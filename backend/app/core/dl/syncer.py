@@ -28,7 +28,7 @@ from app.models.download import (
 )
 from app.models.flow import GraphState
 from app.models.media import MediaLib
-from app.utils.bittorrent import standardize_magnet
+from app.utils.bittorrent import MagnetLink, standardize_magnet
 
 
 @dataclass(frozen=True)
@@ -381,39 +381,61 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
         downloader = await Downloader.get(id=plan.downloader_id)
         adapter = load_config(downloader.config)
 
-    # prepare the boot parameters for graph execution
+    # get the flow engine instance
     engine: FlowEngine = Sanic.get_app().ctx.flow_engine
-    bootparams = {
-        "$start": "search_start",
-        "page_num": 1,
-        "page_size": plan.batch_limit,
-        "keyword": plan.keyword,
-        **(plan.filters or {}),
-    }
+    page_num = 1
+    seen_links: set[str] = set()
 
-    # execute the graph workflow with up to 3 retries
-    items = []
-    for attempt in range(3):
-        try:
-            result = await engine.execute(graph_id=plan.graph_id, bootparams=bootparams)
-            if isinstance(result, dict) and isinstance(result.get("items"), list):
-                items = result["items"]
-                break
-            raise ValueError("invalid graph execution result")
-        except Exception:
-            if attempt == 2:
-                logger.error(
-                    "Failed to execute graph for plan %s after 3 attempts!",
-                    plan.id,
-                    exc_info=True,
+    async def _magnet_links() -> list[MagnetLink] | None:
+        # prepare the boot parameters for graph execution
+        bootparams = {
+            "$start": "search_start",
+            "page_num": page_num,
+            "page_size": plan.batch_limit,
+            "keyword": plan.keyword,
+            **(plan.filters or {}),
+        }
+
+        # execute the graph workflow with up to 3 retries
+        items = []
+        retries = 3
+        for attempt in range(retries):
+            try:
+                result = await engine.execute(
+                    graph_id=plan.graph_id, bootparams=bootparams
                 )
-                return
-            await asyncio.sleep(2**attempt * 5)
+                if isinstance(result, dict) and isinstance(result.get("items"), list):
+                    items = result["items"]
+                    if not items:
+                        return None
+                    break
+                raise ValueError("invalid graph execution result")
+            except Exception:
+                if attempt == retries - 1:
+                    logger.error(
+                        "Failed to execute graph for plan %s after %d attempts",
+                        plan.id,
+                        retries,
+                        exc_info=True,
+                    )
+                    return None
+                await asyncio.sleep(2**attempt * 5)
 
-    # extract valid magnet links from the graph execution result
-    magnet_links = []
-    for item in items:
-        if isinstance(item, dict) and isinstance((link := item.get("link")), str):
+        # detect non-paginated API by checking for duplicate links on page > 1
+        links = list(
+            dict.fromkeys(
+                item["link"]
+                for item in items
+                if isinstance(item, dict) and isinstance(item.get("link"), str)
+            )
+        )
+        if page_num > 1 and set(links).issubset(seen_links):
+            return None
+        seen_links.update(links)
+
+        # extract valid magnet links from the graph execution result
+        result = []
+        for link in links:
             # check if the link is a valid magnet/hash
             magnet = standardize_magnet(link)
             if magnet is None:
@@ -425,7 +447,23 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
             hash_v2 = magnet.info_hash_v2
             if hash_v2 and await DownloadTask.filter(info_hash_v2=hash_v2).exists():
                 continue
-            magnet_links.append(magnet)
+            result.append(magnet)
+            if len(result) >= plan.batch_limit:
+                break
+
+        return result
+
+    # get the magnet links in batch until the batch limit is reached
+    magnet_links: list[MagnetLink] = []
+    while page_num <= 1000:  # prevent infinite loop
+        links = await _magnet_links()
+        if links is None:
+            break
+        magnet_links.extend(links)
+        if len(magnet_links) >= plan.batch_limit:
+            magnet_links = magnet_links[: plan.batch_limit]
+            break
+        page_num += 1
 
     # add download tasks for each valid magnet link
     task_count = 0
@@ -448,7 +486,7 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
             logger.error(
                 "Failed to add download task for plan %s, link: %s",
                 plan.id,
-                link,
+                magnet.link,
                 exc_info=True,
             )
             continue
