@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 import re
 import shutil
@@ -317,7 +318,14 @@ async def transfer_files(task: DownloadTask, files: list[str] | None):
         dst.parent.mkdir(parents=True, exist_ok=True)
 
         if task.transfer_method == TransferMethod.HARDLINK:
-            os.link(src, dst)
+            try:
+                os.link(src, dst)
+            except OSError as e:
+                # fallback to symlink if hard link fails due to cross-device link error
+                if e.errno == errno.EXDEV:
+                    os.symlink(src, dst)
+                else:
+                    raise
         elif task.transfer_method == TransferMethod.SYMLINK:
             os.symlink(src, dst)
         elif task.transfer_method == TransferMethod.MOVE:
