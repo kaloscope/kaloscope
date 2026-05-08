@@ -215,12 +215,14 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
         if state == DownloadState.PAUSED and task.dl_speed == 0 and dl_speed > 0:
             state = DownloadState.DOWNLOADING
 
-        # update the state to `ERROR` if the error message is not empty
+        # update the state to `ERROR` if the raw state indicates an error
+        name = str(item.get("name") or task.name)
+        raw_state = str(item.get("raw_state") or task.raw_state)
         error_msg = str(item.get("error_msg", ""))
-        if error_msg:
+        if error_msg or raw_state.lower() == "error":
             state = DownloadState.ERROR
             await Notifications.send(
-                NotificationTemplate.DOWNLOAD_FAILED, name=task.name, error=error_msg
+                NotificationTemplate.DOWNLOAD_FAILED, name=name, error=error_msg
             )
 
         # update the state to `COMPLETED` if the percentage has reached 100
@@ -234,9 +236,7 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
             dl_speed = 0
             completed_at = timezone.now()
             state = DownloadState.COMPLETED
-            await Notifications.send(
-                NotificationTemplate.DOWNLOAD_COMPLETED, name=task.name
-            )
+            await Notifications.send(NotificationTemplate.DOWNLOAD_COMPLETED, name=name)
 
         # get the files if the details method is supported
         files = item.get("files")
@@ -248,10 +248,11 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
             files = [str(f).removeprefix(f"{task.dir}/") for f in files if f]
 
         # update the download task
+        unique_id = str(item.get("unique_id") or task.unique_id)
         await DownloadTask.filter(id=task.id).update(
-            name=str(item.get("name") or task.name),
-            unique_id=str(item.get("unique_id") or task.unique_id),
-            raw_state=str(item.get("raw_state") or task.raw_state),
+            name=name,
+            unique_id=unique_id,
+            raw_state=raw_state,
             files=files,
             state=state,
             error_msg=error_msg,

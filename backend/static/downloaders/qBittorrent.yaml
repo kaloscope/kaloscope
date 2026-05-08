@@ -22,7 +22,7 @@ methods:
       username: '{{username}}'
       password: '{{password}}'
     response:
-      expected: Ok.
+      unexpected: Fails.
   add_link:
     post: /torrents/add
     form:
@@ -30,7 +30,7 @@ methods:
       urls: '{{link}}'
       stopped: '{{pause}}'
     response:
-      expected: Ok.
+      unexpected: Fails.
   add_torrent:
     post: /torrents/add
     form:
@@ -38,7 +38,7 @@ methods:
       torrents: '{{torrent}}'
       stopped: '{{pause}}'
     response:
-      expected: Ok.
+      unexpected: Fails.
   list:
     post: /torrents/info
     form:
