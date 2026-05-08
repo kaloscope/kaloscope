@@ -614,7 +614,7 @@
   "notification": {
     "download_failed": {
       "title": "Download Failed",
-      "content": "\"{name}\" failed to download! Error: {error}"
+      "content": "\"{name}\" failed to download! Error message: {error}"
     },
     "download_completed": {
       "title": "Download Completed",
