@@ -65,6 +65,7 @@ methods:
         dl_speed: $.downloadSpeed
         total_size: $.totalLength
         completed_size: $.completedLength
+        error_msg: $.errorMessage
         raw_state: $.status
         files: $.files[?length != "0"].path
   details:
@@ -84,6 +85,7 @@ methods:
         dl_speed: $.result.downloadSpeed
         total_size: $.result.totalLength
         completed_size: $.result.completedLength
+        error_msg: $.result.errorMessage
         raw_state: $.result.status
         files: $.result.files[?length != "0"].path
   pause:

@@ -57,6 +57,7 @@ methods:
           - leftUntilDone
           - sizeWhenDone
           - percentDone
+          - errorString
           - status
           - files
     response:
@@ -69,6 +70,7 @@ methods:
         total_size: $.sizeWhenDone
         completed_size: $.sizeWhenDone - $.leftUntilDone
         percentage: $.percentDone * 100
+        error_msg: $.errorString
         raw_state: $.status
         files: $.files[*].name
   pause:
