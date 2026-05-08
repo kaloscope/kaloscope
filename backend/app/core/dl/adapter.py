@@ -254,7 +254,9 @@ class Adapter(BaseModel):
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED, extra=extra)
 
         # raise an exception if the response is not successful
-        if not _successful(self._expected(api), response.text):
+        if _failed(self._unexpected(api), response.text) or (
+            not _successful(self._expected(api), response.text)
+        ):
             logger.debug(f"HTTP Response: {Colors.RED}%s{Colors.END}", response.text)
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED)
 
@@ -302,10 +304,10 @@ class Adapter(BaseModel):
 
 
 def _successful(expected: dict[str, str] | str | None, actual: JSONType) -> bool:
-    """Check if the response is successful based on the expected value.
+    """Check if the response is successful based on the expected format.
 
     Args:
-        expected: The expected response value.
+        expected: The expected response format.
         actual: The actual response value.
 
     Returns:
@@ -318,6 +320,25 @@ def _successful(expected: dict[str, str] | str | None, actual: JSONType) -> bool
             code == jsonpath_first(actual, path) for code, path in expected.items()
         )
     return actual == expected
+
+
+def _failed(unexpected: dict[str, str] | str | None, actual: JSONType) -> bool:
+    """Check if the response is failed based on the unexpected format.
+
+    Args:
+        unexpected: The unexpected response format.
+        actual: The actual response value.
+
+    Returns:
+        Whether the response is failed.
+    """
+    if unexpected is None:
+        return False
+    if isinstance(unexpected, dict):
+        return any(
+            code == jsonpath_first(actual, path) for code, path in unexpected.items()
+        )
+    return actual == unexpected
 
 
 def _error_msg(response: httpx.Response) -> str | None:
