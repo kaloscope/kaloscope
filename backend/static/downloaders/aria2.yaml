@@ -88,6 +88,7 @@ methods:
         error_msg: $.result.errorMessage
         raw_state: $.result.status
         files: $.result.files[?length != "0"].path
+        followed_by: $.result.followedBy
   pause:
     json:
       id: kaloscope
