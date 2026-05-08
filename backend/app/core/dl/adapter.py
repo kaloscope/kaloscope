@@ -202,7 +202,7 @@ class Adapter(BaseModel):
             # form encoded data
             form = _render(api.form, variables, raw=True)
             for key, value in form.items():
-                if _is_file(value):
+                if _is_multipart_file(value):
                     if files is None:
                         files = {}
                     files[key] = value
@@ -339,6 +339,22 @@ def _error_msg(response: httpx.Response) -> str | None:
     return None
 
 
+def _render[T: dict | list | str](value: T, variables: dict, *, raw: bool = False) -> T:
+    """Render the given value with the given variables.
+
+    Args:
+        value: The value to render.
+        variables: The variables to render the value with.
+        raw: Whether to render the value as raw object.
+
+    Returns:
+        The rendered value.
+    """
+    if not variables:
+        return value
+    return render(value, variables, raw=raw)
+
+
 def _mapping(json: Any, mappings: dict[str, str]) -> dict[str, Any]:
     """Map the JSON response with the given mappings using JSONPath.
 
@@ -357,14 +373,14 @@ def _mapping(json: Any, mappings: dict[str, str]) -> dict[str, Any]:
     return {k: jsonpath(k)(json, v) for k, v in mappings.items()}
 
 
-def _is_file(value: Any) -> bool:
+def _is_multipart_file(value: Any) -> bool:
     """Check if the given value is a multipart file tuple.
 
     Args:
         value: The value to check.
 
     Returns:
-        Whether the value is a file tuple.
+        Whether the value is a multipart file tuple.
     """
     if not isinstance(value, tuple):
         return False
@@ -373,22 +389,6 @@ def _is_file(value: Any) -> bool:
     if not isinstance(value[0], str | type(None)):
         return False
     return isinstance(value[1], bytes)
-
-
-def _render[T: dict | list | str](value: T, variables: dict, *, raw: bool = False) -> T:
-    """Render the given value with the given variables.
-
-    Args:
-        value: The value to render.
-        variables: The variables to render the value with.
-        raw: Whether to render the value as raw object.
-
-    Returns:
-        The rendered value.
-    """
-    if not variables:
-        return value
-    return render(value, variables, raw=raw)
 
 
 def load_config(config: str) -> Adapter:
