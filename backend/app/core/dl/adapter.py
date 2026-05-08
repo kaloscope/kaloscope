@@ -43,6 +43,7 @@ class APIResponse(BaseModel):
     each: str | None = None
     mappings: dict[str, str] | None = None
     expected: dict[str, str] | str | None = None
+    unexpected: dict[str, str] | str | None = None
 
 
 class API(BaseModel):
@@ -270,18 +271,33 @@ class Adapter(BaseModel):
         return response.text
 
     def _expected(self, api: API) -> dict[str, str] | str | None:
-        """Get the expected response for the given API.
+        """Get the expected response format for the given API.
 
         Args:
             api: The API schema.
 
         Returns:
-            The expected response value.
+            The expected response format.
         """
         if api.response and api.response.expected:
             return api.response.expected
         elif self.response and self.response.expected:
             return self.response.expected
+        return None
+
+    def _unexpected(self, api: API) -> dict[str, str] | str | None:
+        """Get the unexpected response format for the given API.
+
+        Args:
+            api: The API schema.
+
+        Returns:
+            The unexpected response format.
+        """
+        if api.response and api.response.unexpected:
+            return api.response.unexpected
+        elif self.response and self.response.unexpected:
+            return self.response.unexpected
         return None
 
 
@@ -299,7 +315,7 @@ def _successful(expected: dict[str, str] | str | None, actual: JSONType) -> bool
         return True
     if isinstance(expected, dict):
         return all(
-            jsonpath_first(actual, path) == code for code, path in expected.items()
+            code == jsonpath_first(actual, path) for code, path in expected.items()
         )
     return actual == expected
 
