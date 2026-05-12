@@ -199,11 +199,6 @@ async def update_metadata(
         path: The path to the NFO file.
         alternative: An alternative metadata dictionary.
     """
-
-    # helper function to get the value from the alternative metadata
-    def _alternative(key: str) -> Any:
-        return alternative.get(key) if alternative else None
-
     # parse the NFO file to get the metadata
     if not isinstance(path, Path):
         path = Path(path)
@@ -211,6 +206,16 @@ async def update_metadata(
 
     # update the media item in the database
     if meta is not None:
+        # helper function to get the value from the alternative metadata
+        def _alternative(key: str) -> Any:
+            value = None
+            if hasattr(meta, key):
+                value = getattr(meta, key)
+            if value is not None:
+                return value
+            return alternative.get(key) if alternative else None
+
+        # prepare the data to update the media item
         data = {
             "nfo_path": meta.nfo_path,
             "nfo_mtime": datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
@@ -221,9 +226,9 @@ async def update_metadata(
             "poster": meta.poster,
             "backdrop": meta.backdrop,
         }
-        if (year := meta.year or _alternative("year")) is not None:
+        if (year := _alternative("year")) is not None:
             data["year"] = year
-        if (season := meta.season or _alternative("season")) is not None:
+        if (season := _alternative("season")) is not None:
             data["season"] = season
         if (episode := meta.episode) is not None:
             data["episode"] = episode
