@@ -16,20 +16,12 @@
 </script>
 
 <script lang="ts">
+  import { fixedNumber } from '$lib/utils';
+
   let { score: _score, min = 0, max = 10, decimals = 1, stroke = true, class: _class }: RatingProps = $props();
 
-  let score: string = $derived.by(() => {
-    if (_score === null || _score === undefined) {
-      return '';
-    }
-    if (_score <= min) {
-      return min ? min.toString() : '';
-    }
-    if (_score >= max) {
-      return max.toString();
-    }
-    return Number(_score).toFixed(decimals);
-  });
+  // the formatted score to display
+  let score: string = $derived(fixedNumber(_score, decimals, min, max));
 </script>
 
 {#if score}

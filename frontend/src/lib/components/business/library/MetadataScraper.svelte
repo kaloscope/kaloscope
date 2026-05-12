@@ -40,6 +40,7 @@
   import { createLoading } from '$lib/helpers';
   import { _, locales } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { fixedNumber } from '$lib/utils';
 
   let { item: _item, onscrape }: MetadataScraperProps = $props();
 
@@ -237,6 +238,7 @@
         <tbody>
           {#if results.length > 0}
             {#each results as result, i (i)}
+              {@const rating = fixedNumber(result.rating, 1, 0, 10)}
               <tr
                 class="cursor-pointer hover:bg-base-300 {index === i ? 'bg-primary/15' : ''}"
                 onclick={() => (index = index === i ? -1 : i)}
@@ -244,7 +246,7 @@
                 <td><input type="radio" class="pointer-events-none radio radio-xs" checked={index === i} /></td>
                 <td class="truncate font-semibold" title={result.title}>{result.title ?? EMPTY_SIGN}</td>
                 <td class="truncate opacity-70">{result.year ?? EMPTY_SIGN}</td>
-                <td class="truncate opacity-70">{result.rating ?? EMPTY_SIGN}</td>
+                <td class="truncate opacity-70">{rating ?? EMPTY_SIGN}</td>
                 <td class="truncate opacity-70" title={result.plot}>{result.plot || EMPTY_SIGN}</td>
               </tr>
             {/each}

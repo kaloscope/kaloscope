@@ -289,3 +289,36 @@ export function aspectRatio(ratio: number | string | null | undefined): number {
     return 0;
   }
 }
+
+/**
+ * Convert a number to a fixed decimal string with bounds checking.
+ *
+ * @param value - The number to format, can be a number, string, null, or undefined.
+ * @param decimals - The number of decimal places to include (default is 1).
+ * @param min - The minimum value to return (default is null).
+ * @param max - The maximum value to return (default is null).
+ * @returns A string representing the fixed number, or an empty string if the input is invalid.
+ */
+export function fixedNumber(
+  value: number | string | null | undefined,
+  decimals: number = 1,
+  min: number | null = null,
+  max: number | null = null
+): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const num = Number(value);
+  if (Number.isNaN(num)) {
+    return '';
+  }
+  if (min !== null && num <= min) {
+    // min=0 will return empty string instead of "0",
+    // which is more suitable for rating displays
+    return min ? min.toString() : '';
+  }
+  if (max !== null && num >= max) {
+    return max.toString();
+  }
+  return num.toFixed(decimals);
+}
