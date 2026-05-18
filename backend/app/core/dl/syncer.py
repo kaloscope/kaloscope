@@ -14,14 +14,16 @@ from typing import cast
 from sanic import Sanic
 from sanic.log import logger
 from tortoise import timezone
-from tortoise.expressions import F, RawSQL
+from tortoise.expressions import F, Q, RawSQL
 
 from app.core.dl.adapter import Adapter, load_config
 from app.core.flow.engine import FlowEngine
 from app.core.notifications import Notifications, NotificationTemplate
+from app.models.base import TortoiseModel
 from app.models.download import (
     Downloader,
     DownloadPlan,
+    DownloadPlanHistory,
     DownloadState,
     DownloadTask,
     TransferMethod,
@@ -435,7 +437,46 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
     page_num = 1
     seen_links: set[str] = set()
 
+    async def _record_history(magnet: MagnetLink):
+        """Record the magnet link in the download plan history."""
+        filter = {"plan_id": plan.id}
+        if magnet.info_hash is not None:
+            filter["info_hash"] = magnet.info_hash
+        if magnet.info_hash_v2 is not None:
+            filter["info_hash_v2"] = magnet.info_hash_v2
+        await DownloadPlanHistory.get_or_create(
+            defaults={
+                "info_hash": magnet.info_hash,
+                "info_hash_v2": magnet.info_hash_v2,
+            },
+            **filter,
+        )
+
+    async def _extract_hashes(
+        model: type[TortoiseModel],
+        magnets: list[MagnetLink],
+        *args: Q,
+    ) -> tuple[set[str], set[str]]:
+        """Query matching records by magnet hashes and return both hash sets."""
+        hashes = [m.info_hash for m in magnets if m.info_hash]
+        hashes_v2 = [m.info_hash_v2 for m in magnets if m.info_hash_v2]
+        if not hashes and not hashes_v2:
+            return set(), set()
+
+        filter = Q()
+        if hashes:
+            filter |= Q(info_hash__in=hashes)
+        if hashes_v2:
+            filter |= Q(info_hash_v2__in=hashes_v2)
+
+        records = await model.filter(filter, *args).only("info_hash", "info_hash_v2")
+        return (
+            set(v1 for r in records if (v1 := getattr(r, "info_hash", None))),
+            set(v2 for r in records if (v2 := getattr(r, "info_hash_v2", None))),
+        )
+
     async def _magnet_links() -> list[MagnetLink] | None:
+        """Get the magnet links from the graph execution result of the download plan."""
         # prepare the boot parameters for graph execution
         bootparams = {
             "$start": "search_start",
@@ -480,22 +521,65 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
         )
         if page_num > 1 and set(links).issubset(seen_links):
             return None
-        seen_links.update(links)
 
         # extract valid magnet links from the graph execution result
-        result = []
+        magnets: list[MagnetLink] = []
         for link in links:
+            # skip if the link has been seen in previous pages
+            if link in seen_links:
+                continue
+            seen_links.add(link)
             # check if the link is a valid magnet/hash
             magnet = standardize_magnet(link)
             if magnet is None:
                 continue
-            # check if the magnet link already exists in the download tasks
-            hash = magnet.info_hash
-            if hash and await DownloadTask.filter(info_hash=hash).exists():
+            magnets.append(magnet)
+
+        if not magnets:
+            return []
+
+        # extract the existing hashes in download plan histories
+        hist_hashes, hist_hashes_v2 = await _extract_hashes(
+            DownloadPlanHistory,
+            magnets,
+            Q(plan_id=plan.id),
+        )
+
+        missing = [
+            m
+            for m in magnets
+            if (
+                (not m.info_hash or m.info_hash not in hist_hashes)
+                and (not m.info_hash_v2 or m.info_hash_v2 not in hist_hashes_v2)
+            )
+        ]
+
+        # extract the existing hashes in download tasks
+        task_hashes: set[str] = set()
+        task_hashes_v2: set[str] = set()
+        if missing:
+            task_hashes, task_hashes_v2 = await _extract_hashes(DownloadTask, missing)
+
+        # filter out the magnets that already exist in histories or tasks
+        result = []
+        for magnet in magnets:
+            hist_exists = bool(
+                magnet.info_hash and magnet.info_hash in hist_hashes
+            ) or bool(magnet.info_hash_v2 and magnet.info_hash_v2 in hist_hashes_v2)
+            if hist_exists:
                 continue
-            hash_v2 = magnet.info_hash_v2
-            if hash_v2 and await DownloadTask.filter(info_hash_v2=hash_v2).exists():
+
+            task_exists = bool(
+                magnet.info_hash and magnet.info_hash in task_hashes
+            ) or bool(magnet.info_hash_v2 and magnet.info_hash_v2 in task_hashes_v2)
+            if task_exists:
+                await _record_history(magnet)
+                if magnet.info_hash:
+                    task_hashes.add(magnet.info_hash)
+                if magnet.info_hash_v2:
+                    task_hashes_v2.add(magnet.info_hash_v2)
                 continue
+
             result.append(magnet)
             if len(result) >= plan.batch_limit:
                 break
@@ -505,14 +589,23 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
     # get the magnet links in batch until the batch limit is reached
     magnet_links: list[MagnetLink] = []
     while page_num <= 1000:  # prevent infinite loop
-        links = await _magnet_links()
-        if links is None:
+        try:
+            links = await _magnet_links()
+            if links is None:
+                break
+            magnet_links.extend(links)
+            if len(magnet_links) >= plan.batch_limit:
+                magnet_links = magnet_links[: plan.batch_limit]
+                break
+            page_num += 1
+        except Exception:
+            logger.error(
+                "Failed to get magnet links for plan %s on page %d",
+                plan.id,
+                page_num,
+                exc_info=True,
+            )
             break
-        magnet_links.extend(links)
-        if len(magnet_links) >= plan.batch_limit:
-            magnet_links = magnet_links[: plan.batch_limit]
-            break
-        page_num += 1
 
     # add download tasks for each valid magnet link
     task_count = 0
@@ -556,6 +649,7 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
             sub_repl=plan.sub_repl,
         )
         task_count += 1
+        await _record_history(magnet)
 
     # update the plan's total_count and last_exec
     await DownloadPlan.filter(id=plan.id).update(

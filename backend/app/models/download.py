@@ -110,6 +110,8 @@ class DownloadPlan(TortoiseModel):
     transfer_method = CharEnumField(max_length=16, enum_type=TransferMethod, null=True)
     sub_pattern = CharField(max_length=4096, null=True)
     sub_repl = CharField(max_length=4096, null=True)
+    # relational fields
+    histories: ReverseRelation["DownloadPlanHistory"]
 
     def inactive(self) -> bool:
         """Check if the plan is currently inactive."""
@@ -125,8 +127,20 @@ class DownloadPlan(TortoiseModel):
         ordering = ["-created_at"]
 
     class PydanticMeta:
-        exclude = ("graph", "downloader", "transfer_lib")
+        exclude = ("graph", "downloader", "transfer_lib", "histories")
         computed = ("inactive",)
+
+
+class DownloadPlanHistory(TortoiseModel):
+    plan_id: int
+    plan: ForeignKeyRelation[DownloadPlan] = ForeignKeyField(
+        "models.DownloadPlan", related_name="histories", db_index=True
+    )
+    info_hash = CharField(max_length=40, null=True)
+    info_hash_v2 = CharField(max_length=68, null=True)
+
+    class Meta:
+        table = "download_plan_history"
 
 
 class DownloadTask(TortoiseModel):
