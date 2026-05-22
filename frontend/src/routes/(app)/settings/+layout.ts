@@ -90,8 +90,8 @@ export const load: LayoutLoad = async () => {
             icon: icons.documentFlowchart
           },
           {
-            title: 'nav.settings.workflows.schedule',
-            path: '/settings/workflows/schedule',
+            title: 'nav.settings.workflows.schedules',
+            path: '/settings/workflows/schedules',
             icon: icons.clock
           }
         ]

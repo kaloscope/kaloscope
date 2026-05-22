@@ -63,7 +63,7 @@
         "templates": "流程模板",
         "variables": "全局变量",
         "graphs": "流程定义",
-        "schedule": "定时调度"
+        "schedules": "定时调度"
       },
       "help": {
         "title": "帮助",
