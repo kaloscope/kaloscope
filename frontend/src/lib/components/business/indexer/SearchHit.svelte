@@ -146,7 +146,7 @@
   <Cell class="group {detailsConfig ? 'cursor-pointer' : ''}" onclick={() => gotoDetails(rsrc)}>
     {#if rsrc.cover}
       {@const ratio = coverRatio ?? '16/9'}
-      <div class="relative">
+      <div class="relative shrink-0">
         <Image transparent src={rsrc.cover} height={coverHeight(ratio)} {ratio} />
         <div class="absolute inset-0 flex size-full flex-col">
           <Rating score={rsrc.rating} class="mt-0.5 ml-0.5 self-start px-1! text-xs" />
@@ -161,11 +161,11 @@
         </div>
       </div>
     {:else if rsrc.category}
-      <Badge class="line-clamp-2 w-18 text-center">{rsrc.category}</Badge>
+      <Badge class="line-clamp-2 w-18 shrink-0 text-center">{rsrc.category}</Badge>
     {/if}
-    <div class="flex w-full flex-col gap-3">
+    <div class="flex w-full min-w-0 flex-col gap-3">
       <div class={detailsConfig ? 'transition-colors group-hover:text-primary' : ''}>
-        <span class="text-sm">{rsrc.title}</span>
+        <span class="text-sm wrap-break-word">{rsrc.title}</span>
         {#if rsrc.misc}
           <span class="italic-text">[{rsrc.misc}]</span>
         {/if}
