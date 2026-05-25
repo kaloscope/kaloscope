@@ -6,7 +6,7 @@ from urllib.parse import quote, urlencode
 
 import aiofiles
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sanic import Sanic
 from sanic.log import logger
 
@@ -36,12 +36,17 @@ class Danmaku(BaseModel):
 class DanmakuMeta(BaseModel):
     """The metadata for a danmaku collection."""
 
-    anime_id: int
+    anime_id: str
     anime_title: str | None = None
-    episode_id: int
+    episode_id: str
     episode_title: str | None = None
     type: str
     type_description: str | None = None
+
+    @field_validator("anime_id", "episode_id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: object) -> str:
+        return "" if value is None else str(value)
 
 
 class DanmakuWrapper(BaseModel):
@@ -136,7 +141,7 @@ class DanmakuService:
                 # load danmakus from the danmaku server
                 meta = DanmakuMeta.model_validate(meta)
                 danmakus = await cls.load_from_server(
-                    server, str(meta.episode_id), media.lib.language
+                    server, meta.episode_id, media.lib.language
                 )
                 if danmakus:
                     # save to local cache file
@@ -443,7 +448,7 @@ class DanmakuService:
 
         # load danmakus from the danmaku server
         danmakus = await cls.load_from_server(
-            server, str(meta.episode_id), media.lib.language
+            server, meta.episode_id, media.lib.language
         )
         if danmakus:
             result.comments = danmakus
@@ -479,7 +484,7 @@ class DanmakuService:
             return
 
         anime_id = meta.anime_id
-        if item.danmaku_meta and item.danmaku_meta.get("anime_id") == anime_id:
+        if item.danmaku_meta and str(item.danmaku_meta.get("anime_id")) == anime_id:
             # skip if the anime ID hasn't changed
             return
 

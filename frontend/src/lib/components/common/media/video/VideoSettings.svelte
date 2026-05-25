@@ -41,9 +41,9 @@
 
   // danmaku types
   type DanmakuMeta = {
-    anime_id: number;
+    anime_id: string;
     anime_title: string | null;
-    episode_id: number;
+    episode_id: string;
     episode_title: string | null;
     type: string;
     type_description: string | null;
