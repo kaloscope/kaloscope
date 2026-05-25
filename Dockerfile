@@ -23,7 +23,7 @@ RUN pnpm run build
 # ============================================================
 # Stage 2: build the production image
 # ============================================================
-FROM --platform=linux/amd64 python:3.13-slim
+FROM python:3.13-slim
 
 # install runtime dependencies
 # - git:               required by gitpython
@@ -45,7 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # download and install mkcert
-RUN curl -fsSL "https://dl.filippo.io/mkcert/latest?for=linux/amd64" -o /usr/local/bin/mkcert \
+ARG TARGETPLATFORM
+RUN curl -fsSL "https://dl.filippo.io/mkcert/latest?for=${TARGETPLATFORM}" -o /usr/local/bin/mkcert \
     && chmod +x /usr/local/bin/mkcert
 
 # install poetry via pip
