@@ -2144,6 +2144,36 @@ files = [
 prompt_toolkit = ">=2.0,<4.0"
 
 [[package]]
+name = "quickjs-rs"
+version = "0.1.2"
+description = "Sandboxed JavaScript execution for Python, via PyO3 + rquickjs."
+optional = false
+python-versions = ">=3.11"
+groups = ["main"]
+files = [
+    {file = "quickjs_rs-0.1.2-cp311-cp311-macosx_10_12_x86_64.whl", hash = "sha256:4a03488c73626a129072eae966bcadede77dcc79cfe36f2ea3b0f1ae351bae75"},
+    {file = "quickjs_rs-0.1.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:bf0941f4d6903ac4ce24d3734f71c4391aff403d34774e66405f25045a538ad5"},
+    {file = "quickjs_rs-0.1.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:71f22f01b871800978b8bc23aeeb9edc4c708ada2552da1bfe15227af1717e11"},
+    {file = "quickjs_rs-0.1.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:efb68efe12b600e18dc7b8709dfb3bd61acf3246683713757101bec6db2dd5ad"},
+    {file = "quickjs_rs-0.1.2-cp311-cp311-win_amd64.whl", hash = "sha256:93c1ac55e811f582c1b7affd92274ded945e77009010d4a028bfa2d6577b8322"},
+    {file = "quickjs_rs-0.1.2-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:543ae2a983f677f7c83457fbea6fb33abf938215b512439340c90768c15b0b96"},
+    {file = "quickjs_rs-0.1.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:68bb46c3909bd40768da20f0ffbdd1e0da70702e0638711f5e2bb31d778dd92a"},
+    {file = "quickjs_rs-0.1.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7b3d5bde9f2c12bfce1702f9d1bc2ccfa14f3993211e3d9ed8eceaf7069d432d"},
+    {file = "quickjs_rs-0.1.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a7dc9d446b00c24437ae22ba0acefc238abfbdca223716bd8c2ce4223b836d14"},
+    {file = "quickjs_rs-0.1.2-cp312-cp312-win_amd64.whl", hash = "sha256:b4229db014881f56828c8ffd120b6be822f2886d570ab1bea99cfe70da83f401"},
+    {file = "quickjs_rs-0.1.2-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:673a5c9824905754f67f52e7d05a23ca8094828b44cd389dd63976caa109420f"},
+    {file = "quickjs_rs-0.1.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:2af1fa9cca2009e8ab69d39d5b4579b59ec69607fb2cf4394cccfab14bd89caa"},
+    {file = "quickjs_rs-0.1.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:806eec8c3ba699931372e34743b3894795eb382f2ee70321a25795228524840f"},
+    {file = "quickjs_rs-0.1.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fed6aa295b80f5ebc7b077af37895a70234c566961735ca9c803a3fe8be511ec"},
+    {file = "quickjs_rs-0.1.2-cp313-cp313-win_amd64.whl", hash = "sha256:606a7b4da741ceb51e4f79723ad366f9272f69bca4f438b985d1b54c56c8fcc0"},
+    {file = "quickjs_rs-0.1.2.tar.gz", hash = "sha256:95c42dcb40f067ae3b95eb3f79836cc8bcab62d4fd4cb276970ca2a211e687c7"},
+]
+
+[package.extras]
+bench = ["matplotlib (>=3.8)", "pytest-codspeed (>=4.3.0)"]
+dev = ["mypy", "pytest (>=8.0)", "pytest-asyncio (>=0.23)", "pytest-cov", "ruff"]
+
+[[package]]
 name = "ruff"
 version = "0.15.14"
 description = "An extremely fast Python linter and code formatter, written in Rust."
@@ -2296,39 +2326,6 @@ groups = ["main"]
 files = [
     {file = "socksio-1.0.0-py3-none-any.whl", hash = "sha256:95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3"},
     {file = "socksio-1.0.0.tar.gz", hash = "sha256:f88beb3da5b5c38b9890469de67d0cb0f9d494b78b106ca1845f96c10b91c4ac"},
-]
-
-[[package]]
-name = "stpyv8"
-version = "13.1.201.22"
-description = "Python Wrapper for Google V8 Engine"
-optional = false
-python-versions = "*"
-groups = ["main"]
-files = [
-    {file = "stpyv8-13.1.201.22-cp310-cp310-macosx_13_0_x86_64.whl", hash = "sha256:2ce8e85a4a88e80ae561654be1b55ff578c4f1a27d518ac35e6d87b93d91b096"},
-    {file = "stpyv8-13.1.201.22-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:fe25c004b12f2616ae877e0469f95aa2164e62e6584d253b07f3c9f9ba69a888"},
-    {file = "stpyv8-13.1.201.22-cp310-cp310-manylinux_2_31_x86_64.whl", hash = "sha256:90568ff08dfaf0ebd3bf1c79f7d21db06d82eada412a6e914b995bead7c78666"},
-    {file = "stpyv8-13.1.201.22-cp310-cp310-win_amd64.whl", hash = "sha256:8019f19b29621ccde85125d86f60f5814175b17670f5949d2671cf22cf453ea6"},
-    {file = "stpyv8-13.1.201.22-cp311-cp311-macosx_13_0_x86_64.whl", hash = "sha256:b2a660a331e82fa89d5938ec8418743ebfb544733269f24cd8461a18472701c2"},
-    {file = "stpyv8-13.1.201.22-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:4d737935167c52ed72e5a78264d9adfeaf089bf54693b88f12cbdb439a36a102"},
-    {file = "stpyv8-13.1.201.22-cp311-cp311-manylinux_2_31_x86_64.whl", hash = "sha256:da6d8f2945bd057057c64bc93ea3c064cc848b75f55d6d651120ee5d115e0761"},
-    {file = "stpyv8-13.1.201.22-cp311-cp311-win_amd64.whl", hash = "sha256:b9d9499ed2007cc097a5d2ae0cb18226b2bf3ca429301811b2e12a787a8f137e"},
-    {file = "stpyv8-13.1.201.22-cp312-cp312-macosx_13_0_x86_64.whl", hash = "sha256:fc2b956bfaf23531c490845edb7d80fc998fe8aee1c7cf1337317dae01169307"},
-    {file = "stpyv8-13.1.201.22-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:6dc40b656cea7fe541f6bdbad83b6b4ed51e5ead985b54c139319a731253a55e"},
-    {file = "stpyv8-13.1.201.22-cp312-cp312-manylinux_2_31_x86_64.whl", hash = "sha256:c24aa4215c64db7d67fc6c42c0d7731cabcf300596bf9c826ae74f426fe3b771"},
-    {file = "stpyv8-13.1.201.22-cp312-cp312-win_amd64.whl", hash = "sha256:c4292843c8133fc99833aceef25925a97edf01031e186335582deb077b99d2bf"},
-    {file = "stpyv8-13.1.201.22-cp313-cp313-macosx_13_0_x86_64.whl", hash = "sha256:b53df6114a88698ee6f3820cf46476e83ee09c9a67dd9f7cf58ca6a2928238b0"},
-    {file = "stpyv8-13.1.201.22-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:6cb5e8751aee2487cc3b5f21eac6d459041a7180a779941b64db5736e27276ee"},
-    {file = "stpyv8-13.1.201.22-cp313-cp313-manylinux_2_31_x86_64.whl", hash = "sha256:834b9761bb7f49da8b887847c7647495a2cf6c45f69e2124ae0e3f024493bc15"},
-    {file = "stpyv8-13.1.201.22-cp313-cp313-win_amd64.whl", hash = "sha256:c8189b8c4d87579f353705441757f11e2f2260578b82000925dadf0ed59a47e3"},
-    {file = "stpyv8-13.1.201.22-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:c4bf3048c96a6a1561861da0c74be842c79a71373d3bec0d53c4e8f6eaa7b6e8"},
-    {file = "stpyv8-13.1.201.22-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:6fdbc3a8b1aa941064ec0976a5a85761f50e9090468ce275c22d0774293d2668"},
-    {file = "stpyv8-13.1.201.22-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:c0b258c7c5a79c5f19e636b93eece90d3cf9109af9a11c5394bdb807ed68e04a"},
-    {file = "stpyv8-13.1.201.22-cp39-cp39-macosx_13_0_x86_64.whl", hash = "sha256:05c3ecaaf2dd8dbe06bdb70f3192b7e6161337ee04e6830a57b58eb4be7c70bd"},
-    {file = "stpyv8-13.1.201.22-cp39-cp39-manylinux_2_31_x86_64.whl", hash = "sha256:bf51578ec84dba6519d75ca81a154a070910e638da0ec384f4bf6d535f9b5218"},
-    {file = "stpyv8-13.1.201.22-cp39-cp39-win_amd64.whl", hash = "sha256:d00a220268d63d68490682b571d082d5b197de1f19d6f478a88357c61da94f7a"},
-    {file = "stpyv8-13.1.201.22.tar.gz", hash = "sha256:2bdbc7307dbf86cfc4bd0a11f0ae1f1c6f91d1b3366a7b409f9fc5d01f69441d"},
 ]
 
 [[package]]
@@ -2994,4 +2991,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<4.0"
-content-hash = "bf052b4d1826efa2e7781cffead073574eb71b6572d15cbe0ba241034294b8ac"
+content-hash = "e76e3db0b9ad8768a8e7974613f5a75a99baf33f914f06603533bb440027a4dd"
