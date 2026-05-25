@@ -41,6 +41,7 @@ IDX_KEY = "$index"
 @dataclass(init=False)
 class Context:
     _context: dict[str, Any]
+    _deleted: set[str]
     # the global variables
     globalvars: Mapping[str, str]
     # the local variables
@@ -50,7 +51,13 @@ class Context:
     # the storage dictionary
     storage: TrackableDict[str, Any]
     # the loop variable
-    loopvar: Mapping[str, Any] | None = None
+    loopvar: Mapping[str, Any] | None
+
+    def __new__(cls, *args, **kwargs):
+        context = super().__new__(cls)
+        context._deleted = set()
+        context.loopvar = None
+        return context
 
     @classmethod
     async def create(
@@ -91,14 +98,10 @@ class Context:
 
     def union(self):
         """Merge the context variables into a single dictionary."""
-        merged = getattr(self, "_context", None)
-        if merged is None:
-            merged = {
-                "ks_version": _KS_VERSION,
-            }
-            merged.update(self.globalvars)
-            merged.update(self.localvars)
-            merged.update(self.bootparams)
+        merged = {"ks_version": _KS_VERSION}
+        merged.update(self.globalvars)
+        merged.update(self.localvars)
+        merged.update(self.bootparams)
         merged.update(self.storage)
         if self.loopvar is not None:
             merged.update(self.loopvar)
@@ -121,11 +124,29 @@ class Context:
 
     @after("union")
     def __setitem__(self, key: str, value: Any):
+        self._deleted.discard(key)
         self.storage[key] = value
 
     @after("union")
     def setdefault(self, key: str, default: Any):
+        self._deleted.discard(key)
         return self.storage.setdefault(key, default)
+
+    @after("union")
+    def __delitem__(self, key: str):
+        self._deleted.add(key)
+        del self.storage[key]
+
+    @after("union")
+    def pop(self, key: str, default: Any = None):
+        if key in self.storage:
+            self._deleted.add(key)
+        return self.storage.pop(key, default)
+
+    @after("union")
+    def clear(self):
+        self._deleted.update(self.storage.keys())
+        self.storage.clear()
 
     @after("union")
     def update(self, other: Self | dict[str, Any]) -> Self:
@@ -138,8 +159,14 @@ class Context:
             The merged context.
         """
         if isinstance(other, Context):
+            # remove keys that are marked as deleted in the other context
+            for key in other._deleted:
+                self.storage.pop(key, None)
+                self._deleted.add(key)
+            self._deleted.difference_update(other.storage.keys())
             deep_update(self.storage, other.storage)
         else:
+            self._deleted.difference_update(other.keys())
             deep_update(self.storage, other)
         return self
 
