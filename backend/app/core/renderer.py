@@ -4,6 +4,7 @@ import re
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import jinja2
 import opencc
@@ -554,6 +555,32 @@ def suffix(value: Any, suffix: Any, strict: bool = True) -> str:
     return f"{_str(value)}{_str(suffix)}"
 
 
+def query_param(url: str, param: str) -> str:
+    """Append a query parameter to a URL if the key is not already present.
+
+    Args:
+        url: The original URL.
+        param: The query parameter in `key=value` format.
+
+    Returns:
+        The URL with the query parameter appended when applicable.
+    """
+    if not url or not param:
+        return url
+
+    key, separator, _ = param.partition("=")
+    if not separator or not key:
+        return url
+
+    parts = urlsplit(url)
+    existing_params = parse_qsl(parts.query, keep_blank_values=True)
+    if any(existing_key == key for existing_key, _ in existing_params):
+        return url
+
+    query = param if not parts.query else f"{parts.query}&{param}"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
 # register custom filters
 # https://jinja.palletsprojects.com/en/stable/api/#custom-filters
 ENV.filters["trim"] = trim
@@ -579,6 +606,7 @@ ENV.filters["strftime"] = strftime
 ENV.filters["year"] = year
 ENV.filters["prefix"] = prefix
 ENV.filters["suffix"] = suffix
+ENV.filters["query_param"] = query_param
 
 
 def is_file(path: Any) -> bool:
