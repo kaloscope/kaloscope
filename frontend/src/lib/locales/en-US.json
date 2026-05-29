@@ -448,12 +448,6 @@
       "live_tip": "Live"
     }
   },
-  "code": {
-    "evaluator": "Evaluator",
-    "var_name": "Variable Name",
-    "raw_doc": "Raw Document...",
-    "eval_result": "Evaluation Result..."
-  },
   "flow": {
     "readonly": "Read-Only Mode",
     "sidebar": "Sidebar",
@@ -561,6 +555,57 @@
       "async_mode": "Asynchronous Execution"
     }
   },
+  "code": {
+    "evaluator": "Evaluator",
+    "var_name": "Variable Name",
+    "raw_doc": "Raw Document...",
+    "eval_result": "Evaluation Result..."
+  },
+  "codemirror": {
+    "find": "Find",
+    "replace": "Replace",
+    "next": "next",
+    "previous": "previous",
+    "all": "all",
+    "match_case": "match case",
+    "regexp": "regexp",
+    "by_word": "by word",
+    "replace_action": "replace",
+    "replace_all": "replace all",
+    "close": "close",
+    "current_match": "current match",
+    "on_line": "on line",
+    "replaced_match_on_line": "replaced match on line $",
+    "replaced_matches": "replaced $ matches",
+    "go_to_line": "Go to line",
+    "go": "go"
+  },
+  "notification": {
+    "download_failed": {
+      "title": "Download Failed",
+      "content": "\"{name}\" failed to download! Error message: {error}"
+    },
+    "download_completed": {
+      "title": "Download Completed",
+      "content": "\"{name}\" downloaded successfully!"
+    }
+  },
+  "message": {
+    "cancel": "Cancel",
+    "confirm": "OK",
+    "default": {
+      "title": "Confirm your action",
+      "content": "Are you sure you want to continue?"
+    },
+    "leave": {
+      "title": "Do you want to leave?",
+      "content": "Changes you made may not be saved."
+    },
+    "clear": {
+      "title": "Clear All",
+      "content": "Are you sure you want to delete all records?"
+    }
+  },
   "alert": {
     "internal_server_error": "Internal server error!",
     "unauthorized": "Unauthorized!",
@@ -594,31 +639,5 @@
     "import_items_failed": "Failed to import the items!",
     "import_items_success": "Successfully imported {0} items!",
     "upgrade_success": "Upgrade successful!"
-  },
-  "message": {
-    "cancel": "Cancel",
-    "confirm": "OK",
-    "default": {
-      "title": "Confirm your action",
-      "content": "Are you sure you want to continue?"
-    },
-    "leave": {
-      "title": "Do you want to leave?",
-      "content": "Changes you made may not be saved."
-    },
-    "clear": {
-      "title": "Clear All",
-      "content": "Are you sure you want to delete all records?"
-    }
-  },
-  "notification": {
-    "download_failed": {
-      "title": "Download Failed",
-      "content": "\"{name}\" failed to download! Error message: {error}"
-    },
-    "download_completed": {
-      "title": "Download Completed",
-      "content": "\"{name}\" downloaded successfully!"
-    }
   }
 }

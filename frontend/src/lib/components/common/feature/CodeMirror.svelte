@@ -264,6 +264,31 @@
   let evalName: string | null = $state(null);
   let evalDoc: string | undefined = $state(undefined);
 
+  /**
+   * Translation of phrases in editor.
+   */
+  const phrases: Record<string, string> = {
+    // search related translations
+    Find: $_('codemirror.find'),
+    Replace: $_('codemirror.replace'),
+    next: $_('codemirror.next'),
+    previous: $_('codemirror.previous'),
+    all: $_('codemirror.all'),
+    'match case': $_('codemirror.match_case'),
+    regexp: $_('codemirror.regexp'),
+    'by word': $_('codemirror.by_word'),
+    replace: $_('codemirror.replace_action'),
+    'replace all': $_('codemirror.replace_all'),
+    close: $_('codemirror.close'),
+    'current match': $_('codemirror.current_match'),
+    'on line': $_('codemirror.on_line'),
+    'replaced match on line $': $_('codemirror.replaced_match_on_line'),
+    'replaced $ matches': $_('codemirror.replaced_matches'),
+    // jump related translations
+    'Go to line': $_('codemirror.go_to_line'),
+    go: $_('codemirror.go')
+  };
+
   // trigger the onchange callback with debounce
   // svelte-ignore state_referenced_locally
   const _onchange = debounce(() => {
@@ -312,6 +337,7 @@
     crosshairCursor(),
     drawSelection(),
     rectangularSelection(),
+    EditorState.phrases.of(phrases),
     EditorState.allowMultipleSelections.of(true),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
     highlightSpecialChars(),

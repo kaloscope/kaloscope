@@ -448,12 +448,6 @@
       "live_tip": "直播"
     }
   },
-  "code": {
-    "evaluator": "验证工具",
-    "var_name": "变量名称",
-    "raw_doc": "原始文档...",
-    "eval_result": "验证结果..."
-  },
   "flow": {
     "readonly": "只读模式",
     "sidebar": "侧边栏",
@@ -561,6 +555,57 @@
       "async_mode": "异步执行"
     }
   },
+  "code": {
+    "evaluator": "验证工具",
+    "var_name": "变量名称",
+    "raw_doc": "原始文档...",
+    "eval_result": "验证结果..."
+  },
+  "codemirror": {
+    "find": "查找",
+    "replace": "替换",
+    "next": "下一个",
+    "previous": "上一个",
+    "all": "全部",
+    "match_case": "区分大小写",
+    "regexp": "正则表达式",
+    "by_word": "全字匹配",
+    "replace_action": "替换",
+    "replace_all": "替换全部",
+    "close": "关闭",
+    "current_match": "当前匹配",
+    "on_line": "在第",
+    "replaced_match_on_line": "已替换第 $ 行的匹配项",
+    "replaced_matches": "已替换 $ 个匹配项",
+    "go_to_line": "跳转到行",
+    "go": "跳转"
+  },
+  "notification": {
+    "download_failed": {
+      "title": "下载失败",
+      "content": "\"{name}\" 下载失败！错误信息：{error}"
+    },
+    "download_completed": {
+      "title": "下载完成",
+      "content": "\"{name}\" 下载完成！"
+    }
+  },
+  "message": {
+    "cancel": "取 消",
+    "confirm": "确 定",
+    "default": {
+      "title": "确认操作",
+      "content": "是否确定要继续？"
+    },
+    "leave": {
+      "title": "确定要离开吗？",
+      "content": "您所做的更改可能不会保存。"
+    },
+    "clear": {
+      "title": "清空记录",
+      "content": "是否确定要删除所有记录？"
+    }
+  },
   "alert": {
     "internal_server_error": "服务器内部错误！",
     "unauthorized": "认证失败！",
@@ -594,31 +639,5 @@
     "import_items_failed": "导入数据失败！",
     "import_items_success": "成功导入 {0} 条数据！",
     "upgrade_success": "更新成功！"
-  },
-  "message": {
-    "cancel": "取 消",
-    "confirm": "确 定",
-    "default": {
-      "title": "确认操作",
-      "content": "是否确定要继续？"
-    },
-    "leave": {
-      "title": "确定要离开吗？",
-      "content": "您所做的更改可能不会保存。"
-    },
-    "clear": {
-      "title": "清空记录",
-      "content": "是否确定要删除所有记录？"
-    }
-  },
-  "notification": {
-    "download_failed": {
-      "title": "下载失败",
-      "content": "\"{name}\" 下载失败！错误信息：{error}"
-    },
-    "download_completed": {
-      "title": "下载完成",
-      "content": "\"{name}\" 下载完成！"
-    }
   }
 }
