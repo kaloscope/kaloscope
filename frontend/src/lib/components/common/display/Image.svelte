@@ -6,7 +6,7 @@
     /** The key of the preset image. */
     preset: string | null;
     /** Whether to proxy the image through the server. */
-    proxy: boolean | 'store';
+    proxy: boolean | 'auto' | 'store';
     /** The source URL of the image. */
     src: string | null;
     /** The fallback text for the image. */
@@ -77,7 +77,7 @@
 
   let {
     preset = null,
-    proxy = false,
+    proxy = 'auto',
     src: _src = preset ? PRESETS[preset] : null,
     text: _text = null,
     icon = icons.image,

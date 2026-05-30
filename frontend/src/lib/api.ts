@@ -71,18 +71,43 @@ export const api = ky.create({
  * @param policy - The policy for proxying the image.
  * @returns The proxied URL of the image.
  */
-export function proxyImage(url: string | null, policy: boolean | 'store' = false): string | null {
-  if (url) {
-    if (url.startsWith('icons/') || url.startsWith('avatars/')) {
-      // serve icons and avatars directly from the API endpoint
-      return `/_api/${url}`;
-    } else if (policy !== false) {
-      // proxy images through the `/image/proxy` endpoint
-      return `/_api/image/proxy?store=${policy === 'store'}&url=${encodeURIComponent(url)}`;
-    }
+export function proxyImage(url: string | null, policy: boolean | 'auto' | 'store' = false): string | null {
+  if (!url) {
+    return url;
   }
+
+  // serve icons and avatars directly from the API endpoint
+  if (url.startsWith('icons/') || url.startsWith('avatars/')) {
+    return `/_api/${url}`;
+  }
+
   // return the original URL
-  return url;
+  if (policy === false) {
+    return url;
+  }
+
+  const buildProxyUrl = (store: boolean): string => `/_api/image/proxy?store=${store}&url=${encodeURIComponent(url)}`;
+
+  // only proxy the image if the URL contains the query parameter `proxy=store` or `proxy=true`
+  if (policy === 'auto') {
+    const [, query = ''] = url.split('?', 2);
+    const proxy = new URLSearchParams(query).get('proxy');
+    if (proxy === 'store') {
+      return buildProxyUrl(true);
+    }
+    if (proxy !== 'true') {
+      return url;
+    }
+    return buildProxyUrl(false);
+  }
+
+  // proxy the image and store it if the policy is 'store'
+  if (policy === 'store') {
+    return buildProxyUrl(true);
+  }
+
+  // proxy the image if the policy is true
+  return buildProxyUrl(false);
 }
 
 /**
