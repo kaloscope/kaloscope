@@ -57,12 +57,28 @@
    * Formats the danmakus to the format required by the player.
    *
    * @param danmakus - The list of video comments.
+   * @param container - The danmaku container element.
+   * @param direction - The danmaku direction.
    * @returns The formatted danmakus.
    */
-  export function formatDanmakus(danmakus: Danmaku[] | null | undefined) {
+  export function formatDanmakus(
+    danmakus: Danmaku[] | null | undefined,
+    container?: HTMLDivElement,
+    direction?: 'r2l' | 'b2t'
+  ) {
     if (!danmakus || danmakus.length === 0) {
       return [];
     }
+
+    // calculate dynamic duration based on container size
+    let defaultDuration = 5000;
+    if (container) {
+      const size = direction === 'b2t' ? container.offsetHeight : container.offsetWidth;
+      const duration = Math.round((size / 200) * 1000);
+      // clamp between 5s and 10s
+      defaultDuration = Math.max(5000, Math.min(10000, duration));
+    }
+
     // https://github.com/bytedance/danmu.js
     return danmakus
       .filter((danmaku) => danmaku.text)
@@ -71,8 +87,7 @@
           id: id || uuidv4(), // unique id
           txt: text, // comment text
           start: start || 0, // start time in milliseconds
-          duration: duration || undefined, // duration in milliseconds
-          moveV: duration ? undefined : 200, // speed of scrolling (pixels per second)
+          duration: duration || defaultDuration, // duration in milliseconds
           mode: mode || 'scroll', // display mode: 'scroll', 'top', 'bottom'
           color: !!color && !isWhite(color), // mark the danmaku as colored
           style: {
@@ -267,7 +282,10 @@
       .then((resp) => {
         const comments = resp.data.comments;
         if (comments && comments.length > 0) {
-          danmakuPlugin.updateComments(formatDanmakus(comments), true);
+          danmakuPlugin.updateComments(
+            formatDanmakus(comments, danmakuPlugin.danmujs?.container, danmakuPlugin.danmujs?.direction),
+            true
+          );
           // The font size needs to be reset after updating the comments;
           // this may be a bug in danmu.js where the style is reset after updating.
           if ($danmaku !== null) {
@@ -345,7 +363,10 @@
       .then((resp) => {
         const comments = resp.data.comments;
         if (comments && comments.length > 0) {
-          danmakuPlugin.updateComments(formatDanmakus(comments), true);
+          danmakuPlugin.updateComments(
+            formatDanmakus(comments, danmakuPlugin.danmujs?.container, danmakuPlugin.danmujs?.direction),
+            true
+          );
           if ($danmaku !== null) {
             danmakuPlugin.setFontSize($danmaku.fontSize, null);
           }

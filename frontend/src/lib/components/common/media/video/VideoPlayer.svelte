@@ -307,7 +307,7 @@
         uploadedAt: options.uploadedAt
       },
       danmu: {
-        comments: formatDanmakus(options.danmakus),
+        comments: formatDanmakus(options.danmakus, danmakuContainer),
         // the danmaku plugin will start automatically when the `TIME_UPDATE` event is emitted
         // https://github.com/bytedance/xgplayer/blob/main/packages/xgplayer/src/plugins/danmu/index.js#L91
         defaultOff: true,
