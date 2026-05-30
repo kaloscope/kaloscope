@@ -109,6 +109,7 @@
   import { persisted } from '$lib/stores';
   import { fade } from 'svelte/transition';
   import { Events } from 'xgplayer';
+  import { tick } from 'svelte';
 
   let { player }: { player: Player | null } = $props();
   // whether the current video is a local media file
@@ -162,10 +163,21 @@
    * Toggle the rotation direction of the modal.
    */
   export function toggleDirection() {
+    const portrait = screen.orientation.type.includes('portrait');
     if (player) {
-      const portrait = screen.orientation.type.includes('portrait');
-      rotateFullscreen = portrait && player?.isRotateFullscreen;
+      rotateFullscreen = portrait && player.isRotateFullscreen;
     }
+    // toggle the scroll direction of the danmakus
+    tick().then(() => {
+      const danmujs = danmakuPlugin?.danmujs;
+      if (danmujs) {
+        const direction = portrait && rotateFullscreen ? 'b2t' : 'r2l';
+        danmujs.stop();
+        danmujs.setDirection(direction);
+        danmujs.start();
+        player?.paused && danmujs.pause();
+      }
+    });
   }
 
   /**

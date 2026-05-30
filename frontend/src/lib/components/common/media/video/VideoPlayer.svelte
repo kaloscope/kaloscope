@@ -4,7 +4,6 @@
   import type { Chapter, Danmaku, Definition, MediaItem, Optional, Page, Resp } from '$lib/types';
   import type { IUrl } from 'xgplayer/es/defaultConfig';
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
-  import type DanmakuPlugin from 'xgplayer/es/plugins/danmu';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
   import type MobilePlugin from 'xgplayer/es/plugins/mobile';
 
@@ -110,7 +109,7 @@
 <script lang="ts">
   import { freeze } from '$lib/stores';
   import { sniffer } from '$lib/utils';
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import { v4 as uuidv4 } from 'uuid';
   import Player, { Events, SimplePlayer } from 'xgplayer';
   import DefaultPreset from './plugins/preset';
@@ -131,7 +130,6 @@
 
   // the plugins used in the player
   let mobilePlugin: MobilePlugin | null = $derived.by(() => player?.getPlugin('mobile'));
-  let danmakuPlugin: DanmakuPlugin | null = $derived.by(() => player?.getPlugin('danmu'));
   let chaptersPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('chapters'));
   let fullscreenPlugin: FullscreenPlugin | null = $derived.by(() => player?.getPlugin('fullscreen'));
   let playbackRatePlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('playbackRate'));
@@ -157,7 +155,6 @@
       player.exitRotateFullscreen();
       rotateFullscreen = player.isRotateFullscreen;
       fullscreenPlugin.animate(rotateFullscreen);
-      toggleDanmakuDirection();
       videoSettings.toggleDirection();
     } else if (player.cssfullscreen) {
       // exit css fullscreen mode
@@ -185,7 +182,6 @@
           player.getRotateFullscreen();
           rotateFullscreen = player.isRotateFullscreen;
           fullscreenPlugin.animate(rotateFullscreen);
-          toggleDanmakuDirection();
           videoSettings.toggleDirection();
         }
       } else if (sniffer.isIos()) {
@@ -197,23 +193,6 @@
         player.getFullscreen(container).catch(() => {});
       }
     }
-  };
-
-  /**
-   * Toggles the scroll direction of the danmaku.
-   */
-  const toggleDanmakuDirection = () => {
-    tick().then(() => {
-      const danmujs = danmakuPlugin?.danmujs;
-      if (danmujs) {
-        const portrait = screen.orientation.type.includes('portrait');
-        const direction = portrait && rotateFullscreen ? 'b2t' : 'r2l';
-        danmujs.stop();
-        danmujs.setDirection(direction);
-        danmujs.start();
-        player?.paused && danmujs.pause();
-      }
-    });
   };
 
   /**
@@ -452,7 +431,6 @@
    */
   function onorientationchange() {
     if (player?.isRotateFullscreen) {
-      toggleDanmakuDirection();
       videoSettings.toggleDirection();
     }
   }
