@@ -121,7 +121,14 @@
         <div class="flex flex-wrap gap-4">
           {#each proxies as proxy (proxy.id)}
             <label class="label">
-              <input type="radio" class="radio" bind:group={proxy_id} value={proxy.id} />
+              <input
+                type="radio"
+                class="radio"
+                checked={proxy_id === proxy.id}
+                onclick={() => {
+                  proxy_id = proxy_id === proxy.id ? null : proxy.id;
+                }}
+              />
               <span class="text-base text-base-content/80">{proxy.name}</span>
             </label>
           {/each}
