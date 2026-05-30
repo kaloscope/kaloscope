@@ -201,6 +201,7 @@
         class="toggle toggle-sm"
         checked={rule.secure_dns}
         onchange={() => toggle(rule, 'secure_dns')}
+        disabled={rule.resolver_ids?.length === 0}
       />
     </Cell>
     <Cell>
@@ -209,6 +210,7 @@
         class="toggle toggle-sm"
         checked={rule.http_proxy}
         onchange={() => toggle(rule, 'http_proxy')}
+        disabled={rule.proxy_id === null}
       />
     </Cell>
     <Cell text={$dateTime(rule.created_at)} />
