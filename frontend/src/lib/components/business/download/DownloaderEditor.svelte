@@ -125,7 +125,7 @@ methods:
             preset = target.value;
             codeMirror.setDocument(presets?.[preset] || CONFIG_TEMPLATE, true);
           };
-          if (preset === '' && config === CONFIG_TEMPLATE) {
+          if ((preset === '' && config === CONFIG_TEMPLATE) || (preset && config === presets?.[preset])) {
             // change the preset directly
             onconfirm();
           } else {
