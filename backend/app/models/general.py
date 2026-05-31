@@ -6,15 +6,25 @@ from tortoise.fields import (
     ForeignKeyField,
     ForeignKeyNullableRelation,
     IntField,
+    JSONField,
     TextField,
 )
 
 from app.models.base import Pageable, TortoiseModel
 from app.models.user import User, UserRole
 from app.utils.crypto import xor_decrypt
+from app.utils.json import JSONType
 
 
 # -------------------- ORM Models --------------------
+class GlobalConfig(TortoiseModel):
+    key = CharField(max_length=64, unique=True)
+    value = JSONField[JSONType](null=True)
+
+    class Meta:
+        table = "global_config"
+
+
 class GlobalVariable(TortoiseModel):
     key = CharField(max_length=64, unique=True)
     value = CharField(max_length=4096)
@@ -65,6 +75,16 @@ class Notification(TortoiseModel):
 
 
 # -------------------- Pydantic Models --------------------
+class ConfigQuery(Pageable):
+    key: str | None = None
+
+
+class ConfigUpsert(BaseModel):
+    id: PositiveInt | None = None
+    key: str | None = Field(min_length=1, max_length=64, default=None)
+    value: JSONType = None
+
+
 class VariableQuery(Pageable):
     key: str | None = None
 
