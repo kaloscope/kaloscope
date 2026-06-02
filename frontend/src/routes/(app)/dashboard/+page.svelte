@@ -13,7 +13,6 @@
     VideoPlayer,
     ViewSwitcher
   } from '$lib/components';
-  import { MEDIA_STREAM_PREFIX } from '$lib/constants';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { restorePosition, user } from '$lib/stores';
@@ -27,7 +26,7 @@
     ViewMode,
     ViewModes
   } from '$lib/types';
-  import { aspectRatio } from '$lib/utils';
+  import { aspectRatio, buildStreamUrl } from '$lib/utils';
   import { onMount, tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import type { PageData } from './$types';
@@ -249,7 +248,7 @@
     playing = true;
     tick().then(() => {
       player?.mount({
-        url: `${MEDIA_STREAM_PREFIX}${encodeURIComponent(media.path)}`,
+        url: buildStreamUrl(media.path),
         back: () => (playing = false),
         title: mediaTitle(media),
         startTime: w.position

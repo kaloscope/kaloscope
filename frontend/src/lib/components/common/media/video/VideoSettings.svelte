@@ -1,9 +1,9 @@
 <script lang="ts" module>
-  import { isWhite } from '$lib/utils';
-  import { v4 as uuidv4 } from 'uuid';
-
+  import { extractStreamPath } from '$lib/utils';
   import type { Danmaku, Definition, Resp } from '$lib/types';
+  import { isWhite } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
+  import { v4 as uuidv4 } from 'uuid';
   import type Player from 'xgplayer';
   import type { IUrl } from 'xgplayer/es/defaultConfig';
   import type DanmakuPlugin from 'xgplayer/es/plugins/danmu';
@@ -101,15 +101,15 @@
 <script lang="ts">
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
-  import { Button, Modal, Overlay, Range, Select, confirm } from '$lib/components';
+  import { Button, confirm, Modal, Overlay, Range, Select } from '$lib/components';
   import { EMPTY_SIGN, MEDIA_STREAM_PREFIX } from '$lib/constants';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { persisted } from '$lib/stores';
+  import { tick } from 'svelte';
   import { fade } from 'svelte/transition';
   import { Events } from 'xgplayer';
-  import { tick } from 'svelte';
 
   let { player }: { player: Player | null } = $props();
   // whether the current video is a local media file
@@ -287,7 +287,7 @@
     danmakuMeta = null;
     // fetch the danmakus matched with the current video
     const url = player?.config.url as string;
-    const path = decodeURIComponent(url.slice(MEDIA_STREAM_PREFIX.length));
+    const path = extractStreamPath(url);
     api
       .post('danmaku/match', { json: { path } })
       .json<Resp<DanmakuWrapper>>()
@@ -316,7 +316,7 @@
       return;
     }
     const url = player?.config.url as string;
-    const path = decodeURIComponent(url.slice(MEDIA_STREAM_PREFIX.length));
+    const path = extractStreamPath(url);
     confirm({
       icon: icons.delete,
       title: `${$_('action.delete', $_('media.danmaku.cache'))}`,
@@ -339,7 +339,7 @@
     results = [];
     index = -1;
     const url = player?.config.url as string;
-    const path = decodeURIComponent(url.slice(MEDIA_STREAM_PREFIX.length));
+    const path = extractStreamPath(url);
     api
       .post('danmaku/search', {
         json: { path, title: animeTitle.trim() }
@@ -366,7 +366,7 @@
     }
     confirming.start();
     const url = player?.config.url as string;
-    const path = decodeURIComponent(url.slice(MEDIA_STREAM_PREFIX.length));
+    const path = extractStreamPath(url);
     api
       .post('danmaku/confirm', {
         json: { path, metadata: result }

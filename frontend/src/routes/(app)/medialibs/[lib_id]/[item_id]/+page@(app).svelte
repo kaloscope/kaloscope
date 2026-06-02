@@ -1,13 +1,13 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import { Backdrop, Container, Image, MediaActions, Rating, VideoPlayer, mediaTitle } from '$lib/components';
-  import { MEDIA_STREAM_PREFIX } from '$lib/constants';
+  import { Backdrop, Container, Image, MediaActions, mediaTitle, Rating, VideoPlayer } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { historyBack, user } from '$lib/stores';
   import type { MediaItem, MediaMeta, Resp } from '$lib/types';
+  import { buildStreamUrl } from '$lib/utils';
   import { onMount, tick } from 'svelte';
 
   // the loading state
@@ -61,13 +61,13 @@
       if (parts.length) {
         for (const part of parts) {
           chapters.push({
-            url: `${MEDIA_STREAM_PREFIX}${encodeURIComponent(part.path)}`,
+            url: buildStreamUrl(part.path),
             title: mediaTitle(part)
           });
         }
       }
       player?.mount({
-        url: `${MEDIA_STREAM_PREFIX}${encodeURIComponent(target.path)}`,
+        url: buildStreamUrl(target.path),
         back: () => (playing = false),
         title: mediaTitle(target),
         chapters: chapters

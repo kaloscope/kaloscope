@@ -1,3 +1,5 @@
+import { MEDIA_STREAM_PREFIX } from '$lib/constants';
+import type { TranscodeOptions } from '$lib/types';
 import { UAParser } from 'ua-parser-js';
 
 /**
@@ -321,4 +323,38 @@ export function fixedNumber(
     return max.toString();
   }
   return num.toFixed(decimals);
+}
+
+/**
+ * Extract the decoded file path from a media stream URL.
+ *
+ * @param url - A stream URL starting with {@link MEDIA_STREAM_PREFIX}.
+ * @returns The decoded file path, or the original string if not a stream URL.
+ */
+export function extractStreamPath(url: string): string {
+  if (!url.startsWith(MEDIA_STREAM_PREFIX)) {
+    return url;
+  }
+  const pathWithParams = url.slice(MEDIA_STREAM_PREFIX.length);
+  return decodeURIComponent(pathWithParams.split('&')[0]);
+}
+
+/**
+ * Build a media stream URL with optional transcode parameters.
+ *
+ * @param path - The file path to stream.
+ * @param transcode - Optional transcode options.
+ * @returns The full stream URL with query parameters.
+ */
+export function buildStreamUrl(path: string, transcode: TranscodeOptions | null = null): string {
+  let url = `${MEDIA_STREAM_PREFIX}${encodeURIComponent(path)}`;
+  if (transcode) {
+    url += `&transcode=true`;
+    url += `&quality=${transcode.quality}`;
+    url += `&resolution=${transcode.resolution}`;
+    if (transcode.hwaccel) {
+      url += `&hwaccel=${transcode.hwaccel}`;
+    }
+  }
+  return url;
 }
