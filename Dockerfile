@@ -33,6 +33,7 @@ FROM python:3.13-slim
 # - curl:              used to download mkcert at runtime
 # - libnss3-tools:     required by mkcert to install CA certificates
 # - media-types:       required to guess MIME types of files based on their extensions
+# - ffmpeg:            used to transcode videos for streaming
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libxml2 \
@@ -42,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libnss3-tools \
     media-types \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # download and install mkcert
