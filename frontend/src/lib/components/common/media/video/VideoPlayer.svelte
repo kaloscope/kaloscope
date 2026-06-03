@@ -2,6 +2,7 @@
   import { api } from '$lib/api';
   import { MEDIA_STREAM_PREFIX } from '$lib/constants';
   import type { Chapter, Danmaku, Definition, MediaItem, Optional, Page, Resp } from '$lib/types';
+  import { extractStreamPath, isTranscodedStream } from '$lib/utils';
   import type { IUrl } from 'xgplayer/es/defaultConfig';
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
@@ -75,7 +76,7 @@
     }
     const url = player.config.url;
     if (typeof url === 'string' && url.startsWith(MEDIA_STREAM_PREFIX)) {
-      const path = decodeURIComponent(url.slice(MEDIA_STREAM_PREFIX.length));
+      const path = extractStreamPath(url);
       let position = player.currentTime;
       let duration = player.duration;
       if (isNaN(position) || isNaN(duration) || position < 0 || duration <= 0) {
@@ -252,19 +253,35 @@
    *
    * @param options - The video options.
    */
-  export function mount(options: VideoOptions) {
+  export async function mount(options: VideoOptions) {
     if (!options || !options.url) {
       return;
     }
+
+    // probe the full duration for transcoded streams before creating the player instance
+    let duration: number | undefined;
+    if (isTranscodedStream(options.url)) {
+      try {
+        const path = extractStreamPath(options.url as string);
+        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<{ duration: number }>>();
+        if (resp.data.duration > 0) {
+          duration = resp.data.duration;
+        }
+      } catch {
+        // probe failed, just ignore the error and let the player handle it
+      }
+    }
+
     // if the player is already mounted, just switch the URL
     if (player) {
       if (options.next) {
-        player.playNext({ url: options.url, topBar: { title: options.title } });
+        player.playNext({ url: options.url, topBar: { title: options.title }, customDuration: duration });
       } else {
         videoSettings.changeDefinition(options.url);
       }
       return;
     }
+
     // create a new player instance
     SimplePlayer.defaultPreset = DefaultPreset;
     player = new SimplePlayer({
@@ -275,6 +292,7 @@
       autoplay: options.autoplay ?? true,
       startTime: options.startTime ?? undefined,
       videoType: options.videoType,
+      customDuration: duration,
       // bind the video settings component to the player config
       settings: videoSettings,
       definitions: extractDefinitions(options),

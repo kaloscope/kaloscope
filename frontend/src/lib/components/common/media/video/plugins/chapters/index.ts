@@ -1,5 +1,7 @@
+import { api } from '$lib/api';
 import { icons, iconToSVG } from '$lib/icons';
-import type { Chapter } from '$lib/types';
+import type { Chapter, Resp } from '$lib/types';
+import { extractStreamPath, isTranscodedStream } from '$lib/utils';
 import OptionList from 'xgplayer/es/plugins/common/optionList';
 import OptionsIcon from 'xgplayer/es/plugins/common/optionsIcon';
 import './index.css';
@@ -61,10 +63,26 @@ export default class Chapters extends OptionsIcon {
       if (definition === 'true') {
         this.player.config.settings.changeDefinition(url);
       } else {
-        this.player.playNext({ url: url, topBar: { title: showText } });
+        this.playNext(url, showText);
       }
     }
   };
+
+  private async playNext(url: string, title: string | number | undefined) {
+    let duration: number | undefined;
+    if (isTranscodedStream(url)) {
+      try {
+        const path = extractStreamPath(url);
+        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<{ duration: number }>>();
+        if (resp.data.duration > 0) {
+          duration = resp.data.duration;
+        }
+      } catch {
+        // probe failed
+      }
+    }
+    this.player.playNext({ url, topBar: { title }, customDuration: duration });
+  }
 
   registerIcons() {
     return {
