@@ -1,6 +1,7 @@
 import { MEDIA_STREAM_PREFIX } from '$lib/constants';
 import type { TranscodeOptions } from '$lib/types';
 import { UAParser } from 'ua-parser-js';
+import type { IUrl } from 'xgplayer/es/defaultConfig';
 
 /**
  * Debounce function.
@@ -357,4 +358,14 @@ export function buildStreamUrl(path: string, transcode: TranscodeOptions | null 
     }
   }
   return url;
+}
+
+/**
+ * Check if a media URL is a transcoded stream.
+ *
+ * @param url - The media URL to check.
+ * @returns True if the URL is a transcoded stream, false otherwise.
+ */
+export function isTranscodedStream(url: IUrl | null | undefined): boolean {
+  return typeof url === 'string' && url.startsWith(MEDIA_STREAM_PREFIX) && url.includes('transcode=true');
 }

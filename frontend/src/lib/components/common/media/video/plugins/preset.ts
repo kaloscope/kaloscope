@@ -1,5 +1,5 @@
 import { icons, iconToSVG } from '$lib/icons';
-import { sniffer } from '$lib/utils';
+import { isTranscodedStream, sniffer } from '$lib/utils';
 import { I18N, type BasePlugin, type IPlayerOptions } from 'xgplayer';
 import type { IUrl } from 'xgplayer/es/defaultConfig';
 
@@ -120,7 +120,7 @@ export default class DefaultPreset {
       this.plugins.push(PC);
     }
     // set video plugins
-    this.plugins.push(...videoPlugins(options.videoType || guessVideoType(options.url)));
+    this.plugins.push(...videoPlugins(options.videoType || guessVideoType(options.url), options.url));
     options.mp4Plugin = {
       preferMMS: true
     };
@@ -158,10 +158,16 @@ function guessVideoType(url?: IUrl): string | null {
 /**
  * Gets the video plugins based on the video type.
  *
- * @param videoType - The type of video.
+ * @param videoType - The video type, either from options or guessed from the URL.
+ * @param url - The media URL, used to check if it's a transcoded stream.
  * @returns An array of video plugins.
  */
-function videoPlugins(videoType?: string | null): Partial<BasePlugin>[] {
+function videoPlugins(videoType: string | null | undefined, url: IUrl | undefined): Partial<BasePlugin>[] {
+  // if it's a transcoded stream, use HLS plugin if supported since transcoded streams are delivered via HLS
+  if (isTranscodedStream(url)) {
+    return HLS.isSupported() ? [HLS] : [];
+  }
+
   videoType = videoType?.toLowerCase();
   if (videoType === 'mp4') {
     // https://h5player.bytedance.com/plugins/extension/xgplayer-mp4.html
