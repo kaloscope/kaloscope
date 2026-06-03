@@ -33,7 +33,7 @@ class Package:
 # ---------------------------------------------------------------------------
 
 
-def run_license_checker() -> None:
+def run_license_checker():
     """Execute license-checker via pnpm for frontend dependencies.
 
     https://github.com/davglass/license-checker
@@ -44,7 +44,7 @@ def run_license_checker() -> None:
     print("✅ Frontend license data generated successfully")
 
 
-def run_pip_licenses() -> None:
+def run_pip_licenses():
     """Execute pip-licenses via poetry for backend dependencies.
 
     https://github.com/raimon49/pip-licenses
@@ -126,9 +126,7 @@ def generate_table(packages: list[Package], title: str) -> list[str]:
     return rows
 
 
-def generate_licenses(
-    frontend_data: list[Package], backend_data: list[Package]
-) -> None:
+def generate_licenses(frontend_data: list[Package], backend_data: list[Package]):
     """Generate the complete LICENSES.md document."""
     now = datetime.now(timezone.utc).strftime("%B %d, %Y, %I:%M %p %Z")
     lines: list[str] = [
@@ -174,7 +172,7 @@ def get_sanic_version() -> str:
     return match.group(1)
 
 
-def update_readme() -> None:
+def update_readme():
     """Update version badges in all README*.md files at the project root."""
     xyflow_version = get_xyflow_version()
     print(f"📋 xyflow version: {xyflow_version}")

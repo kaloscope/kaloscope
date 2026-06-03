@@ -28,7 +28,7 @@ def bump(major: int, minor: int, patch: int, part: str) -> tuple[int, int, int]:
     return major, minor, patch + 1
 
 
-def update_toml(path: Path, version: str) -> None:
+def update_toml(path: Path, version: str):
     """Replace version in a TOML file: version = "x.y.z" """
     content = path.read_text(encoding="utf-8")
     updated = re.sub(
@@ -41,7 +41,7 @@ def update_toml(path: Path, version: str) -> None:
     path.write_text(updated, encoding="utf-8")
 
 
-def update_json(path: Path, version: str) -> None:
+def update_json(path: Path, version: str):
     """Replace version in a JSON file: "version": "x.y.z" """
     content = path.read_text(encoding="utf-8")
     updated = re.sub(
@@ -63,7 +63,7 @@ def choose_part() -> str:
     return {"1": "major", "2": "minor"}.get(choice, "patch")
 
 
-def main() -> None:
+def main():
     # read current version from pyproject.toml
     toml_content = PYPROJECT.read_text(encoding="utf-8")
     major, minor, patch = parse_version(toml_content)

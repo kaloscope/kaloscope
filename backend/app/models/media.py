@@ -1,5 +1,5 @@
 from enum import StrEnum, auto
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 from pydantic import BaseModel, Field, PositiveInt, model_validator
 from tortoise.fields import (
@@ -20,6 +20,12 @@ from tortoise.fields import (
 from app.models.base import Pageable, TortoiseModel
 from app.models.flow import GraphRef
 from app.utils.disk import is_directory
+from app.utils.transcode import (
+    HWAccelType,
+    QualityLevel,
+    ResolutionLimit,
+    TranscodeOptions,
+)
 
 
 # -------------------- Enumerations --------------------
@@ -168,14 +174,22 @@ class TranscodeQuery(MediaResource):
     transcode: bool = False
     """Whether to transcode the video."""
 
-    quality: Literal["low", "medium", "high"] | None = None
-    """Transcode quality preset."""
+    hwaccel: HWAccelType | None = None
+    """Hardware acceleration types."""
 
-    resolution: Literal["original", "1080p", "720p", "480p"] | None = None
+    quality: QualityLevel | None = None
+    """Transcode quality level."""
+
+    resolution: ResolutionLimit | None = None
     """Output resolution limit."""
 
-    hwaccel: (
-        Literal["amf", "qsv", "nvenc", "v4l2m2m", "vaapi", "videotoolbox", "rkmpp"]
-        | None
-    ) = None
-    """Hardware acceleration types."""
+    def options(self) -> TranscodeOptions:
+        """Convert query parameters to a `TranscodeOptions` instance."""
+        kwargs: dict[str, Any] = {}
+        if self.hwaccel is not None:
+            kwargs["hwaccel"] = self.hwaccel
+        if self.quality is not None:
+            kwargs["quality"] = self.quality
+        if self.resolution is not None:
+            kwargs["resolution"] = self.resolution
+        return TranscodeOptions(**kwargs)

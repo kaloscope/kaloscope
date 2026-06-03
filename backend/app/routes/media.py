@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 from aiofiles import os as async_os
-from sanic import Blueprint, HTTPResponse, Request, empty, json
+from sanic import Blueprint, HTTPResponse, Request, empty, json, redirect
 from sanic.exceptions import InvalidRangeType, RangeNotSatisfiable
 from sanic.log import logger
 from sanic.response import ResponseStream, file_stream
@@ -10,7 +10,7 @@ from sanic_ext import validate
 from tortoise.expressions import Q, RawSQL
 
 from app.core.decorators import authorize
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
 from app.core.media.shelver import (
     gen_nfo,
     get_nfo_path,
@@ -29,11 +29,18 @@ from app.models.media import (
     MediaMetadata,
     MediaQuery,
     MediaResource,
+    TranscodeQuery,
 )
 from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.extractor import extract_title
+from app.utils.transcode import (
+    ensure_transcode,
+    output_dir,
+    probe_duration,
+    read_m3u8,
+)
 
 # subroutes for all media related operations
 media = Blueprint("media", url_prefix="/media")
@@ -178,11 +185,38 @@ async def get_item_title(_, query: MediaResource) -> HTTPResponse:
     return json({"title": extract_title(path.name if path.is_dir() else path.stem)})
 
 
-@media.get("/stream")
+@media.get("/probe")
 @validate(query=MediaResource)
-async def get_item_stream(request: Request, query: MediaResource) -> ResponseStream:
-    """Get the media item stream with HTTP Range support."""
+async def probe_media_duration(_, query: MediaResource) -> HTTPResponse:
+    """Probe the media file duration via ffprobe."""
+    duration = await probe_duration(query.path)
+    return json({"duration": duration or 0})
+
+
+@media.get("/stream")
+@validate(query=TranscodeQuery)
+async def get_item_stream(
+    request: Request, query: TranscodeQuery
+) -> HTTPResponse | ResponseStream:
+    """Get the media item stream with optional real-time ffmpeg transcoding."""
     path = query.path
+    if not await async_os.path.exists(path):
+        raise KaloscopeException(ErrorCode.FILE_NOT_EXISTS)
+
+    # -------------------- Transcoding with ffmpeg and HLS --------------------
+    if query.transcode:
+        options = query.options()
+
+        # resolve the media hash
+        media_hash = await MediaItemService.resolve_media_hash(path)
+
+        # start or wait for the transcoding process to produce the M3U8 output
+        media_hash, profile = await ensure_transcode(path, media_hash, options)
+
+        # redirect to the deterministic M3U8 path
+        return redirect(f"/_api/media/hls/{media_hash}/{profile}/index.m3u8")
+
+    # -------------------- Direct file streaming --------------------
     stat = await async_os.stat(path)
     total = stat.st_size
     headers = {"Accept-Ranges": "bytes"}
@@ -212,3 +246,34 @@ async def get_item_stream(request: Request, query: MediaResource) -> ResponseStr
 
     # if no range header, return the entire file
     return await file_stream(path, headers=headers)
+
+
+@media.get("/hls/<hash>/<profile>/<filename:ext=m3u8|ts>")
+async def serve_hls_file(
+    _, hash: str, profile: str, filename: str, ext: str
+) -> HTTPResponse | ResponseStream:
+    """Serve any file from an HLS output directory (M3U8 playlist or TS segment)."""
+    # check if the requested file exists in the output directory
+    file_path = output_dir(hash, profile) / f"{filename}.{ext}"
+    if not file_path.is_file():
+        raise KaloscopeException(ErrorCode.FILE_NOT_EXISTS)
+
+    # M3U8 playlist
+    if ext == "m3u8":
+        content = await read_m3u8(file_path)
+        if content is None:
+            raise BadRequestException("HLS output not found")
+        return HTTPResponse(
+            content,
+            content_type="application/vnd.apple.mpegurl",
+            headers={
+                "Accept-Ranges": "none",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    # TS segment
+    return await file_stream(
+        file_path,
+        headers={"Cache-Control": "no-store"},
+    )
