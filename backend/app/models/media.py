@@ -1,5 +1,5 @@
 from enum import StrEnum, auto
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, PositiveInt, model_validator
 from tortoise.fields import (
@@ -153,3 +153,29 @@ class MediaMetadata(BaseModel):
 
 class MediaResource(BaseModel):
     path: str
+
+
+class TranscodeQuery(MediaResource):
+    """Query parameters for the media stream endpoint with optional transcoding.
+
+    When `transcode` is `False`, the endpoint serves the raw file directly
+    with HTTP Range support.
+
+    When `transcode` is `True`, the server transcodes the video in real-time
+    using ffmpeg to HLS (M3U8 + MPEG-TS segments).
+    """
+
+    transcode: bool = False
+    """Whether to transcode the video."""
+
+    quality: Literal["low", "medium", "high"] | None = None
+    """Transcode quality preset."""
+
+    resolution: Literal["original", "1080p", "720p", "480p"] | None = None
+    """Output resolution limit."""
+
+    hwaccel: (
+        Literal["amf", "qsv", "nvenc", "v4l2m2m", "vaapi", "videotoolbox", "rkmpp"]
+        | None
+    ) = None
+    """Hardware acceleration types."""

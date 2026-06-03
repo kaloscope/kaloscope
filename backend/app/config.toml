@@ -16,4 +16,5 @@ oas_ui_default = "swagger"
 [workspace]
 images = "{workspace}/images"
 database = "{workspace}/database"
+transcoded = "{workspace}/transcoded"
 repositories = "{workspace}/repositories"
