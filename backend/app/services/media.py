@@ -4,6 +4,7 @@ from pathlib import Path
 
 import aiofiles
 from sanic import Sanic
+from sanic.log import logger
 from tortoise.expressions import Q
 from tortoise.transactions import atomic
 
@@ -177,6 +178,34 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         async with aiofiles.open(path, "rb") as f:
             md5.update(await f.read(cls.HASH_READ_SIZE))
         await MediaItem.filter(id=item_id).update(hash=md5.hexdigest(), size=size)
+
+    @classmethod
+    async def resolve_media_hash(cls, item_path: str) -> str:
+        """Look up the media file's hash from the database.
+
+        Args:
+            item_path: The file path of the media item.
+
+        Returns:
+            The media hash if found, otherwise calculate and return the hash.
+        """
+        try:
+            media = await MediaItem.filter(path=item_path).first()
+            if media and media.hash:
+                return media.hash
+        except Exception:
+            logger.debug(
+                "Failed to look up media hash for '%s'", item_path, exc_info=True
+            )
+
+        # fallback to calculating the hash if not found in the database
+        path = Path(item_path)
+        if not path.is_file():
+            raise KaloscopeException(ErrorCode.NOT_FOUND)
+        md5 = hashlib.md5()
+        async with aiofiles.open(path, "rb") as f:
+            md5.update(await f.read(cls.HASH_READ_SIZE))
+        return md5.hexdigest()
 
     @classmethod
     async def refresh_episodes(cls, item: MediaItem, meta: MediaMetadata):
