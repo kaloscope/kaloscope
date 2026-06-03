@@ -638,6 +638,7 @@
     "export_items_failed": "Failed to export the items!",
     "import_items_failed": "Failed to import the items!",
     "import_items_success": "Successfully imported {0} items!",
-    "upgrade_success": "Upgrade successful!"
+    "upgrade_success": "Upgrade successful!",
+    "file_not_exists": "File does not exist!"
   }
 }

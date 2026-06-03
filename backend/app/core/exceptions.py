@@ -38,6 +38,7 @@ class ErrorCode(StrEnum):
     HTTP_REQUEST_FAILED = auto()
     EXPORT_ITEMS_FAILED = auto()
     IMPORT_ITEMS_FAILED = auto()
+    FILE_NOT_EXISTS = auto()
 
 
 class KaloscopeException(SanicException):

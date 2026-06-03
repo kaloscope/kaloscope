@@ -201,7 +201,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         # fallback to calculating the hash if not found in the database
         path = Path(item_path)
         if not path.is_file():
-            raise KaloscopeException(ErrorCode.NOT_FOUND)
+            raise KaloscopeException(ErrorCode.FILE_NOT_EXISTS)
         md5 = hashlib.md5()
         async with aiofiles.open(path, "rb") as f:
             md5.update(await f.read(cls.HASH_READ_SIZE))
