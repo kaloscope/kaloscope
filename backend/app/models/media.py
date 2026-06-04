@@ -19,6 +19,7 @@ from tortoise.fields import (
 
 from app.models.base import Pageable, TortoiseModel
 from app.models.flow import GraphRef
+from app.models.general import GlobalConfig
 from app.utils.disk import is_directory
 from app.utils.transcode import (
     HWAccelType,
@@ -183,13 +184,20 @@ class TranscodeQuery(MediaResource):
     resolution: ResolutionLimit | None = None
     """Output resolution limit."""
 
-    def options(self) -> TranscodeOptions:
+    async def options(self) -> TranscodeOptions:
         """Convert query parameters to a `TranscodeOptions` instance."""
         kwargs: dict[str, Any] = {}
-        if self.hwaccel is not None:
-            kwargs["hwaccel"] = self.hwaccel
-        if self.quality is not None:
-            kwargs["quality"] = self.quality
-        if self.resolution is not None:
-            kwargs["resolution"] = self.resolution
+
+        async def _option(key: str) -> Any:
+            value = getattr(self, key)
+            if value is not None:
+                kwargs[key] = value
+            else:
+                config = await GlobalConfig.get_or_none(key=f"transcode.{key}")
+                if config and config.value is not None:
+                    kwargs[key] = config.value
+
+        await _option("hwaccel")
+        await _option("quality")
+        await _option("resolution")
         return TranscodeOptions(**kwargs)

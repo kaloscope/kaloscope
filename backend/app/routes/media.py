@@ -205,7 +205,7 @@ async def get_item_stream(
 
     # -------------------- Transcoding with ffmpeg and HLS --------------------
     if query.transcode:
-        options = query.options()
+        options = await query.options()
 
         # resolve the media hash
         media_hash = await MediaItemService.resolve_media_hash(path)
