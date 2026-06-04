@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,7 @@ class TranscodeOptions:
     hwaccel: HWAccelType | None = None
     quality: QualityLevel = "medium"
     resolution: ResolutionLimit = "original"
+    framerate: float = 30.0
 
     @property
     def encoder_config(self) -> EncoderConfig:
@@ -152,6 +154,46 @@ async def probe_duration(media_path: str) -> float | None:
         return None
 
 
+async def probe_framerate(media_path: str) -> float | None:
+    """Probe the average framerate of the media's first video stream via ffprobe.
+
+    The framerate is reported by ffprobe as a rational string (e.g. `"30000/1001"`)
+    and is parsed into a float here.  This is used to calculate the GOP size for
+    hardware encoders so that segment-boundary keyframes are correctly aligned.
+
+    Args:
+        media_path: The media file path to probe.
+
+    Returns:
+        Frames per second, or `None` if probing failed or returned an invalid value.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        media_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    raw = stdout.decode().strip()
+    try:
+        num, _, den = raw.partition("/")
+        fps = float(num) / float(den) if den else float(num)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return None
+    # guard against bogus values (e.g. "0/0" -> 0.0)
+    return fps if fps > 0 else None
+
+
 async def ensure_transcode(
     media_path: str, media_hash: str, options: TranscodeOptions
 ) -> tuple[str, str]:
@@ -188,6 +230,12 @@ async def ensure_transcode(
 
     # start the ffmpeg process if we acquired the lock
     try:
+        # probe the real source framerate so GOP-based keyframe placement
+        # (used by hardware encoders) aligns with the HLS segment boundaries
+        fps = await probe_framerate(media_path)
+        if fps is not None:
+            options.framerate = fps
+
         cmd = _build_hls_cmd(media_path, out_dir, options)
         logger.info("Starting ffmpeg HLS: %s", " ".join(cmd))
 
@@ -260,10 +308,13 @@ def _build_hls_cmd(
     """Build the ffmpeg command line for HLS transcoding.
 
     Constructs a complete ffmpeg command that transcodes a source video into
-    an HLS playlist with MPEG-TS segments. The command configures hardware
+    an HLS playlist with MPEG-TS segments.  The command configures hardware
     acceleration (if requested), video codec parameters (CRF for libx264,
     bitrate-based for hardware encoders), audio encoding (AAC 128k stereo),
     keyframe alignment for clean segment boundaries, and HLS output settings.
+
+    The command structure, argument ordering, and per-encoder parameters are
+    referenced from Jellyfin: https://github.com/jellyfin/jellyfin
 
     Args:
         input_path: The source media file path.
@@ -275,22 +326,32 @@ def _build_hls_cmd(
     """
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
 
-    enc = options.encoder
-    hw = options.encoder_config
-    seg_len = 6  # HLS segment length in seconds
-    bitrate = _HW_BITRATE.get(options.quality, "3000k")  # bitrate for hardware encoders
+    # HLS segment length in seconds
+    seg_len = 6
+
+    # when scaling is requested we use a CPU `scale` filter, which cannot
+    # operate on GPU-resident frames; in that case skip hwaccel_output_format
+    # so decoded frames stay in system memory (the encoder re-uploads them)
+    needs_scale = options.max_height is not None
 
     # hardware acceleration
+    hw = options.encoder_config
     if hw.hwaccel:
         cmd.extend(["-hwaccel", hw.hwaccel])
-        if hw.hwaccel_output_format:
+        if hw.hwaccel_output_format and not needs_scale:
             cmd.extend(["-hwaccel_output_format", hw.hwaccel_output_format])
 
     cmd.extend(["-i", input_path])
 
+    # strip metadata and chapters from output (not needed for web playback)
+    cmd.extend(["-map_metadata", "-1", "-map_chapters", "-1"])
+
+    # stream mapping placed before codec arguments
+    cmd.extend(["-map", "0:v:0?", "-map", "0:a:0?"])
+
     # video filter chain
     vf_parts: list[str] = []
-    if options.max_height is not None:
+    if needs_scale:
         # scale filter to limit the output height while preserving aspect ratio,
         # and ensure the dimensions are divisible by 16 for better encoder compatibility
         vf_parts.append(
@@ -298,9 +359,14 @@ def _build_hls_cmd(
             f":'min({options.max_height},ih)'"
         )
 
+    # video encoder and parameters
+    enc = options.encoder
     cmd.extend(["-c:v", enc])
 
     if enc == "libx264":
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
+        bitrate_num = int(bitrate[:-1])
+        bufsize = str(bitrate_num * 2) + "k"
         cmd.extend(
             [
                 "-preset",
@@ -313,10 +379,17 @@ def _build_hls_cmd(
                 "4.0",
                 "-pix_fmt",
                 "yuv420p",
+                # VBV constraints cap peak bitrate during CRF encoding,
+                # preventing network-unfriendly bitrate spikes
+                "-maxrate",
+                bitrate,
+                "-bufsize",
+                bufsize,
             ]
         )
 
     elif enc == "h264_amf":
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
         amf_quality = (
             "balanced"
             if options.quality == "medium"
@@ -342,7 +415,15 @@ def _build_hls_cmd(
         )
 
     elif enc == "h264_qsv":
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
         bitrate_num = int(bitrate[:-1])
+        # QSV rate control follows Jellyfin:
+        # - maxrate = bitrate + 1 triggers VBR for better bitrate allocation
+        # - mbbrc 1 enables MacroBlock-level rate control
+        # - bufsize = bitrate * 2 * factor, factor=2 (level ≥ 5.1);
+        #   Jellyfin uses factor=1 only for level < 5.1; without codec-level
+        #   detection we default to factor=2
+        # - rc_init_occupancy = bitrate * 1 * factor (2 s initial buffer fill)
         cmd.extend(
             [
                 "-preset",
@@ -352,15 +433,16 @@ def _build_hls_cmd(
                 "-maxrate",
                 str(bitrate_num + 1) + "k",
                 "-bufsize",
-                str(bitrate_num * 2) + "k",
+                str(bitrate_num * 2 * 2) + "k",
                 "-mbbrc",
                 "1",
                 "-rc_init_occupancy",
-                bitrate,
+                str(bitrate_num * 2 * 1000),
             ]
         )
 
     elif enc == "h264_nvenc":
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
         nvenc_preset = (
             "p4"
             if options.quality == "medium"
@@ -380,13 +462,11 @@ def _build_hls_cmd(
         )
 
     elif enc == "h264_vaapi":
-        vaapi_compression = {"low": 1, "medium": 3, "high": 7}.get(options.quality, 3)
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
         cmd.extend(
             [
                 "-rc_mode",
                 "VBR",
-                "-compression_level",
-                str(vaapi_compression),
                 "-b:v",
                 bitrate,
                 "-maxrate",
@@ -397,11 +477,14 @@ def _build_hls_cmd(
         )
 
     elif enc == "h264_videotoolbox":
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
         vt_prio = "0" if options.quality in ("high", "medium") else "1"
         cmd.extend(
             [
                 "-b:v",
                 bitrate,
+                # qmin=-1 / qmax=-1 disable quantization constraints,
+                # letting the encoder use pure bitrate-based rate control
                 "-qmin",
                 "-1",
                 "-qmax",
@@ -412,6 +495,7 @@ def _build_hls_cmd(
         )
 
     else:
+        bitrate = _HW_BITRATE.get(options.quality, "3000k")
         cmd.extend(
             [
                 "-b:v",
@@ -426,20 +510,49 @@ def _build_hls_cmd(
     if vf_parts:
         cmd.extend(["-vf", ",".join(vf_parts)])
 
-    # HLS keyframe / GOP
-    cmd.extend(
-        [
-            "-force_key_frames:0",
-            f"expr:gte(t,n_forced*{seg_len})",
-            "-g:v:0",
-            "48",
-            "-keyint_min:v:0",
-            "48",
-        ]
-    )
-    if enc == "libx264":
-        # disable scene-change keyframe insertion so segment durations stay uniform
-        cmd.extend(["-sc_threshold", "0"])
+    # -------------------- Keyframe / GOP --------------------
+
+    _FORCE_KEYFRAMES = ("libx264", "h264_vaapi")
+    _GOP_ENCODERS = ("h264_qsv", "h264_nvenc", "h264_amf", "h264_rkmpp")
+
+    if enc in _FORCE_KEYFRAMES:
+        cmd.extend(
+            [
+                "-force_key_frames:0",
+                f"expr:gte(t,n_forced*{seg_len})",
+            ]
+        )
+        if enc == "libx264":
+            # prevent libx264 from inserting scene-change keyframes that
+            # would break the uniform segment duration
+            cmd.extend(["-sc_threshold:v:0", "0"])
+
+    elif enc in _GOP_ENCODERS:
+        # GOP size = segment length × framerate, rounded up to ensure each
+        # segment contains at least one keyframe
+        gop = math.ceil(options.framerate * seg_len)
+        cmd.extend(
+            [
+                "-g:v:0",
+                str(gop),
+                "-keyint_min:v:0",
+                str(gop),
+            ]
+        )
+
+    else:
+        # unknown encoder: apply both strategies for safety
+        gop = math.ceil(options.framerate * seg_len)
+        cmd.extend(
+            [
+                "-force_key_frames:0",
+                f"expr:gte(t,n_forced*{seg_len})",
+                "-g:v:0",
+                str(gop),
+                "-keyint_min:v:0",
+                str(gop),
+            ]
+        )
 
     # -------------------- Audio --------------------
     cmd.extend(
@@ -457,7 +570,8 @@ def _build_hls_cmd(
         ]
     )
 
-    cmd.extend(["-map", "0:v:0?", "-map", "0:a:0?"])
+    # preserve original timestamps and disable negative timestamp avoidance
+    cmd.extend(["-copyts", "-avoid_negative_ts", "disabled"])
 
     # -------------------- HLS output --------------------
     m3u8_path = str(out_dir / "index.m3u8")
@@ -470,6 +584,8 @@ def _build_hls_cmd(
             str(seg_len),
             "-hls_list_size",
             "0",
+            "-hls_playlist_type",
+            "event",
             "-hls_segment_type",
             "mpegts",
             "-hls_segment_filename",
@@ -478,6 +594,10 @@ def _build_hls_cmd(
             "append_list",
             "-start_number",
             "0",
+            "-max_delay",
+            "5000000",
+            "-max_muxing_queue_size",
+            "128",
             m3u8_path,
         ]
     )
