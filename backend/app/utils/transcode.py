@@ -12,6 +12,7 @@ from sanic.log import logger
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
+from app.models.general import GlobalConfig
 
 
 @dataclass
@@ -124,6 +125,32 @@ class TranscodeOptions:
         return f"{self.quality}_{self.resolution}_{str(self.hwaccel).lower()}"
 
 
+async def _ffmpeg() -> str:
+    """Get the ffmpeg executable path from global config or default to "ffmpeg".
+
+    Returns:
+        The ffmpeg executable name or path.
+    """
+    path = await GlobalConfig.get_or_none(key="ffmpeg.path")
+    if path and isinstance(path.value, str) and Path(path.value).is_file():
+        return path.value
+    return "ffmpeg"
+
+
+async def _ffprobe() -> str:
+    """Get the ffprobe executable path from global config or default to "ffprobe".
+
+    Returns:
+        The ffprobe executable name or path.
+    """
+    ffmpeg = await _ffmpeg()
+    if ffmpeg != "ffmpeg":
+        path = Path(ffmpeg).with_name("ffprobe")
+        if path.is_file():
+            return str(path)
+    return "ffprobe"
+
+
 async def probe_duration(media_path: str) -> float | None:
     """Probe the media file duration in seconds via ffprobe.
 
@@ -134,7 +161,7 @@ async def probe_duration(media_path: str) -> float | None:
         Duration in seconds, or `None` if probing failed.
     """
     proc = await asyncio.create_subprocess_exec(
-        "ffprobe",
+        await _ffprobe(),
         "-v",
         "quiet",
         "-show_entries",
@@ -168,7 +195,7 @@ async def probe_framerate(media_path: str) -> float | None:
         Frames per second, or `None` if probing failed or returned an invalid value.
     """
     proc = await asyncio.create_subprocess_exec(
-        "ffprobe",
+        await _ffprobe(),
         "-v",
         "quiet",
         "-select_streams",
@@ -236,7 +263,7 @@ async def ensure_transcode(
         if fps is not None:
             options.framerate = fps
 
-        cmd = _build_hls_cmd(media_path, out_dir, options)
+        cmd = await _build_hls_cmd(media_path, out_dir, options)
         logger.info("Starting ffmpeg HLS: %s", " ".join(cmd))
 
         proc = await asyncio.create_subprocess_exec(
@@ -302,7 +329,7 @@ def _release_lock(lock: FileLock):
         lock.release()
 
 
-def _build_hls_cmd(
+async def _build_hls_cmd(
     input_path: str, out_dir: Path, options: TranscodeOptions
 ) -> list[str]:
     """Build the ffmpeg command line for HLS transcoding.
@@ -324,7 +351,7 @@ def _build_hls_cmd(
     Returns:
         A list of command-line arguments ready for `asyncio.create_subprocess_exec`.
     """
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    cmd = [await _ffmpeg(), "-hide_banner", "-loglevel", "error"]
 
     # HLS segment length in seconds
     seg_len = 6
