@@ -55,6 +55,7 @@
         "title": "System",
         "users": "Users",
         "network": "Network",
+        "general": "General",
         "medialibs": "Libraries",
         "downloaders": "Downloaders"
       },
@@ -307,6 +308,33 @@
       "search": "Search Records",
       "watch": "Watch Records",
       "untrack": "Not Saving"
+    }
+  },
+  "general": {
+    "ffmpeg": {
+      "title": "FFmpeg",
+      "path": {
+        "title": "Custom Path",
+        "tip": "Path to the FFmpeg binary. Leave empty to use the system default."
+      }
+    },
+    "transcode": {
+      "title": "Transcoding",
+      "auto": {
+        "title": "Auto Transcode"
+      },
+      "hwaccel": {
+        "title": "Hardware Acceleration",
+        "tip": "Select the hardware acceleration method for video transcoding.",
+        "none": "None (Software)"
+      },
+      "quality": {
+        "title": "Transcode Quality",
+        "tip": "Higher quality produces better video but uses more storage and CPU/GPU resources.",
+        "low": "Low (Faster)",
+        "medium": "Medium (Balanced)",
+        "high": "High (Better)"
+      }
     }
   },
   "filesystem": {

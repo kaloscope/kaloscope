@@ -55,6 +55,7 @@
         "title": "系统设置",
         "users": "用户管理",
         "network": "网络设置",
+        "general": "通用设置",
         "medialibs": "媒体库管理",
         "downloaders": "下载器设置"
       },
@@ -307,6 +308,33 @@
       "search": "搜索记录",
       "watch": "观看记录",
       "untrack": "不保存"
+    }
+  },
+  "general": {
+    "ffmpeg": {
+      "title": "FFmpeg",
+      "path": {
+        "title": "自定义路径",
+        "tip": "FFmpeg 可执行文件路径，留空则使用系统默认值。"
+      }
+    },
+    "transcode": {
+      "title": "转码设置",
+      "auto": {
+        "title": "自动转码播放"
+      },
+      "hwaccel": {
+        "title": "硬件加速",
+        "tip": "选择视频转码的硬件加速方式。",
+        "none": "无（软件编码）"
+      },
+      "quality": {
+        "title": "转码质量",
+        "tip": "更高质量产生更好的画质，但消耗更多存储空间和 CPU/GPU 资源。",
+        "low": "低（快速）",
+        "medium": "中（均衡）",
+        "high": "高（最佳）"
+      }
     }
   },
   "filesystem": {

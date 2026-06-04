@@ -60,6 +60,11 @@ export const load: LayoutLoad = async () => {
             icon: icons.globeDesktop
           },
           {
+            title: 'nav.settings.system.general',
+            path: '/settings/system/general',
+            icon: icons.settings
+          },
+          {
             title: 'nav.settings.system.medialibs',
             path: '/settings/system/medialibs',
             icon: icons.videoClipMultiple
