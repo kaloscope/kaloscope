@@ -69,9 +69,18 @@ _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
     ),
 }
 
-# transcode quality levels (mapped to CRF values)
+# transcode quality levels (mapped to CRF values and bitrate targets)
 QualityLevel = Literal["low", "medium", "high"]
-_QUALITY_CRF: dict[QualityLevel, int] = {"low": 28, "medium": 23, "high": 18}
+_QUALITY_CRF: dict[QualityLevel, int] = {
+    "low": 28,
+    "medium": 23,
+    "high": 18,
+}
+_HW_BITRATE: dict[QualityLevel, str] = {
+    "low": "1500k",
+    "medium": "3000k",
+    "high": "6000k",
+}
 
 # output resolution limits (mapped to max height in pixels)
 ResolutionLimit = Literal["original", "1080p", "720p", "480p"]
@@ -146,23 +155,38 @@ async def probe_duration(media_path: str) -> float | None:
 async def ensure_transcode(
     media_path: str, media_hash: str, options: TranscodeOptions
 ) -> tuple[str, str]:
+    """Ensure the media file has been transcoded to HLS for the given profile.
+
+    If the M3U8 playlist already exists and is complete, returns immediately.
+    If another process is already transcoding, waits for at least one segment.
+    Otherwise acquires the lock and starts an ffmpeg subprocess, waiting for
+    the first segment before returning so playback can begin immediately.
+
+    Args:
+        media_path: The source media file path.
+        media_hash: The media file hash used as part of the output path.
+        options: The transcode parameters (encoder, quality, resolution).
+
+    Returns:
+        A tuple of `(media_hash, profile)`.
+    """
     profile = options.profile
     out_dir = output_dir(media_hash, profile)
     m3u8_path = out_dir / "index.m3u8"
 
-    # Fast path: already complete.
+    # return immediately if the M3U8 already exists and is complete
     if _is_complete(m3u8_path):
         logger.debug("HLS already complete: %s", out_dir)
         return media_hash, profile
 
-    # If another ffmpeg is running for this directory, just wait.
+    # if another ffmpeg is running for this directory, just wait
     lock = _acquire_lock(out_dir)
     if lock is None:
         logger.debug("HLS transcode already in progress: %s", out_dir)
         await _wait_segment(m3u8_path)
         return media_hash, profile
 
-    # We hold the lock — start ffmpeg.
+    # start the ffmpeg process if we acquired the lock
     try:
         cmd = _build_hls_cmd(media_path, out_dir, options)
         logger.info("Starting ffmpeg HLS: %s", " ".join(cmd))
@@ -173,10 +197,10 @@ async def ensure_transcode(
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Monitor completion in the background.
+        # monitor completion in the background
         asyncio.ensure_future(_monitor_ffmpeg(proc, lock))
 
-        # Wait for at least one segment so the player can start immediately.
+        # wait for at least one segment so the player can start immediately
         await _wait_segment(m3u8_path)
 
     except Exception:
@@ -233,20 +257,30 @@ def _release_lock(lock: FileLock):
 def _build_hls_cmd(
     input_path: str, out_dir: Path, options: TranscodeOptions
 ) -> list[str]:
+    """Build the ffmpeg command line for HLS transcoding.
+
+    Constructs a complete ffmpeg command that transcodes a source video into
+    an HLS playlist with MPEG-TS segments. The command configures hardware
+    acceleration (if requested), video codec parameters (CRF for libx264,
+    bitrate-based for hardware encoders), audio encoding (AAC 128k stereo),
+    keyframe alignment for clean segment boundaries, and HLS output settings.
+
+    Args:
+        input_path: The source media file path.
+        out_dir: The output directory for M3U8 playlist and TS segments.
+        options: The transcode parameters (encoder, quality, resolution).
+
+    Returns:
+        A list of command-line arguments ready for `asyncio.create_subprocess_exec`.
+    """
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
 
     enc = options.encoder
     hw = options.encoder_config
     seg_len = 6  # HLS segment length in seconds
+    bitrate = _HW_BITRATE.get(options.quality, "3000k")  # bitrate for hardware encoders
 
-    # -- Bitrate by quality (hardware encoders) -------------------------------
-    # Jellyfin computes bitrate dynamically from source + resolution;
-    # we use fixed presets for simplicity.
-    hw_bitrate = {"low": "1500k", "medium": "3000k", "high": "6000k"}
-    bitrate = hw_bitrate.get(options.quality, "3000k")
-
-    # -- Hardware acceleration init (decode) ----------------------------------
-    # Ref: EncodingHelper.GetHardwareVideoDecoder / GetInputVideoHwaccelArgs
+    # hardware acceleration
     if hw.hwaccel:
         cmd.extend(["-hwaccel", hw.hwaccel])
         if hw.hwaccel_output_format:
@@ -254,13 +288,11 @@ def _build_hls_cmd(
 
     cmd.extend(["-i", input_path])
 
-    # -- Video filter chain ---------------------------------------------------
+    # video filter chain
     vf_parts: list[str] = []
     if options.max_height is not None:
-        # Explicit width computation that rounds down to the nearest multiple
-        # of 16, with a floor of 16 px.  This avoids the edge-case behaviour
-        # of ffmpeg's `-16` flag (which can round to 0 or above source
-        # width, clashing with `force_original_aspect_ratio=decrease`).
+        # scale filter to limit the output height while preserving aspect ratio,
+        # and ensure the dimensions are divisible by 16 for better encoder compatibility
         vf_parts.append(
             f"scale='max(trunc(iw*min({options.max_height},ih)/ih/16)*16,16)'"
             f":'min({options.max_height},ih)'"
@@ -394,8 +426,7 @@ def _build_hls_cmd(
     if vf_parts:
         cmd.extend(["-vf", ",".join(vf_parts)])
 
-    # -- HLS keyframe / GOP ---------------------------------------------------
-    # Ref: Jellyfin uses force_key_frames for precise segment boundaries.
+    # HLS keyframe / GOP
     cmd.extend(
         [
             "-force_key_frames:0",
@@ -407,11 +438,10 @@ def _build_hls_cmd(
         ]
     )
     if enc == "libx264":
-        # Software encoder: disable scene-change keyframe insertion
-        # so segment durations stay uniform.
+        # disable scene-change keyframe insertion so segment durations stay uniform
         cmd.extend(["-sc_threshold", "0"])
 
-    # -- Audio ----------------------------------------------------------------
+    # -------------------- Audio --------------------
     cmd.extend(
         [
             "-c:a",
@@ -429,7 +459,7 @@ def _build_hls_cmd(
 
     cmd.extend(["-map", "0:v:0?", "-map", "0:a:0?"])
 
-    # -- HLS output -----------------------------------------------------------
+    # -------------------- HLS output --------------------
     m3u8_path = str(out_dir / "index.m3u8")
     segment_pattern = str(out_dir / "segment_%06d.ts")
     cmd.extend(
