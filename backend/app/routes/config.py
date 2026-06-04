@@ -20,7 +20,12 @@ async def list_configs(_, query: ConfigQuery) -> HTTPResponse:
     if query.key:
         queries.append(Q(key__icontains=query.key))
     page = await GlobalConfig.page(*queries, **query.page_params)
-    return json(await ConfigService.dump_page(page))
+    return json(
+        {
+            "total": page.total,
+            "items": [ConfigService.dump(c) for c in page.items],
+        }
+    )
 
 
 @config.post("/upsert")
@@ -29,7 +34,7 @@ async def list_configs(_, query: ConfigQuery) -> HTTPResponse:
 async def upsert_config(_, body: ConfigUpsert) -> HTTPResponse:
     """Create or update a global config."""
     config = await ConfigService.upsert(body)
-    return json(await ConfigService.dump(config))
+    return json(ConfigService.dump(config))
 
 
 @config.post("/delete")

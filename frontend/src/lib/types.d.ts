@@ -690,6 +690,17 @@ export type IndexerConfig = Optional<{
 }>;
 
 /**
+ * The type of the global config.
+ */
+export type GlobalConfig = {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  key: string;
+  value: any; // eslint-disable-line
+};
+
+/**
  * Available hardware acceleration types for real-time transcoding.
  *
  * Mirrors Jellyfin's `HardwareAccelerationType` enum:

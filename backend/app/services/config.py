@@ -1,8 +1,6 @@
-from tortoise.expressions import Q
-
-from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.general import ConfigUpsert, GlobalConfig
 from app.services.base import BaseService
+from app.utils import json
 
 
 class ConfigService(BaseService[GlobalConfig], model=GlobalConfig):
@@ -15,26 +13,31 @@ class ConfigService(BaseService[GlobalConfig], model=GlobalConfig):
         Args:
             obj: The global config data.
 
-        Raises:
-            KaloscopeException: If the key already exists.
-
         Returns:
             The global config instance.
         """
-        # check if the key already exists
-        filter = ~Q(id=obj.id) if obj.id else Q()
-        if await GlobalConfig.filter(filter & Q(key=obj.key)).count() > 0:
-            raise KaloscopeException(ErrorCode.NAME_ALREADY_EXISTS)
-
-        if obj.id:
-            # update the global config
-            await GlobalConfig.filter(id=obj.id).update(value=obj.value)
-            config = await GlobalConfig.get(id=obj.id)
-        else:
-            # create the global config
-            config = await GlobalConfig.create(
-                key=obj.key,
-                value=obj.value,
-            )
-
+        config, _ = await GlobalConfig.get_or_create(key=obj.key)
+        await GlobalConfig.filter(id=config.id).update(value=json.dumps(obj.value))
+        await config.refresh_from_db()
         return config
+
+    @classmethod
+    def dump(cls, config: GlobalConfig) -> dict:
+        """Serialize a GlobalConfig ORM object to a plain dict.
+
+        Tortoise's JSONField Pydantic model rejects scalar values
+        (str, int, float, bool), so we serialize manually.
+
+        Args:
+            config: The GlobalConfig ORM object to serialize.
+
+        Returns:
+            A dict containing the serialized config data.
+        """
+        return {
+            "id": config.id,
+            "created_at": config.created_at.isoformat() if config.created_at else None,
+            "updated_at": config.updated_at.isoformat() if config.updated_at else None,
+            "key": config.key,
+            "value": config.value,
+        }

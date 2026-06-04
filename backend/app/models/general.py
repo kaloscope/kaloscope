@@ -80,8 +80,7 @@ class ConfigQuery(Pageable):
 
 
 class ConfigUpsert(BaseModel):
-    id: PositiveInt | None = None
-    key: str | None = Field(min_length=1, max_length=64, default=None)
+    key: str = Field(min_length=1, max_length=64)
     value: JSONType = None
 
 
