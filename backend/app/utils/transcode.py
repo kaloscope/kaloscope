@@ -152,16 +152,17 @@ async def _ffprobe() -> str:
 
 
 async def _vaapi_device() -> str | None:
-    """Get the VAAPI render device path from global config.
+    """Get the VAAPI render device path.
+
+    Checks the `vaapi.device` global config first, falls back to the
+    standard render node `/dev/dri/renderD128`.
 
     Returns:
-        The render device path (e.g. `/dev/dri/renderD128`),
-        or `None` if not configured.
+        The render device path if it exists, or `None` if not.
     """
     dev = await GlobalConfig.get_or_none(key="vaapi.device")
-    if dev and isinstance(dev.value, str) and Path(dev.value).is_file():
-        return dev.value
-    return None
+    path = dev.value if dev and isinstance(dev.value, str) else "/dev/dri/renderD128"
+    return path if Path(path).is_file() else None
 
 
 async def probe_duration(media_path: str) -> float | None:

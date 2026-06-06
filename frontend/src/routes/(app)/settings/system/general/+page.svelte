@@ -33,6 +33,7 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let configs: Record<string, any> = $state({
     'ffmpeg.path': '',
+    'vaapi.device': '',
     'transcode.enabled': false,
     'transcode.hwaccel': null,
     'transcode.quality': 'medium'
@@ -99,6 +100,17 @@
       />
     </fieldset>
     <fieldset class="fieldset">
+      <Label tip={$_('general.transcode.quality.tip')}>
+        {$_('general.transcode.quality.title')}
+      </Label>
+      <Select
+        options={qualityOptions}
+        bind:value={configs['transcode.quality']}
+        onchange={() => setValue('transcode.quality')}
+        class="w-full"
+      />
+    </fieldset>
+    <fieldset class="fieldset">
       <Label tip={$_('general.transcode.hwaccel.tip')}>
         {$_('general.transcode.hwaccel.title')}
       </Label>
@@ -110,14 +122,15 @@
       />
     </fieldset>
     <fieldset class="fieldset">
-      <Label tip={$_('general.transcode.quality.tip')}>
-        {$_('general.transcode.quality.title')}
+      <Label tip={$_('general.transcode.vaapi_device.tip')}>
+        {$_('general.transcode.vaapi_device.title')}
       </Label>
-      <Select
-        options={qualityOptions}
-        bind:value={configs['transcode.quality']}
-        onchange={() => setValue('transcode.quality')}
-        class="w-full"
+      <input
+        type="text"
+        class="input w-full"
+        placeholder="/dev/dri/renderD128"
+        bind:value={configs['vaapi.device']}
+        onchange={() => setValue('vaapi.device')}
       />
     </fieldset>
   </Setting>

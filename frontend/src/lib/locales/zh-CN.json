@@ -335,6 +335,10 @@
         "low": "低（快速）",
         "medium": "中（均衡）",
         "high": "高（最佳）"
+      },
+      "vaapi_device": {
+        "title": "VAAPI 设备",
+        "tip": "VAAPI 渲染设备路径，留空则使用系统默认值。"
       }
     }
   },

@@ -335,6 +335,10 @@
         "low": "Low (Faster)",
         "medium": "Medium (Balanced)",
         "high": "High (Better)"
+      },
+      "vaapi_device": {
+        "title": "VAAPI Device",
+        "tip": "Path to the VAAPI render device. Leave empty to use the system default."
       }
     }
   },
