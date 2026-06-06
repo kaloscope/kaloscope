@@ -449,8 +449,7 @@
         try {
           const resp = await api.get('config/transcode.auto').json<Resp<boolean>>();
           if (resp.data) {
-            const transcodeUrl = url + '&transcode=true';
-            player.switchURL(transcodeUrl);
+            videoSettings.changePlaybackMode('transcode');
           }
         } catch {
           // ignore the error and continue playing

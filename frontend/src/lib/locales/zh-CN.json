@@ -379,6 +379,12 @@
         "tip": "仅部分移动设备支持 Web API 方式锁定横屏。",
         "rotate": "旋转横屏",
         "web_api": "Web API"
+      },
+      "playback": {
+        "title": "播放方式",
+        "tip": "服务端转码可将视频转为浏览器兼容格式，但会增加服务器负载。",
+        "direct": "客户端解码",
+        "transcode": "服务端转码"
       }
     },
     "danmaku": {

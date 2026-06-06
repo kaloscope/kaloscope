@@ -379,6 +379,12 @@
         "tip": "Only certain mobile devices support locking landscape mode via the Web API.",
         "rotate": "Rotate 90°",
         "web_api": "Web API"
+      },
+      "playback": {
+        "title": "Playback Mode",
+        "tip": "Server transcoding converts videos to browser-compatible formats, but increases server load.",
+        "direct": "Direct Stream",
+        "transcode": "Server Transcode"
       }
     },
     "danmaku": {

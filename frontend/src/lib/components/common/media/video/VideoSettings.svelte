@@ -1,5 +1,4 @@
 <script lang="ts" module>
-  import { extractStreamPath } from '$lib/utils';
   import type { Danmaku, Definition, Resp } from '$lib/types';
   import { isWhite } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
@@ -13,11 +12,14 @@
 
   // video settings
   type LandscapeMode = 'rotate' | 'web_api';
+  type PlaybackMode = 'direct' | 'transcode';
   type VideoSettings = {
     landscapeMode: LandscapeMode;
+    playbackMode: PlaybackMode;
   };
   const video = persisted<VideoSettings>('video', {
-    landscapeMode: 'rotate'
+    landscapeMode: 'rotate',
+    playbackMode: 'direct'
   });
 
   // danmaku settings
@@ -107,6 +109,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { persisted } from '$lib/stores';
+  import { extractStreamPath, isTranscodedStream } from '$lib/utils';
   import { tick } from 'svelte';
   import { fade } from 'svelte/transition';
   import { Events } from 'xgplayer';
@@ -184,6 +187,11 @@
    * Initialize the settings.
    */
   export function init() {
+    // playback mode
+    if (localMedia && $video !== null) {
+      const url = player?.config.url;
+      $video.playbackMode = isTranscodedStream(url) ? 'transcode' : 'direct';
+    }
     // playback rate
     if (playbackRatePlugin !== null) {
       for (const rate of [...playbackRatePlugin.config.list].reverse()) {
@@ -220,33 +228,57 @@
   }
 
   /**
+   * Change the playback mode of the video.
+   *
+   * @param mode - The new playback mode.
+   */
+  export function changePlaybackMode(mode: PlaybackMode) {
+    if (!player || !localMedia) {
+      return;
+    }
+    const url = player.config.url as string;
+    const isTranscoded = isTranscodedStream(url);
+    if ((mode === 'transcode' && isTranscoded) || (mode === 'direct' && !isTranscoded)) {
+      return;
+    }
+    // persist the new mode
+    if ($video !== null) {
+      $video.playbackMode = mode;
+    }
+    // switch the URL
+    const newUrl = mode === 'transcode' ? url + '&transcode=true' : url.replace('&transcode=true', '');
+    changeDefinition(newUrl);
+  }
+
+  /**
    * Change the video definition.
    *
-   * @param url - The new video URL to switch to.
+   * @param url - The new video URL.
    */
   export function changeDefinition(url: IUrl) {
-    if (player) {
-      player.setConfig({ url: url });
-      const seamless = typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function';
-      if (seamless) {
-        // use seamless switching if supported
-        player.switchURL(url, { seamless });
+    if (!player) {
+      return;
+    }
+    player.setConfig({ url: url });
+    const seamless = typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function';
+    if (seamless) {
+      // use seamless switching if supported
+      player.switchURL(url, { seamless });
+    } else {
+      const isPlaying = player.isPlaying;
+      startPlugin && (startPlugin.config.disableAnimate = true);
+      player.switchURL(url)?.then(() => {
+        startPlugin && (startPlugin.config.disableAnimate = false);
+        // start the player if it was not playing before
+        !isPlaying && player?.play();
+      });
+    }
+    if (typeof url === 'string') {
+      if (definition !== url) {
+        definition = url;
       } else {
-        const isPlaying = player.isPlaying;
-        startPlugin && (startPlugin.config.disableAnimate = true);
-        player.switchURL(url)?.then(() => {
-          startPlugin && (startPlugin.config.disableAnimate = false);
-          // start the player if it was not playing before
-          !isPlaying && player?.play();
-        });
-      }
-      if (typeof url === 'string') {
-        if (definition !== url) {
-          definition = url;
-        } else {
-          // definition is changed by the select component
-          player.emit('url_change', url);
-        }
+        // definition is changed by the select component
+        player.emit('url_change', url);
       }
     }
   }
@@ -257,10 +289,11 @@
    * @param rate - The new playback rate.
    */
   function changePlaybackRate(rate: number) {
-    if (player) {
-      player.playbackRate = rate;
-      playbackRate = rate;
+    if (!player) {
+      return;
     }
+    player.playbackRate = rate;
+    playbackRate = rate;
   }
 
   /**
@@ -269,10 +302,11 @@
    * @param degree - The new rotation degree.
    */
   function changeRotateDegree(degree: number) {
-    if (rotatePlugin) {
-      rotatePlugin.rotate(true, true, (degree - rotateDegree) / 90);
-      rotateDegree = degree;
+    if (!rotatePlugin) {
+      return;
     }
+    rotatePlugin.rotate(true, true, (degree - rotateDegree) / 90);
+    rotateDegree = degree;
   }
 
   /**
@@ -461,6 +495,21 @@
             class="dropdown-top [&_p]:max-h-32!"
           />
         </div>
+        {#if localMedia}
+          <div>
+            {@render optionLabel($_('media.video.playback.title'), $_('media.video.playback.tip'))}
+            <Select
+              native={!rotateFullscreen}
+              options={[
+                { value: 'direct', label: 'media.video.playback.direct' },
+                { value: 'transcode', label: 'media.video.playback.transcode' }
+              ]}
+              bind:value={$video.playbackMode}
+              onchange={() => changePlaybackMode($video.playbackMode)}
+              class="dropdown-top [&_p]:max-h-32!"
+            />
+          </div>
+        {/if}
       {/if}
     </div>
 
