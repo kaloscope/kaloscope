@@ -109,12 +109,17 @@ export default class Chapters extends OptionsIcon {
 
     this.curIndex = -1;
     const items = (config.list as Chapter[]).map((item, index) => {
+      let url = player.config.url;
+      if (typeof url === 'string' && isTranscodedStream(url)) {
+        // remove transcode=true from url if it's a transcoded stream
+        url = url.replace('&transcode=true', '');
+      }
       const chapterItem = {
         id: item.id || '',
         url: item.url || '',
         showText: item.title,
         definition: item.definition || false,
-        selected: (item.id || item.url) === (config.chapterId || player.config.url || '')
+        selected: (item.id || item.url) === (config.chapterId || url || '')
       };
       if (chapterItem.selected) {
         this.curIndex = index;
