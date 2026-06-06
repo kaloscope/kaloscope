@@ -99,6 +99,22 @@ PGID=${PGID:-0}
 if [ "$PUID" != "0" ] && [ "$(id -u)" = "0" ]; then
   getent group "$PGID" > /dev/null 2>&1 || groupadd -g "$PGID" kaloscope
   id -u "$PUID" > /dev/null 2>&1 || useradd -u "$PUID" -g "$PGID" -m -s /bin/sh kaloscope
+
+  # grant access to DRI devices for hardware acceleration
+  for dri_dev in /dev/dri/renderD* /dev/dri/card*; do
+    if [ -e "$dri_dev" ]; then
+      dri_gid=$(stat -c '%g' "$dri_dev" 2>/dev/null)
+      dri_grp=$(stat -c '%G' "$dri_dev" 2>/dev/null)
+      if [ -n "$dri_gid" ] && [ "$dri_gid" != "0" ]; then
+        getent group "$dri_gid" > /dev/null 2>&1 || \
+          groupadd -g "$dri_gid" "$dri_grp" 2>/dev/null || \
+          groupadd -g "$dri_gid" dri_hwaccel
+        usermod -a -G "$dri_gid" kaloscope 2>/dev/null || true
+        break
+      fi
+    fi
+  done
+
   chown -R "$PUID":"$PGID" /app /workspace
   exec gosu "$PUID" "$0" "$@"
 fi
