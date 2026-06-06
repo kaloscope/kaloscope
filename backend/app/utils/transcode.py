@@ -57,7 +57,7 @@ _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
     "vaapi": EncoderConfig(
         encoder="h264_vaapi",
         hwaccel="vaapi",
-        hwaccel_output_format="vaapi",
+        hwaccel_output_format=None,
     ),
     "videotoolbox": EncoderConfig(
         encoder="h264_videotoolbox",
@@ -149,6 +149,19 @@ async def _ffprobe() -> str:
         if path.is_file():
             return str(path)
     return "ffprobe"
+
+
+async def _vaapi_device() -> str | None:
+    """Get the VAAPI render device path from global config.
+
+    Returns:
+        The render device path (e.g. `/dev/dri/renderD128`),
+        or `None` if not configured.
+    """
+    dev = await GlobalConfig.get_or_none(key="vaapi.device")
+    if dev and isinstance(dev.value, str) and Path(dev.value).is_file():
+        return dev.value
+    return None
 
 
 async def probe_duration(media_path: str) -> float | None:
@@ -364,9 +377,13 @@ async def _build_hls_cmd(
     # hardware acceleration
     hw = options.encoder_config
     if hw.hwaccel:
-        cmd.extend(["-hwaccel", hw.hwaccel])
-        if hw.hwaccel_output_format and not needs_scale:
-            cmd.extend(["-hwaccel_output_format", hw.hwaccel_output_format])
+        vaapi_dev = hw.hwaccel == "vaapi" and await _vaapi_device()
+        if vaapi_dev:
+            cmd.extend(["-vaapi_device", vaapi_dev])
+        else:
+            cmd.extend(["-hwaccel", hw.hwaccel])
+            if hw.hwaccel_output_format and not needs_scale:
+                cmd.extend(["-hwaccel_output_format", hw.hwaccel_output_format])
 
     cmd.extend(["-i", input_path])
 
@@ -385,6 +402,14 @@ async def _build_hls_cmd(
             f"scale='max(trunc(iw*min({options.max_height},ih)/ih/16)*16,16)'"
             f":'min({options.max_height},ih)'"
         )
+
+    # VAAPI: ensure NV12 8-bit format and re-upload to GPU for the encoder.
+    # HEVC 10-bit decode produces P010 surfaces — format=nv12 converts in
+    # software, then hwupload uploads to the device created by -vaapi_device
+    # (or the implicit device from -hwaccel vaapi as fallback).
+    if hw.hwaccel == "vaapi":
+        vf_parts.append("format=nv12")
+        vf_parts.append("hwupload")
 
     # video encoder and parameters
     enc = options.encoder
@@ -489,17 +514,15 @@ async def _build_hls_cmd(
         )
 
     elif enc == "h264_vaapi":
-        bitrate = _HW_BITRATE.get(options.quality, "3000k")
+        # CQP is the safest RC mode — universally supported across Intel iHD
+        # and i965 drivers. VBR / CBR may be unavailable on some GPUs.
+        # Reuse CRF values as QP targets (lower = higher quality, ~0–51).
         cmd.extend(
             [
                 "-rc_mode",
-                "VBR",
-                "-b:v",
-                bitrate,
-                "-maxrate",
-                bitrate,
-                "-bufsize",
-                str(int(bitrate[:-1]) * 2) + "k",
+                "CQP",
+                "-qp",
+                str(options.crf),
             ]
         )
 
