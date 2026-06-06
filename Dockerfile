@@ -25,31 +25,36 @@ RUN pnpm run build
 # ============================================================
 FROM python:3.13-slim
 
+# enable non-free and non-free-firmware repositories for Intel media driver
+RUN echo "deb http://deb.debian.org/debian trixie non-free non-free-firmware" >> /etc/apt/sources.list
+
 # install runtime dependencies
-# - git:               required by gitpython
-# - libxml2, libxslt:  required by lxml
-# - gosu:              used to drop privileges
-# - aria2:             optional download manager
-# - curl:              used to download mkcert at runtime
-# - libnss3-tools:     required by mkcert to install CA certificates
-# - media-types:       required to guess MIME types of files based on their extensions
-# - ffmpeg:            used to transcode videos for streaming
+# - git:                    required by gitpython
+# - libxml2, libxslt:       required by lxml
+# - gosu:                   used to drop privileges
+# - aria2:                  optional download manager
+# - curl:                   used to download mkcert at runtime
+# - libnss3-tools:          required by mkcert to install CA certificates
+# - media-types:            required to guess MIME types of files based on their extensions
+# - ffmpeg:                 used to transcode videos for streaming
+# - intel-media-va-driver:  Intel iHD VA-API driver for GPU hardware video acceleration
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    libxml2 \
-    libxslt1.1 \
-    gosu \
-    aria2 \
-    curl \
-    libnss3-tools \
-    media-types \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+  git \
+  libxml2 \
+  libxslt1.1 \
+  gosu \
+  aria2 \
+  curl \
+  libnss3-tools \
+  media-types \
+  ffmpeg \
+  intel-media-va-driver \
+  && rm -rf /var/lib/apt/lists/*
 
 # download and install mkcert
 ARG TARGETPLATFORM
 RUN curl -fsSL "https://dl.filippo.io/mkcert/latest?for=${TARGETPLATFORM}" -o /usr/local/bin/mkcert \
-    && chmod +x /usr/local/bin/mkcert
+  && chmod +x /usr/local/bin/mkcert
 
 # install poetry via pip
 RUN python -m pip install --no-cache-dir setuptools "poetry~=2.0"
@@ -61,12 +66,12 @@ COPY backend/pyproject.toml backend/poetry.lock backend/poetry.toml ./backend/
 
 # install backend dependencies, then remove build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake make g++ \
-    && cd backend \
-    && poetry install --no-root --no-cache --no-interaction --only main \
-    && apt-get purge -y cmake make g++ \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+  cmake make g++ \
+  && cd backend \
+  && poetry install --no-root --no-cache --no-interaction --only main \
+  && apt-get purge -y cmake make g++ \
+  && apt-get autoremove -y \
+  && rm -rf /var/lib/apt/lists/*
 
 # copy the rest of the backend source code
 COPY backend/ ./backend/
@@ -83,6 +88,7 @@ ENV TLS_HOSTNAME=
 ENV AUTO_TLS=false
 ENV DEBUG_MODE=false
 ENV ENABLE_ARIA2=false
+ENV LIBVA_DRIVER_NAME=iHD
 
 # entrypoint script
 COPY <<'EOF' /app/entrypoint.sh
