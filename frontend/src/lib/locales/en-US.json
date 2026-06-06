@@ -321,7 +321,8 @@
     "transcode": {
       "title": "Transcoding",
       "auto": {
-        "title": "Auto Transcode"
+        "title": "Auto Transcode",
+        "tip": "Automatically switch to server transcoding when browser playback fails."
       },
       "hwaccel": {
         "title": "Hardware Acceleration",

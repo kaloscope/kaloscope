@@ -88,7 +88,9 @@
 
   <Setting title={$_('general.transcode.title')}>
     <fieldset class="fieldset grid-cols-2">
-      <Label class="my-2">{$_('general.transcode.auto.title')}</Label>
+      <Label class="my-2 justify-start" tipPlacement="right" tip={$_('general.transcode.auto.tip')}>
+        {$_('general.transcode.auto.title')}
+      </Label>
       <input
         type="checkbox"
         class="toggle self-center justify-self-end"
