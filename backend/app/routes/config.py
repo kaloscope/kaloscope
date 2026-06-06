@@ -28,6 +28,13 @@ async def list_configs(_, query: ConfigQuery) -> HTTPResponse:
     )
 
 
+@config.get("/<key>")
+async def get_config(_, key: str) -> HTTPResponse:
+    """Get a single global config by key."""
+    config = await GlobalConfig.get_or_none(key=key)
+    return json(config.value if config else None)
+
+
 @config.post("/upsert")
 @authorize(role=UserRole.ADMIN)
 @validate(json=ConfigUpsert)

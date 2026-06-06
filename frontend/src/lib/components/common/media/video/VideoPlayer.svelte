@@ -141,6 +141,8 @@
   let screenLocked: boolean = $state(false);
   // whether the player is in rotate fullscreen mode
   let rotateFullscreen: boolean = $state(false);
+  // track the last URL that was auto-retried with transcode to prevent infinite loops
+  let transcodeRetriedUrl: string | null = null;
 
   /**
    * Toggles the fullscreen state of the player.
@@ -257,6 +259,9 @@
     if (!options || !options.url) {
       return;
     }
+
+    // reset the transcode auto-retry flag so a new video gets its own retry
+    transcodeRetriedUrl = null;
 
     // probe the full duration for transcoded streams before creating the player instance
     let duration: number | undefined;
@@ -418,6 +423,37 @@
               mobilePlugin.onPressEnd({});
             }
           };
+        }
+      });
+
+      // handle the error event
+      player.on(Events.ERROR, async (error) => {
+        // only handle errors related to transcoding
+        const errorCode = error.errorCode;
+        if (![5103, 5104, 5105].includes(errorCode)) {
+          // 5103 - decoding error
+          // 5104 - format of media resource is not supported by platform
+          // 5105 - current browser can't decode video
+          return;
+        }
+        const url = player.config.url;
+        // only handle direct stream URLs that are not already transcoded
+        if (typeof url !== 'string' || !url.startsWith(MEDIA_STREAM_PREFIX) || url.includes('transcode=true')) {
+          return;
+        }
+        // prevent infinite retry loop for the same URL
+        if (transcodeRetriedUrl === url) {
+          return;
+        }
+        transcodeRetriedUrl = url;
+        try {
+          const resp = await api.get('config/transcode.auto').json<Resp<boolean>>();
+          if (resp.data) {
+            const transcodeUrl = url + '&transcode=true';
+            player.switchURL(transcodeUrl);
+          }
+        } catch {
+          // ignore the error and continue playing
         }
       });
     }

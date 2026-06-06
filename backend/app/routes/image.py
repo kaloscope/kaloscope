@@ -26,7 +26,7 @@ RESPONSE_HEADERS = [
 ]
 
 
-@image.get("/<dir:str>/<filename:ext=jpg|jpeg|png|gif|webp>")
+@image.get("/<dir>/<filename:ext=jpg|jpeg|png|gif|webp>")
 async def get_image(_, dir: str, filename: str, ext: str) -> HTTPResponse:
     """Get an image from the given path."""
     image_dir = Path(KaloscopeConfig.get_workspace("images")) / dir
