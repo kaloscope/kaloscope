@@ -180,11 +180,30 @@ def jsonpath_all(obj: Any, expr: str) -> list:
     return [match.value for match in matches]
 
 
-def xpath_first(obj: Any, expr: str) -> Any:
-    """Find first match in an HTML string or object using an XPath expression.
+def _parse_xml_or_html(string: str) -> Any:
+    """Parse an XML or HTML string into an lxml element tree.
+
+    Uses XMLParser for XML content (detected by `<?xml` declaration)
+    to preserve element semantics like `<link>` that are void elements
+    in HTML but container elements in XML. Falls back to HTMLParser for
+    HTML content.
 
     Args:
-        obj: The HTML string or object to search.
+        string: The XML/HTML string to parse.
+
+    Returns:
+        The parsed lxml element tree.
+    """
+    content = string.lstrip()
+    parser = etree.XMLParser() if content.startswith("<?xml") else etree.HTMLParser()
+    return etree.fromstring(string.encode(ENCODING), parser=parser)
+
+
+def xpath_first(obj: Any, expr: str) -> Any:
+    """Find first match in an XML/HTML string or object using an XPath expression.
+
+    Args:
+        obj: The XML/HTML string or object to search.
         expr: The XPath expression.
 
     Returns:
@@ -192,7 +211,7 @@ def xpath_first(obj: Any, expr: str) -> Any:
     """
     xpath = compile_xpath(expr)
     if isinstance(obj, str):
-        obj = etree.fromstring(obj, parser=etree.HTMLParser())
+        obj = _parse_xml_or_html(obj)
     result = xpath(obj)
     if isinstance(result, list):
         return result[0] if result else None
@@ -200,10 +219,10 @@ def xpath_first(obj: Any, expr: str) -> Any:
 
 
 def xpath_all(obj: Any, expr: str) -> list:
-    """Find all matches in an HTML string or object using an XPath expression.
+    """Find all matches in an XML/HTML string or object using an XPath expression.
 
     Args:
-        obj: The HTML string or object to search.
+        obj: The XML/HTML string or object to search.
         expr: The XPath expression.
 
     Returns:
@@ -211,7 +230,7 @@ def xpath_all(obj: Any, expr: str) -> list:
     """
     xpath = compile_xpath(expr)
     if isinstance(obj, str):
-        obj = etree.fromstring(obj, parser=etree.HTMLParser())
+        obj = _parse_xml_or_html(obj)
     result = xpath(obj)
     if not isinstance(result, list):
         return [result] if result is not None else []
