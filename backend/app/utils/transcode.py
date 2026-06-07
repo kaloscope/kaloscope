@@ -162,7 +162,7 @@ async def _vaapi_device() -> str | None:
     """
     dev = await GlobalConfig.get_or_none(key="vaapi.device")
     path = dev.value if dev and isinstance(dev.value, str) else "/dev/dri/renderD128"
-    return path if Path(path).is_file() else None
+    return path if Path(path).exists() else None
 
 
 async def probe_duration(media_path: str) -> float | None:
