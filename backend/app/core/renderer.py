@@ -180,6 +180,21 @@ def jsonpath_all(obj: Any, expr: str) -> list:
     return [match.value for match in matches]
 
 
+def _cleanup_namespaces(tree: Any) -> Any:
+    """Remove XML namespaces from all element tags in place.
+
+    Args:
+        tree: The parsed lxml element tree.
+
+    Returns:
+        The cleaned-up tree.
+    """
+    for elem in tree.iter():
+        elem.tag = etree.QName(elem).localname
+    etree.cleanup_namespaces(tree)
+    return tree
+
+
 def _parse_xml_or_html(string: str) -> Any:
     """Parse an XML or HTML string into an lxml element tree.
 
@@ -195,8 +210,10 @@ def _parse_xml_or_html(string: str) -> Any:
         The parsed lxml element tree.
     """
     content = string.lstrip()
-    parser = etree.XMLParser() if content.startswith("<?xml") else etree.HTMLParser()
-    return etree.fromstring(string.encode(ENCODING), parser=parser)
+    if content.startswith("<?xml"):
+        tree = etree.fromstring(string.encode(ENCODING), parser=etree.XMLParser())
+        return _cleanup_namespaces(tree)
+    return etree.fromstring(string.encode(ENCODING), parser=etree.HTMLParser())
 
 
 def xpath_first(obj: Any, expr: str) -> Any:
