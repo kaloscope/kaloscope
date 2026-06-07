@@ -33,6 +33,9 @@
     sub_repl: string | null;
     onsave: (result: DownloadPlan) => void;
   }>;
+
+  const DEFAULT_SUB_PATTERN = '^(.+/)?';
+  const DEFAULT_SUB_REPL = '{{title}}/';
 </script>
 
 <script lang="ts">
@@ -60,8 +63,8 @@
     total_limit = null,
     transfer_lib_id = 0,
     transfer_method = null,
-    sub_pattern = null,
-    sub_repl = null,
+    sub_pattern = DEFAULT_SUB_PATTERN,
+    sub_repl = DEFAULT_SUB_REPL,
     onsave
   }: PlanEditorProps = $props();
 
@@ -209,8 +212,8 @@
             total_limit = null;
             transfer_lib_id = 0;
             transfer_method = supportsHardlink ? 'hardlink' : 'symlink';
-            sub_pattern = null;
-            sub_repl = null;
+            sub_pattern = DEFAULT_SUB_PATTERN;
+            sub_repl = DEFAULT_SUB_REPL;
             resources = [];
             abortController?.abort();
           }, 200);

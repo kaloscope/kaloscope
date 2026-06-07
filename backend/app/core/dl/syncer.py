@@ -19,6 +19,7 @@ from tortoise.expressions import F, Q, RawSQL
 from app.core.dl.adapter import Adapter, load_config
 from app.core.flow.engine import FlowEngine
 from app.core.notifications import Notifications, NotificationTemplate
+from app.core.renderer import is_template, render
 from app.models.base import TortoiseModel
 from app.models.download import (
     Downloader,
@@ -31,6 +32,12 @@ from app.models.download import (
 from app.models.flow import GraphState
 from app.models.media import MediaLib
 from app.utils.bittorrent import MagnetLink, standardize_magnet
+from app.utils.extractor import (
+    extract_episode,
+    extract_season,
+    extract_title,
+    extract_year,
+)
 
 
 @dataclass(frozen=True)
@@ -352,7 +359,20 @@ async def transfer_files(task: DownloadTask, files: list[str] | None):
     new_files = files
     if task.sub_pattern:
         repl = task.sub_repl or ""
-        replaced = [re.sub(task.sub_pattern, repl, f) for f in files]
+        replaced = []
+        for file in files:
+            # render the template with the extracted metadata
+            if is_template(repl):
+                context = {
+                    "title": extract_title(file, True),
+                    "year": extract_year(file),
+                    "season": extract_season(file),
+                    "episode": extract_episode(file),
+                }
+                repl = render(repl, context=context)
+            # apply the replacement pattern
+            replaced.append(re.sub(task.sub_pattern, repl, file))
+
         # discard replacement if duplicate file names arise
         if len(set(replaced)) == len(replaced):
             new_files = replaced
