@@ -280,7 +280,7 @@ class DownloadPlanUpsert(BaseModel):
     graph_id: PositiveInt
     downloader_id: PositiveInt
     dir: str = Field(min_length=1, max_length=4096)
-    keyword: str = Field(min_length=1, max_length=4096)
+    keyword: str = Field(min_length=0, max_length=4096)
     filters: dict[str, Any] | None = None
     interval_num: PositiveInt
     interval_start: datetime | None = None

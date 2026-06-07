@@ -83,6 +83,7 @@
   // the graph options and preview resources
   let graphOptions: Option[] = $state([]);
   let querySchema: Record<string, Filter> | null = $state(null);
+  let keywordRequired: boolean = $state(false);
   let resources: Resource[] = $state([]);
   let searching = createLoading();
   let abortController: AbortController | null = null;
@@ -108,7 +109,7 @@
   }));
 
   /**
-   * Configure the query schema based on the given flow graph ID.
+   * Fetch indexer config for the given graph.
    *
    * @param graphId - The flow graph ID.
    */
@@ -120,8 +121,9 @@
     api
       .get(`flow/indexer/${graphId}/config`)
       .json<Resp<IndexerConfig>>()
-      .then((resp) => {
-        querySchema = resp.data?.search?.filters ?? null;
+      .then(({ data }) => {
+        querySchema = data?.search?.filters ?? null;
+        keywordRequired = data?.search?.keyword?.required ?? false;
       })
       .catch(() => {
         querySchema = null;
@@ -136,7 +138,7 @@
       return;
     }
     resources = [];
-    if (!graph_id || !keyword.trim()) {
+    if (!graph_id || (keywordRequired && !keyword.trim())) {
       return;
     }
     searching.start();
@@ -312,7 +314,7 @@
           disabled={!!id}
         />
         <Search
-          required
+          required={keywordRequired}
           maxWidth="100%"
           class="shadow-none!"
           label={$_('field.keyword')}
@@ -470,7 +472,7 @@
       <button
         type="submit"
         class="btn btn-submit"
-        disabled={$loading !== null || !graph_id || !downloader_id || !keyword.trim()}
+        disabled={$loading !== null || !graph_id || !downloader_id || (keywordRequired && !keyword.trim())}
       >
         {$_('message.confirm')}
         {#if $loading}
