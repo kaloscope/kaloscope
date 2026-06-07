@@ -3,6 +3,8 @@ import contextlib
 import re
 from dataclasses import dataclass
 
+import httpx
+from sanic import Sanic
 from sanic.log import logger
 from torrentool.api import Torrent
 from torrentool.bencode import Bencode
@@ -17,11 +19,11 @@ class MagnetLink:
     info_hash_v2: str | None = None
 
 
-def standardize_magnet(link: str) -> MagnetLink | None:
+async def standardize_magnet(link: str) -> MagnetLink | None:
     """Standardize a magnet link.
 
     Args:
-        link: The magnet link string.
+        link: The magnet link string, or an HTTP/HTTPS URL to a torrent file.
 
     Returns:
         The standardized magnet link object if successful, None otherwise.
@@ -29,6 +31,9 @@ def standardize_magnet(link: str) -> MagnetLink | None:
     link = link.strip()
     if not link:
         return None
+    # HTTP/HTTPS link
+    if link.startswith(("http://", "https://")):
+        return await _http_to_magnet(link)
     # Magnet link
     if link.startswith("magnet:"):
         hash = get_magnet_hash(link)
@@ -47,6 +52,38 @@ def standardize_magnet(link: str) -> MagnetLink | None:
         hash = link
         hash_v2 = None
         return MagnetLink(f"magnet:?xt=urn:btih:{hash}", hash, hash_v2)
+
+
+async def _http_to_magnet(url: str) -> MagnetLink | None:
+    """Download a torrent file from an HTTP/HTTPS URL and convert to a magnet link.
+
+    Args:
+        url: The HTTP/HTTPS URL to the torrent file.
+
+    Returns:
+        The magnet link object if successful, None otherwise.
+    """
+    try:
+        client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        # send a HEAD request to check the content type
+        head_response = await client.head(url)
+        content_type = head_response.headers.get("content-type", "")
+        if "application/x-bittorrent" not in content_type:
+            return None
+        # download the torrent file
+        response = await client.get(url)
+        torrent_bytes = response.content
+        # decode and convert to magnet link
+        torrent = decode_torrent(torrent_bytes)
+        if torrent is None:
+            return None
+        return MagnetLink(
+            link=torrent.magnet_link,
+            info_hash=torrent.info_hash,
+        )
+    except Exception:
+        logger.error("Failed to convert HTTP link to magnet: %s", url, exc_info=True)
+        return None
 
 
 def is_info_hash(hash: str) -> bool:

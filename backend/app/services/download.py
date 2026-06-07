@@ -179,7 +179,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             if await cls.hash_collision(info_hash):
                 raise KaloscopeException(ErrorCode.INFO_HASH_COLLISION)
             result = await adapter.call("add_torrent", add.model_dump())
-        elif add.link and (magnet := standardize_magnet(add.link)) is not None:
+        elif add.link and (magnet := await standardize_magnet(add.link)) is not None:
             # extract info hash from the magnet link
             add.link = magnet.link
             info_hash = magnet.info_hash

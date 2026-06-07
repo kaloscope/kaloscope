@@ -184,7 +184,7 @@ async def list_tasks(_, query: DownloadQuery) -> HTTPResponse:
 async def valid_magnet_link(request: Request) -> HTTPResponse:
     """Validate a magnet link."""
     link = request.body.decode(ENCODING)
-    return json(standardize_magnet(link) is not None)
+    return json((await standardize_magnet(link)) is not None)
 
 
 @download.post("/add")

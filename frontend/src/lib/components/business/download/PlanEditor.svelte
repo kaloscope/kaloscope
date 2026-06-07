@@ -109,7 +109,7 @@
   }));
 
   /**
-   * Fetch indexer config for the given graph.
+   * Get the indexer config for the given graph.
    *
    * @param graphId - The flow graph ID.
    */

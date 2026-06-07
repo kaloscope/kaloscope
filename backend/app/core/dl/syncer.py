@@ -530,7 +530,7 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
                 continue
             seen_links.add(link)
             # check if the link is a valid magnet/hash
-            magnet = standardize_magnet(link)
+            magnet = await standardize_magnet(link)
             if magnet is None:
                 continue
             magnets.append(magnet)

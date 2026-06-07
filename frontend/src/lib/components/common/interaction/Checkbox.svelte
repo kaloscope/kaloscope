@@ -28,7 +28,7 @@
   let indeterminate = $state(false);
 
   /**
-   * Gets the selected keys.
+   * Get the selected keys.
    *
    * @returns The selected keys.
    */
@@ -37,7 +37,7 @@
   }
 
   /**
-   * Selects all sub-checkboxes.
+   * Select all sub-checkboxes.
    */
   export function selectAll() {
     selectedKeys.splice(0, selectedKeys.length);
@@ -51,7 +51,7 @@
   }
 
   /**
-   * Unselects all sub-checkboxes.
+   * Unselect all sub-checkboxes.
    */
   export function unselectAll() {
     selectedKeys.splice(0, selectedKeys.length);
