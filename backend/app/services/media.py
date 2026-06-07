@@ -219,6 +219,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         metadata = meta.metadata
         series_id = metadata.get("id")
+        nfo_source = metadata.get("site")
         season = metadata.get("season", item.season)
         title = metadata.get("title", item.title)
         year = metadata.get("year", item.year)
@@ -247,6 +248,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 bootparams={
                     "$manual": True,
                     "series_id": series_id,
+                    "nfo_source": nfo_source,
                     "item_path": e.path,
                     "item_name": e.name,
                     "nfo_type": NFOType.EPISODE,

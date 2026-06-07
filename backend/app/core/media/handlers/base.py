@@ -26,6 +26,7 @@ class MediaPathInfo:
     path: Path = field(kw_only=False)
     nfo_path: Path | None = None
     nfo_type: NFOType | None = None
+    nfo_source: str | None = None
     language: Language | None = None
     title: str = field(init=False)
     year: int | None = None

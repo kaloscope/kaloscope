@@ -143,6 +143,7 @@ class TVShowMediaHandler(MediaHandler):
             info.season = parent.season
             info.episode = extract_episode(info.item_name)
             info.series_id = parent.unique_id
+            info.nfo_source = parent.nfo_source
             return info
 
         dir = Path(lib.dir)

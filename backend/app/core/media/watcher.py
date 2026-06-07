@@ -434,6 +434,7 @@ async def consume_event(event: MediaEvent):
                     "season": path_info.season,
                     "episode": path_info.episode,
                     "series_id": path_info.series_id,
+                    "nfo_source": path_info.nfo_source,
                     "page_num": 1,
                     "page_size": 1,
                 },
