@@ -2,7 +2,7 @@
   import { api } from '$lib/api';
   import { MEDIA_STREAM_PREFIX } from '$lib/constants';
   import type { Chapter, Danmaku, Definition, MediaItem, Optional, Page, Resp } from '$lib/types';
-  import { extractStreamPath, isTranscodedStream } from '$lib/utils';
+  import { extractStreamPath } from '$lib/utils';
   import type { IUrl } from 'xgplayer/es/defaultConfig';
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
@@ -114,7 +114,7 @@
   import { v4 as uuidv4 } from 'uuid';
   import Player, { Events, SimplePlayer } from 'xgplayer';
   import DefaultPreset from './plugins/preset';
-  import VideoSettings, { formatDanmakus } from './VideoSettings.svelte';
+  import VideoSettings, { formatDanmakus, probeDuration } from './VideoSettings.svelte';
 
   const { width = '100%', height = '100%' }: VideoPlayerProps = $props();
   // player ID
@@ -264,18 +264,7 @@
     transcodeRetriedUrl = null;
 
     // probe the full duration for transcoded streams before creating the player instance
-    let duration: number | undefined;
-    if (isTranscodedStream(options.url)) {
-      try {
-        const path = extractStreamPath(options.url as string);
-        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<{ duration: number }>>();
-        if (resp.data.duration > 0) {
-          duration = resp.data.duration;
-        }
-      } catch {
-        // probe failed, just ignore the error and let the player handle it
-      }
-    }
+    let duration = await probeDuration(options.url);
 
     // if the player is already mounted, just switch the URL
     if (player) {

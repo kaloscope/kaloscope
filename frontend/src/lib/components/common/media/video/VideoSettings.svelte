@@ -98,6 +98,28 @@
         };
       });
   }
+
+  /**
+   * Probes the duration of a transcoded video stream.
+   *
+   * @param url - The URL of the transcoded video stream.
+   * @returns The duration in seconds, or undefined if probing failed.
+   */
+  export async function probeDuration(url: IUrl): Promise<number | undefined> {
+    let duration: number | undefined;
+    if (isTranscodedStream(url)) {
+      try {
+        const path = extractStreamPath(url as string);
+        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<{ duration: number }>>();
+        if (resp.data.duration > 0) {
+          duration = resp.data.duration;
+        }
+      } catch {
+        // probe failed, just ignore the error and let the player handle it
+      }
+    }
+    return duration;
+  }
 </script>
 
 <script lang="ts">
@@ -255,11 +277,11 @@
    *
    * @param url - The new video URL.
    */
-  export function changeDefinition(url: IUrl) {
+  export async function changeDefinition(url: IUrl) {
     if (!player) {
       return;
     }
-    player.setConfig({ url: url });
+    player.setConfig({ url: url, customDuration: await probeDuration(url) });
     const seamless = typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function';
     if (seamless) {
       // use seamless switching if supported
@@ -273,6 +295,7 @@
         !isPlaying && player?.play();
       });
     }
+
     if (typeof url === 'string') {
       if (definition !== url) {
         definition = url;
