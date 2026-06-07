@@ -20,6 +20,7 @@ from lxml import etree
 from app.core.constants import ENCODING
 from app.utils import json
 from app.utils.deep import deep_strip
+from app.utils.disk import format_bytes
 
 # create a new Jinja2 environment
 # https://jinja.palletsprojects.com/en/stable/api/#jinja2.Environment
@@ -632,6 +633,7 @@ ENV.filters["xpath"] = partial(_find, expr_type="xpath")
 ENV.filters["regex_first"] = regex_first
 ENV.filters["regex_all"] = regex_all
 ENV.filters["regex"] = partial(_find, expr_type="regex")
+ENV.filters["size"] = lambda x: format_bytes(int(float(x))) if x else ""
 ENV.filters["s2t"] = s2t
 ENV.filters["t2s"] = t2s
 ENV.filters["duration"] = duration
