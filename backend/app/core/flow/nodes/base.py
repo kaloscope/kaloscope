@@ -313,11 +313,11 @@ def node_register(
     return register
 
 
-async def start_config(graph_id: int, key: str, *keys: str) -> dict[str, Any]:
+async def start_config(graph: int | FlowGraph, key: str, *keys: str) -> dict[str, Any]:
     """Get the start node configuration of the flow graph.
 
     Args:
-        graph_id: The flow graph ID.
+        graph: The flow graph ID or instance.
         key: The first required key.
         keys: The keys of the configuration to retrieve.
 
@@ -325,10 +325,14 @@ async def start_config(graph_id: int, key: str, *keys: str) -> dict[str, Any]:
         The configuration dictionary.
     """
     # get the flow graph definition and extract the nodes
+    if isinstance(graph, int):
+        _graph = await FlowGraph.get_or_none(id=graph)
+    else:
+        _graph = graph
+
     nodes = None
-    graph = await FlowGraph.get_or_none(id=graph_id)
-    if graph and graph.definition:
-        nodes = graph.definition.get("nodes")
+    if _graph and _graph.definition:
+        nodes = _graph.definition.get("nodes")
     if not isinstance(nodes, list):
         return {k: None for k in (key, *keys)}
 

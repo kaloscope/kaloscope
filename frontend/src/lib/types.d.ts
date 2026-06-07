@@ -463,6 +463,7 @@ export type FlowGraph = {
   node_types: string[];
   tmpl: FlowTemplate | null;
   newest_tmpl: FlowTemplate | null;
+  only_preview: boolean;
 };
 
 /**

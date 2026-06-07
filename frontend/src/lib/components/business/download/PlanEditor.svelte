@@ -235,9 +235,9 @@
         .json<Resp<Page<FlowGraph>>>()
         .then((resp) => {
           graphOptions = resp.data.items
-            .filter((g) => g.node_types.includes('search_start'))
+            .filter((g) => g.node_types.includes('search_start') && !g.only_preview)
             .map((g) => ({ value: g.id, label: g.name }));
-          graph_id = resp.data.items[0]?.id;
+          graph_id = graphOptions[0]?.value as number | undefined;
           configure(graph_id);
         });
     }

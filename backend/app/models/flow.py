@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum, auto
 from typing import Any, Self
 
+import yaml
 from pydantic import BaseModel, Field, FutureDatetime, PositiveInt, model_validator
 from sanic.request.form import File
 from tortoise.fields import (
@@ -161,13 +162,37 @@ class FlowGraph(TortoiseModel):
             if isinstance((node_type := node["data"]["$schema"]), str)
         ]
 
+    def only_preview(self) -> bool:
+        """Check if the graph is only for preview."""
+        nodes = (self.definition or {}).get("nodes")
+        if not isinstance(nodes, list):
+            return False
+        for node in nodes:
+            if node.get("data", {}).get("$schema") == "search_start":
+                config = node["data"].get("config", "")
+                if isinstance(config, str) and config.strip():
+                    try:
+                        cfg = yaml.load(config, Loader=yaml.SafeLoader)
+                        if isinstance(cfg, dict):
+                            return bool(cfg.get("only_preview", False))
+                    except yaml.YAMLError:
+                        pass
+                break
+        return False
+
     class Meta:
         table = "flow_graph"
         ordering = ["-created_at"]
 
     class PydanticMeta:
         exclude = ("jobs", "triggers", "variables", "instances", "favorites", "plans")
-        computed = ("success_rate", "average_time", "last_exec", "node_types")
+        computed = (
+            "success_rate",
+            "average_time",
+            "last_exec",
+            "node_types",
+            "only_preview",
+        )
 
 
 class FlowLog(TortoiseModel):

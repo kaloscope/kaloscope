@@ -92,7 +92,7 @@
       .json<Resp<Page<FlowGraph>>>()
       .then((resp) => {
         const items = resp.data.items;
-        graphs = items.filter((g) => g.node_types.includes('search_start'));
+        graphs = items.filter((g) => g.node_types.includes('search_start') && !g.only_preview);
       });
   });
 </script>
