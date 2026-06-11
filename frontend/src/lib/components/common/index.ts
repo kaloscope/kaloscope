@@ -35,7 +35,7 @@ export { default as Container, type ContainerProps } from './layout/Container.sv
 export { default as Drawer, type DrawerProps } from './layout/Drawer.svelte';
 export { default as Setting, type SettingProps } from './layout/Setting.svelte';
 
-export { mediaTitle, default as VideoPlayer, type VideoPlayerProps } from './media/video/VideoPlayer.svelte';
+export { mediaTitle, default as VideoPlayer, type VideoPlayerOptions } from './media/video/VideoPlayer.svelte';
 
 export { default as Dock, type DockProps } from './navigation/Dock.svelte';
 export { default as Menu, type MenuProps } from './navigation/Menu.svelte';

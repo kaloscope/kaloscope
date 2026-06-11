@@ -9,9 +9,9 @@
   import type MobilePlugin from 'xgplayer/es/plugins/mobile';
 
   /**
-   * The type of the video player properties.
+   * The type of the video player options.
    */
-  export type VideoPlayerProps = {
+  export type VideoPlayerOptions = {
     /** The width of the container. */
     width?: string;
     /** The height of the container. */
@@ -116,7 +116,7 @@
   import DefaultPreset from './plugins/preset';
   import VideoSettings, { formatDanmakus, probeDuration } from './VideoSettings.svelte';
 
-  const { width = '100%', height = '100%' }: VideoPlayerProps = $props();
+  const { width = '100%', height = '100%' }: VideoPlayerOptions = $props();
   // player ID
   const id: string = `player-${uuidv4()}`;
   // video container
