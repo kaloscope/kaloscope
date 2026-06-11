@@ -211,10 +211,16 @@ def _parse_xml_or_html(string: str) -> Any:
         The parsed lxml element tree.
     """
     content = string.lstrip()
+    # bytes are always UTF-8 encoded; force the parser to use UTF-8 so it
+    # won't be misled by <meta charset="gbk"> or <?xml encoding="gbk"?>
     if content.startswith("<?xml"):
-        tree = etree.fromstring(string.encode(ENCODING), parser=etree.XMLParser())
+        tree = etree.fromstring(
+            string.encode(ENCODING), parser=etree.XMLParser(encoding=ENCODING)
+        )
         return _cleanup_namespaces(tree)
-    return etree.fromstring(string.encode(ENCODING), parser=etree.HTMLParser())
+    return etree.fromstring(
+        string.encode(ENCODING), parser=etree.HTMLParser(encoding=ENCODING)
+    )
 
 
 def xpath_first(obj: Any, expr: str) -> Any:
