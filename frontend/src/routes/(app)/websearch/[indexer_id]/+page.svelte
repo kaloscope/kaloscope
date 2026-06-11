@@ -190,8 +190,13 @@
         resources = data.items;
         markFavorites(indexerId, resources);
         if (data.total === null || data.total === undefined) {
-          pagination.total = resources.length;
-          pagination.simpleMode = true;
+          if (data.totalPages) {
+            pagination.totalPages = data.totalPages;
+            pagination.simpleMode = false;
+          } else {
+            pagination.total = resources.length;
+            pagination.simpleMode = true;
+          }
         } else {
           pagination.total = data.total;
           pagination.simpleMode = false;

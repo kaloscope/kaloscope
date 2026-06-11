@@ -43,6 +43,7 @@ export interface Resp<T> extends BaseResp {
  */
 export interface Page<T> {
   total?: number | null;
+  totalPages?: number | null;
   items: T[];
 }
 

@@ -6,6 +6,8 @@
     size: number;
     /** Total number of entries. */
     total?: number | null;
+    /** Total number of pages. */
+    totalPages?: number | null;
     /** The callback function when the parameters changes. */
     onchange?: (page: number, size: number) => void;
     /** Whether the paginator is disabled. */
@@ -21,15 +23,20 @@
   let {
     current = $bindable(),
     size = $bindable(),
-    total,
+    total: _total,
+    totalPages,
     onchange,
     disabled = false,
     simpleMode = false
   }: PaginatorProps = $props();
 
+  // `!= null` catches both null and undefined in a single check
+  let total = $derived(_total ?? (totalPages != null ? totalPages * size : null));
+  let isEstimated = $derived(_total == null && totalPages != null);
+
   let pages: number[] = $state([]);
   $effect(() => {
-    if (simpleMode || total === null || total === undefined) {
+    if (simpleMode || total === null) {
       return;
     }
     const first = 1;
@@ -77,7 +84,7 @@
   }
 </script>
 
-{#if total !== null && total !== undefined}
+{#if total !== null}
   {@const bgClass = simpleMode ? 'bg-linear-to-t from-base-125 to-transparent to-50%' : 'bg-blur-90'}
   <!-- whether the previous and next buttons are disabled -->
   {@const prevDisabled = current === 1}
@@ -93,7 +100,7 @@
         class="flex h-14 w-full items-center overflow-x-auto rounded-t-md px-2 {bgClass}"
       >
         <!-- total number of entries -->
-        {#if !simpleMode}
+        {#if !simpleMode && !isEstimated}
           <span class="mx-2 truncate text-sm font-semibold opacity-50">
             {$_('data.paginator.total', $number(total))}
           </span>
