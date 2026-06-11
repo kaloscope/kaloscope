@@ -1,0 +1,298 @@
+<script lang="ts" module>
+  import { persisted } from '$lib/stores';
+  import type { Chapter } from '$lib/types';
+
+  export type ReaderTheme = 'white' | 'sepia' | 'dark' | 'black';
+  export type ReaderFont = 'system' | 'serif' | 'sans' | 'kai' | 'mono';
+
+  export type ReaderSettings = {
+    theme: ReaderTheme;
+    font: ReaderFont;
+    fontSize: number;
+    lineHeight: number;
+    paraSpacing: number;
+    margin: number;
+  };
+
+  export type TextViewerOptions = {
+    text: string;
+    title?: string | null;
+    chapters?: Chapter[];
+    chapterId?: string | null;
+    chapterChange?: (chapter: Chapter) => void;
+  };
+
+  const settings = persisted<ReaderSettings>('reader', {
+    theme: 'white',
+    font: 'system',
+    fontSize: 16,
+    lineHeight: 1.8,
+    paraSpacing: 1,
+    margin: 2
+  });
+
+  const THEMES: Record<ReaderTheme, { bg: string; text: string; muted: string; label: string }> = {
+    white: { bg: '#f5f5f0', text: '#333', muted: '#999', label: '白色' },
+    sepia: { bg: '#f4ecd8', text: '#5b4636', muted: '#a08b76', label: '护眼' },
+    dark: { bg: '#2b2b2b', text: '#ccc', muted: '#666', label: '深色' },
+    black: { bg: '#000', text: '#aaa', muted: '#444', label: '夜间' }
+  };
+
+  const FONTS: Record<ReaderFont, { family: string; label: string }> = {
+    system: { family: 'inherit', label: '系统默认' },
+    serif: { family: '"Noto Serif SC", "Songti SC", "STSong", serif', label: '宋体' },
+    sans: { family: '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif', label: '黑体' },
+    kai: { family: '"KaiTi", "STKaiti", "楷体", serif', label: '楷体' },
+    mono: { family: '"Noto Sans Mono SC", "SF Mono", "Cascadia Code", monospace', label: '等宽' }
+  };
+
+  const RANGES: Record<string, [number, number, number]> = {
+    fontSize: [12, 28, 1],
+    lineHeight: [1.4, 3.0, 0.2],
+    paraSpacing: [0, 2, 0.5],
+    margin: [0, 4, 0.5]
+  };
+</script>
+
+<script lang="ts">
+  import { icons } from '$lib/icons';
+  import { freeze } from '$lib/stores';
+  import { onMount } from 'svelte';
+  import { fade, fly, scale } from 'svelte/transition';
+
+  let content = $state('');
+  let title = $state('');
+  let chapters = $state<Chapter[]>([]);
+  let chapterId = $state<string | null>(null);
+  let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
+  let open = $state(false);
+  let chapterOpen = $state(false);
+  let visible = $state(true);
+
+  let s = $derived($settings!);
+  let t = $derived(THEMES[s.theme]);
+  let panelBg = $derived(s.theme === 'black' ? '#1a1a1a' : s.theme === 'dark' ? '#222' : '#fff');
+  let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
+
+  export function mount(options: TextViewerOptions) {
+    if (!options) return;
+    content = options.text ?? '';
+    title = options.title ?? '';
+    chapters = options.chapters ?? [];
+    chapterId = options.chapterId ?? null;
+    chapterChange = options.chapterChange;
+    resetTimer();
+  }
+
+  function selectChapter(chapter: Chapter) {
+    chapterOpen = false;
+    chapterChange?.(chapter);
+  }
+
+  function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin', delta: number) {
+    const [min, max, step] = RANGES[key];
+    s[key] = Math.max(min, Math.min(max, Math.round((s[key] + delta) / step) * step));
+  }
+
+  let hideTimer: ReturnType<typeof setTimeout>;
+  function resetTimer() {
+    visible = true;
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => (visible = false), 3000);
+  }
+
+  onMount(() => {
+    freeze.set(true);
+    resetTimer();
+    return () => {
+      freeze.set(false);
+      clearTimeout(hideTimer);
+    };
+  });
+</script>
+
+<svelte:window onmousemove={resetTimer} />
+
+<div class="flex size-full flex-col transition-colors duration-300" style:background-color={t.bg}>
+  <!-- Top bar -->
+  {#if visible}
+    <div
+      class="absolute top-0 left-0 right-0 z-10 flex items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
+      style:background-color={t.bg === '#000'
+        ? 'rgba(0,0,0,0.5)'
+        : t.bg === '#2b2b2b'
+          ? 'rgba(0,0,0,0.5)'
+          : 'rgba(0,0,0,0.08)'}
+      style:color={t.muted}
+      transition:fade={{ duration: 200 }}
+    >
+      <button
+        class="btn btn-xs btn-ghost border-0 shadow-none"
+        style:color={t.muted}
+        onclick={() => history.back()}
+        aria-label="返回"
+      >
+        <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
+      </button>
+
+      {#if chapters.length > 1}
+        <div class="relative min-w-0 flex-1">
+          <button
+            class="flex items-center gap-1 truncate text-sm"
+            onclick={() => {
+              chapterOpen = !chapterOpen;
+              clearTimeout(hideTimer);
+            }}
+          >
+            <span class="truncate">{currentTitle}</span>
+            <iconify-icon icon={icons.arrowSortDownLines} width="0.75rem" class="shrink-0"></iconify-icon>
+          </button>
+          {#if chapterOpen}
+            <div
+              class="absolute top-full left-0 mt-1 max-h-64 w-56 overflow-y-auto rounded-lg py-1 shadow-xl"
+              style:background-color={panelBg === '#fff' ? '#f5f5f5' : panelBg === '#222' ? '#333' : '#222'}
+              style:color={t.text}
+              transition:scale={{ start: 0.95, duration: 150 }}
+            >
+              {#each chapters as ch}
+                <button
+                  class="block w-full px-4 py-1.5 text-left text-sm transition-colors {ch.id === chapterId
+                    ? 'text-primary'
+                    : 'opacity-60 hover:opacity-100'}"
+                  onclick={() => selectChapter(ch)}
+                >
+                  {ch.title}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else}
+        <span class="min-w-0 flex-1 truncate text-sm">{title}</span>
+      {/if}
+
+      <button
+        class="btn btn-xs btn-ghost border-0 shadow-none"
+        style:color={t.muted}
+        aria-label="阅读设置"
+        onclick={() => (open = !open)}
+      >
+        <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
+      </button>
+    </div>
+  {/if}
+
+  <!-- Reading area -->
+  <article class="flex-1 overflow-y-auto overscroll-none transition-all duration-300" style:padding="0 {s.margin}rem">
+    {#if content}
+      <div
+        class="mx-auto max-w-3xl transition-all duration-300"
+        style:font-family={FONTS[s.font].family}
+        style:font-size="{s.fontSize}px"
+        style:line-height={s.lineHeight}
+        style:color={t.text}
+      >
+        {#each content.split('\n\n') as para}
+          <p class="indent-2" style:margin-bottom="{s.paraSpacing}em">{para.trim() || '&nbsp;'}</p>
+        {/each}
+      </div>
+    {/if}
+  </article>
+
+  <!-- Settings panel -->
+  {#if open}
+    <button
+      class="fixed inset-0 z-10 bg-black/20"
+      aria-label="关闭设置"
+      onclick={() => (open = false)}
+      transition:fade={{ duration: 150 }}
+    ></button>
+    <div
+      class="fixed right-0 top-0 z-20 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
+      style:background-color={panelBg}
+      style:color={t.text}
+      transition:fly={{ x: 300, duration: 200 }}
+    >
+      <div class="flex items-center justify-between px-4 pt-4 pb-2">
+        <h3 class="text-base font-bold">阅读设置</h3>
+        <button class="btn btn-xs border-0 bg-transparent shadow-none" aria-label="关闭" onclick={() => (open = false)}>
+          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
+        </button>
+      </div>
+      <div class="flex-1 space-y-5 px-4 pb-6">
+        <div>
+          <span class="mb-1.5 block text-sm font-semibold opacity-60">背景主题</span>
+          <div class="grid grid-cols-4 gap-2">
+            {#each Object.entries(THEMES) as [key, th]}
+              <button
+                class="flex flex-col items-center gap-1.5 rounded-lg py-2 text-xs transition-all {s.theme === key
+                  ? 'ring-2 ring-primary'
+                  : 'opacity-60 hover:opacity-100'}"
+                onclick={() => (s.theme = key as ReaderTheme)}
+              >
+                <span
+                  class="size-5 rounded-full border shadow-sm"
+                  style:background-color={th.bg}
+                  style:border-color={th.bg === '#f5f5f0' || th.bg === '#f4ecd8' ? '#00000020' : '#ffffff30'}
+                ></span>
+                <span>{th.label}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+        <div>
+          <span class="mb-1.5 block text-sm font-semibold opacity-60">字体</span>
+          <div class="grid grid-cols-3 gap-2">
+            {#each Object.entries(FONTS) as [key, f]}
+              <button
+                class="rounded-lg py-2 text-xs font-medium transition-all {s.font === key
+                  ? 'bg-primary/15 text-primary'
+                  : 'opacity-50 hover:opacity-80'}"
+                onclick={() => (s.font = key as ReaderFont)}>{f.label}</button
+              >
+            {/each}
+          </div>
+        </div>
+        {@render slider('字号', 'fontSize', 'px', 1, 'A−', 'A+')}
+        {@render slider('行间距', 'lineHeight', '', 0.2, '−', '+')}
+        {@render slider('段间距', 'paraSpacing', 'em', 0.5, '−', '+')}
+        {@render slider('页边距', 'margin', 'rem', 0.5, '−', '+')}
+      </div>
+    </div>
+  {/if}
+
+  <!-- Chapter dropdown backdrop -->
+  {#if chapterOpen}
+    <button class="fixed inset-0 z-10" aria-label="关闭章节列表" onclick={() => (chapterOpen = false)}></button>
+  {/if}
+</div>
+
+{#snippet slider(
+  label: string,
+  key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin',
+  unit: string,
+  step: number,
+  left: string,
+  right: string
+)}
+  {@const [min, max] = RANGES[key]}
+  <div>
+    <span class="mb-1.5 flex items-center justify-between text-sm font-semibold opacity-60">
+      <span>{label}</span>
+      <span class="tabular-nums">{s[key]}{unit}</span>
+    </span>
+    <div class="flex items-center gap-2">
+      <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, -step)}>{left}</button>
+      <input
+        type="range"
+        class="range range-xs flex-1"
+        {min}
+        {max}
+        {step}
+        value={s[key]}
+        oninput={(e) => (s[key] = parseFloat(e.currentTarget.value))}
+      />
+      <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, step)}>{right}</button>
+    </div>
+  </div>
+{/snippet}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import { Overlay, VideoPlayer } from '$lib/components';
+  import { Overlay, TextViewer, VideoPlayer } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import type { Chapter, Resource, Resp } from '$lib/types';
   import { onMount, tick } from 'svelte';
@@ -24,8 +24,10 @@
   let mediaType: string | null = $derived.by(() => resource?.media_type ?? query.media_type);
   let videoType: string | null = $derived.by(() => resource?.video_type ?? query.video_type);
 
+  // the text viewer instance
+  let textViewer: TextViewer | null = $state(null);
   // the video player instance
-  let player: VideoPlayer | null = $state(null);
+  let videoPlayer: VideoPlayer | null = $state(null);
   let refreshKey: number = $state(0);
 
   // the loading state
@@ -34,7 +36,7 @@
   /**
    * Fetch the details of the resource.
    *
-   * @param refresh - Whether to refresh the player.
+   * @param refresh - Whether to refresh the resource details.
    */
   function details(refresh: boolean = false) {
     loading.start();
@@ -46,7 +48,7 @@
           chapter_id: query.chapter_id
         }
       })
-      .json<Resp<Resource>>()
+      .json<Resp<Resource | null>>()
       .then(({ data }) => {
         refresh && (refreshKey = new Date().getTime());
         tick().then(() => onload(data));
@@ -61,12 +63,15 @@
    *
    * @param rsrc - The resource object.
    */
-  function onload(rsrc: Resource) {
+  function onload(rsrc: Resource | null) {
+    if (!rsrc) {
+      return;
+    }
     resource = rsrc;
-    const chapters = rsrc?.chapters ?? [];
-    if (rsrc?.url) {
-      if (mediaType === 'video' && player) {
-        player.mount({
+    const chapters = rsrc.chapters ?? [];
+    if (rsrc.url) {
+      if (mediaType === 'video' && videoPlayer) {
+        videoPlayer.mount({
           url: rsrc.url,
           videoType: videoType,
           danmakus: rsrc.danmakus,
@@ -77,6 +82,16 @@
           title: rsrc.title,
           uploader: rsrc.uploader,
           uploadedAt: rsrc.uploaded_at
+        });
+      }
+    } else if (mediaType === 'text' && textViewer) {
+      if (rsrc.text) {
+        textViewer.mount({
+          text: rsrc.text,
+          title: rsrc.title,
+          chapters: chapters,
+          chapterId: query.chapter_id,
+          chapterChange: onchange
         });
       }
     } else if (chapters.length > 0) {
@@ -91,13 +106,13 @@
    */
   function onchange(chapter: Chapter) {
     const { id, url, title, definition } = chapter;
-    if (url) {
-      // switch the resource URL
-      if (mediaType === 'video' && player) {
-        player.mount({ next: !definition, url: url, title: title });
-      }
-    } else if (id && id !== query.chapter_id) {
-      // update the query parameter and request the new chapter
+    // change the video chapter directly if the URL is available
+    if (mediaType === 'video' && videoPlayer && url) {
+      videoPlayer.mount({ next: !definition, url: url, title: title });
+      return;
+    }
+    // update the query parameter and request the new chapter
+    if (id && id !== query.chapter_id) {
       query.chapter_id = id;
       details(true);
     }
@@ -111,6 +126,10 @@
 <div class="history-back fixed inset-0 layer-1 max-sm:bottom-(--ks-dock-h)">
   <Overlay black loading={$loading} />
   {#key refreshKey}
-    <VideoPlayer bind:this={player} />
+    {#if mediaType === 'text'}
+      <TextViewer bind:this={textViewer} />
+    {:else if mediaType === 'video'}
+      <VideoPlayer bind:this={videoPlayer} />
+    {/if}
   {/key}
 </div>
