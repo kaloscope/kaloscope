@@ -147,7 +147,15 @@ async def start_orm(app: Sanic):
     if app.debug:
         # enable debug logging for Tortoise ORM
         logging.getLogger("tortoise").setLevel(logging.DEBUG)
-        logging.getLogger("tortoise.db_client").setLevel(logging.DEBUG)
+        db_client_logger = logging.getLogger("tortoise.db_client")
+        db_client_logger.setLevel(logging.DEBUG)
+        # suppress noisy SQL statements (INSERT/UPDATE on large tables, etc.)
+        sql_noise = [
+            'INSERT INTO "flow_log"',
+        ]
+        db_client_logger.addFilter(
+            lambda r: not any(r.getMessage().startswith(s) for s in sql_noise)
+        )
     await Tortoise.init(tortoise_config, _enable_global_fallback=True)
     logger.debug(_msg(Colors.BLUE, "Tortoise ORM initialized."), _worker(app))
 
