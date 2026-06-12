@@ -119,7 +119,7 @@ def execute(node_id, node_data, context):
 <fieldset class="fieldset">
   <Label required={true}>{$label('language')}</Label>
   <select
-    class="nodrag select min-w-md appearance-none select-sm"
+    class="nodrag select w-full appearance-none select-sm"
     value={data.language}
     onchange={(event) => {
       data = scriptData(event.currentTarget.value as Language);
