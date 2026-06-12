@@ -430,7 +430,6 @@
       })
       .json<Resp<DanmakuWrapper>>()
       .then(({ data }) => {
-        s;
         const comments = data.comments;
         if (comments && comments.length > 0) {
           danmakuPlugin.updateComments(

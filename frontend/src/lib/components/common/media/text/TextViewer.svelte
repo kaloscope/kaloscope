@@ -74,6 +74,10 @@
   let panelBg = $derived(s.theme === 'black' ? '#1a1a1a' : s.theme === 'dark' ? '#222' : '#fff');
   let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
 
+  function updateSettings(patch: Partial<ReaderSettings>) {
+    settings.update((v) => ({ ...v, ...patch }) as ReaderSettings);
+  }
+
   export function mount(options: TextViewerOptions) {
     if (!options) return;
     content = options.text ?? '';
@@ -91,7 +95,8 @@
 
   function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin', delta: number) {
     const [min, max, step] = RANGES[key];
-    s[key] = Math.max(min, Math.min(max, Math.round((s[key] + delta) / step) * step));
+    const newValue = Math.max(min, Math.min(max, Math.round((s[key] + delta) / step) * step));
+    updateSettings({ [key]: newValue });
   }
 
   let hideTimer: ReturnType<typeof setTimeout>;
@@ -228,7 +233,7 @@
                 class="flex flex-col items-center gap-1.5 rounded-lg py-2 text-xs transition-all {s.theme === key
                   ? 'ring-2 ring-primary'
                   : 'opacity-60 hover:opacity-100'}"
-                onclick={() => (s.theme = key as ReaderTheme)}
+                onclick={() => updateSettings({ theme: key as ReaderTheme })}
               >
                 <span
                   class="size-5 rounded-full border shadow-sm"
@@ -248,7 +253,7 @@
                 class="rounded-lg py-2 text-xs font-medium transition-all {s.font === key
                   ? 'bg-primary/15 text-primary'
                   : 'opacity-50 hover:opacity-80'}"
-                onclick={() => (s.font = key as ReaderFont)}>{f.label}</button
+                onclick={() => updateSettings({ font: key as ReaderFont })}>{f.label}</button
               >
             {/each}
           </div>
@@ -290,7 +295,7 @@
         {max}
         {step}
         value={s[key]}
-        oninput={(e) => (s[key] = parseFloat(e.currentTarget.value))}
+        oninput={(e) => updateSettings({ [key]: parseFloat(e.currentTarget.value) })}
       />
       <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, step)}>{right}</button>
     </div>
