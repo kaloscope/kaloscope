@@ -62,6 +62,27 @@ class HTTPNode(Node):
             ]
         )
 
+        # extract X-Hishel-* headers into extensions
+        # https://hishel.com/metadata.html
+        extensions: dict[str, Any] = {}
+        hishel_headers: list[str] = []
+        for key, value in headers.items():
+            if key.lower().startswith("x-hishel-"):
+                hishel_headers.append(key)
+                # convert X-Hishel-Ttl → hishel_ttl
+                hishel_key = key[2:].lower().replace("-", "_")
+                # convert value to appropriate type
+                if value.lower() in ("true", "false"):
+                    extensions[hishel_key] = value.lower() == "true"
+                else:
+                    try:
+                        extensions[hishel_key] = float(value)
+                    except ValueError:
+                        extensions[hishel_key] = value
+        # remove hishel headers
+        for key in hishel_headers:
+            del headers[key]
+
         # request body
         binary, form, json = None, None, None
         if body := cls.body.extract(node_data, context=context):
@@ -79,7 +100,13 @@ class HTTPNode(Node):
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
         try:
             response = await client.request(
-                method, url, headers=headers, content=binary, data=form, json=json
+                method,
+                url,
+                headers=headers,
+                content=binary,
+                data=form,
+                json=json,
+                extensions=extensions,
             )
             formatter = cls.formatter.extract(node_data)
             # merge the rendered response into context
