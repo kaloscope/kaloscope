@@ -4,7 +4,7 @@ import re
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import jinja2
 import opencc
@@ -651,6 +651,7 @@ ENV.filters["year"] = year
 ENV.filters["prefix"] = prefix
 ENV.filters["suffix"] = suffix
 ENV.filters["query_param"] = query_param
+ENV.filters["quote"] = quote
 
 
 def is_file(path: Any) -> bool:
