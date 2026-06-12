@@ -108,6 +108,13 @@ class HTTPNode(Node):
                 json=json,
                 extensions=extensions,
             )
+            if response.extensions.get("hishel_from_cache"):
+                logger.debug(
+                    'HTTP Response: served from cache "%s %s"',
+                    response.http_version,
+                    response.status_code,
+                )
+
             formatter = cls.formatter.extract(node_data)
             # merge the rendered response into context
             rendered = render(formatter, {**context._context, "response": response})

@@ -132,4 +132,29 @@ def _patch_hishel_headers():
     _async._internal_to_httpx = _internal_to_httpx
 
 
+def _patch_hishel_force_cache():
+    """Patch hishel to force-cache responses when `hishel_ttl` is explicitly set
+    on the request, even if the origin server returns `Cache-Control: no-cache`
+    or `no-store`.
+
+    Replaces the response's `Cache-Control` header with `max-age=<ttl>` so
+    the RFC 9111 state machine handles caching naturally without further patches.
+    """
+    from hishel._async_httpx import AsyncCacheTransport
+
+    _orig_request_sender = AsyncCacheTransport.request_sender
+
+    async def _patched_request_sender(self, request):
+        response = await _orig_request_sender(self, request)
+        ttl = request.metadata.get("hishel_ttl")
+        if ttl is not None:
+            if "cache-control" in response.headers:
+                del response.headers["cache-control"]
+            response.headers["cache-control"] = f"max-age={ttl:.0f}"
+        return response
+
+    AsyncCacheTransport.request_sender = _patched_request_sender
+
+
 _patch_hishel_headers()
+_patch_hishel_force_cache()
