@@ -4,6 +4,7 @@
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import {
+    alert,
     Button,
     confirm,
     Container,
@@ -22,11 +23,11 @@
   import { icons } from '$lib/icons';
   import { positions, restorePosition } from '$lib/stores';
   import type { IndexerAuth, Page, Resource, Resp, ViewMode, ViewModes } from '$lib/types';
+  import { aspectRatio } from '$lib/utils';
   import { tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { queryParameters, ssp } from 'sveltekit-search-params';
   import type { PageData } from './$types';
-  import { aspectRatio } from '$lib/utils';
 
   // the indexer configurations
   let { data }: { data: PageData } = $props();
@@ -92,14 +93,19 @@
 
   /**
    * Get the auth status.
+   *
+   * @param warning - Whether to show a warning message.
    */
-  async function auth(): Promise<void> {
+  async function auth(warning: boolean = false): Promise<void> {
     if (loginConfig) {
       authLoading.start();
       try {
         const resp = await api.get(`flow/indexer/${indexerId}/auth`).json<Resp<IndexerAuth>>();
         // if the user is logged in, get the user name from the response
         loggedUser = resp.data?.name ?? null;
+        if (warning && loggedUser === null) {
+          alert({ level: 'warning', message: 'login_failed' });
+        }
       } finally {
         authLoading.end();
       }
@@ -123,7 +129,7 @@
       })
       .then(() => {
         loginModal.close();
-        auth().then(() => search());
+        auth(true).then(() => search());
         setTimeout(() => loginForm.reset(), 200);
       })
       .finally(() => {
