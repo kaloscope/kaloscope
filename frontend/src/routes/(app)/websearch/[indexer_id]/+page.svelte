@@ -161,6 +161,7 @@
     if ((keyword?.required && !query.keyword) || (loginConfig?.required && loggedUser === null)) {
       resources = [];
       pagination.total = null;
+      pagination.totalPages = null;
       innerLoading.end();
       outerLoading.end();
       return;
