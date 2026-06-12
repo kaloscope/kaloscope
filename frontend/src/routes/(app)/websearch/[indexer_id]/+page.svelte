@@ -192,6 +192,7 @@
         if (!data || !data.items) {
           resources = [];
           pagination.total = null;
+          pagination.totalPages = null;
           return;
         }
         resources = data.items;
@@ -215,6 +216,7 @@
         } else {
           resources = [];
           pagination.total = null;
+          pagination.totalPages = null;
         }
       })
       .finally(() => {
