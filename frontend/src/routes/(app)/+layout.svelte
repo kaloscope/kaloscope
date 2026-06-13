@@ -6,6 +6,7 @@
   import { headTitle } from '$lib/i18n';
   import { freeze, histories, positions, subroutes, urlparams, user } from '$lib/stores';
   import type { Resp, User } from '$lib/types';
+  import { normalizePathname } from '$lib/utils';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import { untrack, type Snippet } from 'svelte';
   import { Spring } from 'svelte/motion';
@@ -66,15 +67,21 @@
   beforeNavigate(({ from, to }) => {
     const fromUrl = from?.url;
     const toUrl = to?.url;
-    if (!fromUrl || !toUrl || fromUrl.pathname === toUrl.pathname) {
+    if (!fromUrl || !toUrl) {
+      return;
+    }
+    // normalize pathnames to ensure consistent keys regardless of trailing slashes
+    const fromPath = normalizePathname(fromUrl.pathname);
+    const toPath = normalizePathname(toUrl.pathname);
+    if (fromPath === toPath) {
       return;
     }
     // capture the scroll position
     const position = { left: window.scrollX, top: window.scrollY };
-    positions.set({ ...$positions, [fromUrl.pathname]: position });
+    positions.set({ ...$positions, [fromPath]: position });
     // capture the URL parameters
     if (fromUrl.search) {
-      urlparams.set({ ...$urlparams, [fromUrl.pathname]: fromUrl.search });
+      urlparams.set({ ...$urlparams, [fromPath]: fromUrl.search });
     }
     // restore the URL parameters for the next page
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
@@ -83,7 +90,7 @@
       toSearchParams.delete('restore');
       toUrl.search = toSearchParams.toString();
     } else {
-      let searchParams = $urlparams[toUrl.pathname];
+      let searchParams = $urlparams[toPath];
       if (searchParams && searchParams !== toUrl.search) {
         toUrl.search = searchParams;
       }
@@ -97,15 +104,15 @@
     navbarShadow = document.querySelector('.navbar-shadow') !== null;
     pullToRefresh = document.querySelector('.pull-to-refresh') !== null;
     // update the subroutes store after navigation
-    const pageUrl = page.url;
-    const pagePath = pageUrl.pathname;
     const mainPath = mainRoute?.path;
+    const pageUrl = page.url;
+    const pagePath = normalizePathname(pageUrl.pathname);
     if (!historyBack && mainPath && mainPath !== pagePath) {
       subroutes.set({ ...($subroutes ?? {}), [mainPath]: pagePath + pageUrl.search });
     }
     // update the histories store after navigation
     const fromUrl = from?.url;
-    const fromPath = fromUrl?.pathname;
+    const fromPath = fromUrl?.pathname && normalizePathname(fromUrl.pathname);
     if (historyBack && fromPath && fromPath !== pagePath) {
       histories.set({ ...($histories ?? {}), [pagePath]: fromPath + fromUrl.search });
     }

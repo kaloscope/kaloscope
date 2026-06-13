@@ -221,6 +221,16 @@ export function loadFile(target: EventTarget & HTMLInputElement): Promise<string
 }
 
 /**
+ * Normalize a URL pathname by stripping the trailing slash.
+ *
+ * @param pathname - The pathname to normalize.
+ * @returns The normalized pathname (root `/` is preserved).
+ */
+export function normalizePathname(pathname: string): string {
+  return pathname.replace(/\/$/, '') || '/';
+}
+
+/**
  * Escape HTML special characters in a string to prevent XSS attacks.
  *
  * @param str - The string to escape.

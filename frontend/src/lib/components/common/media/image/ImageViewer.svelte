@@ -345,7 +345,7 @@
 {#snippet chapterItem(chapter: Chapter)}
   <li>
     <button
-      class="truncate {chapter.id === chapterId ? 'active' : ''}"
+      class={chapter.id === chapterId ? 'active' : ''}
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >

@@ -21,7 +21,7 @@
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { positions, restorePosition } from '$lib/stores';
+  import { captureScrollPosition, restorePosition } from '$lib/stores';
   import type { IndexerAuth, Page, Resource, Resp, ViewMode, ViewModes } from '$lib/types';
   import { aspectRatio } from '$lib/utils';
   import { tick, untrack } from 'svelte';
@@ -83,12 +83,7 @@
 
   // capture the scroll position of the current page
   beforeNavigate(({ from, to }) => {
-    const fromUrl = from?.url;
-    const toUrl = to?.url;
-    if (fromUrl && toUrl && fromUrl.pathname !== toUrl.pathname && view) {
-      const position = standaloneMode.current ? view.scrollPosition() : { left: window.scrollX, top: window.scrollY };
-      positions.set({ ...$positions, [fromUrl.pathname]: position });
-    }
+    captureScrollPosition(from, to, view, standaloneMode.current);
   });
 
   /**

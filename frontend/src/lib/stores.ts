@@ -3,6 +3,7 @@ import { goto } from '$app/navigation';
 import { page } from '$app/state';
 import type { DataView } from '$lib/components';
 import type { ScrollPosition, User } from '$lib/types';
+import { normalizePathname } from '$lib/utils';
 import { tick } from 'svelte';
 import { get, writable, type Writable } from 'svelte/store';
 
@@ -88,7 +89,7 @@ export function mediaQuery(query: string, immediate: boolean = true): Writable<b
  * Navigate back to the previous page.
  */
 export function historyBack() {
-  const pathname = page.url.pathname;
+  const pathname = normalizePathname(page.url.pathname);
   const _histories = get(histories);
   const history = _histories?.[pathname];
   if (history) {
@@ -106,10 +107,39 @@ export function historyBack() {
  * @param defaultRoute - The default route to navigate to if no match is found.
  */
 export function restoreRoute(defaultRoute?: string) {
+  const pathname = normalizePathname(page.url.pathname);
   const _subroutes = get(subroutes);
-  const subroute = _subroutes?.[page.url.pathname] ?? defaultRoute;
+  const subroute = _subroutes?.[pathname] ?? defaultRoute;
   if (subroute) {
     goto(subroute, { replaceState: true });
+  }
+}
+
+/**
+ * Capture the scroll position of the current page before navigation.
+ *
+ * @param from - The source navigation target.
+ * @param to - The destination navigation target.
+ * @param view - The data view instance to capture scroll position from.
+ * @param standalone - Whether the app is in standalone display mode.
+ */
+export function captureScrollPosition(
+  from: { url: URL } | null | undefined,
+  to: { url: URL } | null | undefined,
+  view: { scrollPosition: () => ScrollPosition } | null | undefined,
+  standalone: boolean = false
+) {
+  const fromUrl = from?.url;
+  const toUrl = to?.url;
+  if (fromUrl && toUrl && view) {
+    const fromPath = normalizePathname(fromUrl.pathname);
+    const toPath = normalizePathname(toUrl.pathname);
+    if (fromPath === toPath) {
+      return;
+    }
+    const position = standalone ? view.scrollPosition() : { left: window.scrollX, top: window.scrollY };
+    const _positions = get(positions);
+    positions.set({ ..._positions, [fromPath]: position });
   }
 }
 
@@ -127,7 +157,7 @@ export function restorePosition<T>(target: Window | DataView<T> | null | undefin
     if (toTop) {
       target.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
-      const pathname = page.url.pathname;
+      const pathname = normalizePathname(page.url.pathname);
       const _positions = get(positions);
       const position = _positions[pathname];
       if (position) {

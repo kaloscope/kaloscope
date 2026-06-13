@@ -377,7 +377,7 @@
               class="btn-circle"
               iconClass="opacity-50"
             />
-            {#if item.percentage != null}
+            {#if item.percentage !== null}
               <div class="absolute bottom-0 left-0 h-0.5 w-full bg-base-200">
                 <div class="h-full bg-primary/50" style="width: {item.percentage}%"></div>
               </div>

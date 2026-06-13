@@ -59,7 +59,7 @@
       return '';
     }
     const title = item.title ?? item.name;
-    if (item.season != null && item.episode != null) {
+    if (item.season !== null && item.episode !== null) {
       return `S${item.season}E${item.episode} - ${title}`;
     }
     return title;

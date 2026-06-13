@@ -15,7 +15,7 @@
   } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
-  import { positions, restorePosition, subroutes, user } from '$lib/stores';
+  import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
   import type { MediaItem, Page, Resp } from '$lib/types';
   import { tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -60,12 +60,7 @@
 
   // capture the scroll position of the current page
   beforeNavigate(({ from, to }) => {
-    const fromUrl = from?.url;
-    const toUrl = to?.url;
-    if (fromUrl && toUrl && fromUrl.pathname !== toUrl.pathname && view) {
-      const position = standaloneMode.current ? view.scrollPosition() : { left: window.scrollX, top: window.scrollY };
-      positions.set({ ...$positions, [fromUrl.pathname]: position });
-    }
+    captureScrollPosition(from, to, view, standaloneMode.current);
   });
 
   /**
