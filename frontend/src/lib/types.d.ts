@@ -561,6 +561,7 @@ export type Chapter = {
   id?: string | null;
   url?: string | null;
   title: string;
+  volume?: string | null;
   definition?: boolean;
 };
 

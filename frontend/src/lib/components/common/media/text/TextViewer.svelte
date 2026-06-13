@@ -22,6 +22,11 @@
     chapterChange?: (chapter: Chapter) => void;
   };
 
+  type ChapterGroup = {
+    volume: string | null;
+    chapters: Chapter[];
+  };
+
   const settings = persisted<ReaderSettings>('reader', {
     theme: 'white',
     font: 'system',
@@ -53,19 +58,36 @@
     margin: [0, 4, 0.5]
   };
 
-  const PANEL_COLORS: Record<ReaderTheme, { panel: string; dropdown: string; topBar: string }> = {
-    white: { panel: '#fff', dropdown: '#f5f5f5', topBar: 'rgba(0,0,0,0.08)' },
-    sepia: { panel: '#fff', dropdown: '#f5f5f5', topBar: 'rgba(0,0,0,0.08)' },
-    dark: { panel: '#222', dropdown: '#333', topBar: 'rgba(0,0,0,0.5)' },
-    black: { panel: '#1a1a1a', dropdown: '#222', topBar: 'rgba(0,0,0,0.5)' }
+  const PANEL_COLORS: Record<ReaderTheme, { panel: string; topBar: string }> = {
+    white: { panel: '#fff', topBar: 'rgba(0,0,0,0.08)' },
+    sepia: { panel: '#fff', topBar: 'rgba(0,0,0,0.08)' },
+    dark: { panel: '#222', topBar: 'rgba(0,0,0,0.5)' },
+    black: { panel: '#1a1a1a', topBar: 'rgba(0,0,0,0.5)' }
   };
+
+  function groupChapters(chapters: Chapter[]): ChapterGroup[] {
+    const grouped = chapters.length > 0 && chapters.every((chapter) => !!chapter.volume?.trim());
+    if (!grouped) {
+      return [{ volume: null, chapters }];
+    }
+    return chapters.reduce<ChapterGroup[]>((groups, chapter) => {
+      const volume = chapter.volume!.trim();
+      const group = groups.find((group) => group.volume === volume);
+      if (group) {
+        group.chapters.push(chapter);
+      } else {
+        groups.push({ volume, chapters: [chapter] });
+      }
+      return groups;
+    }, []);
+  }
 </script>
 
 <script lang="ts">
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
   import { onMount } from 'svelte';
-  import { fade, fly, scale } from 'svelte/transition';
+  import { fade, fly } from 'svelte/transition';
 
   let content = $state('');
   let title = $state('');
@@ -79,6 +101,7 @@
   let t = $derived(THEMES[$settings?.theme ?? 'white']);
   let colors = $derived(PANEL_COLORS[$settings?.theme ?? 'white']);
   let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
+  let chapterGroups = $derived(groupChapters(chapters));
   let paragraphs = $derived(content.split(/\n{2,}/).map((para) => para.trim()));
 
   export function mount(options: TextViewerOptions) {
@@ -128,64 +151,73 @@
   <!-- Top bar -->
   {#if visible}
     <div
-      class="absolute top-0 left-0 right-0 z-10 flex items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
+      class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
       style:background-color={colors.topBar}
       style:color={t.muted}
       transition:fade={{ duration: 200 }}
     >
-      <button
-        class="btn btn-xs btn-ghost border-0 shadow-none"
-        style:color={t.muted}
-        onclick={() => historyBack()}
-        aria-label="返回"
-      >
-        <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
-      </button>
-
-      {#if chapters.length > 1}
-        <div class="relative min-w-0 flex-1">
+      <div class="flex items-center gap-1">
+        <button
+          class="btn btn-xs btn-ghost border-0 shadow-none"
+          style:color={t.muted}
+          onclick={() => historyBack()}
+          aria-label="返回"
+        >
+          <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
+        </button>
+        {#if chapters.length > 1}
           <button
-            class="flex items-center gap-1 truncate text-sm"
+            class="btn btn-xs btn-ghost border-0 shadow-none"
+            style:color={t.muted}
+            aria-label="章节"
             onclick={() => {
-              chapterOpen = !chapterOpen;
+              chapterOpen = true;
               clearTimeout(hideTimer);
             }}
           >
-            <span class="truncate">{currentTitle}</span>
-            <iconify-icon icon={icons.arrowSortDownLines} width="0.75rem" class="shrink-0"></iconify-icon>
+            <iconify-icon icon={icons.arrowSortDownLines} width="1.125rem"></iconify-icon>
           </button>
-          {#if chapterOpen}
-            <div
-              class="absolute top-full left-0 mt-1 max-h-64 w-56 overflow-y-auto rounded-field py-1 shadow-xl"
-              style:background-color={colors.dropdown}
-              style:color={t.text}
-              transition:scale={{ start: 0.95, duration: 150 }}
-            >
-              {#each chapters as ch (ch.id)}
-                <button
-                  class="block w-full px-4 py-1.5 text-left text-sm transition-colors {ch.id === chapterId
-                    ? 'text-primary'
-                    : 'opacity-60 hover:opacity-100'}"
-                  onclick={() => selectChapter(ch)}
-                >
-                  {ch.title}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {:else}
-        <span class="min-w-0 flex-1 truncate text-sm">{title}</span>
-      {/if}
+        {/if}
+      </div>
+
+      <span class="min-w-0 truncate text-center text-sm">{currentTitle}</span>
 
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none"
+        class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none"
         style:color={t.muted}
         aria-label="阅读设置"
         onclick={() => (open = !open)}
       >
         <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
       </button>
+    </div>
+  {/if}
+
+  <!-- Chapter panel -->
+  {#if chapterOpen}
+    <button
+      class="fixed inset-0 z-10 bg-black/20"
+      aria-label="关闭章节列表"
+      onclick={() => (chapterOpen = false)}
+      transition:fade={{ duration: 150 }}
+    ></button>
+    <div
+      class="fixed left-0 top-0 z-20 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
+      style:background-color={colors.panel}
+      style:color={t.text}
+      transition:fly={{ x: -300, duration: 200 }}
+    >
+      <div class="flex items-center justify-between px-4 pt-4 pb-2">
+        <h3 class="text-base font-bold">章节</h3>
+        <button
+          class="btn btn-xs border-0 bg-transparent shadow-none"
+          aria-label="关闭"
+          onclick={() => (chapterOpen = false)}
+        >
+          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
+        </button>
+      </div>
+      {@render chapterMenu()}
     </div>
   {/if}
 
@@ -284,12 +316,40 @@
       </div>
     </div>
   {/if}
-
-  <!-- Chapter dropdown backdrop -->
-  {#if chapterOpen}
-    <button class="fixed inset-0 z-[9]" aria-label="关闭章节列表" onclick={() => (chapterOpen = false)}></button>
-  {/if}
 </div>
+
+{#snippet chapterMenu()}
+  <ul class="menu w-full px-2 pb-6 text-sm">
+    {#each chapterGroups as group, index (group.volume ?? index)}
+      {#if group.volume}
+        <li>
+          <h2 class="menu-title">{group.volume}</h2>
+          <ul>
+            {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
+              {@render chapterItem(chapter)}
+            {/each}
+          </ul>
+        </li>
+      {:else}
+        {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
+          {@render chapterItem(chapter)}
+        {/each}
+      {/if}
+    {/each}
+  </ul>
+{/snippet}
+
+{#snippet chapterItem(chapter: Chapter)}
+  <li>
+    <button
+      class="truncate {chapter.id === chapterId ? 'active' : ''}"
+      title={chapter.title}
+      onclick={() => selectChapter(chapter)}
+    >
+      {chapter.title}
+    </button>
+  </li>
+{/snippet}
 
 {#snippet slider(
   label: string,

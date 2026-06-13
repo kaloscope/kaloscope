@@ -21,6 +21,11 @@
     chapterChange?: (chapter: Chapter) => void;
   };
 
+  type ChapterGroup = {
+    volume: string | null;
+    chapters: Chapter[];
+  };
+
   const settings = persisted<ImageReaderSettings>('image-reader', {
     readMode: 'scroll',
     zoomMode: 'width',
@@ -32,6 +37,23 @@
     height: 'h-full w-auto',
     auto: 'max-h-full max-w-full object-contain'
   };
+
+  function groupChapters(chapters: Chapter[]): ChapterGroup[] {
+    const grouped = chapters.length > 0 && chapters.every((chapter) => !!chapter.volume?.trim());
+    if (!grouped) {
+      return [{ volume: null, chapters }];
+    }
+    return chapters.reduce<ChapterGroup[]>((groups, chapter) => {
+      const volume = chapter.volume!.trim();
+      const group = groups.find((group) => group.volume === volume);
+      if (group) {
+        group.chapters.push(chapter);
+      } else {
+        groups.push({ volume, chapters: [chapter] });
+      }
+      return groups;
+    }, []);
+  }
 </script>
 
 <script lang="ts">
@@ -39,7 +61,7 @@
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
   import { onMount } from 'svelte';
-  import { fade, fly, scale } from 'svelte/transition';
+  import { fade, fly } from 'svelte/transition';
 
   let images = $state<string[]>([]);
   let title = $state('');
@@ -55,6 +77,7 @@
 
   let zoomClass = $derived(ZOOM[$settings?.zoomMode ?? 'width']);
   let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
+  let chapterGroups = $derived(groupChapters(chapters));
 
   export function mount(options: ImageViewerOptions) {
     if (!options?.images?.length) return;
@@ -133,59 +156,71 @@
   <!-- Top bar -->
   {#if visible}
     <div
-      class="absolute top-0 left-0 right-0 z-10 flex items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
+      class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
     >
-      <button
-        class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
-        onclick={() => historyBack()}
-        aria-label="返回"
-      >
-        <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
-      </button>
-
-      {#if chapters.length > 1}
-        <div class="relative min-w-0 flex-1">
+      <div class="flex items-center gap-1">
+        <button
+          class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
+          onclick={() => historyBack()}
+          aria-label="返回"
+        >
+          <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
+        </button>
+        {#if chapters.length > 1}
           <button
-            class="flex items-center gap-1 truncate text-sm"
+            class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
+            aria-label="章节"
             onclick={() => {
-              chapterOpen = !chapterOpen;
+              chapterOpen = true;
               clearTimeout(hideTimer);
             }}
           >
-            <span class="truncate">{currentTitle}</span>
-            <iconify-icon icon={icons.arrowSortDownLines} width="0.75rem" class="shrink-0"></iconify-icon>
+            <iconify-icon icon={icons.arrowSortDownLines} width="1.125rem"></iconify-icon>
           </button>
-          {#if chapterOpen}
-            <div
-              class="absolute top-full left-0 mt-1 max-h-64 w-56 overflow-y-auto rounded-field bg-black/90 py-1 shadow-xl"
-              transition:scale={{ start: 0.95, duration: 150 }}
-            >
-              {#each chapters as ch (ch.id)}
-                <button
-                  class="block w-full px-4 py-1.5 text-left text-sm transition-colors {ch.id === chapterId
-                    ? 'text-primary'
-                    : 'text-white/60 hover:bg-white/10 hover:text-white/80'}"
-                  onclick={() => selectChapter(ch)}
-                >
-                  {ch.title}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {:else}
-        <span class="min-w-0 flex-1 truncate text-sm">{title}</span>
-      {/if}
+        {/if}
+      </div>
 
-      <span class="tabular-nums text-sm whitespace-nowrap">{page + 1} / {total}</span>
+      <span class="min-w-0 truncate text-center text-sm">
+        {currentTitle}
+        {#if total > 0}
+          <span class="ml-2 tabular-nums opacity-60">{page + 1} / {total}</span>
+        {/if}
+      </span>
+
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
+        class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none text-white/70"
         aria-label="阅读设置"
         onclick={() => (open = !open)}
       >
         <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
       </button>
+    </div>
+  {/if}
+
+  <!-- Chapter panel -->
+  {#if chapterOpen}
+    <button
+      class="fixed inset-0 z-20 bg-black/20"
+      aria-label="关闭章节列表"
+      onclick={() => (chapterOpen = false)}
+      transition:fade={{ duration: 150 }}
+    ></button>
+    <div
+      class="fixed left-0 top-0 z-30 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
+      transition:fly={{ x: -300, duration: 200 }}
+    >
+      <div class="flex items-center justify-between px-4 pt-4 pb-2">
+        <h3 class="text-base font-bold">章节</h3>
+        <button
+          class="btn btn-xs border-0 bg-transparent shadow-none"
+          aria-label="关闭"
+          onclick={() => (chapterOpen = false)}
+        >
+          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
+        </button>
+      </div>
+      {@render chapterMenu()}
     </div>
   {/if}
 
@@ -284,12 +319,40 @@
       </div>
     </div>
   {/if}
-
-  <!-- Chapter dropdown backdrop -->
-  {#if chapterOpen}
-    <button class="fixed inset-0 z-[9]" aria-label="关闭章节列表" onclick={() => (chapterOpen = false)}></button>
-  {/if}
 </div>
+
+{#snippet chapterMenu()}
+  <ul class="menu w-full px-2 pb-6 text-sm">
+    {#each chapterGroups as group, index (group.volume ?? index)}
+      {#if group.volume}
+        <li>
+          <h2 class="menu-title">{group.volume}</h2>
+          <ul>
+            {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
+              {@render chapterItem(chapter)}
+            {/each}
+          </ul>
+        </li>
+      {:else}
+        {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
+          {@render chapterItem(chapter)}
+        {/each}
+      {/if}
+    {/each}
+  </ul>
+{/snippet}
+
+{#snippet chapterItem(chapter: Chapter)}
+  <li>
+    <button
+      class="truncate {chapter.id === chapterId ? 'active' : ''}"
+      title={chapter.title}
+      onclick={() => selectChapter(chapter)}
+    >
+      {chapter.title}
+    </button>
+  </li>
+{/snippet}
 
 {#snippet zoomBtn(mode: ZoomMode, label: string)}
   <label
