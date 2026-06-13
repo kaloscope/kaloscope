@@ -52,11 +52,18 @@
     paraSpacing: [0, 2, 0.5],
     margin: [0, 4, 0.5]
   };
+
+  const PANEL_COLORS: Record<ReaderTheme, { panel: string; dropdown: string; topBar: string }> = {
+    white: { panel: '#fff', dropdown: '#f5f5f5', topBar: 'rgba(0,0,0,0.08)' },
+    sepia: { panel: '#fff', dropdown: '#f5f5f5', topBar: 'rgba(0,0,0,0.08)' },
+    dark: { panel: '#222', dropdown: '#333', topBar: 'rgba(0,0,0,0.5)' },
+    black: { panel: '#1a1a1a', dropdown: '#222', topBar: 'rgba(0,0,0,0.5)' }
+  };
 </script>
 
 <script lang="ts">
   import { icons } from '$lib/icons';
-  import { freeze } from '$lib/stores';
+  import { freeze, historyBack } from '$lib/stores';
   import { onMount } from 'svelte';
   import { fade, fly, scale } from 'svelte/transition';
 
@@ -69,14 +76,10 @@
   let chapterOpen = $state(false);
   let visible = $state(true);
 
-  let s = $derived($settings!);
-  let t = $derived(THEMES[s.theme]);
-  let panelBg = $derived(s.theme === 'black' ? '#1a1a1a' : s.theme === 'dark' ? '#222' : '#fff');
+  let t = $derived(THEMES[$settings?.theme ?? 'white']);
+  let colors = $derived(PANEL_COLORS[$settings?.theme ?? 'white']);
   let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
-
-  function updateSettings(patch: Partial<ReaderSettings>) {
-    settings.update((v) => ({ ...v, ...patch }) as ReaderSettings);
-  }
+  let paragraphs = $derived(content.split(/\n{2,}/).map((para) => para.trim()));
 
   export function mount(options: TextViewerOptions) {
     if (!options) return;
@@ -94,9 +97,12 @@
   }
 
   function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin', delta: number) {
+    if ($settings === null) {
+      return;
+    }
     const [min, max, step] = RANGES[key];
-    const newValue = Math.max(min, Math.min(max, Math.round((s[key] + delta) / step) * step));
-    updateSettings({ [key]: newValue });
+    const value = $settings[key] + delta;
+    $settings[key] = Math.max(min, Math.min(max, Math.round(value / step) * step));
   }
 
   let hideTimer: ReturnType<typeof setTimeout>;
@@ -123,18 +129,14 @@
   {#if visible}
     <div
       class="absolute top-0 left-0 right-0 z-10 flex items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
-      style:background-color={t.bg === '#000'
-        ? 'rgba(0,0,0,0.5)'
-        : t.bg === '#2b2b2b'
-          ? 'rgba(0,0,0,0.5)'
-          : 'rgba(0,0,0,0.08)'}
+      style:background-color={colors.topBar}
       style:color={t.muted}
       transition:fade={{ duration: 200 }}
     >
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none"
         style:color={t.muted}
-        onclick={() => history.back()}
+        onclick={() => historyBack()}
         aria-label="返回"
       >
         <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
@@ -154,12 +156,12 @@
           </button>
           {#if chapterOpen}
             <div
-              class="absolute top-full left-0 mt-1 max-h-64 w-56 overflow-y-auto rounded-lg py-1 shadow-xl"
-              style:background-color={panelBg === '#fff' ? '#f5f5f5' : panelBg === '#222' ? '#333' : '#222'}
+              class="absolute top-full left-0 mt-1 max-h-64 w-56 overflow-y-auto rounded-field py-1 shadow-xl"
+              style:background-color={colors.dropdown}
               style:color={t.text}
               transition:scale={{ start: 0.95, duration: 150 }}
             >
-              {#each chapters as ch}
+              {#each chapters as ch (ch.id)}
                 <button
                   class="block w-full px-4 py-1.5 text-left text-sm transition-colors {ch.id === chapterId
                     ? 'text-primary'
@@ -188,21 +190,32 @@
   {/if}
 
   <!-- Reading area -->
-  <article class="flex-1 overflow-y-auto overscroll-none transition-all duration-300" style:padding="0 {s.margin}rem">
-    {#if content}
-      <div
-        class="mx-auto max-w-3xl transition-all duration-300"
-        style:font-family={FONTS[s.font].family}
-        style:font-size="{s.fontSize}px"
-        style:line-height={s.lineHeight}
-        style:color={t.text}
-      >
-        {#each content.split('\n\n') as para}
-          <p class="indent-2" style:margin-bottom="{s.paraSpacing}em">{para.trim() || '&nbsp;'}</p>
-        {/each}
-      </div>
-    {/if}
-  </article>
+  {#if $settings !== null}
+    <article
+      class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
+      style:padding="0 {$settings.margin}rem"
+    >
+      {#if content}
+        <div
+          class="mx-auto min-w-0 max-w-3xl break-words transition-all duration-300 [word-break:normal]"
+          style:font-family={FONTS[$settings.font].family}
+          style:font-size="{$settings.fontSize}px"
+          style:line-height={$settings.lineHeight}
+          style:color={t.text}
+        >
+          {#each paragraphs as para, index (index)}
+            <p class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
+              {#if para}
+                {para}
+              {:else}
+                &nbsp;
+              {/if}
+            </p>
+          {/each}
+        </div>
+      {/if}
+    </article>
+  {/if}
 
   <!-- Settings panel -->
   {#if open}
@@ -214,7 +227,7 @@
     ></button>
     <div
       class="fixed right-0 top-0 z-20 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
-      style:background-color={panelBg}
+      style:background-color={colors.panel}
       style:color={t.text}
       transition:fly={{ x: 300, duration: 200 }}
     >
@@ -225,50 +238,56 @@
         </button>
       </div>
       <div class="flex-1 space-y-5 px-4 pb-6">
-        <div>
-          <span class="mb-1.5 block text-sm font-semibold opacity-60">背景主题</span>
-          <div class="grid grid-cols-4 gap-2">
-            {#each Object.entries(THEMES) as [key, th]}
-              <button
-                class="flex flex-col items-center gap-1.5 rounded-lg py-2 text-xs transition-all {s.theme === key
-                  ? 'ring-2 ring-primary'
-                  : 'opacity-60 hover:opacity-100'}"
-                onclick={() => updateSettings({ theme: key as ReaderTheme })}
-              >
-                <span
-                  class="size-5 rounded-full border shadow-sm"
-                  style:background-color={th.bg}
-                  style:border-color={th.bg === '#f5f5f0' || th.bg === '#f4ecd8' ? '#00000020' : '#ffffff30'}
-                ></span>
-                <span>{th.label}</span>
-              </button>
-            {/each}
+        {#if $settings !== null}
+          <div>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">背景主题</span>
+            <div class="grid grid-cols-4 gap-2">
+              {#each Object.entries(THEMES) as [key, th] (key)}
+                <label
+                  class="flex cursor-pointer flex-col items-center gap-1.5 rounded-field py-2 text-xs transition-all {$settings.theme ===
+                  key
+                    ? 'ring-2 ring-primary'
+                    : 'opacity-60 hover:opacity-100'}"
+                >
+                  <input type="radio" class="hidden" value={key} bind:group={$settings.theme} />
+                  <span
+                    class="size-5 rounded-full border shadow-sm"
+                    style:background-color={th.bg}
+                    style:border-color={th.bg === '#f5f5f0' || th.bg === '#f4ecd8' ? '#00000020' : '#ffffff30'}
+                  ></span>
+                  <span>{th.label}</span>
+                </label>
+              {/each}
+            </div>
           </div>
-        </div>
-        <div>
-          <span class="mb-1.5 block text-sm font-semibold opacity-60">字体</span>
-          <div class="grid grid-cols-3 gap-2">
-            {#each Object.entries(FONTS) as [key, f]}
-              <button
-                class="rounded-lg py-2 text-xs font-medium transition-all {s.font === key
-                  ? 'bg-primary/15 text-primary'
-                  : 'opacity-50 hover:opacity-80'}"
-                onclick={() => updateSettings({ font: key as ReaderFont })}>{f.label}</button
-              >
-            {/each}
+          <div>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">字体</span>
+            <div class="grid grid-cols-3 gap-2">
+              {#each Object.entries(FONTS) as [key, f] (key)}
+                <label
+                  class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.font ===
+                  key
+                    ? 'bg-primary/15 text-primary'
+                    : 'opacity-50 hover:opacity-80'}"
+                >
+                  <input type="radio" class="hidden" value={key} bind:group={$settings.font} />
+                  {f.label}
+                </label>
+              {/each}
+            </div>
           </div>
-        </div>
-        {@render slider('字号', 'fontSize', 'px', 1, 'A−', 'A+')}
-        {@render slider('行间距', 'lineHeight', '', 0.2, '−', '+')}
-        {@render slider('段间距', 'paraSpacing', 'em', 0.5, '−', '+')}
-        {@render slider('页边距', 'margin', 'rem', 0.5, '−', '+')}
+          {@render slider('字号', 'fontSize', 'px', 1, 'A−', 'A+')}
+          {@render slider('行间距', 'lineHeight', '', 0.2, '−', '+')}
+          {@render slider('段间距', 'paraSpacing', 'em', 0.5, '−', '+')}
+          {@render slider('页边距', 'margin', 'rem', 0.5, '−', '+')}
+        {/if}
       </div>
     </div>
   {/if}
 
   <!-- Chapter dropdown backdrop -->
   {#if chapterOpen}
-    <button class="fixed inset-0 z-10" aria-label="关闭章节列表" onclick={() => (chapterOpen = false)}></button>
+    <button class="fixed inset-0 z-[9]" aria-label="关闭章节列表" onclick={() => (chapterOpen = false)}></button>
   {/if}
 </div>
 
@@ -284,19 +303,13 @@
   <div>
     <span class="mb-1.5 flex items-center justify-between text-sm font-semibold opacity-60">
       <span>{label}</span>
-      <span class="tabular-nums">{s[key]}{unit}</span>
+      <span class="tabular-nums">{$settings?.[key]}{unit}</span>
     </span>
     <div class="flex items-center gap-2">
       <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, -step)}>{left}</button>
-      <input
-        type="range"
-        class="range range-xs flex-1"
-        {min}
-        {max}
-        {step}
-        value={s[key]}
-        oninput={(e) => updateSettings({ [key]: parseFloat(e.currentTarget.value) })}
-      />
+      {#if $settings !== null}
+        <input type="range" class="range range-xs flex-1" {min} {max} {step} bind:value={$settings[key]} />
+      {/if}
       <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, step)}>{right}</button>
     </div>
   </div>
