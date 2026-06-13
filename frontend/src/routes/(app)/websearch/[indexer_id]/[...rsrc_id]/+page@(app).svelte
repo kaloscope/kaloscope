@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import { Overlay, TextViewer, VideoPlayer } from '$lib/components';
+  import { ImageViewer, Overlay, TextViewer, VideoPlayer } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import type { Chapter, Resource, Resp } from '$lib/types';
   import { onMount, tick } from 'svelte';
@@ -24,21 +24,30 @@
   let mediaType: string | null = $derived.by(() => resource?.media_type ?? query.media_type);
   let videoType: string | null = $derived.by(() => resource?.video_type ?? query.video_type);
 
+  let refreshKey: number = $state(0);
   // the text viewer instance
   let textViewer: TextViewer | null = $state(null);
+  // the image viewer instance
+  let imageViewer: ImageViewer | null = $state(null);
   // the video player instance
   let videoPlayer: VideoPlayer | null = $state(null);
-  let refreshKey: number = $state(0);
 
   // the loading state
   const loading = createLoading();
 
+  // guard to limit fallback to first chapter once per load
+  let chapterFallbackTried: boolean = false;
+
   /**
    * Fetch the details of the resource.
    *
-   * @param refresh - Whether to refresh the resource details.
+   * @param chapterChange - Whether this request is triggered by a chapter change.
    */
-  function details(refresh: boolean = false) {
+  function details(chapterChange: boolean = false) {
+    // reset fallback guard on initial loads
+    if (!chapterChange) {
+      chapterFallbackTried = false;
+    }
     loading.start();
     api
       .post(`flow/graph/${page.params.indexer_id}/execute`, {
@@ -50,7 +59,9 @@
       })
       .json<Resp<Resource | null>>()
       .then(({ data }) => {
-        refresh && (refreshKey = new Date().getTime());
+        if (chapterChange) {
+          refreshKey = new Date().getTime();
+        }
         tick().then(() => onload(data));
       })
       .finally(() => {
@@ -69,22 +80,8 @@
     }
     resource = rsrc;
     const chapters = rsrc.chapters ?? [];
-    if (rsrc.url) {
-      if (mediaType === 'video' && videoPlayer) {
-        videoPlayer.mount({
-          url: rsrc.url,
-          videoType: videoType,
-          danmakus: rsrc.danmakus,
-          chapters: chapters,
-          chapterId: query.chapter_id,
-          chapterChange: onchange,
-          definitions: rsrc.definitions,
-          title: rsrc.title,
-          uploader: rsrc.uploader,
-          uploadedAt: rsrc.uploaded_at
-        });
-      }
-    } else if (mediaType === 'text' && textViewer) {
+    // load the viewer/player based on the media type
+    if (mediaType === 'text' && textViewer) {
       if (rsrc.text) {
         textViewer.mount({
           text: rsrc.text,
@@ -93,8 +90,49 @@
           chapterId: query.chapter_id,
           chapterChange: onchange
         });
+      } else {
+        fallbackToFirst(chapters);
       }
-    } else if (chapters.length > 0) {
+    } else if (mediaType === 'image' && imageViewer) {
+      if (rsrc.images && rsrc.images.length > 0) {
+        imageViewer.mount({
+          images: rsrc.images,
+          title: rsrc.title,
+          chapters: chapters,
+          chapterId: query.chapter_id,
+          chapterChange: onchange
+        });
+      } else {
+        fallbackToFirst(chapters);
+      }
+    } else if (mediaType === 'video' && videoPlayer) {
+      if (rsrc.url) {
+        videoPlayer.mount({
+          url: rsrc.url,
+          title: rsrc.title,
+          danmakus: rsrc.danmakus,
+          videoType: videoType,
+          chapters: chapters,
+          chapterId: query.chapter_id,
+          chapterChange: onchange,
+          definitions: rsrc.definitions,
+          uploader: rsrc.uploader,
+          uploadedAt: rsrc.uploaded_at
+        });
+      } else {
+        fallbackToFirst(chapters);
+      }
+    }
+  }
+
+  /**
+   * Fall back to the first chapter when the resource has no primary content.
+   *
+   * @param chapters - The chapter array.
+   */
+  function fallbackToFirst(chapters: Chapter[]) {
+    if (chapters.length > 0 && !chapterFallbackTried) {
+      chapterFallbackTried = true;
       onchange(chapters[0]);
     }
   }
@@ -108,7 +146,7 @@
     const { id, url, title, definition } = chapter;
     // change the video chapter directly if the URL is available
     if (mediaType === 'video' && videoPlayer && url) {
-      videoPlayer.mount({ next: !definition, url: url, title: title });
+      videoPlayer.mount({ next: !definition, url, title });
       return;
     }
     // update the query parameter and request the new chapter
@@ -128,6 +166,8 @@
   {#key refreshKey}
     {#if mediaType === 'text'}
       <TextViewer bind:this={textViewer} />
+    {:else if mediaType === 'image'}
+      <ImageViewer bind:this={imageViewer} />
     {:else if mediaType === 'video'}
       <VideoPlayer bind:this={videoPlayer} />
     {/if}
