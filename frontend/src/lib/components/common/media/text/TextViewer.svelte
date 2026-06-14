@@ -38,102 +38,78 @@
     paddingX: 2
   });
 
-  const THEMES: Record<Theme, { label: string; bg: string; text: string; muted: string; panel: string; bar: string }> =
-    {
-      white: {
-        label: '纯白',
-        bg: '#fafaf5',
-        text: '#333333',
-        muted: '#999999',
-        panel: '#ffffff',
-        bar: 'rgba(0,0,0,0.06)'
-      },
-      cream: {
-        label: '奶油',
-        bg: '#fdf6e3',
-        text: '#5c4b3a',
-        muted: '#9a8978',
-        panel: '#ffffff',
-        bar: 'rgba(0,0,0,0.08)'
-      },
-      sepia: {
-        label: '护眼',
-        bg: '#f4ecd8',
-        text: '#5b4636',
-        muted: '#a08b76',
-        panel: '#ffffff',
-        bar: 'rgba(0,0,0,0.08)'
-      },
-      light: {
-        label: '浅灰',
-        bg: '#e6e6e6',
-        text: '#444444',
-        muted: '#888888',
-        panel: '#ffffff',
-        bar: 'rgba(0,0,0,0.08)'
-      },
-      green: {
-        label: '豆绿',
-        bg: '#dce8d8',
-        text: '#3a4a3a',
-        muted: '#6b7b6b',
-        panel: '#ffffff',
-        bar: 'rgba(0,0,0,0.08)'
-      },
-      dark: {
-        label: '深色',
-        bg: '#2b2b2b',
-        text: '#cccccc',
-        muted: '#666666',
-        panel: '#222222',
-        bar: 'rgba(0,0,0,0.5)'
-      },
-      slate: {
-        label: '蓝灰',
-        bg: '#1a2128',
-        text: '#b0bec5',
-        muted: '#546e7a',
-        panel: '#1e242c',
-        bar: 'rgba(0,0,0,0.5)'
-      },
-      black: {
-        label: '夜间',
-        bg: '#000000',
-        text: '#aaaaaa',
-        muted: '#444444',
-        panel: '#1a1a1a',
-        bar: 'rgba(0,0,0,0.5)'
-      }
-    };
-
-  const FONTS: Record<Font, { label: string; family: string }> = {
-    system: {
-      label: '系统',
-      family: 'var(--font-sans)'
+  const THEMES: Record<Theme, { bg: string; text: string; muted: string; panel: string; bar: string }> = {
+    white: {
+      bg: '#fafaf5',
+      text: '#333333',
+      muted: '#999999',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.06)'
     },
-    sans: {
-      label: '黑体',
-      family: '"Noto Sans SC", "Noto Sans CJK SC", "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif'
+    cream: {
+      bg: '#fdf6e3',
+      text: '#5c4b3a',
+      muted: '#9a8978',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)'
     },
-    serif: {
-      label: '宋体',
-      family: '"Noto Serif SC", "Noto Serif CJK SC", "Noto Serif", "Songti SC", "STSong", serif'
+    sepia: {
+      bg: '#f4ecd8',
+      text: '#5b4636',
+      muted: '#a08b76',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)'
     },
-    kai: {
-      label: '楷体',
-      family: '"Kaiti SC", "KaiTi", "STKaiti", "ST Kaiti", "楷体", "楷体_GB2312", serif'
+    light: {
+      bg: '#e6e6e6',
+      text: '#444444',
+      muted: '#888888',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)'
     },
-    mono: {
-      label: '等宽',
-      family: '"Noto Sans Mono CJK SC", "Noto Sans Mono", "SF Mono", "Cascadia Code", monospace'
+    green: {
+      bg: '#dce8d8',
+      text: '#3a4a3a',
+      muted: '#6b7b6b',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)'
+    },
+    dark: {
+      bg: '#2b2b2b',
+      text: '#cccccc',
+      muted: '#666666',
+      panel: '#222222',
+      bar: 'rgba(0,0,0,0.5)'
+    },
+    slate: {
+      bg: '#1a2128',
+      text: '#b0bec5',
+      muted: '#546e7a',
+      panel: '#1e242c',
+      bar: 'rgba(0,0,0,0.5)'
+    },
+    black: {
+      bg: '#000000',
+      text: '#aaaaaa',
+      muted: '#444444',
+      panel: '#1a1a1a',
+      bar: 'rgba(0,0,0,0.5)'
     }
   };
 
+  const FONTS: Record<Font, string> = {
+    system: 'var(--font-sans)',
+    sans: '"Noto Sans SC", "Noto Sans CJK SC", "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif',
+    serif: '"Noto Serif SC", "Noto Serif CJK SC", "Noto Serif", "Songti SC", "STSong", serif',
+    kai: '"Kaiti SC", "KaiTi", "STKaiti", "ST Kaiti", "楷体", "楷体_GB2312", serif',
+    mono: '"Noto Sans Mono CJK SC", "Noto Sans Mono", "SF Mono", "Cascadia Code", monospace'
+  };
+
   const SLIDER_CONFIGS = {
-    fontSize: { label: '字号', min: 12, max: 28, step: 1, unit: 'px' },
-    lineHeight: { label: '行间距', min: 1.4, max: 3.0, step: 0.2, unit: '' },
-    paraSpacing: { label: '段间距', min: 0, max: 2, step: 0.5, unit: 'em' },
-    paddingX: { label: '左右边距', min: 0, max: 4, step: 0.5, unit: 'rem' }
+    fontSize: { i18n: 'media.text.font_size', min: 12, max: 28, step: 1, unit: 'px' },
+    lineHeight: { i18n: 'media.text.line_height', min: 1.4, max: 3.0, step: 0.2, unit: '' },
+    paraSpacing: { i18n: 'media.text.para_spacing', min: 0, max: 2, step: 0.5, unit: 'em' },
+    paddingX: { i18n: 'media.text.padding_x', min: 0, max: 4, step: 0.5, unit: 'rem' }
   };
 
   /**
@@ -172,6 +148,7 @@
 </script>
 
 <script lang="ts">
+  import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
   import { onMount } from 'svelte';
@@ -345,7 +322,7 @@
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">章节</h3>
+        <h3 class="text-base font-bold">{$_('media.text.chapters')}</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
           aria-label="Close"
@@ -367,7 +344,7 @@
       {#if content}
         <div
           class="mx-auto min-w-0 max-w-3xl wrap-break-word transition-all duration-300 [word-break:normal]"
-          style:font-family={FONTS[$settings.font].family}
+          style:font-family={FONTS[$settings.font]}
           style:font-size="{$settings.fontSize}px"
           style:line-height={$settings.lineHeight}
           style:color={colors.text}
@@ -401,7 +378,7 @@
       transition:fly={{ x: 300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">阅读设置</h3>
+        <h3 class="text-base font-bold">{$_('media.text.settings')}</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
           aria-label="Close"
@@ -413,7 +390,7 @@
       <div class="flex-1 space-y-5 p-4">
         {#if $settings !== null}
           <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">背景主题</span>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.theme')}</span>
             <div class="grid grid-cols-4 gap-2">
               {#each Object.entries(THEMES) as [key, t] (key)}
                 <label
@@ -426,21 +403,21 @@
                     style:background-color={t.bg}
                     style:border-color="{t.muted}50 !important"
                   ></span>
-                  <span>{t.label}</span>
+                  <span>{$_(`media.text.theme_options.${key}`)}</span>
                 </label>
               {/each}
             </div>
           </div>
           <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">字体</span>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.font')}</span>
             <div class="grid grid-cols-3 gap-2">
-              {#each Object.entries(FONTS) as [key, f] (key)}
+              {#each Object.entries(FONTS) as [key] (key)}
                 <label
                   class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
                   {$settings.font === key ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
                 >
                   <input type="radio" class="hidden" value={key} bind:group={$settings.font} />
-                  {f.label}
+                  {$_(`media.text.font_options.${key}`)}
                 </label>
               {/each}
             </div>
@@ -458,8 +435,8 @@
   {#if controlsVisible && chapters.length > 1}
     <div
       class="absolute bottom-0 inset-x-0 z-1 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
-      style:background-color={colors.bar}
       style:color={colors.muted}
+      style:background-color={colors.bar}
       transition:fade={{ duration: 200 }}
     >
       <button
@@ -518,10 +495,10 @@
 {/snippet}
 
 {#snippet slider(key: keyof typeof SLIDER_CONFIGS)}
-  {@const { label, min, max, step, unit } = SLIDER_CONFIGS[key]}
+  {@const { min, max, step, unit } = SLIDER_CONFIGS[key]}
   <div>
     <span class="mb-1.5 flex items-center justify-between text-sm font-semibold opacity-60">
-      <span>{label}</span>
+      <span>{$_(SLIDER_CONFIGS[key].i18n)}</span>
       <span class="tabular-nums">{$settings?.[key]}{unit}</span>
     </span>
     <div class="flex items-center gap-2">

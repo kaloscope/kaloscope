@@ -41,21 +41,10 @@
     pageDirection: 'right'
   });
 
-  const READ_MODES: Record<ReadMode, { label: string }> = {
-    scroll: { label: '滚动' },
-    paged: { label: '翻页' }
-  };
-
-  const ZOOM_MODES: Record<ZoomMode, { label: string; class: string }> = {
-    auto: { label: '自动', class: 'max-h-full max-w-full object-contain mx-auto' },
-    width: { label: '适应宽度', class: 'w-full h-auto' },
-    height: { label: '适应高度', class: 'h-full w-auto max-w-none mx-auto' }
-  };
-
-  const PAGE_DIRECTIONS: Record<PageDirection, { label: string }> = {
-    right: { label: '点击右侧' },
-    left: { label: '点击左侧' },
-    bottom: { label: '点击下方' }
+  const ZOOM_MODES: Record<ZoomMode, { class: string }> = {
+    auto: { class: 'max-h-full max-w-full object-contain mx-auto' },
+    width: { class: 'w-full h-auto' },
+    height: { class: 'h-full w-auto max-w-none mx-auto' }
   };
 
   /**
@@ -96,6 +85,7 @@
 <script lang="ts">
   import { page as route } from '$app/state';
   import { api, proxyImage } from '$lib/api';
+  import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
   import { onMount } from 'svelte';
@@ -460,7 +450,7 @@
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">章节</h3>
+        <h3 class="text-base font-bold">{$_('media.image.chapters')}</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
           aria-label="Close"
@@ -536,7 +526,7 @@
       transition:fly={{ x: 300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">阅读设置</h3>
+        <h3 class="text-base font-bold">{$_('media.image.settings')}</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
           aria-label="Close"
@@ -548,14 +538,14 @@
       <div class="flex-1 space-y-5 p-4">
         {#if $settings !== null}
           <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">阅读模式</span>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.read_mode')}</span>
             <div class="grid grid-cols-2 gap-2">
               {@render readModeBtn('scroll')}
               {@render readModeBtn('paged')}
             </div>
           </div>
           <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">缩放模式</span>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.zoom_mode')}</span>
             <div class="grid grid-cols-3 gap-2">
               {@render zoomModeBtn('auto')}
               {@render zoomModeBtn('width')}
@@ -563,7 +553,7 @@
             </div>
           </div>
           <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">翻页方向</span>
+            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.page_direction')}</span>
             <div class="grid grid-cols-3 gap-2">
               {@render directionBtn('right')}
               {@render directionBtn('left')}
@@ -642,7 +632,7 @@
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.readMode} />
     {/if}
-    {READ_MODES[mode].label}
+    {$_(`media.image.read_mode_options.${mode}`)}
   </label>
 {/snippet}
 
@@ -654,7 +644,7 @@
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.zoomMode} />
     {/if}
-    {ZOOM_MODES[mode].label}
+    {$_(`media.image.zoom_mode_options.${mode}`)}
   </label>
 {/snippet}
 
@@ -666,6 +656,6 @@
     {#if $settings !== null}
       <input type="radio" class="hidden" value={direction} bind:group={$settings.pageDirection} />
     {/if}
-    {PAGE_DIRECTIONS[direction].label}
+    {$_(`media.image.page_direction_options.${direction}`)}
   </label>
 {/snippet}

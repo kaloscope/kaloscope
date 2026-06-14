@@ -373,6 +373,54 @@
     "episodes": "Episodes",
     "parts": "Parts",
     "tags": "Tags",
+    "text": {
+      "chapters": "Chapters",
+      "settings": "Settings",
+      "theme": "Theme",
+      "theme_options": {
+        "white": "White",
+        "cream": "Cream",
+        "sepia": "Sepia",
+        "light": "Light",
+        "green": "Green",
+        "dark": "Dark",
+        "slate": "Slate",
+        "black": "Night"
+      },
+      "font": "Font",
+      "font_options": {
+        "system": "System",
+        "sans": "Sans Serif",
+        "serif": "Serif",
+        "kai": "Kai",
+        "mono": "Monospace"
+      },
+      "font_size": "Font Size",
+      "line_height": "Line Height",
+      "para_spacing": "Paragraph Spacing",
+      "padding_x": "Horizontal Padding"
+    },
+    "image": {
+      "chapters": "Chapters",
+      "settings": "Settings",
+      "read_mode": "Read Mode",
+      "read_mode_options": {
+        "scroll": "Scroll",
+        "paged": "Paged"
+      },
+      "zoom_mode": "Zoom Mode",
+      "zoom_mode_options": {
+        "auto": "Auto",
+        "width": "Fit Width",
+        "height": "Fit Height"
+      },
+      "page_direction": "Page Turn",
+      "page_direction_options": {
+        "right": "Tap Right",
+        "left": "Tap Left",
+        "bottom": "Tap Bottom"
+      }
+    },
     "video": {
       "settings": "Video",
       "speed": "Speed",

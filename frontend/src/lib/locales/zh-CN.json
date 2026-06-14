@@ -373,6 +373,54 @@
     "episodes": "剧集",
     "parts": "分段",
     "tags": "标签",
+    "text": {
+      "chapters": "章节",
+      "settings": "阅读设置",
+      "theme": "背景",
+      "theme_options": {
+        "white": "纯白",
+        "cream": "奶油",
+        "sepia": "护眼",
+        "light": "浅灰",
+        "green": "豆绿",
+        "dark": "深色",
+        "slate": "蓝灰",
+        "black": "夜间"
+      },
+      "font": "字体",
+      "font_options": {
+        "system": "系统",
+        "sans": "黑体",
+        "serif": "宋体",
+        "kai": "楷体",
+        "mono": "等宽"
+      },
+      "font_size": "字号",
+      "line_height": "行间距",
+      "para_spacing": "段间距",
+      "padding_x": "左右边距"
+    },
+    "image": {
+      "chapters": "章节",
+      "settings": "阅读设置",
+      "read_mode": "阅读模式",
+      "read_mode_options": {
+        "scroll": "滚动",
+        "paged": "翻页"
+      },
+      "zoom_mode": "缩放模式",
+      "zoom_mode_options": {
+        "auto": "自动",
+        "width": "适应宽度",
+        "height": "适应高度"
+      },
+      "page_direction": "翻页方向",
+      "page_direction_options": {
+        "right": "点击右侧",
+        "left": "点击左侧",
+        "bottom": "点击下方"
+      }
+    },
     "video": {
       "settings": "视频",
       "speed": "倍速",
