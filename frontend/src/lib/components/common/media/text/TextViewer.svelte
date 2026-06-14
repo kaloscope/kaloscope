@@ -65,6 +65,41 @@
     black: { panel: '#1a1a1a', topBar: 'rgba(0,0,0,0.5)' }
   };
 
+  /**
+   * Normalize chapter ids before comparing them with ids read from the URL.
+   *
+   * @param id - The chapter id to normalize.
+   * @returns The decoded chapter id, or null when it is missing.
+   */
+  function normalizeChapterId(id: string | null | undefined) {
+    if (!id) {
+      return null;
+    }
+    try {
+      return decodeURIComponent(id);
+    } catch {
+      return id;
+    }
+  }
+
+  /**
+   * Check whether two chapter ids refer to the same chapter.
+   *
+   * @param left - The first chapter id.
+   * @param right - The second chapter id.
+   * @returns Whether the normalized ids match.
+   */
+  function matchChapterId(left: string | null | undefined, right: string | null | undefined) {
+    const normalized = normalizeChapterId(left);
+    return !!normalized && normalized === normalizeChapterId(right);
+  }
+
+  /**
+   * Group chapters by volume when every chapter has a volume.
+   *
+   * @param chapters - The chapters to group.
+   * @returns Ordered chapter groups.
+   */
   function groupChapters(chapters: Chapter[]): ChapterGroup[] {
     const grouped = chapters.length > 0 && chapters.every((chapter) => !!chapter.volume?.trim());
     if (!grouped) {
@@ -100,10 +135,21 @@
 
   let t = $derived(THEMES[$settings?.theme ?? 'white']);
   let colors = $derived(PANEL_COLORS[$settings?.theme ?? 'white']);
-  let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
   let chapterGroups = $derived(groupChapters(chapters));
+  let currentChapterIndex = $derived.by(() => chapters.findIndex((chapter) => matchChapterId(chapter.id, chapterId)));
+  let currentChapter = $derived(currentChapterIndex >= 0 ? chapters[currentChapterIndex] : null);
+  let currentTitle = $derived(currentChapter?.title ?? title);
+  let previousChapter = $derived(currentChapterIndex > 0 ? chapters[currentChapterIndex - 1] : null);
+  let nextChapter = $derived(
+    currentChapterIndex >= 0 && currentChapterIndex < chapters.length - 1 ? chapters[currentChapterIndex + 1] : null
+  );
   let paragraphs = $derived(content.split(/\n{2,}/).map((para) => para.trim()));
 
+  /**
+   * Mount the text viewer with the given text resource.
+   *
+   * @param options - The text viewer options.
+   */
   export function mount(options: TextViewerOptions) {
     if (!options) return;
     content = options.text ?? '';
@@ -114,11 +160,41 @@
     resetTimer();
   }
 
+  /**
+   * Select a chapter and notify the parent page.
+   *
+   * @param chapter - The chapter to select.
+   */
   function selectChapter(chapter: Chapter) {
     chapterOpen = false;
+    chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
   }
 
+  /**
+   * Select the previous chapter when one is available.
+   */
+  function selectPreviousChapter() {
+    if (previousChapter) {
+      selectChapter(previousChapter);
+    }
+  }
+
+  /**
+   * Select the next chapter when one is available.
+   */
+  function selectNextChapter() {
+    if (nextChapter) {
+      selectChapter(nextChapter);
+    }
+  }
+
+  /**
+   * Adjust a numeric reader setting within its configured range.
+   *
+   * @param key - The setting key to adjust.
+   * @param delta - The amount to add to the current value.
+   */
   function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin', delta: number) {
     if ($settings === null) {
       return;
@@ -129,6 +205,9 @@
   }
 
   let hideTimer: ReturnType<typeof setTimeout>;
+  /**
+   * Show transient controls and restart the auto-hide timer.
+   */
   function resetTimer() {
     visible = true;
     clearTimeout(hideTimer);
@@ -316,6 +395,35 @@
       </div>
     </div>
   {/if}
+
+  <!-- Bottom bar -->
+  {#if visible && chapters.length > 1}
+    <div
+      class="absolute bottom-0 left-0 right-0 z-10 flex justify-center gap-4 px-2 py-2 backdrop-blur-sm transition-colors duration-300"
+      style:background-color={colors.topBar}
+      style:color={t.muted}
+      transition:fade={{ duration: 200 }}
+    >
+      <button
+        class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
+        style:color={t.muted}
+        aria-label="上一章"
+        disabled={!previousChapter}
+        onclick={() => selectPreviousChapter()}
+      >
+        <iconify-icon icon={icons.arrowUp} width="1.125rem"></iconify-icon>
+      </button>
+      <button
+        class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
+        style:color={t.muted}
+        aria-label="下一章"
+        disabled={!nextChapter}
+        onclick={() => selectNextChapter()}
+      >
+        <iconify-icon icon={icons.arrowDown} width="1.125rem"></iconify-icon>
+      </button>
+    </div>
+  {/if}
 </div>
 
 {#snippet chapterMenu()}
@@ -342,7 +450,7 @@
 {#snippet chapterItem(chapter: Chapter)}
   <li>
     <button
-      class={chapter.id === chapterId ? 'active' : ''}
+      class={matchChapterId(chapter.id, chapterId) ? 'active' : ''}
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >

@@ -39,6 +39,41 @@
     auto: 'max-h-full max-w-full object-contain mx-auto'
   };
 
+  /**
+   * Normalize chapter ids before comparing them with ids read from the URL.
+   *
+   * @param id - The chapter id to normalize.
+   * @returns The decoded chapter id, or null when it is missing.
+   */
+  function normalizeChapterId(id: string | null | undefined) {
+    if (!id) {
+      return null;
+    }
+    try {
+      return decodeURIComponent(id);
+    } catch {
+      return id;
+    }
+  }
+
+  /**
+   * Check whether two chapter ids refer to the same chapter.
+   *
+   * @param left - The first chapter id.
+   * @param right - The second chapter id.
+   * @returns Whether the normalized ids match.
+   */
+  function matchChapterId(left: string | null | undefined, right: string | null | undefined) {
+    const normalized = normalizeChapterId(left);
+    return !!normalized && normalized === normalizeChapterId(right);
+  }
+
+  /**
+   * Group chapters by volume when every chapter has a volume.
+   *
+   * @param chapters - The chapters to group.
+   * @returns Ordered chapter groups.
+   */
   function groupChapters(chapters: Chapter[]): ChapterGroup[] {
     const grouped = chapters.length > 0 && chapters.every((chapter) => !!chapter.volume?.trim());
     if (!grouped) {
@@ -93,9 +128,20 @@
     const fromRight = dir === 'right' ? fwd : !fwd;
     return { x: fromRight ? 200 : -200, duration: 200 };
   });
-  let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
   let chapterGroups = $derived(groupChapters(chapters));
+  let currentChapterIndex = $derived.by(() => chapters.findIndex((chapter) => matchChapterId(chapter.id, chapterId)));
+  let currentChapter = $derived(currentChapterIndex >= 0 ? chapters[currentChapterIndex] : null);
+  let currentTitle = $derived(currentChapter?.title ?? title);
+  let previousChapter = $derived(currentChapterIndex > 0 ? chapters[currentChapterIndex - 1] : null);
+  let nextChapter = $derived(
+    currentChapterIndex >= 0 && currentChapterIndex < chapters.length - 1 ? chapters[currentChapterIndex + 1] : null
+  );
 
+  /**
+   * Mount the image viewer with the given image resource.
+   *
+   * @param options - The image viewer options.
+   */
   export function mount(options: ImageViewerOptions) {
     if (!options?.images?.length) return;
     const nextImages = options.images.map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
@@ -112,11 +158,38 @@
     resetTimer();
   }
 
+  /**
+   * Select a chapter and notify the parent page.
+   *
+   * @param chapter - The chapter to select.
+   */
   function selectChapter(chapter: Chapter) {
     chapterOpen = false;
+    chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
   }
 
+  /**
+   * Select the previous chapter when one is available.
+   */
+  function selectPreviousChapter() {
+    if (previousChapter) {
+      selectChapter(previousChapter);
+    }
+  }
+
+  /**
+   * Select the next chapter when one is available.
+   */
+  function selectNextChapter() {
+    if (nextChapter) {
+      selectChapter(nextChapter);
+    }
+  }
+
+  /**
+   * Move to the previous loaded image.
+   */
   function prev() {
     if (pageIndex > 0) {
       animForward = false;
@@ -125,6 +198,10 @@
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
   }
+
+  /**
+   * Move to the next image, loading more images when needed.
+   */
   async function next() {
     if (pageIndex >= total - 1 || loading || imageLoading) {
       return;
@@ -140,6 +217,12 @@
     }
   }
 
+  /**
+   * Append new image URLs to the viewer, skipping duplicates.
+   *
+   * @param urls - The image URLs returned from the details API.
+   * @returns The number of images appended.
+   */
   function appendImages(urls: string[] | null | undefined) {
     const nextImages = (urls ?? []).map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
     const appended = nextImages.filter((src) => !images.includes(src));
@@ -149,6 +232,11 @@
     return appended.length;
   }
 
+  /**
+   * Read and decode the current chapter id from the URL.
+   *
+   * @returns The decoded chapter id, or null when none is available.
+   */
   function currentChapterId() {
     const id = route.url.searchParams.get('chapter_id') ?? chapterId;
     if (!id) {
@@ -161,6 +249,9 @@
     }
   }
 
+  /**
+   * Load the next batch of images from the details API.
+   */
   async function loadMore() {
     if (loading || !hasMore) {
       return;
@@ -186,6 +277,9 @@
     }
   }
 
+  /**
+   * Update the current page index according to scroll position.
+   */
   function updatePageIndex() {
     const el = scrollEl;
     if (!$settings || $settings.readMode !== 'scroll' || !el) return;
@@ -204,10 +298,18 @@
 
   const MAX_IMAGE_RETRY = 3;
 
+  /**
+   * Clear image loading state after an image finishes loading.
+   */
   function handleImageLoad() {
     imageLoading = false;
   }
 
+  /**
+   * Retry a failed image request with a cache-busting query parameter.
+   *
+   * @param e - The image error event.
+   */
   function handleImageError(e: Event) {
     const img = e.target as HTMLImageElement;
     const retry = parseInt(img.dataset.retry || '0');
@@ -221,6 +323,9 @@
     }
   }
 
+  /**
+   * Track scroll position and request more images near the end.
+   */
   function handleScroll() {
     updatePageIndex();
     const el = scrollEl;
@@ -232,6 +337,11 @@
     }
   }
 
+  /**
+   * Handle paged reader click zones.
+   *
+   * @param e - The click event.
+   */
   function handleClick(e: MouseEvent) {
     if (open || chapterOpen || $settings?.readMode !== 'paged') return;
     const dir = $settings.direction;
@@ -250,6 +360,11 @@
     }
   }
 
+  /**
+   * Handle keyboard navigation in paged mode.
+   *
+   * @param e - The keyboard event.
+   */
   async function handleKey(e: KeyboardEvent) {
     if (open || $settings === null) return;
     if (e.key === 'ArrowUp' || e.key === 'PageUp') prev();
@@ -259,6 +374,9 @@
   }
 
   let hideTimer: ReturnType<typeof setTimeout>;
+  /**
+   * Show transient controls and restart the auto-hide timer.
+   */
   function resetTimer() {
     visible = true;
     clearTimeout(hideTimer);
@@ -494,6 +612,31 @@
       </div>
     </div>
   {/if}
+
+  <!-- Bottom bar -->
+  {#if visible && chapters.length > 1}
+    <div
+      class="absolute bottom-0 left-0 right-0 z-10 flex justify-center gap-4 bg-black/50 px-2 py-2 text-white/80 backdrop-blur-sm"
+      transition:fade={{ duration: 200 }}
+    >
+      <button
+        class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
+        aria-label="上一章"
+        disabled={!previousChapter}
+        onclick={() => selectPreviousChapter()}
+      >
+        <iconify-icon icon={icons.arrowUp} width="1.125rem"></iconify-icon>
+      </button>
+      <button
+        class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
+        aria-label="下一章"
+        disabled={!nextChapter}
+        onclick={() => selectNextChapter()}
+      >
+        <iconify-icon icon={icons.arrowDown} width="1.125rem"></iconify-icon>
+      </button>
+    </div>
+  {/if}
 </div>
 
 {#snippet chapterMenu()}
@@ -520,7 +663,7 @@
 {#snippet chapterItem(chapter: Chapter)}
   <li>
     <button
-      class={chapter.id === chapterId ? 'active' : ''}
+      class={matchChapterId(chapter.id, chapterId) ? 'active' : ''}
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >
