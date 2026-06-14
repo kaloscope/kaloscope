@@ -43,131 +43,113 @@
 
   const THEMES: Record<
     TextTheme,
-    { bg: string; text: string; muted: string; panel: string; bar: string; label: string }
+    { label: string; bg: string; text: string; muted: string; panel: string; bar: string }
   > = {
     white: {
+      label: '纯白',
       bg: '#fafaf5',
       text: '#333333',
       muted: '#999999',
       panel: '#ffffff',
-      bar: 'rgba(0,0,0,0.06)',
-      label: '纯白'
+      bar: 'rgba(0,0,0,0.06)'
     },
     cream: {
+      label: '奶油',
       bg: '#fdf6e3',
       text: '#5c4b3a',
       muted: '#9a8978',
       panel: '#ffffff',
-      bar: 'rgba(0,0,0,0.08)',
-      label: '奶油'
+      bar: 'rgba(0,0,0,0.08)'
     },
     sepia: {
+      label: '护眼',
       bg: '#f4ecd8',
       text: '#5b4636',
       muted: '#a08b76',
       panel: '#ffffff',
-      bar: 'rgba(0,0,0,0.08)',
-      label: '护眼'
+      bar: 'rgba(0,0,0,0.08)'
     },
     light: {
+      label: '浅灰',
       bg: '#e6e6e6',
       text: '#444444',
       muted: '#888888',
       panel: '#ffffff',
-      bar: 'rgba(0,0,0,0.08)',
-      label: '浅灰'
+      bar: 'rgba(0,0,0,0.08)'
     },
     green: {
+      label: '豆绿',
       bg: '#dce8d8',
       text: '#3a4a3a',
       muted: '#6b7b6b',
       panel: '#ffffff',
-      bar: 'rgba(0,0,0,0.08)',
-      label: '豆绿'
+      bar: 'rgba(0,0,0,0.08)'
     },
     dark: {
+      label: '深色',
       bg: '#2b2b2b',
       text: '#cccccc',
       muted: '#666666',
       panel: '#222222',
-      bar: 'rgba(0,0,0,0.5)',
-      label: '深色'
+      bar: 'rgba(0,0,0,0.5)'
     },
     slate: {
+      label: '蓝灰',
       bg: '#1a2128',
       text: '#b0bec5',
       muted: '#546e7a',
       panel: '#1e242c',
-      bar: 'rgba(0,0,0,0.5)',
-      label: '蓝灰'
+      bar: 'rgba(0,0,0,0.5)'
     },
     black: {
+      label: '夜间',
       bg: '#000000',
       text: '#aaaaaa',
       muted: '#444444',
       panel: '#1a1a1a',
-      bar: 'rgba(0,0,0,0.5)',
-      label: '夜间'
+      bar: 'rgba(0,0,0,0.5)'
     }
   };
 
-  const FONTS: Record<TextFont, { family: string; label: string }> = {
+  const FONTS: Record<TextFont, { label: string; family: string }> = {
     system: {
-      family: 'var(--font-sans)',
-      label: '系统'
+      label: '系统',
+      family: 'var(--font-sans)'
     },
     sans: {
-      family: '"Noto Sans SC", "Noto Sans CJK SC", "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif',
-      label: '黑体'
+      label: '黑体',
+      family: '"Noto Sans SC", "Noto Sans CJK SC", "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif'
     },
     serif: {
-      family: '"Noto Serif SC", "Noto Serif CJK SC", "Noto Serif", "Songti SC", "STSong", serif',
-      label: '宋体'
+      label: '宋体',
+      family: '"Noto Serif SC", "Noto Serif CJK SC", "Noto Serif", "Songti SC", "STSong", serif'
     },
     kai: {
-      family: '"Kaiti SC", "KaiTi", "STKaiti", "ST Kaiti", "楷体", "楷体_GB2312", serif',
-      label: '楷体'
+      label: '楷体',
+      family: '"Kaiti SC", "KaiTi", "STKaiti", "ST Kaiti", "楷体", "楷体_GB2312", serif'
     },
     mono: {
-      family: '"Noto Sans Mono CJK SC", "Noto Sans Mono", "SF Mono", "Cascadia Code", monospace',
-      label: '等宽'
+      label: '等宽',
+      family: '"Noto Sans Mono CJK SC", "Noto Sans Mono", "SF Mono", "Cascadia Code", monospace'
     }
   };
 
-  const RANGES: Record<string, [number, number, number]> = {
-    fontSize: [12, 28, 1],
-    lineHeight: [1.4, 3.0, 0.2],
-    paraSpacing: [0, 2, 0.5],
-    paddingX: [0, 4, 0.5]
+  const SLIDER_CONFIGS = {
+    fontSize: { label: '字号', min: 12, max: 28, step: 1, unit: 'px' },
+    lineHeight: { label: '行间距', min: 1.4, max: 3.0, step: 0.2, unit: '' },
+    paraSpacing: { label: '段间距', min: 0, max: 2, step: 0.5, unit: 'em' },
+    paddingX: { label: '左右边距', min: 0, max: 4, step: 0.5, unit: 'rem' }
   };
-
-  /**
-   * Normalize chapter ids before comparing them with ids read from the URL.
-   *
-   * @param id - The chapter id to normalize.
-   * @returns The decoded chapter id, or null when it is missing.
-   */
-  function normalizeChapterId(id: string | null | undefined) {
-    if (!id) {
-      return null;
-    }
-    try {
-      return decodeURIComponent(id);
-    } catch {
-      return id;
-    }
-  }
 
   /**
    * Check whether two chapter ids refer to the same chapter.
    *
    * @param left - The first chapter id.
    * @param right - The second chapter id.
-   * @returns Whether the normalized ids match.
+   * @returns Whether the ids match.
    */
   function matchChapterId(left: string | null | undefined, right: string | null | undefined) {
-    const normalized = normalizeChapterId(left);
-    return !!normalized && normalized === normalizeChapterId(right);
+    return !!left && left === right;
   }
 
   /**
@@ -271,11 +253,11 @@
    * @param key - The setting key to adjust.
    * @param delta - The amount to add to the current value.
    */
-  function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'paddingX', delta: number) {
+  function clamp(key: keyof typeof SLIDER_CONFIGS, delta: number) {
     if ($settings === null) {
       return;
     }
-    const [min, max, step] = RANGES[key];
+    const { min, max, step } = SLIDER_CONFIGS[key];
     const value = $settings[key] + delta;
     $settings[key] = Math.max(min, Math.min(max, Math.round(value / step) * step));
   }
@@ -472,10 +454,10 @@
               {/each}
             </div>
           </div>
-          {@render slider('字号', 'fontSize', 'px', 1, 'A−', 'A+')}
-          {@render slider('行间距', 'lineHeight', '', 0.2, '−', '+')}
-          {@render slider('段间距', 'paraSpacing', 'em', 0.5, '−', '+')}
-          {@render slider('左右边距', 'paddingX', 'rem', 0.5, '−', '+')}
+          {@render slider('fontSize')}
+          {@render slider('lineHeight')}
+          {@render slider('paraSpacing')}
+          {@render slider('paddingX')}
         {/if}
       </div>
     </div>
@@ -544,26 +526,19 @@
   </li>
 {/snippet}
 
-{#snippet slider(
-  label: string,
-  key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'paddingX',
-  unit: string,
-  step: number,
-  left: string,
-  right: string
-)}
-  {@const [min, max] = RANGES[key]}
+{#snippet slider(key: keyof typeof SLIDER_CONFIGS)}
+  {@const { label, min, max, step, unit } = SLIDER_CONFIGS[key]}
   <div>
     <span class="mb-1.5 flex items-center justify-between text-sm font-semibold opacity-60">
       <span>{label}</span>
       <span class="tabular-nums">{$settings?.[key]}{unit}</span>
     </span>
     <div class="flex items-center gap-2">
-      <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, -step)}>{left}</button>
+      <button class="btn btn-xs text-sm font-mono border opacity-50" onclick={() => clamp(key, -step)}>-</button>
       {#if $settings !== null}
         <input type="range" class="range range-xs flex-1" {min} {max} {step} bind:value={$settings[key]} />
       {/if}
-      <button class="btn btn-xs border opacity-60" onclick={() => clamp(key, step)}>{right}</button>
+      <button class="btn btn-xs text-sm font-mono border opacity-50" onclick={() => clamp(key, step)}>+</button>
     </div>
   </div>
 {/snippet}

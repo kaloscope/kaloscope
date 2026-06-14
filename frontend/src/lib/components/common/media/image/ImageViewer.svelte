@@ -39,39 +39,32 @@
     pageDirection: 'right'
   });
 
-  const ZOOM: Record<ImageZoomMode, string> = {
-    width: 'w-full h-auto',
-    height: 'h-full w-auto max-w-none mx-auto',
-    auto: 'max-h-full max-w-full object-contain mx-auto'
+  const READ_MODES: Record<ImageReadMode, { label: string }> = {
+    scroll: { label: '滚动' },
+    paged: { label: '翻页' }
   };
 
-  /**
-   * Normalize chapter ids before comparing them with ids read from the URL.
-   *
-   * @param id - The chapter id to normalize.
-   * @returns The decoded chapter id, or null when it is missing.
-   */
-  function normalizeChapterId(id: string | null | undefined) {
-    if (!id) {
-      return null;
-    }
-    try {
-      return decodeURIComponent(id);
-    } catch {
-      return id;
-    }
-  }
+  const ZOOM_MODES: Record<ImageZoomMode, { label: string; class: string }> = {
+    width: { label: '适应宽度', class: 'w-full h-auto' },
+    height: { label: '适应高度', class: 'h-full w-auto max-w-none mx-auto' },
+    auto: { label: '自动', class: 'max-h-full max-w-full object-contain mx-auto' }
+  };
+
+  const PAGE_DIRECTIONS: Record<ImagePageDirection, { label: string }> = {
+    right: { label: '点击右侧' },
+    left: { label: '点击左侧' },
+    bottom: { label: '点击下方' }
+  };
 
   /**
    * Check whether two chapter ids refer to the same chapter.
    *
    * @param left - The first chapter id.
    * @param right - The second chapter id.
-   * @returns Whether the normalized ids match.
+   * @returns Whether the ids match.
    */
   function matchChapterId(left: string | null | undefined, right: string | null | undefined) {
-    const normalized = normalizeChapterId(left);
-    return !!normalized && normalized === normalizeChapterId(right);
+    return !!left && left === right;
   }
 
   /**
@@ -126,7 +119,7 @@
   let total = $derived(totalCount ?? images.length);
   let hasMore = $derived(images.length < total && !exhausted);
 
-  let zoomClass = $derived(ZOOM[$settings?.zoomMode ?? 'width']);
+  let zoomClass = $derived(ZOOM_MODES[$settings?.zoomMode ?? 'width'].class);
   let flyParams = $derived.by(() => {
     const dir = $settings?.pageDirection ?? 'right';
     const fwd = animForward;
@@ -239,20 +232,12 @@
   }
 
   /**
-   * Read and decode the current chapter id from the URL.
+   * Read the current chapter id from the URL.
    *
-   * @returns The decoded chapter id, or null when none is available.
+   * @returns The chapter id, or null when none is available.
    */
   function currentChapterId() {
-    const id = route.url.searchParams.get('chapter_id') ?? chapterId;
-    if (!id) {
-      return id;
-    }
-    try {
-      return decodeURIComponent(id);
-    } catch {
-      return id;
-    }
+    return route.url.searchParams.get('chapter_id') ?? chapterId;
   }
 
   /**
@@ -553,64 +538,24 @@
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">阅读模式</span>
             <div class="grid grid-cols-2 gap-2">
-              <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.readMode ===
-                'scroll'
-                  ? 'bg-primary/15 text-primary'
-                  : 'opacity-50 hover:opacity-80'}"
-              >
-                <input type="radio" class="hidden" value="scroll" bind:group={$settings.readMode} />
-                滚动
-              </label>
-              <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.readMode ===
-                'paged'
-                  ? 'bg-primary/15 text-primary'
-                  : 'opacity-50 hover:opacity-80'}"
-              >
-                <input type="radio" class="hidden" value="paged" bind:group={$settings.readMode} />
-                翻页
-              </label>
+              {@render readModeBtn('scroll')}
+              {@render readModeBtn('paged')}
             </div>
           </div>
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">缩放模式</span>
             <div class="grid grid-cols-3 gap-2">
-              {@render zoomBtn('width', '适应宽度')}
-              {@render zoomBtn('height', '适应高度')}
-              {@render zoomBtn('auto', '自动')}
+              {@render zoomBtn('width')}
+              {@render zoomBtn('height')}
+              {@render zoomBtn('auto')}
             </div>
           </div>
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">翻页方向</span>
-            <div class="grid grid-cols-2 gap-2">
-              <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.pageDirection ===
-                'right'
-                  ? 'bg-primary/15 text-primary'
-                  : 'opacity-50 hover:opacity-80'}"
-              >
-                <input type="radio" class="hidden" value="right" bind:group={$settings.pageDirection} />
-                点击右侧
-              </label>
-              <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.pageDirection ===
-                'left'
-                  ? 'bg-primary/15 text-primary'
-                  : 'opacity-50 hover:opacity-80'}"
-              >
-                <input type="radio" class="hidden" value="left" bind:group={$settings.pageDirection} />
-                点击左侧
-              </label>
-              <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.pageDirection ===
-                'bottom'
-                  ? 'bg-primary/15 text-primary'
-                  : 'opacity-50 hover:opacity-80'}"
-              >
-                <input type="radio" class="hidden" value="bottom" bind:group={$settings.pageDirection} />
-                点击下方
-              </label>
+            <div class="grid grid-cols-3 gap-2">
+              {@render dirBtn('right')}
+              {@render dirBtn('left')}
+              {@render dirBtn('bottom')}
             </div>
           </div>
         {/if}
@@ -677,7 +622,21 @@
   </li>
 {/snippet}
 
-{#snippet zoomBtn(mode: ImageZoomMode, label: string)}
+{#snippet readModeBtn(mode: ImageReadMode)}
+  <label
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.readMode ===
+    mode
+      ? 'bg-primary/15 text-primary'
+      : 'opacity-50 hover:opacity-80'}"
+  >
+    {#if $settings !== null}
+      <input type="radio" class="hidden" value={mode} bind:group={$settings.readMode} />
+    {/if}
+    {READ_MODES[mode].label}
+  </label>
+{/snippet}
+
+{#snippet zoomBtn(mode: ImageZoomMode)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.zoomMode ===
     mode
@@ -687,6 +646,20 @@
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.zoomMode} />
     {/if}
-    {label}
+    {ZOOM_MODES[mode].label}
+  </label>
+{/snippet}
+
+{#snippet dirBtn(dir: ImagePageDirection)}
+  <label
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.pageDirection ===
+    dir
+      ? 'bg-primary/15 text-primary'
+      : 'opacity-50 hover:opacity-80'}"
+  >
+    {#if $settings !== null}
+      <input type="radio" class="hidden" value={dir} bind:group={$settings.pageDirection} />
+    {/if}
+    {PAGE_DIRECTIONS[dir].label}
   </label>
 {/snippet}

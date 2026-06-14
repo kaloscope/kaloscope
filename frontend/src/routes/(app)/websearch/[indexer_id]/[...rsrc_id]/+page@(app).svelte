@@ -163,7 +163,7 @@
 </script>
 
 <div class="history-back fixed inset-0 layer-1 {mediaType === 'video' ? 'max-sm:bottom-(--ks-dock-h)' : ''}">
-  <Overlay black loading={$loading} />
+  <Overlay black={mediaType !== 'text'} loading={$loading} />
   {#key refreshKey}
     {#if mediaType === 'text'}
       <TextViewer bind:this={textViewer} />
