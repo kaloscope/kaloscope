@@ -215,9 +215,11 @@
    * @param options - The text viewer options.
    */
   export function mount(options: TextViewerOptions) {
-    if (!options) return;
-    content = options.text ?? '';
+    if (!options || !options.text) {
+      return;
+    }
     title = options.title ?? '';
+    content = options.text ?? '';
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;

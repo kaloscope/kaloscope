@@ -126,16 +126,14 @@
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
   // image elements for paged mode observation
   let imageEls: HTMLImageElement[] = [];
-  // current page index, 0-based
-  let pageIndex = $state(0);
+  // current image index, 0-based
+  let imageIndex = $state(0);
   // total number of images available from the api
-  let totalCount = $state<number | null>(null);
-  // derived total image count
-  let totalImages = $derived(totalCount ?? images.length);
+  let imageCount = $state(0);
   // whether all available images have been loaded
   let exhausted = $state(false);
   // whether more images can be loaded
-  let hasMore = $derived(images.length < totalImages && !exhausted);
+  let hasMore = $derived(images.length < imageCount && !exhausted);
   // whether a network request is in progress
   let loading = $state(false);
   // whether an image is currently loading
@@ -161,18 +159,18 @@
    * @param options - The image viewer options.
    */
   export function mount(options: ImageViewerOptions) {
-    if (!options?.images?.length) return;
-    const nextImages = options.images.map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
-    const nextTotal = options.image_count && options.image_count > 0 ? options.image_count : nextImages.length;
-    images = nextImages;
-    totalCount = nextTotal;
+    if (!options || !options.images?.length) {
+      return;
+    }
     title = options.title ?? '';
+    images = options.images.map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
+    imageCount = options.image_count && options.image_count > 0 ? options.image_count : images.length;
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
-    pageIndex = 0;
+    imageIndex = 0;
     imageLoading = true;
-    exhausted = nextImages.length >= nextTotal;
+    exhausted = images.length >= imageCount;
     showControls();
   }
 
@@ -209,9 +207,9 @@
    * Move to the previous loaded image.
    */
   function prev() {
-    if (pageIndex > 0) {
+    if (imageIndex > 0) {
       animForward = false;
-      pageIndex--;
+      imageIndex--;
       imageLoading = true;
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
@@ -221,15 +219,15 @@
    * Move to the next image, loading more images when needed.
    */
   async function next() {
-    if (pageIndex >= totalImages - 1 || loading || imageLoading) {
+    if (imageIndex >= imageCount - 1 || loading || imageLoading) {
       return;
     }
-    if (pageIndex >= images.length - 1) {
+    if (imageIndex >= images.length - 1) {
       await loadMore();
     }
-    if (pageIndex < images.length - 1) {
+    if (imageIndex < images.length - 1) {
       animForward = true;
-      pageIndex++;
+      imageIndex++;
       imageLoading = true;
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
@@ -280,7 +278,7 @@
         .json<Resp<Resource | null>>();
       const data = resp.data;
       const nextTotal = data?.image_count;
-      totalCount = nextTotal && nextTotal > 0 ? nextTotal : totalCount;
+      imageCount = nextTotal && nextTotal > 0 ? nextTotal : imageCount;
       exhausted = appendImages(data?.images) === 0;
     } finally {
       loading = false;
@@ -300,7 +298,7 @@
       if (!imgEl) continue;
       const rect = imgEl.getBoundingClientRect();
       if (rect.bottom > containerTop) {
-        pageIndex = i;
+        imageIndex = i;
         return;
       }
     }
@@ -438,8 +436,8 @@
 
       <span class="min-w-0 truncate text-center text-sm">
         {currentTitle}
-        {#if totalImages > 0}
-          <span class="ml-2 tabular-nums opacity-60">{pageIndex + 1} / {totalImages}</span>
+        {#if imageCount > 0}
+          <span class="ml-2 tabular-nums opacity-60">{imageIndex + 1} / {imageCount}</span>
         {/if}
       </span>
 
@@ -507,10 +505,10 @@
   {:else}
     <div bind:this={scrollEl} class="min-w-0 flex-1 overflow-auto overscroll-none">
       <div class="flex-center h-full w-min min-w-full">
-        {#if totalImages > 0}
-          {#key pageIndex}
+        {#if imageCount > 0}
+          {#key imageIndex}
             <img
-              src={images[pageIndex]}
+              src={images[imageIndex]}
               alt=""
               class={zoomClass}
               draggable="false"
