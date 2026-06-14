@@ -17,6 +17,6 @@
     <span class="line-clamp-2" title={info}>{info}</span>
   {/if}
   {#if extra}
-    <span class="italic">{extra}</span>
+    <span class="italic max-w-2/3 truncate" title={extra}>{extra}</span>
   {/if}
 </div>
