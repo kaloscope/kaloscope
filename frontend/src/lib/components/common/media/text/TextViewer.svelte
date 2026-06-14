@@ -2,7 +2,7 @@
   import { persisted } from '$lib/stores';
   import type { Chapter } from '$lib/types';
 
-  export type ReaderTheme = 'white' | 'sepia' | 'dark' | 'black';
+  export type ReaderTheme = 'white' | 'cream' | 'sepia' | 'light' | 'green' | 'dark' | 'slate' | 'black';
   export type ReaderFont = 'system' | 'serif' | 'sans' | 'kai' | 'mono';
 
   export type ReaderSettings = {
@@ -36,11 +36,74 @@
     margin: 2
   });
 
-  const THEMES: Record<ReaderTheme, { bg: string; text: string; muted: string; label: string }> = {
-    white: { bg: '#f5f5f0', text: '#333', muted: '#999', label: '白色' },
-    sepia: { bg: '#f4ecd8', text: '#5b4636', muted: '#a08b76', label: '护眼' },
-    dark: { bg: '#2b2b2b', text: '#ccc', muted: '#666', label: '深色' },
-    black: { bg: '#000', text: '#aaa', muted: '#444', label: '夜间' }
+  const THEMES: Record<
+    ReaderTheme,
+    { bg: string; text: string; muted: string; panel: string; bar: string; label: string }
+  > = {
+    white: {
+      bg: '#fafaf5',
+      text: '#333333',
+      muted: '#999999',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.06)',
+      label: '纯白'
+    },
+    cream: {
+      bg: '#fdf6e3',
+      text: '#5c4b3a',
+      muted: '#9a8978',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)',
+      label: '奶油'
+    },
+    sepia: {
+      bg: '#f4ecd8',
+      text: '#5b4636',
+      muted: '#a08b76',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)',
+      label: '护眼'
+    },
+    light: {
+      bg: '#e6e6e6',
+      text: '#444444',
+      muted: '#888888',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)',
+      label: '浅灰'
+    },
+    green: {
+      bg: '#dce8d8',
+      text: '#3a4a3a',
+      muted: '#6b7b6b',
+      panel: '#ffffff',
+      bar: 'rgba(0,0,0,0.08)',
+      label: '豆绿'
+    },
+    dark: {
+      bg: '#2b2b2b',
+      text: '#cccccc',
+      muted: '#666666',
+      panel: '#222222',
+      bar: 'rgba(0,0,0,0.5)',
+      label: '深色'
+    },
+    slate: {
+      bg: '#1a2128',
+      text: '#b0bec5',
+      muted: '#546e7a',
+      panel: '#1e242c',
+      bar: 'rgba(0,0,0,0.5)',
+      label: '蓝灰'
+    },
+    black: {
+      bg: '#000000',
+      text: '#aaaaaa',
+      muted: '#444444',
+      panel: '#1a1a1a',
+      bar: 'rgba(0,0,0,0.5)',
+      label: '夜间'
+    }
   };
 
   const FONTS: Record<ReaderFont, { family: string; label: string }> = {
@@ -71,13 +134,6 @@
     lineHeight: [1.4, 3.0, 0.2],
     paraSpacing: [0, 2, 0.5],
     margin: [0, 4, 0.5]
-  };
-
-  const PANEL_COLORS: Record<ReaderTheme, { panel: string; topBar: string }> = {
-    white: { panel: '#fff', topBar: 'rgba(0,0,0,0.08)' },
-    sepia: { panel: '#fff', topBar: 'rgba(0,0,0,0.08)' },
-    dark: { panel: '#222', topBar: 'rgba(0,0,0,0.5)' },
-    black: { panel: '#1a1a1a', topBar: 'rgba(0,0,0,0.5)' }
   };
 
   /**
@@ -149,7 +205,7 @@
   let visible = $state(true);
 
   let t = $derived(THEMES[$settings?.theme ?? 'white']);
-  let colors = $derived(PANEL_COLORS[$settings?.theme ?? 'white']);
+  let colors = $derived(THEMES[$settings?.theme ?? 'white']);
   let chapterGroups = $derived(groupChapters(chapters));
   let currentChapterIndex = $derived.by(() => chapters.findIndex((chapter) => matchChapterId(chapter.id, chapterId)));
   let currentChapter = $derived(currentChapterIndex >= 0 ? chapters[currentChapterIndex] : null);
@@ -251,7 +307,7 @@
   {#if visible}
     <div
       class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
-      style:background-color={colors.topBar}
+      style:background-color={colors.bar}
       style:color={t.muted}
       transition:fade={{ duration: 200 }}
     >
@@ -324,7 +380,7 @@
   {#if $settings !== null}
     <article
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
-      style:padding="0 {$settings.margin}rem"
+      style:padding="2rem {$settings.margin}rem 0"
     >
       {#if content}
         <div
@@ -424,7 +480,7 @@
   {#if visible && chapters.length > 1}
     <div
       class="absolute bottom-0 left-0 right-0 z-10 flex justify-center gap-4 px-2 py-2 backdrop-blur-sm transition-colors duration-300"
-      style:background-color={colors.topBar}
+      style:background-color={colors.bar}
       style:color={t.muted}
       transition:fade={{ duration: 200 }}
     >
