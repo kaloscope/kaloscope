@@ -610,6 +610,7 @@ export type Resource = Optional<{
   url: string;
   text: string;
   images: string[];
+  image_count: number;
   definitions: Definition[];
   chapters: Chapter[];
   danmakus: Danmaku[];

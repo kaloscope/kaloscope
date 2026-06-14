@@ -1,6 +1,6 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores';
-  import type { Chapter } from '$lib/types';
+  import type { Chapter, Resource } from '$lib/types';
 
   export type ReadMode = 'scroll' | 'paged';
   export type ZoomMode = 'width' | 'height' | 'auto';
@@ -14,6 +14,7 @@
 
   export type ImageViewerOptions = {
     images: string[];
+    image_count?: number | null;
     index?: number;
     title?: string | null;
     chapters?: Chapter[];
@@ -34,8 +35,8 @@
 
   const ZOOM: Record<ZoomMode, string> = {
     width: 'w-full h-auto',
-    height: 'h-full w-auto',
-    auto: 'max-h-full max-w-full object-contain'
+    height: 'h-full w-auto max-w-none mx-auto',
+    auto: 'max-h-full max-w-full object-contain mx-auto'
   };
 
   function groupChapters(chapters: Chapter[]): ChapterGroup[] {
@@ -57,9 +58,11 @@
 </script>
 
 <script lang="ts">
-  import { proxyImage } from '$lib/api';
+  import { page as route } from '$app/state';
+  import { api, proxyImage } from '$lib/api';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
+  import type { Resp } from '$lib/types';
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
@@ -69,11 +72,17 @@
   let chapterId = $state<string | null>(null);
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
-  let page = $state(0);
+  let imageEls: HTMLImageElement[] = [];
+  let pageIndex = $state(0);
+  let totalCount = $state<number | null>(null);
   let open = $state(false);
   let chapterOpen = $state(false);
   let visible = $state(true);
-  let total = $derived(images.length);
+  let loading = $state(false);
+  let imageLoading = $state(false);
+  let exhausted = $state(false);
+  let total = $derived(totalCount ?? images.length);
+  let hasMore = $derived(images.length < total && !exhausted);
 
   let zoomClass = $derived(ZOOM[$settings?.zoomMode ?? 'width']);
   let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
@@ -82,12 +91,16 @@
   export function mount(options: ImageViewerOptions) {
     if (!options?.images?.length) return;
     const nextImages = options.images.map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
+    const nextTotal = options.image_count && options.image_count > 0 ? options.image_count : nextImages.length;
     images = nextImages;
+    totalCount = nextTotal;
     title = options.title ?? '';
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
-    page = Math.max(0, Math.min(options.index ?? 0, nextImages.length - 1));
+    pageIndex = Math.max(0, Math.min(options.index ?? 0, nextImages.length - 1));
+    imageLoading = true;
+    exhausted = nextImages.length >= nextTotal;
     resetTimer();
   }
 
@@ -97,15 +110,96 @@
   }
 
   function prev() {
-    if (page > 0) {
-      page--;
-      scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
+    if (pageIndex > 0) {
+      pageIndex--;
+      imageLoading = true;
+      scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
   }
-  function next() {
-    if (page < total - 1) {
-      page++;
-      scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
+  async function next() {
+    if (pageIndex >= total - 1 || loading || imageLoading) {
+      return;
+    }
+    if (pageIndex >= images.length - 1) {
+      await loadMore();
+    }
+    if (pageIndex < images.length - 1) {
+      pageIndex++;
+      imageLoading = true;
+      scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    }
+  }
+
+  function appendImages(urls: string[] | null | undefined) {
+    const nextImages = (urls ?? []).map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
+    const appended = nextImages.filter((src) => !images.includes(src));
+    if (appended.length > 0) {
+      images = [...images, ...appended];
+    }
+    return appended.length;
+  }
+
+  function currentChapterId() {
+    const id = route.url.searchParams.get('chapter_id') ?? chapterId;
+    if (!id) {
+      return id;
+    }
+    try {
+      return decodeURIComponent(id);
+    } catch {
+      return id;
+    }
+  }
+
+  async function loadMore() {
+    if (loading || !hasMore) {
+      return;
+    }
+    loading = true;
+    try {
+      const resp = await api
+        .post(`flow/graph/${route.params.indexer_id}/execute`, {
+          json: {
+            $start: 'details_start',
+            id: route.params.rsrc_id,
+            chapter_id: currentChapterId(),
+            page: images.length + 1
+          }
+        })
+        .json<Resp<Resource | null>>();
+      const data = resp.data;
+      const nextTotal = data?.image_count;
+      totalCount = nextTotal && nextTotal > 0 ? nextTotal : totalCount;
+      exhausted = appendImages(data?.images) === 0;
+    } finally {
+      loading = false;
+    }
+  }
+
+  function updatePageIndex() {
+    const el = scrollEl;
+    if (!$settings || $settings.readMode !== 'scroll' || !el) return;
+
+    const containerTop = el.getBoundingClientRect().top;
+    for (let i = 0; i < imageEls.length; i++) {
+      const imgEl = imageEls[i];
+      if (!imgEl) continue;
+      const rect = imgEl.getBoundingClientRect();
+      if (rect.bottom > containerTop) {
+        pageIndex = i;
+        return;
+      }
+    }
+  }
+
+  function handleScroll() {
+    updatePageIndex();
+    const el = scrollEl;
+    if ($settings?.readMode !== 'scroll' || !el || loading || !hasMore) {
+      return;
+    }
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) {
+      loadMore();
     }
   }
 
@@ -114,14 +208,14 @@
     const x = e.clientX / window.innerWidth;
     const [prevZone, nextZone] = $settings.direction === 'rtl' ? [0.7, 0.3] : [0.3, 0.7];
     if (x < prevZone) prev();
-    else if (x > nextZone) next();
+    else if (x > nextZone) void next();
     else resetTimer();
   }
 
-  function handleKey(e: KeyboardEvent) {
+  async function handleKey(e: KeyboardEvent) {
     if (open || $settings === null) return;
-    if (e.key === 'ArrowLeft') $settings.direction === 'rtl' ? next() : prev();
-    else if (e.key === 'ArrowRight') $settings.direction === 'rtl' ? prev() : next();
+    if (e.key === 'ArrowLeft') $settings.direction === 'rtl' ? await next() : prev();
+    else if (e.key === 'ArrowRight') $settings.direction === 'rtl' ? prev() : await next();
     else return;
     resetTimer();
   }
@@ -184,7 +278,7 @@
       <span class="min-w-0 truncate text-center text-sm">
         {currentTitle}
         {#if total > 0}
-          <span class="ml-2 tabular-nums opacity-60">{page + 1} / {total}</span>
+          <span class="ml-2 tabular-nums opacity-60">{pageIndex + 1} / {total}</span>
         {/if}
       </span>
 
@@ -226,19 +320,51 @@
 
   <!-- Content -->
   {#if $settings?.readMode === 'scroll'}
-    <div bind:this={scrollEl} class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none">
+    <div
+      bind:this={scrollEl}
+      class="min-w-0 flex-1 overflow-x-auto overflow-y-auto overscroll-none"
+      onscroll={handleScroll}
+    >
       {#each images as src, i (i)}
-        <img {src} alt="" class={zoomClass} loading={i < 3 ? 'eager' : 'lazy'} draggable="false" />
+        <img
+          bind:this={imageEls[i]}
+          {src}
+          alt=""
+          class={zoomClass}
+          loading={i < 3 ? 'eager' : 'lazy'}
+          draggable="false"
+          onload={handleScroll}
+        />
       {/each}
-    </div>
-  {:else}
-    <div bind:this={scrollEl} class="min-w-0 flex-1 flex-center overflow-hidden">
-      {#if total > 0}
-        {#key page}
-          <img src={images[page]} alt="" class={zoomClass} draggable="false" transition:fade={{ duration: 150 }} />
-        {/key}
+      {#if loading}
+        <div class="flex-center py-6 text-white/40">
+          <span class="loading loading-spinner loading-md"></span>
+        </div>
       {/if}
     </div>
+  {:else}
+    <div bind:this={scrollEl} class="min-w-0 flex-1 overflow-auto overscroll-none">
+      <div class="flex-center h-full w-min min-w-full">
+        {#if total > 0}
+          {#key pageIndex}
+            <img
+              src={images[pageIndex]}
+              alt=""
+              class={zoomClass}
+              draggable="false"
+              transition:fade={{ duration: 150 }}
+              onload={() => (imageLoading = false)}
+            />
+          {/key}
+        {/if}
+      </div>
+    </div>
+
+    {#if loading || imageLoading}
+      <div class="pointer-events-none fixed inset-0 z-10 flex items-center justify-center text-white/60">
+        <span class="loading loading-spinner loading-md"></span>
+      </div>
+    {/if}
   {/if}
 
   <!-- Settings panel -->

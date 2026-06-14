@@ -97,6 +97,7 @@
       if (rsrc.images && rsrc.images.length > 0) {
         imageViewer.mount({
           images: rsrc.images,
+          image_count: rsrc.image_count,
           title: rsrc.title,
           chapters: chapters,
           chapterId: query.chapter_id,
