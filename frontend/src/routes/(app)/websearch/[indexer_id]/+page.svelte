@@ -194,6 +194,7 @@
         markFavorites(indexerId, resources);
         if (data.total === null || data.total === undefined) {
           if (data.totalPages) {
+            pagination.total = null;
             pagination.totalPages = data.totalPages;
             pagination.simpleMode = false;
           } else {
