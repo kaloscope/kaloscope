@@ -2,6 +2,15 @@
   import { persisted } from '$lib/stores';
   import type { Chapter, ChapterGroup, Resource, Resp } from '$lib/types';
 
+  /** Delay in ms before auto-hiding the overlay controls. */
+  const CONTROLS_HIDE_DELAY = 3000;
+  /** Click-zone threshold ratio in paged mode. The complementary zone is `1 - threshold`. */
+  const CLICK_ZONE_THRESHOLD = 0.3;
+  /** Distance from the bottom of the scroll container (px) to trigger loading more images. */
+  const SCROLL_LOAD_THRESHOLD = 400;
+  /** Maximum retries for a failed image request. */
+  const MAX_IMAGE_RETRY = 3;
+
   /** Options passed to the image viewer mount function. */
   export type ImageViewerOptions = {
     images: string[];
@@ -221,22 +230,13 @@
    * @param urls - The image URLs returned from the details API.
    * @returns The number of images appended.
    */
-  function appendImages(urls: string[] | null | undefined) {
+  function appendImages(urls: string[] | null | undefined): number {
     const nextImages = (urls ?? []).map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
     const appended = nextImages.filter((src) => !images.includes(src));
     if (appended.length > 0) {
       images = [...images, ...appended];
     }
     return appended.length;
-  }
-
-  /**
-   * Read the current chapter id from the URL.
-   *
-   * @returns The chapter id, or null when none is available.
-   */
-  function currentChapterId() {
-    return route.url.searchParams.get('chapter_id') ?? chapterId;
   }
 
   /**
@@ -253,14 +253,14 @@
           json: {
             $start: 'details_start',
             id: route.params.rsrc_id,
-            chapter_id: currentChapterId(),
+            chapter_id: route.url.searchParams.get('chapter_id') ?? chapterId,
             page: images.length + 1
           }
         })
         .json<Resp<Resource | null>>();
       const data = resp.data;
-      const nextTotal = data?.image_count;
-      imageCount = nextTotal && nextTotal > 0 ? nextTotal : imageCount;
+      const nextCount = data?.image_count;
+      imageCount = nextCount && nextCount > 0 ? nextCount : imageCount;
       exhausted = appendImages(data?.images) === 0;
     } finally {
       loading = false;
@@ -268,16 +268,19 @@
   }
 
   /**
-   * Update the current page index according to scroll position.
+   * Update the current image index according to scroll position.
    */
-  function updatePageIndex() {
+  function updateImageIndex() {
     const el = scrollEl;
-    if (!$settings || $settings.readMode !== 'scroll' || !el) return;
-
+    if (!el || !$settings || $settings.readMode !== 'scroll') {
+      return;
+    }
     const containerTop = el.getBoundingClientRect().top;
     for (let i = 0; i < imageEls.length; i++) {
       const imgEl = imageEls[i];
-      if (!imgEl) continue;
+      if (!imgEl) {
+        continue;
+      }
       const rect = imgEl.getBoundingClientRect();
       if (rect.bottom > containerTop) {
         imageIndex = i;
@@ -285,8 +288,6 @@
       }
     }
   }
-
-  const MAX_IMAGE_RETRY = 3;
 
   /**
    * Clear image loading state after an image finishes loading.
@@ -316,37 +317,14 @@
   /**
    * Track scroll position and request more images near the end.
    */
-  function handleScroll() {
-    updatePageIndex();
+  function handleImageScroll() {
+    updateImageIndex();
     const el = scrollEl;
-    if ($settings?.readMode !== 'scroll' || !el || loading || !hasMore) {
+    if ($settings?.readMode !== 'scroll' || !el || !hasMore || loading) {
       return;
     }
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) {
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_THRESHOLD) {
       loadMore();
-    }
-  }
-
-  /**
-   * Handle paged reader click zones.
-   *
-   * @param e - The click event.
-   */
-  function handleClick(e: MouseEvent) {
-    if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') return;
-    const dir = $settings.pageDirection;
-
-    if (dir === 'bottom') {
-      const y = e.clientY / window.innerHeight;
-      if (y < 0.3) prev();
-      else if (y > 0.7) void next();
-      else showControls();
-    } else {
-      const x = e.clientX / window.innerWidth;
-      const isLeft = dir === 'left';
-      if (isLeft ? x > 0.7 : x < 0.3) prev();
-      else if (isLeft ? x < 0.3 : x > 0.7) void next();
-      else showControls();
     }
   }
 
@@ -355,22 +333,62 @@
    *
    * @param e - The keyboard event.
    */
-  async function handleKey(e: KeyboardEvent) {
-    if (settingsOpen || $settings === null) return;
-    if (e.key === 'ArrowUp' || e.key === 'PageUp') prev();
-    else if (e.key === 'ArrowDown' || e.key === 'PageDown') await next();
-    else return;
+  function handleKeyDown(e: KeyboardEvent) {
+    if (settingsOpen || $settings === null) {
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+      prev();
+    } else if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+      next();
+    } else {
+      return;
+    }
     showControls();
   }
 
+  /**
+   * Handle paged reader click zones.
+   *
+   * @param e - The click event.
+   */
+  function handleClick(e: MouseEvent) {
+    if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') {
+      return;
+    }
+    const direction = $settings.pageDirection;
+    if (direction === 'bottom') {
+      const y = e.clientY / window.innerHeight;
+      if (y < CLICK_ZONE_THRESHOLD) {
+        prev();
+      } else if (y > 1 - CLICK_ZONE_THRESHOLD) {
+        next();
+      } else {
+        showControls();
+      }
+    } else {
+      const x = e.clientX / window.innerWidth;
+      const isLeft = direction === 'left';
+      if (isLeft ? x > 1 - CLICK_ZONE_THRESHOLD : x < CLICK_ZONE_THRESHOLD) {
+        prev();
+      } else if (isLeft ? x < CLICK_ZONE_THRESHOLD : x > 1 - CLICK_ZONE_THRESHOLD) {
+        next();
+      } else {
+        showControls();
+      }
+    }
+  }
+
+  // auto-hide timer for controls
   let hideTimer: ReturnType<typeof setTimeout>;
+
   /**
    * Show transient controls and restart the auto-hide timer.
    */
   function showControls() {
     controlsVisible = true;
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => (controlsVisible = false), 3000);
+    hideTimer = setTimeout(() => (controlsVisible = false), CONTROLS_HIDE_DELAY);
   }
 
   onMount(() => {
@@ -383,7 +401,7 @@
   });
 </script>
 
-<svelte:window onkeydown={handleKey} onmousemove={showControls} />
+<svelte:window onkeydown={handleKeyDown} onmousemove={showControls} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -464,7 +482,7 @@
     <div
       bind:this={scrollEl}
       class="min-w-0 flex-1 overflow-x-auto overflow-y-auto overscroll-none"
-      onscroll={handleScroll}
+      onscroll={handleImageScroll}
     >
       {#each images as src, i (i)}
         <img
@@ -474,7 +492,7 @@
           class={zoomClass}
           loading={i < 3 ? 'eager' : 'lazy'}
           draggable="false"
-          onload={handleScroll}
+          onload={handleImageScroll}
           onerror={handleImageError}
         />
       {/each}

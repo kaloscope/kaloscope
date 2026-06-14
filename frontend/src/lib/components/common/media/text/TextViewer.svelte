@@ -2,6 +2,9 @@
   import { persisted } from '$lib/stores';
   import type { Chapter, ChapterGroup } from '$lib/types';
 
+  /** Delay in ms before auto-hiding the overlay controls. */
+  const CONTROLS_HIDE_DELAY = 3000;
+
   /** Options passed to the text viewer mount function. */
   export type TextViewerOptions = {
     text: string;
@@ -252,14 +255,16 @@
     $settings[key] = Math.max(min, Math.min(max, Math.round(value / step) * step));
   }
 
+  // auto-hide timer for controls
   let hideTimer: ReturnType<typeof setTimeout>;
+
   /**
    * Show transient controls and restart the auto-hide timer.
    */
   function showControls() {
     controlsVisible = true;
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => (controlsVisible = false), 3000);
+    hideTimer = setTimeout(() => (controlsVisible = false), CONTROLS_HIDE_DELAY);
   }
 
   onMount(() => {
