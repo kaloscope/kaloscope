@@ -3,6 +3,7 @@ import { alert } from '$lib/components';
 import { UserRole } from '$lib/enums';
 import { token, user } from '$lib/stores';
 import type { BaseResp, Resp, User } from '$lib/types';
+import { sniffer } from '$lib/utils';
 import ky, { isHTTPError } from 'ky';
 import { get } from 'svelte/store';
 
@@ -95,7 +96,9 @@ export function proxyImage(url: string | null, policy: boolean | 'auto' | 'store
     if (proxy === 'store') {
       return buildProxyUrl(true);
     }
-    if (proxy !== 'true') {
+    // Android WebView often has issues loading mixed-content or cross-origin images,
+    // so force proxy through the server when running on Android
+    if (proxy !== 'true' && !sniffer.isAndroid()) {
       return url;
     }
     return buildProxyUrl(false);
