@@ -2,16 +2,21 @@
   import { persisted } from '$lib/stores';
   import type { Chapter, Resource } from '$lib/types';
 
-  export type ReadMode = 'scroll' | 'paged';
-  export type ZoomMode = 'width' | 'height' | 'auto';
-  export type Direction = 'right' | 'left' | 'bottom';
+  /** Reading mode for the image viewer. */
+  export type ImageReadMode = 'scroll' | 'paged';
+  /** Zoom mode for images. */
+  export type ImageZoomMode = 'width' | 'height' | 'auto';
+  /** Page-turning direction in paged reading mode. */
+  export type ImagePageDirection = 'right' | 'left' | 'bottom';
 
-  export type ImageReaderSettings = {
-    readMode: ReadMode;
-    zoomMode: ZoomMode;
-    direction: Direction;
+  /** Persisted settings for the image viewer. */
+  export type ImageViewerSettings = {
+    readMode: ImageReadMode;
+    zoomMode: ImageZoomMode;
+    pageDirection: ImagePageDirection;
   };
 
+  /** Options passed to the image viewer mount function. */
   export type ImageViewerOptions = {
     images: string[];
     image_count?: number | null;
@@ -22,18 +27,19 @@
     chapterChange?: (chapter: Chapter) => void;
   };
 
+  /** Group of chapters keyed by volume name. */
   type ChapterGroup = {
     volume: string | null;
     chapters: Chapter[];
   };
 
-  const settings = persisted<ImageReaderSettings>('image-reader', {
+  const settings = persisted<ImageViewerSettings>('image-viewer', {
     readMode: 'scroll',
     zoomMode: 'width',
-    direction: 'right'
+    pageDirection: 'right'
   });
 
-  const ZOOM: Record<ZoomMode, string> = {
+  const ZOOM: Record<ImageZoomMode, string> = {
     width: 'w-full h-auto',
     height: 'h-full w-auto max-w-none mx-auto',
     auto: 'max-h-full max-w-full object-contain mx-auto'
@@ -122,7 +128,7 @@
 
   let zoomClass = $derived(ZOOM[$settings?.zoomMode ?? 'width']);
   let flyParams = $derived.by(() => {
-    const dir = $settings?.direction ?? 'right';
+    const dir = $settings?.pageDirection ?? 'right';
     const fwd = animForward;
     if (dir === 'bottom') return { y: fwd ? 200 : -200, duration: 200 };
     const fromRight = dir === 'right' ? fwd : !fwd;
@@ -344,7 +350,7 @@
    */
   function handleClick(e: MouseEvent) {
     if (open || chapterOpen || $settings?.readMode !== 'paged') return;
-    const dir = $settings.direction;
+    const dir = $settings.pageDirection;
 
     if (dir === 'bottom') {
       const y = e.clientY / window.innerHeight;
@@ -579,30 +585,30 @@
             <span class="mb-1.5 block text-sm font-semibold opacity-60">翻页方向</span>
             <div class="grid grid-cols-2 gap-2">
               <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.direction ===
+                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.pageDirection ===
                 'right'
                   ? 'bg-primary/15 text-primary'
                   : 'opacity-50 hover:opacity-80'}"
               >
-                <input type="radio" class="hidden" value="right" bind:group={$settings.direction} />
+                <input type="radio" class="hidden" value="right" bind:group={$settings.pageDirection} />
                 点击右侧
               </label>
               <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.direction ===
+                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.pageDirection ===
                 'left'
                   ? 'bg-primary/15 text-primary'
                   : 'opacity-50 hover:opacity-80'}"
               >
-                <input type="radio" class="hidden" value="left" bind:group={$settings.direction} />
+                <input type="radio" class="hidden" value="left" bind:group={$settings.pageDirection} />
                 点击左侧
               </label>
               <label
-                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.direction ===
+                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.pageDirection ===
                 'bottom'
                   ? 'bg-primary/15 text-primary'
                   : 'opacity-50 hover:opacity-80'}"
               >
-                <input type="radio" class="hidden" value="bottom" bind:group={$settings.direction} />
+                <input type="radio" class="hidden" value="bottom" bind:group={$settings.pageDirection} />
                 点击下方
               </label>
             </div>
@@ -671,7 +677,7 @@
   </li>
 {/snippet}
 
-{#snippet zoomBtn(mode: ZoomMode, label: string)}
+{#snippet zoomBtn(mode: ImageZoomMode, label: string)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.zoomMode ===
     mode

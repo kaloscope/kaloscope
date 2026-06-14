@@ -2,18 +2,22 @@
   import { persisted } from '$lib/stores';
   import type { Chapter } from '$lib/types';
 
-  export type ReaderTheme = 'white' | 'cream' | 'sepia' | 'light' | 'green' | 'dark' | 'slate' | 'black';
-  export type ReaderFont = 'system' | 'serif' | 'sans' | 'kai' | 'mono';
+  /** Color theme for the text viewer. */
+  export type TextTheme = 'white' | 'cream' | 'sepia' | 'light' | 'green' | 'dark' | 'slate' | 'black';
+  /** Font family for the text viewer. */
+  export type TextFont = 'system' | 'serif' | 'sans' | 'kai' | 'mono';
 
-  export type ReaderSettings = {
-    theme: ReaderTheme;
-    font: ReaderFont;
+  /** Persisted settings for the text viewer. */
+  export type TextViewerSettings = {
+    theme: TextTheme;
+    font: TextFont;
     fontSize: number;
     lineHeight: number;
     paraSpacing: number;
-    margin: number;
+    paddingX: number;
   };
 
+  /** Options passed to the text viewer mount function. */
   export type TextViewerOptions = {
     text: string;
     title?: string | null;
@@ -22,22 +26,23 @@
     chapterChange?: (chapter: Chapter) => void;
   };
 
+  /** Group of chapters keyed by volume name. */
   type ChapterGroup = {
     volume: string | null;
     chapters: Chapter[];
   };
 
-  const settings = persisted<ReaderSettings>('reader', {
+  const settings = persisted<TextViewerSettings>('text-viewer', {
     theme: 'white',
     font: 'system',
     fontSize: 16,
     lineHeight: 1.8,
     paraSpacing: 1,
-    margin: 2
+    paddingX: 2
   });
 
   const THEMES: Record<
-    ReaderTheme,
+    TextTheme,
     { bg: string; text: string; muted: string; panel: string; bar: string; label: string }
   > = {
     white: {
@@ -106,7 +111,7 @@
     }
   };
 
-  const FONTS: Record<ReaderFont, { family: string; label: string }> = {
+  const FONTS: Record<TextFont, { family: string; label: string }> = {
     system: {
       family: 'var(--font-sans)',
       label: '系统'
@@ -133,7 +138,7 @@
     fontSize: [12, 28, 1],
     lineHeight: [1.4, 3.0, 0.2],
     paraSpacing: [0, 2, 0.5],
-    margin: [0, 4, 0.5]
+    paddingX: [0, 4, 0.5]
   };
 
   /**
@@ -266,7 +271,7 @@
    * @param key - The setting key to adjust.
    * @param delta - The amount to add to the current value.
    */
-  function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin', delta: number) {
+  function clamp(key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'paddingX', delta: number) {
     if ($settings === null) {
       return;
     }
@@ -380,7 +385,7 @@
   {#if $settings !== null}
     <article
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
-      style:padding="2rem {$settings.margin}rem 0"
+      style:padding="2rem {$settings.paddingX}rem 0"
     >
       {#if content}
         <div
@@ -470,7 +475,7 @@
           {@render slider('字号', 'fontSize', 'px', 1, 'A−', 'A+')}
           {@render slider('行间距', 'lineHeight', '', 0.2, '−', '+')}
           {@render slider('段间距', 'paraSpacing', 'em', 0.5, '−', '+')}
-          {@render slider('页边距', 'margin', 'rem', 0.5, '−', '+')}
+          {@render slider('左右边距', 'paddingX', 'rem', 0.5, '−', '+')}
         {/if}
       </div>
     </div>
@@ -541,7 +546,7 @@
 
 {#snippet slider(
   label: string,
-  key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'margin',
+  key: 'fontSize' | 'lineHeight' | 'paraSpacing' | 'paddingX',
   unit: string,
   step: number,
   left: string,
