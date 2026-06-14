@@ -92,42 +92,66 @@
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
+  // resource title
   let title = $state('');
+  // loaded image urls
   let images = $state<string[]>([]);
+  // available chapters
   let chapters = $state<Chapter[]>([]);
+  // chapters grouped by volume
   let chapterGroups = $derived(groupChapters(chapters));
+  // currently active chapter id from url or selection
   let chapterId = $state<string | null>(null);
-  let chapterIndex = $derived.by(() => chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
-  let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
-  let settingsOpen = $state(false);
-  let chaptersOpen = $state(false);
-  let controlsVisible = $state(true);
-
-  let currentChapter = $derived(chapterIndex >= 0 ? chapters[chapterIndex] : null);
-  let currentTitle = $derived(title || currentChapter?.title);
+  // index of the current chapter within the chapters array
+  let chapterIndex = $derived(chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
+  // previous chapter in sequence, or null if at the first
   let previousChapter = $derived(chapterIndex > 0 ? chapters[chapterIndex - 1] : null);
+  // next chapter in sequence, or null if at the last
   let nextChapter = $derived(
     chapterIndex >= 0 && chapterIndex < chapters.length - 1 ? chapters[chapterIndex + 1] : null
   );
+  // callback to notify parent of chapter change
+  let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
+  // display title, resource title or current chapter title
+  let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
 
+  // whether the settings panel is open
+  let settingsOpen = $state(false);
+  // whether the chapters menu is open
+  let chaptersOpen = $state(false);
+  // whether the overlay controls are visible
+  let controlsVisible = $state(true);
+
+  // the scroll container element
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
+  // image elements for paged mode observation
   let imageEls: HTMLImageElement[] = [];
+  // current page index, 0-based
   let pageIndex = $state(0);
+  // total number of images available from the api
   let totalCount = $state<number | null>(null);
-
-  let loading = $state(false);
-  let imageLoading = $state(false);
-  let animForward = $state(true);
+  // derived total image count
+  let totalImages = $derived(totalCount ?? images.length);
+  // whether all available images have been loaded
   let exhausted = $state(false);
-  let total = $derived(totalCount ?? images.length);
-  let hasMore = $derived(images.length < total && !exhausted);
+  // whether more images can be loaded
+  let hasMore = $derived(images.length < totalImages && !exhausted);
+  // whether a network request is in progress
+  let loading = $state(false);
+  // whether an image is currently loading
+  let imageLoading = $state(false);
 
+  // css class for the current zoom mode
   let zoomClass = $derived(ZOOM_MODES[$settings?.zoomMode ?? 'width'].class);
+  // direction of the page turn animation, forward or backward
+  let animForward = $state(true);
+  // fly transition parameters for the current page direction
   let flyParams = $derived.by(() => {
-    const dir = $settings?.pageDirection ?? 'right';
-    const fwd = animForward;
-    if (dir === 'bottom') return { y: fwd ? 200 : -200, duration: 200 };
-    const fromRight = dir === 'right' ? fwd : !fwd;
+    const direction = $settings?.pageDirection ?? 'right';
+    if (direction === 'bottom') {
+      return { y: animForward ? 200 : -200, duration: 200 };
+    }
+    const fromRight = direction === 'right' ? animForward : !animForward;
     return { x: fromRight ? 200 : -200, duration: 200 };
   });
 
@@ -197,7 +221,7 @@
    * Move to the next image, loading more images when needed.
    */
   async function next() {
-    if (pageIndex >= total - 1 || loading || imageLoading) {
+    if (pageIndex >= totalImages - 1 || loading || imageLoading) {
       return;
     }
     if (pageIndex >= images.length - 1) {
@@ -414,8 +438,8 @@
 
       <span class="min-w-0 truncate text-center text-sm">
         {currentTitle}
-        {#if total > 0}
-          <span class="ml-2 tabular-nums opacity-60">{pageIndex + 1} / {total}</span>
+        {#if totalImages > 0}
+          <span class="ml-2 tabular-nums opacity-60">{pageIndex + 1} / {totalImages}</span>
         {/if}
       </span>
 
@@ -483,7 +507,7 @@
   {:else}
     <div bind:this={scrollEl} class="min-w-0 flex-1 overflow-auto overscroll-none">
       <div class="flex-center h-full w-min min-w-full">
-        {#if total > 0}
+        {#if totalImages > 0}
           {#key pageIndex}
             <img
               src={images[pageIndex]}

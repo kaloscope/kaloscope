@@ -174,26 +174,39 @@
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
+  // resource title
   let title = $state('');
+  // text content of the current chapter
   let content = $state('');
+  // available chapters
   let chapters = $state<Chapter[]>([]);
+  // chapters grouped by volume
   let chapterGroups = $derived(groupChapters(chapters));
+  // currently active chapter id from url or selection
   let chapterId = $state<string | null>(null);
-  let chapterIndex = $derived.by(() => chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
-  let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
-  let settingsOpen = $state(false);
-  let chaptersOpen = $state(false);
-
-  let controlsVisible = $state(true);
-
-  let currentChapter = $derived(chapterIndex >= 0 ? chapters[chapterIndex] : null);
-  let currentTitle = $derived(title || currentChapter?.title);
+  // index of the current chapter within the chapters array
+  let chapterIndex = $derived(chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
+  // previous chapter in sequence, or null if at the first
   let previousChapter = $derived(chapterIndex > 0 ? chapters[chapterIndex - 1] : null);
+  // next chapter in sequence, or null if at the last
   let nextChapter = $derived(
     chapterIndex >= 0 && chapterIndex < chapters.length - 1 ? chapters[chapterIndex + 1] : null
   );
+  // callback to notify parent of chapter change
+  let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
+  // display title, resource title or current chapter title
+  let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
 
+  // whether the settings panel is open
+  let settingsOpen = $state(false);
+  // whether the chapters menu is open
+  let chaptersOpen = $state(false);
+  // whether the overlay controls are visible
+  let controlsVisible = $state(true);
+
+  // current theme colors
   let colors = $derived(THEMES[$settings?.theme ?? 'white']);
+  // content split into paragraphs
   let paragraphs = $derived(content.split(/\n{2,}/).map((para) => para.trim()));
 
   /**
