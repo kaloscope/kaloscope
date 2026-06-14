@@ -395,14 +395,9 @@
 
 <svelte:window onkeydown={handleKey} onmousemove={resetTimer} />
 
+<!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="fixed inset-0 flex flex-col bg-black"
-  onclick={handleClick}
-  onkeydown={handleKey}
-  role="application"
-  aria-label="图片阅读器"
->
+<div role="application" aria-label="Image viewer" class="fixed inset-0 flex flex-col bg-black" onclick={handleClick}>
   <!-- Top bar -->
   {#if visible}
     <div
@@ -413,14 +408,14 @@
         <button
           class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
           onclick={() => historyBack()}
-          aria-label="返回"
+          aria-label="Back"
         >
           <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
         </button>
         {#if chapters.length > 1}
           <button
             class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
-            aria-label="章节"
+            aria-label="Chapters"
             onclick={() => {
               chapterOpen = true;
               clearTimeout(hideTimer);
@@ -440,7 +435,7 @@
 
       <button
         class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none text-white/70"
-        aria-label="阅读设置"
+        aria-label="Reading settings"
         onclick={() => (open = !open)}
       >
         <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
@@ -452,7 +447,7 @@
   {#if chapterOpen}
     <button
       class="fixed inset-0 z-20 bg-black/20"
-      aria-label="关闭章节列表"
+      aria-label="Close chapter list"
       onclick={() => (chapterOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
@@ -464,7 +459,7 @@
         <h3 class="text-base font-bold">章节</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
-          aria-label="关闭"
+          aria-label="Close"
           onclick={() => (chapterOpen = false)}
         >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
@@ -529,7 +524,7 @@
   {#if open}
     <button
       class="fixed inset-0 z-20 bg-black/20"
-      aria-label="关闭设置"
+      aria-label="Close settings"
       onclick={() => (open = false)}
       transition:fade={{ duration: 150 }}
     ></button>
@@ -539,7 +534,11 @@
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 class="text-base font-bold">阅读设置</h3>
-        <button class="btn btn-xs border-0 bg-transparent shadow-none" aria-label="关闭" onclick={() => (open = false)}>
+        <button
+          class="btn btn-xs border-0 bg-transparent shadow-none"
+          aria-label="Close"
+          onclick={() => (open = false)}
+        >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
         </button>
       </div>
@@ -621,7 +620,7 @@
     >
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
-        aria-label="上一章"
+        aria-label="Previous chapter"
         disabled={!previousChapter}
         onclick={() => selectPreviousChapter()}
       >
@@ -629,7 +628,7 @@
       </button>
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
-        aria-label="下一章"
+        aria-label="Next chapter"
         disabled={!nextChapter}
         onclick={() => selectNextChapter()}
       >
@@ -663,7 +662,7 @@
 {#snippet chapterItem(chapter: Chapter)}
   <li>
     <button
-      class={matchChapterId(chapter.id, chapterId) ? 'active' : ''}
+      class={matchChapterId(chapter.id, chapterId) ? 'menu-active' : ''}
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >

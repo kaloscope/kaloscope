@@ -226,7 +226,12 @@
 
 <svelte:window onmousemove={resetTimer} />
 
-<div class="flex size-full flex-col transition-colors duration-300" style:background-color={t.bg}>
+<div
+  role="application"
+  aria-label="Text viewer"
+  class="fixed inset-0 flex flex-col transition-colors duration-300"
+  style:background-color={t.bg}
+>
   <!-- Top bar -->
   {#if visible}
     <div
@@ -240,7 +245,7 @@
           class="btn btn-xs btn-ghost border-0 shadow-none"
           style:color={t.muted}
           onclick={() => historyBack()}
-          aria-label="返回"
+          aria-label="Back"
         >
           <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
         </button>
@@ -248,7 +253,7 @@
           <button
             class="btn btn-xs btn-ghost border-0 shadow-none"
             style:color={t.muted}
-            aria-label="章节"
+            aria-label="Chapters"
             onclick={() => {
               chapterOpen = true;
               clearTimeout(hideTimer);
@@ -264,7 +269,7 @@
       <button
         class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none"
         style:color={t.muted}
-        aria-label="阅读设置"
+        aria-label="Reading settings"
         onclick={() => (open = !open)}
       >
         <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
@@ -276,7 +281,7 @@
   {#if chapterOpen}
     <button
       class="fixed inset-0 z-10 bg-black/20"
-      aria-label="关闭章节列表"
+      aria-label="Close chapter list"
       onclick={() => (chapterOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
@@ -290,7 +295,7 @@
         <h3 class="text-base font-bold">章节</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
-          aria-label="关闭"
+          aria-label="Close"
           onclick={() => (chapterOpen = false)}
         >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
@@ -308,7 +313,7 @@
     >
       {#if content}
         <div
-          class="mx-auto min-w-0 max-w-3xl break-words transition-all duration-300 [word-break:normal]"
+          class="mx-auto min-w-0 max-w-3xl wrap-break-word transition-all duration-300 [word-break:normal]"
           style:font-family={FONTS[$settings.font].family}
           style:font-size="{$settings.fontSize}px"
           style:line-height={$settings.lineHeight}
@@ -332,7 +337,7 @@
   {#if open}
     <button
       class="fixed inset-0 z-10 bg-black/20"
-      aria-label="关闭设置"
+      aria-label="Close settings"
       onclick={() => (open = false)}
       transition:fade={{ duration: 150 }}
     ></button>
@@ -344,7 +349,11 @@
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 class="text-base font-bold">阅读设置</h3>
-        <button class="btn btn-xs border-0 bg-transparent shadow-none" aria-label="关闭" onclick={() => (open = false)}>
+        <button
+          class="btn btn-xs border-0 bg-transparent shadow-none"
+          aria-label="Close"
+          onclick={() => (open = false)}
+        >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
         </button>
       </div>
@@ -407,7 +416,7 @@
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
         style:color={t.muted}
-        aria-label="上一章"
+        aria-label="Previous chapter"
         disabled={!previousChapter}
         onclick={() => selectPreviousChapter()}
       >
@@ -416,7 +425,7 @@
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
         style:color={t.muted}
-        aria-label="下一章"
+        aria-label="Next chapter"
         disabled={!nextChapter}
         onclick={() => selectNextChapter()}
       >
@@ -450,7 +459,7 @@
 {#snippet chapterItem(chapter: Chapter)}
   <li>
     <button
-      class={matchChapterId(chapter.id, chapterId) ? 'active' : ''}
+      class={matchChapterId(chapter.id, chapterId) ? 'menu-active' : ''}
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >
