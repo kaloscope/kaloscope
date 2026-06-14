@@ -409,7 +409,7 @@
   <!-- top bar -->
   {#if controlsVisible}
     <div
-      class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
+      class="absolute top-0 inset-x-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
     >
       <div class="flex items-center gap-1">
@@ -454,13 +454,13 @@
   <!-- chapter panel -->
   {#if chaptersOpen}
     <button
-      class="fixed inset-0 z-20 bg-black/20"
+      class="fixed inset-0 z-2 bg-black/20"
       aria-label="Close chapter list"
       onclick={() => (chaptersOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed left-0 top-0 z-30 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
+      class="fixed left-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
@@ -477,7 +477,7 @@
     </div>
   {/if}
 
-  <!-- content -->
+  <!-- reading area -->
   {#if $settings?.readMode === 'scroll'}
     <div
       bind:this={scrollEl}
@@ -497,7 +497,7 @@
         />
       {/each}
       {#if loading}
-        <div class="flex-center py-6 text-white/40">
+        <div class="flex-center pt-6 pb-12 text-white/40">
           <span class="loading loading-spinner loading-md"></span>
         </div>
       {/if}
@@ -522,8 +522,8 @@
     </div>
 
     {#if loading || imageLoading}
-      <div class="pointer-events-none fixed inset-0 z-10 flex items-center justify-center text-white/60">
-        <span class="loading loading-spinner loading-md"></span>
+      <div class="pointer-events-none fixed inset-0 z-1 flex items-center justify-center text-white/60">
+        <span class="loading loading-spinner loading-xl"></span>
       </div>
     {/if}
   {/if}
@@ -531,13 +531,13 @@
   <!-- settings panel -->
   {#if settingsOpen}
     <button
-      class="fixed inset-0 z-20 bg-black/20"
+      class="fixed inset-0 z-2 bg-black/20"
       aria-label="Close settings"
       onclick={() => (settingsOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed right-0 top-0 z-30 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
+      class="fixed right-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
       transition:fly={{ x: 300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
@@ -583,7 +583,7 @@
   <!-- bottom bar -->
   {#if controlsVisible && chapters.length > 1}
     <div
-      class="absolute bottom-0 inset-x-0 z-10 flex justify-center gap-6 bg-black/50 p-2 text-white/80 backdrop-blur-sm"
+      class="absolute bottom-0 inset-x-0 z-1 flex justify-center gap-6 bg-black/50 p-2 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
     >
       <button

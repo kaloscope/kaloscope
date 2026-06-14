@@ -288,9 +288,9 @@
   <!-- top bar -->
   {#if controlsVisible}
     <div
-      class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
-      style:background-color={colors.bar}
+      class="absolute top-0 inset-x-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
       style:color={colors.muted}
+      style:background-color={colors.bar}
       transition:fade={{ duration: 200 }}
     >
       <div class="flex items-center gap-1">
@@ -333,13 +333,13 @@
   <!-- chapter panel -->
   {#if chaptersOpen}
     <button
-      class="fixed inset-0 z-10 bg-black/20"
+      class="fixed inset-0 z-2 bg-black/20"
       aria-label="Close chapter list"
       onclick={() => (chaptersOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed left-0 top-0 z-20 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
+      class="fixed left-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
       style:background-color={colors.panel}
       style:color={colors.text}
       transition:fly={{ x: -300, duration: 200 }}
@@ -358,7 +358,7 @@
     </div>
   {/if}
 
-  <!-- content -->
+  <!-- reading area -->
   {#if $settings !== null}
     <article
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
@@ -389,13 +389,13 @@
   <!-- settings panel -->
   {#if settingsOpen}
     <button
-      class="fixed inset-0 z-10 bg-black/20"
+      class="fixed inset-0 z-2 bg-black/20"
       aria-label="Close settings"
       onclick={() => (settingsOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed right-0 top-0 z-20 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
+      class="fixed right-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
       style:background-color={colors.panel}
       style:color={colors.text}
       transition:fly={{ x: 300, duration: 200 }}
@@ -461,7 +461,7 @@
   <!-- bottom bar -->
   {#if controlsVisible && chapters.length > 1}
     <div
-      class="absolute bottom-0 inset-x-0 z-10 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
+      class="absolute bottom-0 inset-x-0 z-1 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
       style:background-color={colors.bar}
       style:color={colors.muted}
       transition:fade={{ duration: 200 }}
