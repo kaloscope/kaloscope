@@ -180,13 +180,15 @@
     onscroll={() => _onscroll()}
     bind:this={view}
   >
-    {#if mode === 'grid' && item}
-      <Grid {data} {uniqueKey} {loading} {item} {itemClass} {gridClass} />
-    {:else if header && row}
-      <Table {data} {uniqueKey} {loading} {header} {row} {rowClass} {tableClass} />
-    {/if}
-    {#if paginator}
-      {@render paginator(loading !== undefined && loading !== null)}
-    {/if}
+    <div class={dvh && hideOnScroll ? 'min-h-[calc(100%+1px)]' : ''}>
+      {#if mode === 'grid' && item}
+        <Grid {data} {uniqueKey} {loading} {item} {itemClass} {gridClass} />
+      {:else if header && row}
+        <Table {data} {uniqueKey} {loading} {header} {row} {rowClass} {tableClass} />
+      {/if}
+      {#if paginator}
+        {@render paginator(loading !== undefined && loading !== null)}
+      {/if}
+    </div>
   </div>
 </div>
