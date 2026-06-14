@@ -340,8 +340,8 @@
     ></button>
     <div
       class="fixed left-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
-      style:background-color={colors.panel}
       style:color={colors.text}
+      style:background-color={colors.panel}
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
@@ -396,8 +396,8 @@
     ></button>
     <div
       class="fixed right-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
-      style:background-color={colors.panel}
       style:color={colors.text}
+      style:background-color={colors.panel}
       transition:fly={{ x: 300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
@@ -410,25 +410,23 @@
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
         </button>
       </div>
-      <div class="flex-1 space-y-5 px-4 pb-6">
+      <div class="flex-1 space-y-5 p-4">
         {#if $settings !== null}
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">背景主题</span>
             <div class="grid grid-cols-4 gap-2">
-              {#each Object.entries(THEMES) as [key, th] (key)}
+              {#each Object.entries(THEMES) as [key, t] (key)}
                 <label
-                  class="flex cursor-pointer flex-col items-center gap-1.5 rounded-field py-2 text-xs transition-all {$settings.theme ===
-                  key
-                    ? 'ring-2 ring-primary'
-                    : 'opacity-60 hover:opacity-100'}"
+                  class="flex cursor-pointer flex-col items-center gap-1.5 rounded-field py-2 text-xs transition-all
+                  {$settings.theme === key ? 'ring-2 ring-primary' : 'opacity-60 hover:opacity-100'}"
                 >
                   <input type="radio" class="hidden" value={key} bind:group={$settings.theme} />
                   <span
                     class="size-5 rounded-full border shadow-sm"
-                    style:background-color={th.bg}
-                    style:border-color={th.bg === '#f5f5f0' || th.bg === '#f4ecd8' ? '#00000020' : '#ffffff30'}
+                    style:background-color={t.bg}
+                    style:border-color="{t.muted}50 !important"
                   ></span>
-                  <span>{th.label}</span>
+                  <span>{t.label}</span>
                 </label>
               {/each}
             </div>
@@ -438,10 +436,8 @@
             <div class="grid grid-cols-3 gap-2">
               {#each Object.entries(FONTS) as [key, f] (key)}
                 <label
-                  class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.font ===
-                  key
-                    ? 'bg-primary/15 text-primary'
-                    : 'opacity-50 hover:opacity-80'}"
+                  class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
+                  {$settings.font === key ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
                 >
                   <input type="radio" class="hidden" value={key} bind:group={$settings.font} />
                   {f.label}

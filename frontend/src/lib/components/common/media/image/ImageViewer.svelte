@@ -462,7 +462,7 @@
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 class="text-base font-bold">章节</h3>
         <button
-          class="btn btn-xs border-0 bg-transparent shadow-none"
+          class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
           aria-label="Close"
           onclick={() => (chaptersOpen = false)}
         >
@@ -516,7 +516,6 @@
         {/if}
       </div>
     </div>
-
     {#if loading || imageLoading}
       <div class="pointer-events-none fixed inset-0 z-1 flex items-center justify-center text-white/60">
         <span class="loading loading-spinner loading-xl"></span>
@@ -539,14 +538,14 @@
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 class="text-base font-bold">阅读设置</h3>
         <button
-          class="btn btn-xs border-0 bg-transparent shadow-none"
+          class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
           aria-label="Close"
           onclick={() => (settingsOpen = false)}
         >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
         </button>
       </div>
-      <div class="flex-1 space-y-5 px-4 pb-6">
+      <div class="flex-1 space-y-5 p-4">
         {#if $settings !== null}
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">阅读模式</span>
@@ -558,17 +557,17 @@
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">缩放模式</span>
             <div class="grid grid-cols-3 gap-2">
-              {@render zoomBtn('auto')}
-              {@render zoomBtn('width')}
-              {@render zoomBtn('height')}
+              {@render zoomModeBtn('auto')}
+              {@render zoomModeBtn('width')}
+              {@render zoomModeBtn('height')}
             </div>
           </div>
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">翻页方向</span>
             <div class="grid grid-cols-3 gap-2">
-              {@render dirBtn('right')}
-              {@render dirBtn('left')}
-              {@render dirBtn('bottom')}
+              {@render directionBtn('right')}
+              {@render directionBtn('left')}
+              {@render directionBtn('bottom')}
             </div>
           </div>
         {/if}
@@ -637,10 +636,8 @@
 
 {#snippet readModeBtn(mode: ReadMode)}
   <label
-    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.readMode ===
-    mode
-      ? 'bg-primary/15 text-primary'
-      : 'opacity-50 hover:opacity-80'}"
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
+    {$settings?.readMode === mode ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
   >
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.readMode} />
@@ -649,12 +646,10 @@
   </label>
 {/snippet}
 
-{#snippet zoomBtn(mode: ZoomMode)}
+{#snippet zoomModeBtn(mode: ZoomMode)}
   <label
-    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.zoomMode ===
-    mode
-      ? 'bg-primary/15 text-primary'
-      : 'opacity-50 hover:opacity-80'}"
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
+    {$settings?.zoomMode === mode ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
   >
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.zoomMode} />
@@ -663,16 +658,14 @@
   </label>
 {/snippet}
 
-{#snippet dirBtn(dir: PageDirection)}
+{#snippet directionBtn(direction: PageDirection)}
   <label
-    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.pageDirection ===
-    dir
-      ? 'bg-primary/15 text-primary'
-      : 'opacity-50 hover:opacity-80'}"
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
+    {$settings?.pageDirection === direction ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
   >
     {#if $settings !== null}
-      <input type="radio" class="hidden" value={dir} bind:group={$settings.pageDirection} />
+      <input type="radio" class="hidden" value={direction} bind:group={$settings.pageDirection} />
     {/if}
-    {PAGE_DIRECTIONS[dir].label}
+    {PAGE_DIRECTIONS[direction].label}
   </label>
 {/snippet}
