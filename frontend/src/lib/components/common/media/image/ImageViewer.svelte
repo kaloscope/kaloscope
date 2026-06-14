@@ -413,40 +413,36 @@
       transition:fade={{ duration: 200 }}
     >
       <div class="flex items-center gap-1">
-        <button
-          class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
-          onclick={() => historyBack()}
-          aria-label="Back"
-        >
-          <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
+        <button class="btn btn-xs btn-ghost border-0 shadow-none" onclick={() => historyBack()} aria-label="Back">
+          <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if chapters.length > 1}
           <button
-            class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
+            class="btn btn-xs btn-ghost border-0 shadow-none"
             aria-label="Chapters"
             onclick={() => {
               chaptersOpen = true;
               clearTimeout(hideTimer);
             }}
           >
-            <iconify-icon icon={icons.arrowSortDownLines} width="1.125rem"></iconify-icon>
+            <iconify-icon icon={icons.menuFoldSolid} width="1.5rem"></iconify-icon>
           </button>
         {/if}
       </div>
 
-      <span class="min-w-0 truncate text-center text-sm">
-        {currentTitle}
+      <span class="min-w-0 flex-center text-sm">
+        <span class="truncate" class:mr-2={imageCount > 0}>{currentTitle}</span>
         {#if imageCount > 0}
-          <span class="ml-2 tabular-nums opacity-60">{imageIndex + 1} / {imageCount}</span>
+          <span class="shrink-0 tabular-nums opacity-60">{imageIndex + 1} / {imageCount}</span>
         {/if}
       </span>
 
       <button
-        class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none text-white/70"
+        class="btn btn-xs btn-ghost border-0 shadow-none"
         aria-label="Reading settings"
         onclick={() => (settingsOpen = !settingsOpen)}
       >
-        <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
+        <iconify-icon icon={icons.settingsFilled} width="1.25rem"></iconify-icon>
       </button>
     </div>
   {/if}
@@ -587,20 +583,20 @@
       transition:fade={{ duration: 200 }}
     >
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
+        class="btn btn-xs btn-ghost border-0 shadow-none disabled:text-white/20"
         aria-label="Previous chapter"
         disabled={!previousChapter}
         onclick={() => previousChapter && selectChapter(previousChapter)}
       >
-        <iconify-icon icon={icons.arrowPrevious} width="1.25rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowPreviousFilled} width="1.25rem"></iconify-icon>
       </button>
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
+        class="btn btn-xs btn-ghost border-0 shadow-none disabled:text-white/20"
         aria-label="Next chapter"
         disabled={!nextChapter}
         onclick={() => nextChapter && selectChapter(nextChapter)}
       >
-        <iconify-icon icon={icons.arrowNext} width="1.25rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowNextFilled} width="1.25rem"></iconify-icon>
       </button>
     </div>
   {/if}

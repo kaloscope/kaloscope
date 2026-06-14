@@ -96,7 +96,7 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     hFlip: false,
     body: '<path fill="currentColor" d="M10.5 18.5h5.75a.75.75 0 0 1 0 1.5H10.5a6.5 6.5 0 1 1 0-13h5.95l-2.616-2.617a.75.75 0 0 1 1.06-1.06l3.882 3.882c.1.1.166.22.198.348a.75.75 0 0 1-.205.739l-3.88 3.88a.75.75 0 1 1-1.06-1.061l2.61-2.611H10.5a5 5 0 0 0 0 10"/>'
   },
-  arrowNext: {
+  arrowNextFilled: {
     left: 0,
     top: 0,
     width: 24,
@@ -104,9 +104,9 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     rotate: 0,
     vFlip: false,
     hFlip: false,
-    body: '<path fill="currentColor" d="M18.25 3a.75.75 0 0 1 .743.648L19 3.75v16.5a.75.75 0 0 1-1.493.102l-.007-.102V3.75a.75.75 0 0 1 .75-.75m-13.03.22a.75.75 0 0 1 .976-.073l.084.073l8.25 8.25a.75.75 0 0 1 .073.976l-.073.084l-8.25 8.25a.75.75 0 0 1-1.133-.976l.073-.084L12.94 12L5.22 4.28a.75.75 0 0 1 0-1.06"/>'
+    body: '<path fill="currentColor" d="M18 3a1 1 0 0 1 .993.883L19 4v16a1 1 0 0 1-1.993.117L17 20V4a1 1 0 0 1 1-1m-12.707.293a1 1 0 0 1 1.32-.083l.094.083l8 8a1 1 0 0 1 .083 1.32l-.083.094l-8 8a1 1 0 0 1-1.497-1.32l.083-.094L12.586 12L5.293 4.707a1 1 0 0 1 0-1.414"/>'
   },
-  arrowPrevious: {
+  arrowPreviousFilled: {
     left: 0,
     top: 0,
     width: 24,
@@ -114,7 +114,7 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     rotate: 0,
     vFlip: false,
     hFlip: false,
-    body: '<path fill="currentColor" d="M5.75 3a.75.75 0 0 0-.743.648L5 3.75v16.5a.75.75 0 0 0 1.493.102l.007-.102V3.75A.75.75 0 0 0 5.75 3m13.03.22a.75.75 0 0 0-.976-.073l-.084.073l-8.25 8.25a.75.75 0 0 0-.073.976l.073.084l8.25 8.25a.75.75 0 0 0 1.133-.976l-.073-.084L11.06 12l7.72-7.72a.75.75 0 0 0 0-1.06"/>'
+    body: '<path fill="currentColor" d="M6 3a1 1 0 0 0-.993.883L5 4v16a1 1 0 0 0 1.993.117L7 20V4a1 1 0 0 0-1-1m12.707.293a1 1 0 0 0-1.32-.083l-.094.083l-8 8a1 1 0 0 0-.083 1.32l.083.094l8 8a1 1 0 0 0 1.497-1.32l-.083-.094L11.414 12l7.293-7.293a1 1 0 0 0 0-1.414"/>'
   },
   arrowReset: {
     left: 0,

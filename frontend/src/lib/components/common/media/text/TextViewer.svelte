@@ -300,7 +300,7 @@
           onclick={() => historyBack()}
           aria-label="Back"
         >
-          <iconify-icon icon={icons.back} width="1.25rem"></iconify-icon>
+          <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if chapters.length > 1}
           <button
@@ -312,7 +312,7 @@
               clearTimeout(hideTimer);
             }}
           >
-            <iconify-icon icon={icons.arrowSortDownLines} width="1.125rem"></iconify-icon>
+            <iconify-icon icon={icons.menuFoldSolid} width="1.5rem"></iconify-icon>
           </button>
         {/if}
       </div>
@@ -320,12 +320,12 @@
       <span class="min-w-0 truncate text-center text-sm">{currentTitle}</span>
 
       <button
-        class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none"
+        class="btn btn-xs btn-ghost border-0 shadow-none"
         style:color={colors.muted}
         aria-label="Reading settings"
         onclick={() => (settingsOpen = !settingsOpen)}
       >
-        <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
+        <iconify-icon icon={icons.settingsFilled} width="1.25rem"></iconify-icon>
       </button>
     </div>
   {/if}
@@ -362,7 +362,7 @@
   {#if $settings !== null}
     <article
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
-      style:padding="2rem {$settings.paddingX}rem 0"
+      style:padding="2.5rem {$settings.paddingX}rem 0"
     >
       {#if content}
         <div
@@ -473,7 +473,7 @@
         disabled={!previousChapter}
         onclick={() => previousChapter && selectChapter(previousChapter)}
       >
-        <iconify-icon icon={icons.arrowPrevious} width="1.25rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowPreviousFilled} width="1.25rem"></iconify-icon>
       </button>
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
@@ -482,7 +482,7 @@
         disabled={!nextChapter}
         onclick={() => nextChapter && selectChapter(nextChapter)}
       >
-        <iconify-icon icon={icons.arrowNext} width="1.25rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowNextFilled} width="1.25rem"></iconify-icon>
       </button>
     </div>
   {/if}
