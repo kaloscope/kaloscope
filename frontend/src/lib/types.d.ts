@@ -565,6 +565,12 @@ export type Chapter = {
   definition?: boolean;
 };
 
+/** Group of chapters keyed by volume name. */
+export type ChapterGroup = {
+  volume: string | null;
+  chapters: Chapter[];
+};
+
 /**
  * The type of the video definition.
  */

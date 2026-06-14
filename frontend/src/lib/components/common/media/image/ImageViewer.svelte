@@ -1,56 +1,49 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores';
-  import type { Chapter, Resource } from '$lib/types';
-
-  /** Reading mode for the image viewer. */
-  export type ImageReadMode = 'scroll' | 'paged';
-  /** Zoom mode for images. */
-  export type ImageZoomMode = 'width' | 'height' | 'auto';
-  /** Page-turning direction in paged reading mode. */
-  export type ImagePageDirection = 'right' | 'left' | 'bottom';
-
-  /** Persisted settings for the image viewer. */
-  export type ImageViewerSettings = {
-    readMode: ImageReadMode;
-    zoomMode: ImageZoomMode;
-    pageDirection: ImagePageDirection;
-  };
+  import type { Chapter, ChapterGroup, Resource, Resp } from '$lib/types';
 
   /** Options passed to the image viewer mount function. */
   export type ImageViewerOptions = {
     images: string[];
     image_count?: number | null;
-    index?: number;
     title?: string | null;
     chapters?: Chapter[];
     chapterId?: string | null;
     chapterChange?: (chapter: Chapter) => void;
   };
 
-  /** Group of chapters keyed by volume name. */
-  type ChapterGroup = {
-    volume: string | null;
-    chapters: Chapter[];
+  /** Reading mode. */
+  export type ReadMode = 'scroll' | 'paged';
+  /** Zoom mode for images. */
+  export type ZoomMode = 'auto' | 'width' | 'height';
+  /** Page-turning direction in paged reading mode. */
+  export type PageDirection = 'right' | 'left' | 'bottom';
+
+  /** Persisted settings. */
+  export type ImageViewerSettings = {
+    readMode: ReadMode;
+    zoomMode: ZoomMode;
+    pageDirection: PageDirection;
   };
 
   const settings = persisted<ImageViewerSettings>('image-viewer', {
     readMode: 'scroll',
-    zoomMode: 'width',
+    zoomMode: 'auto',
     pageDirection: 'right'
   });
 
-  const READ_MODES: Record<ImageReadMode, { label: string }> = {
+  const READ_MODES: Record<ReadMode, { label: string }> = {
     scroll: { label: '滚动' },
     paged: { label: '翻页' }
   };
 
-  const ZOOM_MODES: Record<ImageZoomMode, { label: string; class: string }> = {
+  const ZOOM_MODES: Record<ZoomMode, { label: string; class: string }> = {
+    auto: { label: '自动', class: 'max-h-full max-w-full object-contain mx-auto' },
     width: { label: '适应宽度', class: 'w-full h-auto' },
-    height: { label: '适应高度', class: 'h-full w-auto max-w-none mx-auto' },
-    auto: { label: '自动', class: 'max-h-full max-w-full object-contain mx-auto' }
+    height: { label: '适应高度', class: 'h-full w-auto max-w-none mx-auto' }
   };
 
-  const PAGE_DIRECTIONS: Record<ImagePageDirection, { label: string }> = {
+  const PAGE_DIRECTIONS: Record<PageDirection, { label: string }> = {
     right: { label: '点击右侧' },
     left: { label: '点击左侧' },
     bottom: { label: '点击下方' }
@@ -96,22 +89,32 @@
   import { api, proxyImage } from '$lib/api';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
-  import type { Resp } from '$lib/types';
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
-  let images = $state<string[]>([]);
   let title = $state('');
+  let images = $state<string[]>([]);
   let chapters = $state<Chapter[]>([]);
+  let chapterGroups = $derived(groupChapters(chapters));
   let chapterId = $state<string | null>(null);
+  let chapterIndex = $derived.by(() => chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
+  let settingsOpen = $state(false);
+  let chaptersOpen = $state(false);
+  let controlsVisible = $state(true);
+
+  let currentChapter = $derived(chapterIndex >= 0 ? chapters[chapterIndex] : null);
+  let currentTitle = $derived(title || currentChapter?.title);
+  let previousChapter = $derived(chapterIndex > 0 ? chapters[chapterIndex - 1] : null);
+  let nextChapter = $derived(
+    chapterIndex >= 0 && chapterIndex < chapters.length - 1 ? chapters[chapterIndex + 1] : null
+  );
+
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
   let imageEls: HTMLImageElement[] = [];
   let pageIndex = $state(0);
   let totalCount = $state<number | null>(null);
-  let open = $state(false);
-  let chapterOpen = $state(false);
-  let visible = $state(true);
+
   let loading = $state(false);
   let imageLoading = $state(false);
   let animForward = $state(true);
@@ -127,14 +130,6 @@
     const fromRight = dir === 'right' ? fwd : !fwd;
     return { x: fromRight ? 200 : -200, duration: 200 };
   });
-  let chapterGroups = $derived(groupChapters(chapters));
-  let currentChapterIndex = $derived.by(() => chapters.findIndex((chapter) => matchChapterId(chapter.id, chapterId)));
-  let currentChapter = $derived(currentChapterIndex >= 0 ? chapters[currentChapterIndex] : null);
-  let currentTitle = $derived(currentChapter?.title ?? title);
-  let previousChapter = $derived(currentChapterIndex > 0 ? chapters[currentChapterIndex - 1] : null);
-  let nextChapter = $derived(
-    currentChapterIndex >= 0 && currentChapterIndex < chapters.length - 1 ? chapters[currentChapterIndex + 1] : null
-  );
 
   /**
    * Mount the image viewer with the given image resource.
@@ -151,10 +146,10 @@
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
-    pageIndex = Math.max(0, Math.min(options.index ?? 0, nextImages.length - 1));
+    pageIndex = 0;
     imageLoading = true;
     exhausted = nextImages.length >= nextTotal;
-    resetTimer();
+    showControls();
   }
 
   /**
@@ -163,7 +158,7 @@
    * @param chapter - The chapter to select.
    */
   function selectChapter(chapter: Chapter) {
-    chapterOpen = false;
+    chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
   }
@@ -334,20 +329,20 @@
    * @param e - The click event.
    */
   function handleClick(e: MouseEvent) {
-    if (open || chapterOpen || $settings?.readMode !== 'paged') return;
+    if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') return;
     const dir = $settings.pageDirection;
 
     if (dir === 'bottom') {
       const y = e.clientY / window.innerHeight;
       if (y < 0.3) prev();
       else if (y > 0.7) void next();
-      else resetTimer();
+      else showControls();
     } else {
       const x = e.clientX / window.innerWidth;
       const isLeft = dir === 'left';
       if (isLeft ? x > 0.7 : x < 0.3) prev();
       else if (isLeft ? x < 0.3 : x > 0.7) void next();
-      else resetTimer();
+      else showControls();
     }
   }
 
@@ -357,26 +352,26 @@
    * @param e - The keyboard event.
    */
   async function handleKey(e: KeyboardEvent) {
-    if (open || $settings === null) return;
+    if (settingsOpen || $settings === null) return;
     if (e.key === 'ArrowUp' || e.key === 'PageUp') prev();
     else if (e.key === 'ArrowDown' || e.key === 'PageDown') await next();
     else return;
-    resetTimer();
+    showControls();
   }
 
   let hideTimer: ReturnType<typeof setTimeout>;
   /**
    * Show transient controls and restart the auto-hide timer.
    */
-  function resetTimer() {
-    visible = true;
+  function showControls() {
+    controlsVisible = true;
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => (visible = false), 3000);
+    hideTimer = setTimeout(() => (controlsVisible = false), 3000);
   }
 
   onMount(() => {
     freeze.set(true);
-    resetTimer();
+    showControls();
     return () => {
       freeze.set(false);
       clearTimeout(hideTimer);
@@ -384,13 +379,13 @@
   });
 </script>
 
-<svelte:window onkeydown={handleKey} onmousemove={resetTimer} />
+<svelte:window onkeydown={handleKey} onmousemove={showControls} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div role="application" aria-label="Image viewer" class="fixed inset-0 flex flex-col bg-black" onclick={handleClick}>
   <!-- Top bar -->
-  {#if visible}
+  {#if controlsVisible}
     <div
       class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
@@ -408,7 +403,7 @@
             class="btn btn-xs btn-ghost border-0 shadow-none text-white/70"
             aria-label="Chapters"
             onclick={() => {
-              chapterOpen = true;
+              chaptersOpen = true;
               clearTimeout(hideTimer);
             }}
           >
@@ -427,7 +422,7 @@
       <button
         class="btn btn-xs btn-ghost justify-self-end border-0 shadow-none text-white/70"
         aria-label="Reading settings"
-        onclick={() => (open = !open)}
+        onclick={() => (settingsOpen = !settingsOpen)}
       >
         <iconify-icon icon={icons.settings} width="1.125rem"></iconify-icon>
       </button>
@@ -435,11 +430,11 @@
   {/if}
 
   <!-- Chapter panel -->
-  {#if chapterOpen}
+  {#if chaptersOpen}
     <button
       class="fixed inset-0 z-20 bg-black/20"
       aria-label="Close chapter list"
-      onclick={() => (chapterOpen = false)}
+      onclick={() => (chaptersOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
     <div
@@ -451,7 +446,7 @@
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
           aria-label="Close"
-          onclick={() => (chapterOpen = false)}
+          onclick={() => (chaptersOpen = false)}
         >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
         </button>
@@ -512,11 +507,11 @@
   {/if}
 
   <!-- Settings panel -->
-  {#if open}
+  {#if settingsOpen}
     <button
       class="fixed inset-0 z-20 bg-black/20"
       aria-label="Close settings"
-      onclick={() => (open = false)}
+      onclick={() => (settingsOpen = false)}
       transition:fade={{ duration: 150 }}
     ></button>
     <div
@@ -528,7 +523,7 @@
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
           aria-label="Close"
-          onclick={() => (open = false)}
+          onclick={() => (settingsOpen = false)}
         >
           <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
         </button>
@@ -545,9 +540,9 @@
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">缩放模式</span>
             <div class="grid grid-cols-3 gap-2">
+              {@render zoomBtn('auto')}
               {@render zoomBtn('width')}
               {@render zoomBtn('height')}
-              {@render zoomBtn('auto')}
             </div>
           </div>
           <div>
@@ -564,7 +559,7 @@
   {/if}
 
   <!-- Bottom bar -->
-  {#if visible && chapters.length > 1}
+  {#if controlsVisible && chapters.length > 1}
     <div
       class="absolute bottom-0 left-0 right-0 z-10 flex justify-center gap-4 bg-black/50 px-2 py-2 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
@@ -622,7 +617,7 @@
   </li>
 {/snippet}
 
-{#snippet readModeBtn(mode: ImageReadMode)}
+{#snippet readModeBtn(mode: ReadMode)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.readMode ===
     mode
@@ -636,7 +631,7 @@
   </label>
 {/snippet}
 
-{#snippet zoomBtn(mode: ImageZoomMode)}
+{#snippet zoomBtn(mode: ZoomMode)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.zoomMode ===
     mode
@@ -650,7 +645,7 @@
   </label>
 {/snippet}
 
-{#snippet dirBtn(dir: ImagePageDirection)}
+{#snippet dirBtn(dir: PageDirection)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings?.pageDirection ===
     dir
