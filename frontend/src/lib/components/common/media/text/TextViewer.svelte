@@ -44,11 +44,26 @@
   };
 
   const FONTS: Record<ReaderFont, { family: string; label: string }> = {
-    system: { family: 'inherit', label: '系统默认' },
-    serif: { family: '"Noto Serif SC", "Songti SC", "STSong", serif', label: '宋体' },
-    sans: { family: '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif', label: '黑体' },
-    kai: { family: '"KaiTi", "STKaiti", "楷体", serif', label: '楷体' },
-    mono: { family: '"Noto Sans Mono SC", "SF Mono", "Cascadia Code", monospace', label: '等宽' }
+    system: {
+      family: 'var(--font-sans)',
+      label: '系统'
+    },
+    sans: {
+      family: '"Noto Sans SC", "Noto Sans CJK SC", "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif',
+      label: '黑体'
+    },
+    serif: {
+      family: '"Noto Serif SC", "Noto Serif CJK SC", "Noto Serif", "Songti SC", "STSong", serif',
+      label: '宋体'
+    },
+    kai: {
+      family: '"Kaiti SC", "KaiTi", "STKaiti", "ST Kaiti", "楷体", "楷体_GB2312", serif',
+      label: '楷体'
+    },
+    mono: {
+      family: '"Noto Sans Mono CJK SC", "Noto Sans Mono", "SF Mono", "Cascadia Code", monospace',
+      label: '等宽'
+    }
   };
 
   const RANGES: Record<string, [number, number, number]> = {
