@@ -4,7 +4,7 @@
 
   export type ReadMode = 'scroll' | 'paged';
   export type ZoomMode = 'width' | 'height' | 'auto';
-  export type Direction = 'ltr' | 'rtl';
+  export type Direction = 'right' | 'left' | 'bottom';
 
   export type ImageReaderSettings = {
     readMode: ReadMode;
@@ -30,7 +30,7 @@
   const settings = persisted<ImageReaderSettings>('image-reader', {
     readMode: 'scroll',
     zoomMode: 'width',
-    direction: 'ltr'
+    direction: 'right'
   });
 
   const ZOOM: Record<ZoomMode, string> = {
@@ -80,11 +80,19 @@
   let visible = $state(true);
   let loading = $state(false);
   let imageLoading = $state(false);
+  let animForward = $state(true);
   let exhausted = $state(false);
   let total = $derived(totalCount ?? images.length);
   let hasMore = $derived(images.length < total && !exhausted);
 
   let zoomClass = $derived(ZOOM[$settings?.zoomMode ?? 'width']);
+  let flyParams = $derived.by(() => {
+    const dir = $settings?.direction ?? 'right';
+    const fwd = animForward;
+    if (dir === 'bottom') return { y: fwd ? 200 : -200, duration: 200 };
+    const fromRight = dir === 'right' ? fwd : !fwd;
+    return { x: fromRight ? 200 : -200, duration: 200 };
+  });
   let currentTitle = $derived(chapters.find((c) => c.id === chapterId)?.title ?? title);
   let chapterGroups = $derived(groupChapters(chapters));
 
@@ -111,6 +119,7 @@
 
   function prev() {
     if (pageIndex > 0) {
+      animForward = false;
       pageIndex--;
       imageLoading = true;
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
@@ -124,6 +133,7 @@
       await loadMore();
     }
     if (pageIndex < images.length - 1) {
+      animForward = true;
       pageIndex++;
       imageLoading = true;
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
@@ -224,17 +234,26 @@
 
   function handleClick(e: MouseEvent) {
     if (open || chapterOpen || $settings?.readMode !== 'paged') return;
-    const x = e.clientX / window.innerWidth;
-    const [prevZone, nextZone] = $settings.direction === 'rtl' ? [0.7, 0.3] : [0.3, 0.7];
-    if (x < prevZone) prev();
-    else if (x > nextZone) void next();
-    else resetTimer();
+    const dir = $settings.direction;
+
+    if (dir === 'bottom') {
+      const y = e.clientY / window.innerHeight;
+      if (y < 0.3) prev();
+      else if (y > 0.7) void next();
+      else resetTimer();
+    } else {
+      const x = e.clientX / window.innerWidth;
+      const isLeft = dir === 'left';
+      if (isLeft ? x > 0.7 : x < 0.3) prev();
+      else if (isLeft ? x < 0.3 : x > 0.7) void next();
+      else resetTimer();
+    }
   }
 
   async function handleKey(e: KeyboardEvent) {
     if (open || $settings === null) return;
-    if (e.key === 'ArrowLeft') $settings.direction === 'rtl' ? await next() : prev();
-    else if (e.key === 'ArrowRight') $settings.direction === 'rtl' ? prev() : await next();
+    if (e.key === 'ArrowUp' || e.key === 'PageUp') prev();
+    else if (e.key === 'ArrowDown' || e.key === 'PageDown') await next();
     else return;
     resetTimer();
   }
@@ -372,7 +391,7 @@
               alt=""
               class={zoomClass}
               draggable="false"
-              transition:fade={{ duration: 150 }}
+              in:fly={flyParams}
               onload={handleImageLoad}
               onerror={handleImageError}
             />
@@ -444,21 +463,30 @@
             <div class="grid grid-cols-2 gap-2">
               <label
                 class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.direction ===
-                'ltr'
+                'right'
                   ? 'bg-primary/15 text-primary'
                   : 'opacity-50 hover:opacity-80'}"
               >
-                <input type="radio" class="hidden" value="ltr" bind:group={$settings.direction} />
-                左翻右
+                <input type="radio" class="hidden" value="right" bind:group={$settings.direction} />
+                点击右侧
               </label>
               <label
                 class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.direction ===
-                'rtl'
+                'left'
                   ? 'bg-primary/15 text-primary'
                   : 'opacity-50 hover:opacity-80'}"
               >
-                <input type="radio" class="hidden" value="rtl" bind:group={$settings.direction} />
-                右翻左
+                <input type="radio" class="hidden" value="left" bind:group={$settings.direction} />
+                点击左侧
+              </label>
+              <label
+                class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all {$settings.direction ===
+                'bottom'
+                  ? 'bg-primary/15 text-primary'
+                  : 'opacity-50 hover:opacity-80'}"
+              >
+                <input type="radio" class="hidden" value="bottom" bind:group={$settings.direction} />
+                点击下方
               </label>
             </div>
           </div>
