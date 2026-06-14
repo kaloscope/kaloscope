@@ -96,6 +96,26 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     hFlip: false,
     body: '<path fill="currentColor" d="M10.5 18.5h5.75a.75.75 0 0 1 0 1.5H10.5a6.5 6.5 0 1 1 0-13h5.95l-2.616-2.617a.75.75 0 0 1 1.06-1.06l3.882 3.882c.1.1.166.22.198.348a.75.75 0 0 1-.205.739l-3.88 3.88a.75.75 0 1 1-1.06-1.061l2.61-2.611H10.5a5 5 0 0 0 0 10"/>'
   },
+  arrowNext: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="currentColor" d="M18.25 3a.75.75 0 0 1 .743.648L19 3.75v16.5a.75.75 0 0 1-1.493.102l-.007-.102V3.75a.75.75 0 0 1 .75-.75m-13.03.22a.75.75 0 0 1 .976-.073l.084.073l8.25 8.25a.75.75 0 0 1 .073.976l-.073.084l-8.25 8.25a.75.75 0 0 1-1.133-.976l.073-.084L12.94 12L5.22 4.28a.75.75 0 0 1 0-1.06"/>'
+  },
+  arrowPrevious: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="currentColor" d="M5.75 3a.75.75 0 0 0-.743.648L5 3.75v16.5a.75.75 0 0 0 1.493.102l.007-.102V3.75A.75.75 0 0 0 5.75 3m13.03.22a.75.75 0 0 0-.976-.073l-.084.073l-8.25 8.25a.75.75 0 0 0-.073.976l.073.084l8.25 8.25a.75.75 0 0 0 1.133-.976l-.073-.084L11.06 12l7.72-7.72a.75.75 0 0 0 0-1.06"/>'
+  },
   arrowReset: {
     left: 0,
     top: 0,

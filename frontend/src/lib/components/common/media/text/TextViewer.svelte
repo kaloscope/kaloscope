@@ -238,24 +238,6 @@
   }
 
   /**
-   * Select the previous chapter when one is available.
-   */
-  function selectPreviousChapter() {
-    if (previousChapter) {
-      selectChapter(previousChapter);
-    }
-  }
-
-  /**
-   * Select the next chapter when one is available.
-   */
-  function selectNextChapter() {
-    if (nextChapter) {
-      selectChapter(nextChapter);
-    }
-  }
-
-  /**
    * Adjust a numeric reader setting within its configured range.
    *
    * @param key - The setting key to adjust.
@@ -298,7 +280,7 @@
   class="fixed inset-0 flex flex-col transition-colors duration-300"
   style:background-color={colors.bg}
 >
-  <!-- Top bar -->
+  <!-- top bar -->
   {#if controlsVisible}
     <div
       class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
@@ -343,7 +325,7 @@
     </div>
   {/if}
 
-  <!-- Chapter panel -->
+  <!-- chapter panel -->
   {#if chaptersOpen}
     <button
       class="fixed inset-0 z-10 bg-black/20"
@@ -371,7 +353,7 @@
     </div>
   {/if}
 
-  <!-- Reading area -->
+  <!-- content -->
   {#if $settings !== null}
     <article
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
@@ -399,7 +381,7 @@
     </article>
   {/if}
 
-  <!-- Settings panel -->
+  <!-- settings panel -->
   {#if settingsOpen}
     <button
       class="fixed inset-0 z-10 bg-black/20"
@@ -471,10 +453,10 @@
     </div>
   {/if}
 
-  <!-- Bottom bar -->
+  <!-- bottom bar -->
   {#if controlsVisible && chapters.length > 1}
     <div
-      class="absolute bottom-0 left-0 right-0 z-10 flex justify-center gap-4 px-2 py-2 backdrop-blur-sm transition-colors duration-300"
+      class="absolute bottom-0 inset-x-0 z-10 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
       style:background-color={colors.bar}
       style:color={colors.muted}
       transition:fade={{ duration: 200 }}
@@ -484,18 +466,18 @@
         style:color={colors.muted}
         aria-label="Previous chapter"
         disabled={!previousChapter}
-        onclick={() => selectPreviousChapter()}
+        onclick={() => previousChapter && selectChapter(previousChapter)}
       >
-        <iconify-icon icon={icons.arrowUp} width="1.125rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowPrevious} width="1.25rem"></iconify-icon>
       </button>
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
         style:color={colors.muted}
         aria-label="Next chapter"
         disabled={!nextChapter}
-        onclick={() => selectNextChapter()}
+        onclick={() => nextChapter && selectChapter(nextChapter)}
       >
-        <iconify-icon icon={icons.arrowDown} width="1.125rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowNext} width="1.25rem"></iconify-icon>
       </button>
     </div>
   {/if}
@@ -503,7 +485,7 @@
 
 {#snippet chapterMenu()}
   <ul class="menu w-full px-2 pb-6 text-sm">
-    {#each chapterGroups as group, index (group.volume ?? index)}
+    {#each chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
       {#if group.volume}
         <li>
           <h2 class="menu-title">{group.volume}</h2>

@@ -186,24 +186,6 @@
   }
 
   /**
-   * Select the previous chapter when one is available.
-   */
-  function selectPreviousChapter() {
-    if (previousChapter) {
-      selectChapter(previousChapter);
-    }
-  }
-
-  /**
-   * Select the next chapter when one is available.
-   */
-  function selectNextChapter() {
-    if (nextChapter) {
-      selectChapter(nextChapter);
-    }
-  }
-
-  /**
    * Move to the previous loaded image.
    */
   function prev() {
@@ -406,7 +388,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div role="application" aria-label="Image viewer" class="fixed inset-0 flex flex-col bg-black" onclick={handleClick}>
-  <!-- Top bar -->
+  <!-- top bar -->
   {#if controlsVisible}
     <div
       class="absolute top-0 left-0 right-0 z-10 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
@@ -451,7 +433,7 @@
     </div>
   {/if}
 
-  <!-- Chapter panel -->
+  <!-- chapter panel -->
   {#if chaptersOpen}
     <button
       class="fixed inset-0 z-20 bg-black/20"
@@ -477,7 +459,7 @@
     </div>
   {/if}
 
-  <!-- Content -->
+  <!-- content -->
   {#if $settings?.readMode === 'scroll'}
     <div
       bind:this={scrollEl}
@@ -528,7 +510,7 @@
     {/if}
   {/if}
 
-  <!-- Settings panel -->
+  <!-- settings panel -->
   {#if settingsOpen}
     <button
       class="fixed inset-0 z-20 bg-black/20"
@@ -580,27 +562,27 @@
     </div>
   {/if}
 
-  <!-- Bottom bar -->
+  <!-- bottom bar -->
   {#if controlsVisible && chapters.length > 1}
     <div
-      class="absolute bottom-0 left-0 right-0 z-10 flex justify-center gap-4 bg-black/50 px-2 py-2 text-white/80 backdrop-blur-sm"
+      class="absolute bottom-0 inset-x-0 z-10 flex justify-center gap-6 bg-black/50 p-2 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
     >
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
         aria-label="Previous chapter"
         disabled={!previousChapter}
-        onclick={() => selectPreviousChapter()}
+        onclick={() => previousChapter && selectChapter(previousChapter)}
       >
-        <iconify-icon icon={icons.arrowUp} width="1.125rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowPrevious} width="1.25rem"></iconify-icon>
       </button>
       <button
         class="btn btn-xs btn-ghost border-0 shadow-none text-white/70 disabled:opacity-20"
         aria-label="Next chapter"
         disabled={!nextChapter}
-        onclick={() => selectNextChapter()}
+        onclick={() => nextChapter && selectChapter(nextChapter)}
       >
-        <iconify-icon icon={icons.arrowDown} width="1.125rem"></iconify-icon>
+        <iconify-icon icon={icons.arrowNext} width="1.25rem"></iconify-icon>
       </button>
     </div>
   {/if}
@@ -608,7 +590,7 @@
 
 {#snippet chapterMenu()}
   <ul class="menu w-full px-2 pb-6 text-sm">
-    {#each chapterGroups as group, index (group.volume ?? index)}
+    {#each chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
       {#if group.volume}
         <li>
           <h2 class="menu-title">{group.volume}</h2>
