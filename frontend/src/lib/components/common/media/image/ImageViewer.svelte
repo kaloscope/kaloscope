@@ -192,6 +192,25 @@
     }
   }
 
+  const MAX_IMAGE_RETRY = 3;
+
+  function handleImageLoad() {
+    imageLoading = false;
+  }
+
+  function handleImageError(e: Event) {
+    const img = e.target as HTMLImageElement;
+    const retry = parseInt(img.dataset.retry || '0');
+    if (retry < MAX_IMAGE_RETRY) {
+      img.dataset.retry = String(retry + 1);
+      const url = new URL(img.src);
+      url.searchParams.set('_r', String(retry + 1));
+      img.src = url.toString();
+    } else {
+      imageLoading = false;
+    }
+  }
+
   function handleScroll() {
     updatePageIndex();
     const el = scrollEl;
@@ -334,6 +353,7 @@
           loading={i < 3 ? 'eager' : 'lazy'}
           draggable="false"
           onload={handleScroll}
+          onerror={handleImageError}
         />
       {/each}
       {#if loading}
@@ -353,7 +373,8 @@
               class={zoomClass}
               draggable="false"
               transition:fade={{ duration: 150 }}
-              onload={() => (imageLoading = false)}
+              onload={handleImageLoad}
+              onerror={handleImageError}
             />
           {/key}
         {/if}
