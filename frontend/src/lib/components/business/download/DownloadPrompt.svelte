@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import { api } from '$lib/api';
+  import { DEFAULT_SUB_PATTERN, DEFAULT_SUB_REPL } from '$lib/constants';
   import { TransferMethod } from '$lib/enums';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import type { DownloadDir, Downloader, MediaLib, Resp } from '$lib/types';
@@ -18,8 +19,8 @@
   let transferLibId: number = $state(0);
   let transferMethod: keyof typeof TransferMethod = $state('hardlink');
   let supportsHardlink: boolean = $state(true);
-  let subPattern: string = $state('');
-  let subRepl: string = $state('');
+  let subPattern: string = $state(DEFAULT_SUB_PATTERN);
+  let subRepl: string = $state(DEFAULT_SUB_REPL);
 
   // the torrent input and magnet link
   let files: FileList | null = $state(null);
@@ -190,8 +191,8 @@
           // reset the form
           transferLibId = 0;
           transferMethod = supportsHardlink ? 'hardlink' : 'symlink';
-          subPattern = '';
-          subRepl = '';
+          subPattern = DEFAULT_SUB_PATTERN;
+          subRepl = DEFAULT_SUB_REPL;
         }, 200);
       })
       .finally(() => {

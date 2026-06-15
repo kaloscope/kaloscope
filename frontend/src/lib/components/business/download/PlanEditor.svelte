@@ -33,16 +33,13 @@
     sub_repl: string | null;
     onsave: (result: DownloadPlan) => void;
   }>;
-
-  const DEFAULT_SUB_PATTERN = '^(.+/)?';
-  const DEFAULT_SUB_REPL = '{{title}}/';
 </script>
 
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
   import { FileTree, Label, Modal, Overlay, Search, Select } from '$lib/components';
-  import { EMPTY_SIGN } from '$lib/constants';
+  import { DEFAULT_SUB_PATTERN, DEFAULT_SUB_REPL, EMPTY_SIGN } from '$lib/constants';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
