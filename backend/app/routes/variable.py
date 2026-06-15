@@ -20,7 +20,12 @@ async def list_variables(_, query: VariableQuery) -> HTTPResponse:
     if query.key:
         queries.append(Q(key__icontains=query.key))
     page = await GlobalVariable.page(*queries, **query.page_params)
-    return json(await VariableService.dump_page(page))
+    result = await VariableService.dump_page(page)
+    # hide encrypted values
+    for var in result["items"]:
+        if var["encrypted"]:
+            var["value"] = ""
+    return json(result)
 
 
 @variable.post("/upsert")
