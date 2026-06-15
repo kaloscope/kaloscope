@@ -1,3 +1,4 @@
+import os
 import tomllib
 from functools import cached_property
 from pathlib import Path
@@ -81,6 +82,20 @@ class KaloscopeConfig:
         attach_logger("httpx")
         attach_logger("httpcore")
         return logging_config
+
+    @cached_property
+    def script_strict_mode(self) -> bool:
+        """Check if script strict mode is enabled.
+
+        When enabled, Python-type ScriptNode nodes restrict builtins
+        to prevent risky operations (e.g. __import__, open, eval, exec).
+        Read from SCRIPT_STRICT_MODE env var once at first access;
+        cached thereafter and cannot be changed for the server's lifetime.
+
+        Returns:
+            True if script strict mode is enabled, False otherwise.
+        """
+        return os.environ.get("SCRIPT_STRICT_MODE", "").lower() in ("1", "yes", "true")
 
     def configure(self, app: Sanic):
         """Update the Sanic application configuration and store it in the context.
