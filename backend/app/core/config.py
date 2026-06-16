@@ -92,10 +92,14 @@ class KaloscopeConfig:
         Read from the `SCRIPT_STRICT_MODE` env var once at first access;
         cached thereafter and cannot be changed for the server's lifetime.
 
+        Default is True (enabled). Only disabled when the env var is
+        explicitly set to "0", "no", "off", or "false".
+
         Returns:
             True if script strict mode is enabled, False otherwise.
         """
-        return os.environ.get("SCRIPT_STRICT_MODE", "").lower() in ("1", "yes", "true")
+        value = os.environ.get("SCRIPT_STRICT_MODE", "").lower()
+        return value not in ("0", "no", "off", "false")
 
     def configure(self, app: Sanic):
         """Update the Sanic application configuration and store it in the context.

@@ -9,11 +9,64 @@ from app.core.flow.context import Context
 from app.core.flow.fields import ScriptField
 from app.core.flow.nodes.base import Node, general_node
 
+# standard library modules allowed for import in strict mode
+_SAFE_MODULES = frozenset(
+    {
+        # data serialization
+        "json",
+        "csv",
+        # math & statistics
+        "math",
+        "cmath",
+        "statistics",
+        "decimal",
+        "fractions",
+        "random",
+        # string / text
+        "re",
+        "string",
+        "textwrap",
+        "unicodedata",
+        # collections & data structures
+        "collections",
+        "heapq",
+        "bisect",
+        "array",
+        # functional programming
+        "itertools",
+        "functools",
+        "operator",
+        # date & time
+        "datetime",
+        "calendar",
+        "time",
+        # type hints & data classes
+        "typing",
+        "enum",
+        "dataclasses",
+        # hashing & encoding
+        "hashlib",
+        "base64",
+        "hmac",
+        "uuid",
+        # structured markup
+        "html",
+        "xml.etree.ElementTree",
+        # URL parsing only
+        "urllib.parse",
+        # in-memory I/O
+        "io",
+        # debugging helpers
+        "traceback",
+        "warnings",
+    }
+)
+
+
 # builtins removed from exec() namespace in strict mode
 _RESTRICTED_BUILTINS = frozenset(
     {
         # dynamic code execution
-        "__import__",
         "compile",
         "eval",
         "exec",
@@ -45,6 +98,12 @@ def _get_strict_builtins() -> dict[str, Any]:
         _STRICT_BUILTINS = {
             k: v for k, v in _builtins.__dict__.items() if k not in _RESTRICTED_BUILTINS
         }
+        # replace __import__ with the whitelist-restricted version
+        _STRICT_BUILTINS["__import__"] = lambda name, *args, **kwargs: (
+            _builtins.__import__(name, *args, **kwargs)
+            if name in _SAFE_MODULES
+            else (_ for _ in ()).throw(ImportError(f"module '{name}' is not allowed"))
+        )
     return _STRICT_BUILTINS
 
 
