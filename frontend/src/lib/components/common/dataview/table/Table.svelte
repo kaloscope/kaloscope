@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  import { sniffer } from '$lib/utils';
+
+  const isSafari = sniffer.isSafari();
+</script>
+
 <script lang="ts" generics="T">
   import { Overlay } from '$lib/components';
   import { _ } from '$lib/i18n';
@@ -31,7 +37,7 @@
 </script>
 
 <div class="w-full px-1 {_class}" in:fade>
-  <table class="table-pin-rows table table-fixed {tableClass}">
+  <table class:table-composite-fix={isSafari} class="table-pin-rows table table-fixed {tableClass}">
     <thead>
       <tr class="layer-5 bg-base-125 {notEmpty ? 'border-base-content/10' : 'border-b-0'}">
         {@render header()}

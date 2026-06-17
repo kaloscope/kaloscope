@@ -339,7 +339,7 @@
   {#if $settings !== null}
     <article
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
-      style:padding="2.5rem {$settings.paddingX}rem 0"
+      style:padding="2.5rem {$settings.paddingX}rem"
     >
       {#if content}
         <div

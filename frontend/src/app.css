@@ -337,6 +337,21 @@
   @apply bg-base-125/50 backdrop-blur-xs;
 }
 
+/* table composite fix for Safari */
+@utility table-composite-fix {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+
+  :where(thead tr, tbody) {
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
+    -webkit-transform: translateZ(0);
+    transform: translateZ(0);
+  }
+}
+
 /* custom Tippy.js themes */
 /* https://atomiks.github.io/tippyjs/v6/themes/#creating-a-theme */
 .tippy-box:not([data-placement='left']):not([data-placement='right']) {
