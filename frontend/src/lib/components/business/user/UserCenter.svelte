@@ -1,6 +1,6 @@
 <script lang="ts" module>
   import type { DropdownProps } from '$lib/components';
-  import type { Nav } from '$lib/types';
+  import type { Nav, Resp } from '$lib/types';
   import type { IconifyIcon } from 'iconify-icon';
   import type { MouseEventHandler } from 'svelte/elements';
   import { MediaQuery } from 'svelte/reactivity';
@@ -39,6 +39,7 @@
   import { icons } from '$lib/icons';
   import { token, user } from '$lib/stores';
   import { fullscreen } from '$lib/utils';
+  import { onMount } from 'svelte';
 
   let {
     navs = [],
@@ -53,6 +54,9 @@
   // the duration of the user's login time
   let loginDuration: string = $state($duration($user?.login_at));
 
+  // the current application version
+  let version: string = $state('');
+
   /**
    * Logout the user.
    */
@@ -62,6 +66,17 @@
       goto('/login');
     });
   }
+
+  onMount(() => {
+    api
+      .get('system/version')
+      .json<Resp<{ version: string }>>()
+      .then(({ data }) => {
+        if (data.version) {
+          version = `v${data.version}`;
+        }
+      });
+  });
 </script>
 
 <svelte:window
@@ -78,22 +93,31 @@
   text: string,
   onclick: MouseEventHandler<HTMLElement>,
   _class?: string,
-  count?: number
+  badge?: number | string
 )}
   <li class={_class}>
     <button onclick={(event) => onclick?.(event)}>
       <iconify-icon {icon} width="1.25rem" class="size-5"></iconify-icon>
       {text}
-      {#if count && count > 0}
+      {#if typeof badge === 'number' && badge > 0}
         <span class="badge badge-sm badge-primary">
-          {count > 99 ? '99+' : count}
+          {badge > 99 ? '99+' : badge}
         </span>
+      {:else if typeof badge === 'string' && badge}
+        <span class="badge badge-sm opacity-50">{badge}</span>
       {/if}
     </button>
   </li>
 {/snippet}
 
-<Dropdown class={_class} {triggerClass} {contentClass} onclick={() => (loginDuration = $duration($user?.login_at))}>
+<Dropdown
+  class={_class}
+  {triggerClass}
+  {contentClass}
+  onclick={() => {
+    loginDuration = $duration($user?.login_at);
+  }}
+>
   {#snippet trigger()}
     <Image
       circle
@@ -149,9 +173,15 @@
     {#if !standaloneMode.current && deferredPrompt}
       {@render option(icons.desktopArrowDown, $_('app.pwa_install'), () => deferredPrompt?.prompt())}
     {/if}
-    {@render option(icons.stars, $_('app.check_updates'), () => {
-      window.open('https://hub.docker.com/r/kaloscope/kaloscope/tags', '_blank', 'noreferrer');
-    })}
+    {@render option(
+      icons.stars,
+      $_('app.check_updates'),
+      () => {
+        window.open('https://hub.docker.com/r/kaloscope/kaloscope/tags', '_blank', 'noreferrer');
+      },
+      '',
+      version
+    )}
 
     <div class="divider my-0"></div>
     {@render option(
