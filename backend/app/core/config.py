@@ -89,16 +89,24 @@ class KaloscopeConfig:
 
         When enabled, Python-type ScriptNode nodes restrict builtins
         to prevent risky operations (e.g. __import__, open, eval, exec).
-        Read from the `SCRIPT_STRICT_MODE` env var once at first access;
-        cached thereafter and cannot be changed for the server's lifetime.
-
-        Default is True (enabled). Only disabled when the env var is
-        explicitly set to "0", "no", "off", or "false".
 
         Returns:
             True if script strict mode is enabled, False otherwise.
         """
         value = os.environ.get("SCRIPT_STRICT_MODE", "").lower()
+        return value not in ("0", "no", "off", "false")
+
+    @cached_property
+    def filesystem_trash_mode(self) -> bool:
+        """Check if filesystem trash mode is enabled.
+
+        When enabled, filesystem deletes move paths to the OS trash
+        instead of permanently deleting them.
+
+        Returns:
+            True if filesystem trash mode is enabled, False otherwise.
+        """
+        value = os.environ.get("FILESYSTEM_TRASH_MODE", "").lower()
         return value not in ("0", "no", "off", "false")
 
     def configure(self, app: Sanic):

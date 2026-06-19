@@ -10,7 +10,6 @@ import aiofiles
 import httpx
 from sanic.log import logger
 from sanic.request.form import File
-from send2trash import send2trash
 from tortoise import Tortoise, timezone
 from tortoise.expressions import Q
 from tortoise.transactions import atomic
@@ -38,6 +37,7 @@ from app.models.flow import (
 from app.models.user import HistoryType, PermType, UserHistory, UserPermission
 from app.services.base import BaseService
 from app.utils import json
+from app.utils.disk import delete_path
 
 
 class FlowRepositoryService(BaseService[FlowRepository], model=FlowRepository):
@@ -115,11 +115,11 @@ class FlowRepositoryService(BaseService[FlowRepository], model=FlowRepository):
         """
         repo = await FlowRepository.get(id=id)
         await repo.delete()
-        # move the repository directory to the trash if it exists
+        # delete the repository directory according to filesystem trash mode
         repo_dir = Path(KaloscopeConfig.get_workspace("repositories"))
         repo_path = repo_dir / repo.repo_name
         if repo_path.exists() and repo_path.is_dir():
-            send2trash(repo_path)
+            delete_path(repo_path)
 
 
 class FlowTemplateService(BaseService[FlowTemplate], model=FlowTemplate):

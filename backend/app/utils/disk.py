@@ -2,6 +2,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from send2trash import send2trash
+
+from app.core.config import KaloscopeConfig
+
 
 @dataclass
 class DiskUsage:
@@ -66,6 +70,28 @@ def is_directory(path: Path | str) -> bool:
         return path.is_dir()
     except OSError:
         return False
+
+
+def delete_path(path: Path | str):
+    """Delete a filesystem path according to filesystem trash mode.
+
+    When filesystem trash mode is enabled, the path is moved to the OS trash.
+    When disabled, files and symlinks are unlinked and directories are removed.
+
+    Args:
+        path: The file or directory path to delete.
+    """
+    if not isinstance(path, Path):
+        path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        return
+
+    if KaloscopeConfig.get().filesystem_trash_mode:
+        send2trash(path)
+    elif path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def format_bytes(size_bytes: int) -> str:

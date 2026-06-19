@@ -5,7 +5,6 @@ from pathlib import Path
 import aiofiles
 from sanic import Sanic
 from sanic.log import logger
-from send2trash import send2trash
 from tortoise.expressions import Q
 from tortoise.transactions import atomic
 
@@ -16,6 +15,7 @@ from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata,
 from app.models.user import PermType, UserPermission
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
+from app.utils.disk import delete_path
 
 
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
@@ -133,7 +133,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             item = await MediaItem.get(id=id)
             path = Path(item.path)
             if path.exists():
-                send2trash(path)
+                delete_path(path)
             await item.delete()
         else:
             await MediaItem.filter(id=id).update(visible=False)

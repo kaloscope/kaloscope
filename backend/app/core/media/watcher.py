@@ -10,7 +10,6 @@ from queue import Queue
 
 from sanic import Sanic
 from sanic.log import Colors, logger
-from send2trash import send2trash
 from tortoise.transactions import in_transaction
 from watchdog.events import (
     EVENT_TYPE_CREATED,
@@ -39,6 +38,7 @@ from app.models.media import MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, UserHistory
 from app.services.flow import FlowTriggerService
 from app.utils.crypto import encrypt
+from app.utils.disk import delete_path
 
 
 class EventHandler(FileSystemEventHandler):
@@ -462,10 +462,10 @@ async def _handle_deleted(event: MediaEvent):
     def _trash_nfo(path: str | None):
         if not path:
             return
-        # move the NFO file to the trash if it exists
+        # delete the NFO file according to filesystem trash mode
         nfo = Path(path)
         if nfo.exists() and nfo.is_file():
-            send2trash(nfo)
+            delete_path(nfo)
 
     lib_id = event.lib_id
     src_path = event.src_path
