@@ -10,6 +10,16 @@ from app.core.constants import ENCODING, SESSION_ID, URL_PREFIX
 from app.core.exceptions import ErrorCode, UnauthorizedException
 from app.models.user import UserInfo, UserSession
 
+FRONTEND_NO_CACHE = "no-store, no-cache, must-revalidate, max-age=0"
+FRONTEND_NO_CACHE_PATHS = {
+    "/",
+    "/index.html",
+    "/404.html",
+    "/service-worker.js",
+    "/manifest.webmanifest",
+    "/_app/version.json",
+}
+
 
 async def on_request(request: Request):
     """The middleware for request.
@@ -62,6 +72,8 @@ async def on_response(request: Request, response) -> HTTPResponse | None:
     if not isinstance(response, HTTPResponse):
         return None
 
+    set_cache_headers(request, response)
+
     if 200 <= response.status < 300 and hasattr(request.ctx, "user"):
         # add the token to the response cookies
         user: UserInfo = request.ctx.user
@@ -91,6 +103,27 @@ async def on_response(request: Request, response) -> HTTPResponse | None:
         return wrapped
 
     return response
+
+
+def set_cache_headers(request: Request, response: HTTPResponse):
+    """Prevent stale frontend shells from surviving deployments.
+
+    Args:
+        request: The request object.
+        response: The response object.
+    """
+    if request.path.startswith(URL_PREFIX):
+        return
+
+    is_html = bool(
+        response.content_type and response.content_type.startswith("text/html")
+    )
+    if request.path not in FRONTEND_NO_CACHE_PATHS and not is_html:
+        return
+
+    response.headers["Cache-Control"] = FRONTEND_NO_CACHE
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
 
 
 class SessionHolder:

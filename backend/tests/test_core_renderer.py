@@ -1,3 +1,5 @@
+"""Unit tests for the core renderer."""
+
 from app.core.renderer import ENV, query_param, render
 
 
