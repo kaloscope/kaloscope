@@ -27,6 +27,7 @@
     lineHeight: number;
     paraSpacing: number;
     paddingX: number;
+    sortDesc: boolean;
   };
 
   const settings = persisted<TextViewerSettings>('text-viewer', {
@@ -35,7 +36,8 @@
     fontSize: 16,
     lineHeight: 1.8,
     paraSpacing: 1,
-    paddingX: 2
+    paddingX: 2,
+    sortDesc: false
   });
 
   const THEMES: Record<Theme, { bg: string; text: string; muted: string; panel: string; bar: string }> = {
@@ -160,7 +162,7 @@
   let content = $state('');
   // available chapters
   let chapters = $state<Chapter[]>([]);
-  // chapters grouped by volume
+  // chapters grouped by volume in source order
   let chapterGroups = $derived(groupChapters(chapters));
   // currently active chapter id from url or selection
   let chapterId = $state<string | null>(null);
@@ -176,6 +178,8 @@
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
   // display title, resource title or current chapter title
   let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
+  // whether the chapter list is displayed in descending order
+  let sortDesc = $derived($settings?.sortDesc ?? false);
 
   // whether the settings panel is open
   let settingsOpen = $state(false);
@@ -215,6 +219,15 @@
     chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
+  }
+
+  /**
+   * Toggle the persisted chapter list display order.
+   */
+  function toggleSort() {
+    if ($settings !== null) {
+      $settings.sortDesc = !($settings.sortDesc ?? false);
+    }
   }
 
   /**
@@ -259,6 +272,7 @@
 <div
   role="application"
   aria-label="Text viewer"
+  data-theme="light"
   class="fixed inset-0 flex flex-col transition-colors duration-300"
   style:background-color={colors.bg}
 >
@@ -322,9 +336,17 @@
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">{$_('media.text.chapters')}</h3>
+        <div class="flex items-center gap-1">
+          <h3 class="text-base font-bold">{$_('media.text.chapters')}</h3>
+          <!-- svelte-ignore a11y_consider_explicit_label -->
+          <button class="btn btn-xs border-0 bg-transparent shadow-none" style:color={colors.text} onclick={toggleSort}>
+            <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
+            </iconify-icon>
+          </button>
+        </div>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
+          style:color={colors.text}
           aria-label="Close"
           onclick={() => (chaptersOpen = false)}
         >
@@ -381,6 +403,7 @@
         <h3 class="text-base font-bold">{$_('media.text.settings')}</h3>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none"
+          style:color={colors.text}
           aria-label="Close"
           onclick={() => (settingsOpen = false)}
         >
@@ -413,8 +436,8 @@
             <div class="grid grid-cols-3 gap-2">
               {#each Object.entries(FONTS) as [key] (key)}
                 <label
-                  class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
-                  {$settings.font === key ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
+                  class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
+                  {$settings.font === key ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
                 >
                   <input type="radio" class="hidden" value={key} bind:group={$settings.font} />
                   {$_(`media.text.font_options.${key}`)}
@@ -463,10 +486,10 @@
 
 {#snippet chapterMenu()}
   <ul class="menu w-full px-2 pb-6 text-sm">
-    {#each chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
+    {#each sortDesc ? [...chapterGroups].reverse() : chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
       {#if group.volume}
         <li>
-          <h2 class="menu-title">{group.volume}</h2>
+          <h2 class="menu-title opacity-40" style:color={colors.text}>{group.volume}</h2>
           <ul>
             {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
               {@render chapterItem(chapter)}
@@ -474,7 +497,7 @@
           </ul>
         </li>
       {:else}
-        {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
+        {#each sortDesc ? [...group.chapters].reverse() : group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
           {@render chapterItem(chapter)}
         {/each}
       {/if}
@@ -502,11 +525,15 @@
       <span class="tabular-nums">{$settings?.[key]}{unit}</span>
     </span>
     <div class="flex items-center gap-2">
-      <button class="btn btn-xs text-sm font-mono border opacity-50" onclick={() => clamp(key, -step)}>-</button>
+      <button class="btn btn-xs text-sm font-mono border! opacity-50 shadow-none" onclick={() => clamp(key, -step)}>
+        -
+      </button>
       {#if $settings !== null}
         <input type="range" class="range range-xs flex-1" {min} {max} {step} bind:value={$settings[key]} />
       {/if}
-      <button class="btn btn-xs text-sm font-mono border opacity-50" onclick={() => clamp(key, step)}>+</button>
+      <button class="btn btn-xs text-sm font-mono border! opacity-50 shadow-none" onclick={() => clamp(key, step)}>
+        +
+      </button>
     </div>
   </div>
 {/snippet}

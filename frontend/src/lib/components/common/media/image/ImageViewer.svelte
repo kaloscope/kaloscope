@@ -33,12 +33,14 @@
     readMode: ReadMode;
     zoomMode: ZoomMode;
     pageDirection: PageDirection;
+    sortDesc: boolean;
   };
 
   const settings = persisted<ImageViewerSettings>('image-viewer', {
     readMode: 'scroll',
     zoomMode: 'auto',
-    pageDirection: 'right'
+    pageDirection: 'right',
+    sortDesc: false
   });
 
   const ZOOM_MODES: Record<ZoomMode, { class: string }> = {
@@ -97,7 +99,7 @@
   let images = $state<string[]>([]);
   // available chapters
   let chapters = $state<Chapter[]>([]);
-  // chapters grouped by volume
+  // chapters grouped by volume in source order
   let chapterGroups = $derived(groupChapters(chapters));
   // currently active chapter id from url or selection
   let chapterId = $state<string | null>(null);
@@ -113,6 +115,8 @@
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
   // display title, resource title or current chapter title
   let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
+  // whether the chapter list is displayed in descending order
+  let sortDesc = $derived($settings?.sortDesc ?? false);
 
   // whether the settings panel is open
   let settingsOpen = $state(false);
@@ -182,6 +186,15 @@
     chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
+  }
+
+  /**
+   * Toggle the persisted chapter list display order.
+   */
+  function toggleSort() {
+    if ($settings !== null) {
+      $settings.sortDesc = !($settings.sortDesc ?? false);
+    }
   }
 
   /**
@@ -395,7 +408,13 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div role="application" aria-label="Image viewer" class="fixed inset-0 flex flex-col bg-black" onclick={handleClick}>
+<div
+  role="application"
+  data-theme="light"
+  aria-label="Image viewer"
+  class="fixed inset-0 flex flex-col bg-black"
+  onclick={handleClick}
+>
   <!-- top bar -->
   {#if controlsVisible}
     <div
@@ -450,7 +469,14 @@
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">{$_('media.image.chapters')}</h3>
+        <div class="flex items-center gap-1">
+          <h3 class="text-base font-bold">{$_('media.image.chapters')}</h3>
+          <!-- svelte-ignore a11y_consider_explicit_label -->
+          <button class="btn btn-xs border-0 bg-transparent shadow-none text-white/80" onclick={toggleSort}>
+            <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
+            </iconify-icon>
+          </button>
+        </div>
         <button
           class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
           aria-label="Close"
@@ -593,10 +619,10 @@
 
 {#snippet chapterMenu()}
   <ul class="menu w-full px-2 pb-6 text-sm">
-    {#each chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
+    {#each sortDesc ? [...chapterGroups].reverse() : chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
       {#if group.volume}
         <li>
-          <h2 class="menu-title">{group.volume}</h2>
+          <h2 class="menu-title text-neutral-content/40">{group.volume}</h2>
           <ul>
             {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
               {@render chapterItem(chapter)}
@@ -604,7 +630,7 @@
           </ul>
         </li>
       {:else}
-        {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
+        {#each sortDesc ? [...group.chapters].reverse() : group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
           {@render chapterItem(chapter)}
         {/each}
       {/if}
@@ -626,8 +652,8 @@
 
 {#snippet readModeBtn(mode: ReadMode)}
   <label
-    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
-    {$settings?.readMode === mode ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
+    {$settings?.readMode === mode ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
   >
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.readMode} />
@@ -638,8 +664,8 @@
 
 {#snippet zoomModeBtn(mode: ZoomMode)}
   <label
-    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
-    {$settings?.zoomMode === mode ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
+    {$settings?.zoomMode === mode ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
   >
     {#if $settings !== null}
       <input type="radio" class="hidden" value={mode} bind:group={$settings.zoomMode} />
@@ -650,8 +676,8 @@
 
 {#snippet directionBtn(direction: PageDirection)}
   <label
-    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-all
-    {$settings?.pageDirection === direction ? 'bg-primary/15 text-primary' : 'opacity-50 hover:opacity-80'}"
+    class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
+    {$settings?.pageDirection === direction ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
   >
     {#if $settings !== null}
       <input type="radio" class="hidden" value={direction} bind:group={$settings.pageDirection} />
