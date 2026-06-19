@@ -246,6 +246,20 @@ export function escapeHTML(str: string): string {
 }
 
 /**
+ * Convert part of the title to italic format.
+ *
+ * @param title - The title string.
+ * @return The HTML string with italicized parts.
+ */
+export function italic(title: string): string {
+  title = escapeHTML(title);
+  return title.replace(
+    /\[([^\]]+)\]/g,
+    '<span class="text-sm font-normal opacity-60">[<span class="italic px-1">$1</span>]</span>'
+  );
+}
+
+/**
  * Check if a color is white.
  *
  * @param color - The color string to check.

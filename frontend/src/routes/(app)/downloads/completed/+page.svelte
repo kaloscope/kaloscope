@@ -4,7 +4,7 @@
     Badge,
     Cell,
     DataView,
-    DeleteConfirm,
+    DownloadDelConfirm,
     HCell,
     Paginator,
     Search,
@@ -21,7 +21,7 @@
   let name: string = $state('');
   let downloader: number | null = $state(null);
   let downloaders: Downloader[] = $state([]);
-  let deleteConfirm: DeleteConfirm;
+  let deleteConfirm: DownloadDelConfirm;
 
   const pagination: PaginatorProps = $state({ current: 1, size: 50, onchange: search });
   const ordering = createSortField();
@@ -132,4 +132,4 @@
   {/snippet}
 </DataView>
 
-<DeleteConfirm bind:this={deleteConfirm} onconfirm={() => search(pagination.current)} />
+<DownloadDelConfirm bind:this={deleteConfirm} onconfirm={() => search(pagination.current)} />

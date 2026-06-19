@@ -373,6 +373,8 @@
     "episodes": "Episodes",
     "parts": "Parts",
     "tags": "Tags",
+    "delete_local": "Also delete the local files",
+    "delete_local_confirm": "Are you sure you want to delete the local files?",
     "text": {
       "chapters": "Chapters",
       "settings": "Settings",

@@ -17,7 +17,7 @@ from tortoise.fields import (
     ReverseRelation,
 )
 
-from app.models.base import Pageable, TortoiseModel
+from app.models.base import IDs, Pageable, TortoiseModel
 from app.models.flow import GraphRef
 from app.models.general import GlobalConfig
 from app.utils.disk import is_directory
@@ -156,6 +156,10 @@ class MediaQuery(Pageable):
 class MediaMetadata(BaseModel):
     graph_id: PositiveInt
     metadata: dict
+
+
+class MediaDel(IDs):
+    local: bool = False
 
 
 class MediaResource(BaseModel):

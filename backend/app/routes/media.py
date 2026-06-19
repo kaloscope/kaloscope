@@ -23,6 +23,7 @@ from app.models.base import IDs, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
     LibType,
+    MediaDel,
     MediaItem,
     MediaLib,
     MediaLibUpsert,
@@ -132,10 +133,16 @@ async def list_items(_, query: MediaQuery) -> HTTPResponse:
 
 @media.post("/delete")
 @authorize(role=UserRole.ADMIN)
-@validate(json=IDs)
-async def delete_items(_, body: IDs) -> HTTPResponse:
-    """Delete the media items (logically by setting visible to False)."""
-    await MediaItem.filter(id__in=body.ids).update(visible=False)
+@validate(json=MediaDel)
+async def delete_items(_, body: MediaDel) -> HTTPResponse:
+    """Delete the media items."""
+    for id in body.ids:
+        try:
+            await MediaItemService.delete(int(id), body.local)
+        except Exception:
+            if len(body.ids) == 1:
+                raise
+            logger.error("Failed to delete the media item: %s", id, exc_info=True)
     return empty()
 
 

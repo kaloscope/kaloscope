@@ -5,6 +5,7 @@ from pathlib import Path
 import aiofiles
 from sanic import Sanic
 from sanic.log import logger
+from send2trash import send2trash
 from tortoise.expressions import Q
 from tortoise.transactions import atomic
 
@@ -119,6 +120,23 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     """The service class for all media item related operations."""
 
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
+
+    @classmethod
+    async def delete(cls, id: int, local: bool = False):
+        """Delete a media item.
+
+        Args:
+            id: The media item ID.
+            local: Whether to delete the local files.
+        """
+        if local:
+            item = await MediaItem.get(id=id)
+            path = Path(item.path)
+            if path.exists():
+                send2trash(path)
+            await item.delete()
+        else:
+            await MediaItem.filter(id=id).update(visible=False)
 
     @classmethod
     async def create(

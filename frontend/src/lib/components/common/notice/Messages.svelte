@@ -3,7 +3,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { freeze } from '$lib/stores';
-  import { escapeHTML, sniffer } from '$lib/utils';
+  import { italic, sniffer } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
   import { tick } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
@@ -95,20 +95,6 @@
       // call the callback function if provided
       callback?.();
     }
-  }
-
-  /**
-   * Convert part of the title to italic format.
-   *
-   * @param title - The title string.
-   * @return The HTML string with italicized parts.
-   */
-  function italic(title: string): string {
-    title = escapeHTML(title);
-    return title.replace(
-      /\[([^\]]+)\]/g,
-      '<span class="text-sm font-normal opacity-60">[<span class="italic px-1">$1</span>]</span>'
-    );
   }
 </script>
 

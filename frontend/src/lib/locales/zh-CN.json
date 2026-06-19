@@ -373,6 +373,8 @@
     "episodes": "剧集",
     "parts": "分段",
     "tags": "标签",
+    "delete_local": "同时删除本地文件",
+    "delete_local_confirm": "是否确认删除本地文件？",
     "text": {
       "chapters": "章节",
       "settings": "阅读设置",

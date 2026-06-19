@@ -14,14 +14,14 @@
 </script>
 
 <script lang="ts">
-  import { api } from '$lib/api';
-  import { Dropdown, MetadataScraper, confirm, mediaTitle } from '$lib/components';
+  import { Dropdown, MediaDelConfirm, MetadataScraper } from '$lib/components';
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
   let { item, class: _class, triggerClass, onclick, onscrape, ondelete }: MediaActionsProps = $props();
   let scraper: MetadataScraper | null = $state(null);
+  let deleter: MediaDelConfirm | null = $state(null);
 </script>
 
 {#snippet action(icon: IconifyIcon, text: string, onclick: MouseEventHandler<HTMLElement>)}
@@ -64,14 +64,8 @@
     {/if}
     {#if ondelete}
       {@render action(icons.delete, $_('action.delete'), () => {
-        // delete the media item
-        confirm({
-          icon: icons.delete,
-          title: `${$_('action.delete')} [${mediaTitle(item)}]`,
-          onconfirm: () => {
-            api.post('media/delete', { json: { ids: [item.id] } }).then(() => ondelete?.());
-          }
-        });
+        // show delete confirm dialog
+        deleter?.showModal(item);
       })}
     {/if}
   </ul>
@@ -79,4 +73,8 @@
 
 {#if onscrape}
   <MetadataScraper bind:this={scraper} {item} {onscrape} />
+{/if}
+
+{#if ondelete}
+  <MediaDelConfirm bind:this={deleter} onconfirm={ondelete} />
 {/if}

@@ -1,18 +1,21 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
-  import { Modal } from '$lib/components';
+  import { Modal, confirm, mediaTitle } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import type { MediaItem } from '$lib/types';
 
   let { onconfirm }: { onconfirm?: () => void } = $props();
-  let taskId = $state(0);
+  let item: MediaItem | null = $state(null);
+  let local = $state(false);
 
   // the modal dialog instance
   let modal: Modal;
-  export const showModal = (id: number) => {
-    taskId = id;
+  export const showModal = (target: MediaItem) => {
+    item = target;
+    local = false;
     modal.show();
   };
 
@@ -20,16 +23,36 @@
   const loading = createLoading();
 
   /**
-   * Delete a download task by ID.
+   * Confirm the deletion of local files.
+   */
+  function confirmLocalDelete() {
+    local = true;
+    confirm({
+      shallow: false,
+      message: $_('media.delete_local_confirm'),
+      onconfirm: () => {
+        local = true;
+      },
+      oncancel: () => {
+        local = false;
+      }
+    });
+  }
+
+  /**
+   * Delete a media item by ID.
    *
    * @param form - The form element.
    * @param data - The form data.
    */
   function del(form: HTMLFormElement, data: FormData) {
+    if (!item) {
+      return;
+    }
     loading.start();
     api
-      .post('download/delete', {
-        json: { ids: [taskId], local: !!data.get('local') }
+      .post('media/delete', {
+        json: { ids: [item.id], local: !!data.get('local') }
       })
       .then(() => {
         modal.close();
@@ -42,7 +65,7 @@
   }
 </script>
 
-<Modal icon={icons.warning} title={$_('message.default.title')} bind:this={modal}>
+<Modal icon={icons.delete} title={$_('action.delete', item ? `[${mediaTitle(item)}]` : '')} bind:this={modal}>
   <form
     method="post"
     use:enhance={({ formElement, formData, cancel }) => {
@@ -52,8 +75,16 @@
   >
     <fieldset class="mt-2 fieldset">
       <label class="mt-2 fieldset-label w-fit">
-        <input type="checkbox" class="checkbox" checked={false} name="local" />
-        <span class="text-base text-base-content opacity-90">{$_('download.delete_local')}</span>
+        <input
+          type="checkbox"
+          class="checkbox"
+          checked={local}
+          name="local"
+          onchange={(event) => {
+            event.currentTarget.checked ? confirmLocalDelete() : (local = false);
+          }}
+        />
+        <span class="text-base text-base-content opacity-90">{$_('media.delete_local')}</span>
       </label>
     </fieldset>
     <div class="modal-action">

@@ -41,7 +41,7 @@
   import { Alerts } from '$lib/components';
   import { messages } from '$lib/components/common/notice/Messages.svelte';
   import { freeze } from '$lib/stores';
-  import { sniffer } from '$lib/utils';
+  import { italic, sniffer } from '$lib/utils';
   import { tick } from 'svelte';
   import { fade } from 'svelte/transition';
   import { v4 as uuidv4 } from 'uuid';
@@ -143,7 +143,8 @@
           {#if icon}
             <iconify-icon {icon} width="1.5rem" class="size-6 opacity-90"></iconify-icon>
           {/if}
-          {title}
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+          {@html italic(title)}
         </h3>
       {/if}
       {#if children}
