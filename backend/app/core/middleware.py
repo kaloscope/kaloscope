@@ -1,4 +1,5 @@
 from datetime import timedelta
+from fnmatch import fnmatch
 from multiprocessing.managers import DictProxy
 from multiprocessing.synchronize import Lock
 
@@ -35,7 +36,7 @@ async def on_request(request: Request):
     if not request.path.startswith(URL_PREFIX):
         return
     for path in app.config.AUTH_EXCLUDE_PATHS:
-        if request.path.startswith(URL_PREFIX + path):
+        if fnmatch(request.path, URL_PREFIX + path):
             return
     # check if the token is in the request
     token = request.token or request.cookies.get(SESSION_ID)
