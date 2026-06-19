@@ -15,7 +15,7 @@
   } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
-  import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
+  import { captureScrollPosition, compactRecord, restorePosition, subroutes, user } from '$lib/stores';
   import type { MediaItem, Page, Resp } from '$lib/types';
   import { tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -118,11 +118,9 @@
           const route = data.menus[0]?.routes[0]?.path;
           if (!route) {
             setTimeout(() => {
-              const _subroutes = get(subroutes);
-              if (_subroutes) {
-                delete _subroutes['/medialibs'];
-                subroutes.set(_subroutes);
-              }
+              const _subroutes = { ...(get(subroutes) ?? {}) };
+              delete _subroutes['/medialibs'];
+              subroutes.set(compactRecord(_subroutes));
             });
           } else {
             goto(route, { replaceState: true });

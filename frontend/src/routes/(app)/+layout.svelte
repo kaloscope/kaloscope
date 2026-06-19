@@ -4,7 +4,7 @@
   import { api } from '$lib/api';
   import { Dock, Navbar } from '$lib/components';
   import { headTitle } from '$lib/i18n';
-  import { freeze, histories, positions, subroutes, urlparams, user } from '$lib/stores';
+  import { compactRecord, freeze, histories, positions, subroutes, urlparams, user } from '$lib/stores';
   import type { Resp, User } from '$lib/types';
   import { normalizePathname } from '$lib/utils';
   import { SvelteFlowProvider } from '@xyflow/svelte';
@@ -80,8 +80,11 @@
     const position = { left: window.scrollX, top: window.scrollY };
     positions.set({ ...$positions, [fromPath]: position });
     // capture the URL parameters
+    const _urlparams = { ...($urlparams ?? {}) };
     if (fromUrl.search) {
-      urlparams.set({ ...$urlparams, [fromPath]: fromUrl.search });
+      _urlparams[fromPath] = fromUrl.search;
+    } else {
+      delete _urlparams[fromPath];
     }
     // restore the URL parameters for the next page
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
@@ -89,12 +92,17 @@
     if (toSearchParams.get('restore') === 'false') {
       toSearchParams.delete('restore');
       toUrl.search = toSearchParams.toString();
+      delete _urlparams[toPath];
     } else {
-      let searchParams = $urlparams[toPath];
-      if (searchParams && searchParams !== toUrl.search) {
-        toUrl.search = searchParams;
+      const searchParams = _urlparams[toPath];
+      if (searchParams) {
+        delete _urlparams[toPath];
+        if (searchParams !== toUrl.search) {
+          toUrl.search = searchParams;
+        }
       }
     }
+    urlparams.set(compactRecord(_urlparams));
   });
 
   afterNavigate(({ from }) => {

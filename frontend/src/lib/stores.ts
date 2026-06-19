@@ -12,8 +12,8 @@ export const user = writable<User | null>(null);
 export const token = persisted<string>('token');
 export const freeze = writable<boolean>(false);
 export const signposts = writable<string[]>([]);
-export const urlparams = writable<Record<string, string>>({});
 export const positions = writable<Record<string, ScrollPosition>>({});
+export const urlparams = persisted<Record<string, string>>('urlparams');
 export const histories = persisted<Record<string, string>>('histories');
 export const subroutes = persisted<Record<string, string>>('subroutes');
 
@@ -48,6 +48,16 @@ export function persisted<T>(key: string, value?: T | null): Writable<T | null> 
   }
 
   return store;
+}
+
+/**
+ * Return a record only when it still has keys.
+ *
+ * @param record - The record to compact.
+ * @returns The record, or null when empty.
+ */
+export function compactRecord<T>(record: Record<string, T>): Record<string, T> | null {
+  return Object.keys(record).length ? record : null;
 }
 
 /**
@@ -90,12 +100,12 @@ export function mediaQuery(query: string, immediate: boolean = true): Writable<b
  */
 export function historyBack() {
   const pathname = normalizePathname(page.url.pathname);
-  const _histories = get(histories);
-  const history = _histories?.[pathname];
+  const _histories = { ...(get(histories) ?? {}) };
+  const history = _histories[pathname];
   if (history) {
     goto(history);
     delete _histories[pathname];
-    histories.set({ ..._histories });
+    histories.set(compactRecord(_histories));
   } else {
     window.history.back();
   }
