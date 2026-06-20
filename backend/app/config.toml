@@ -1,7 +1,12 @@
 [app]
 # authentication
 token_expiration_hours = 120
-auth_exclude_paths = ["/auth/login", "/user/count", "/user/create_admin", "/system/*"]
+auth_exclude_paths = [
+  "/auth/login",
+  "/user/count",
+  "/user/create_admin",
+  "/system/*",
+]
 
 # https://sanic.dev/en/guide/running/configuration.html
 request_timeout = 60
@@ -14,6 +19,7 @@ oas_ui_redoc = false
 oas_ui_default = "swagger"
 
 [workspace]
+cache = "{workspace}/cache"
 images = "{workspace}/images"
 database = "{workspace}/database"
 transcoded = "{workspace}/transcoded"

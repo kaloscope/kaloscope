@@ -5,6 +5,7 @@ from multiprocessing.managers import SyncManager
 from pathlib import Path
 
 import httpx
+from hishel import AsyncSqliteStorage
 from hishel.httpx import AsyncCacheTransport
 from sanic import Sanic
 from sanic.log import Colors, logger
@@ -181,7 +182,10 @@ async def start_http_client(app: Sanic):
         http2=True,
         follow_redirects=True,
         cookies=app.ctx.cookies,
-        transport=AsyncCacheTransport(next_transport=NetworkTransport(http2=True)),
+        transport=AsyncCacheTransport(
+            next_transport=NetworkTransport(http2=True),
+            storage=AsyncSqliteStorage(database_path=_cache_path(app)),
+        ),
     )
     logger.debug(_msg(Colors.BLUE, "HTTP client initialized."), _worker(app))
 
@@ -274,3 +278,16 @@ def _worker(app: Sanic) -> str:
         The worker name.
     """
     return app.m.name if hasattr(app, "m") else "main"
+
+
+def _cache_path(app: Sanic) -> Path:
+    """Get the worker-specific cache database path.
+
+    Args:
+        app: The Sanic application instance.
+
+    Returns:
+        The cache database path.
+    """
+    worker = _worker(app)
+    return Path(app_config.get_workspace("cache")) / f"{worker}.db"
