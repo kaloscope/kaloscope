@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
 from sanic.request.form import File
@@ -168,7 +168,9 @@ class UserAvatar(BaseModel, RequestFilesMixin):
 
 class FavoriteQuery(Pageable):
     indexer_id: PositiveInt | None = None
-    rsrc_ids: list[str] | None = Field(min_length=1, max_length=999, default=None)
+    rsrc_ids: list[PositiveInt | Annotated[str, Field(min_length=1)]] | None = Field(
+        min_length=1, max_length=999, default=None
+    )
 
 
 class HistoryQuery(Pageable):

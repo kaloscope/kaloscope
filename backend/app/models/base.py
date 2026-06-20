@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, Field, PositiveInt, model_validator
 from sanic import Request, SanicException
@@ -32,7 +32,9 @@ QuerySet.update = patched_update
 class IDs(BaseModel):
     """A list of IDs."""
 
-    ids: list[PositiveInt | str] = Field(min_length=1, max_length=999)
+    ids: list[PositiveInt | Annotated[str, Field(min_length=1)]] = Field(
+        min_length=1, max_length=999
+    )
 
 
 class KVPair(BaseModel):

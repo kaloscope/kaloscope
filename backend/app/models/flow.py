@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
 import yaml
 from pydantic import BaseModel, Field, FutureDatetime, PositiveInt, model_validator
@@ -385,6 +385,6 @@ class JobUpsert(BaseModel):
 
 
 class IndexerResource(BaseModel):
-    rsrc_id: str = Field(min_length=1)
+    rsrc_id: PositiveInt | Annotated[str, Field(min_length=1)]
     rsrc: dict | None = None
     url: str | None = Field(max_length=255, default=None)
