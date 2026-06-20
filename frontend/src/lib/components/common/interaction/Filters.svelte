@@ -21,6 +21,9 @@
   // svelte-ignore state_referenced_locally
   let values: Record<string, string | string[]> = $state(JSON.parse(value || '{}'));
 
+  // calendar filter start date storage
+  const starts: Record<string, string> = {};
+
   let modal: Modal;
   export const showModal = () => modal.show();
 
@@ -35,6 +38,47 @@
       return false;
     }
     return element.getBoundingClientRect().bottom > window.innerHeight;
+  }
+
+  /**
+   * Get the range string from the stored array value.
+   *
+   * @param key - The filter key.
+   * @returns The range string for Cally.
+   */
+  function rangeValue(key: string): string {
+    const value = values[key];
+    if (!Array.isArray(value) || !value[0] || !value[1]) {
+      return '';
+    }
+    return `${value[0]}/${value[1]}`;
+  }
+
+  /**
+   * Get the range label from the stored array value.
+   *
+   * @param key - The filter key.
+   * @returns The range label.
+   */
+  function rangeLabel(key: string): string {
+    const value = values[key];
+    if (!Array.isArray(value) || !value[0] || !value[1]) {
+      return '';
+    }
+    return `${value[0]} ~ ${value[1]}`;
+  }
+
+  /**
+   * Format a Cally date event detail as an ISO date string.
+   *
+   * @param date - The Cally event date.
+   * @returns The ISO date string.
+   */
+  function formatDate(date: Date): string {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 </script>
 
@@ -53,8 +97,8 @@
         {@render scalar(key, 'datetime-local')}
       {:else if filter.type === 'date' || filter.type === 'time' || filter.type === 'week' || filter.type === 'month'}
         {@render scalar(key, filter.type)}
-      {:else if filter.type === 'calendar'}
-        {@render calendar(key)}
+      {:else if filter.type === 'calendar' || filter.type === 'calendar-range'}
+        {@render calendar(key, filter.type === 'calendar-range')}
       {:else if filter.type === 'radio'}
         {@render radio(key, filter)}
       {:else if filter.type === 'checkbox'}
@@ -82,7 +126,7 @@
 {/snippet}
 
 <!-- calendar filter -->
-{#snippet calendar(key: string)}
+{#snippet calendar(key: string, range: boolean)}
   {@const callyId = `cally-${key}`}
   {@const callyPopoverId = `cally-popover-${key}`}
   <button
@@ -102,7 +146,7 @@
     }}
   >
     <iconify-icon icon={icons.calendar} width="1.25rem" class="opacity-70"></iconify-icon>
-    {values[key]}
+    {range ? rangeLabel(key) : values[key]}
     {#if values[key]}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
@@ -112,6 +156,7 @@
         onclick={(event) => {
           event.preventDefault();
           delete values[key];
+          delete starts[key];
         }}
       >
         <iconify-icon
@@ -128,36 +173,61 @@
     class="dropdown invisible m-1 rounded-box border bg-base-100 shadow-xl transition-none"
     style="position-anchor:--{callyId}"
   >
-    <calendar-date
-      class="cally [&_::part(day_selected):hover]:bg-base-content/80 [&_::part(day_today):hover]:bg-primary/80"
-      value={values[key]}
-      onfocusday={(event: { target: { value: string } }) => {
-        const newValue = event.target.value;
-        if (values[key] !== newValue) {
-          values[key] = newValue;
-          document.getElementById(callyPopoverId)?.hidePopover();
-        }
-      }}
-    >
-      {/* @ts-expect-error property does not exist */ null}
-      <svg
-        aria-label="Previous"
-        class="size-4 fill-current"
-        slot="previous"
-        xmlns="http://www.w3.org/2000/svg"
-        viewBox="0 0 24 24"><path d="M15.75 19.5 8.25 12l7.5-7.5"></path></svg
+    {#if range}
+      <calendar-range
+        class="cally [&_::part(day_selected):hover]:bg-base-content/80 [&_::part(day_today):hover]:bg-primary/80"
+        value={rangeValue(key)}
+        onrangestart={(event: CustomEvent<Date>) => {
+          starts[key] = formatDate(event.detail);
+        }}
+        onrangeend={(event: CustomEvent<Date>) => {
+          const start = starts[key];
+          const end = formatDate(event.detail);
+          if (start && end) {
+            values[key] = start <= end ? [start, end] : [end, start];
+            delete starts[key];
+            document.getElementById(callyPopoverId)?.hidePopover();
+          } else {
+            delete values[key];
+          }
+        }}
       >
-      {/* @ts-expect-error property does not exist */ null}
-      <svg
-        aria-label="Next"
-        class="size-4 fill-current"
-        slot="next"
-        xmlns="http://www.w3.org/2000/svg"
-        viewBox="0 0 24 24"><path d="m8.25 4.5 7.5 7.5-7.5 7.5"></path></svg
+        {@render calendarMonth()}
+      </calendar-range>
+    {:else}
+      <calendar-date
+        class="cally [&_::part(day_selected):hover]:bg-base-content/80 [&_::part(day_today):hover]:bg-primary/80"
+        value={values[key]}
+        onfocusday={(event: CustomEvent<Date>) => {
+          const date = formatDate(event.detail);
+          if (values[key] !== date) {
+            values[key] = date;
+            document.getElementById(callyPopoverId)?.hidePopover();
+          }
+        }}
       >
-      <calendar-month></calendar-month>
-    </calendar-date>
+        {@render calendarMonth()}
+      </calendar-date>
+    {/if}
   </div>
+{/snippet}
+
+{#snippet calendarMonth()}
+  {/* @ts-expect-error property does not exist */ null}
+  <svg
+    aria-label="Previous"
+    class="size-4 fill-current"
+    slot="previous"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+  >
+    <path d="M15.75 19.5 8.25 12l7.5-7.5"></path>
+  </svg>
+  {/* @ts-expect-error property does not exist */ null}
+  <svg aria-label="Next" class="size-4 fill-current" slot="next" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="m8.25 4.5 7.5 7.5-7.5 7.5"></path>
+  </svg>
+  <calendar-month></calendar-month>
 {/snippet}
 
 <!-- radio filter -->

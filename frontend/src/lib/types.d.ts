@@ -641,7 +641,18 @@ export type Favorite = {
  * The type of the search filter.
  */
 export type Filter = {
-  type: 'text' | 'radio' | 'checkbox' | 'select' | 'calendar' | 'date' | 'time' | 'datetime' | 'week' | 'month';
+  type:
+    | 'text'
+    | 'radio'
+    | 'checkbox'
+    | 'select'
+    | 'calendar'
+    | 'calendar-range'
+    | 'date'
+    | 'time'
+    | 'datetime'
+    | 'week'
+    | 'month';
   label?: string;
   options?: Record<string, string>;
 };
