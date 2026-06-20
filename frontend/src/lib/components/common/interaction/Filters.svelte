@@ -48,9 +48,13 @@
     {#each Object.entries(schema) as [key, filter] (key)}
       <Label>{filter.label ?? key}</Label>
       {#if filter.type === 'text'}
-        {@render text(key, filter)}
+        {@render scalar(key, 'search')}
+      {:else if filter.type === 'datetime'}
+        {@render scalar(key, 'datetime-local')}
+      {:else if filter.type === 'date' || filter.type === 'time' || filter.type === 'week' || filter.type === 'month'}
+        {@render scalar(key, filter.type)}
       {:else if filter.type === 'calendar'}
-        {@render calendar(key, filter)}
+        {@render calendar(key)}
       {:else if filter.type === 'radio'}
         {@render radio(key, filter)}
       {:else if filter.type === 'checkbox'}
@@ -62,15 +66,14 @@
   </fieldset>
 </Modal>
 
-<!-- text filter -->
-<!-- eslint-disable-next-line @typescript-eslint/no-unused-vars -->
-{#snippet text(key: string, filter: Filter)}
+<!-- scalar filter -->
+{#snippet scalar(key: string, type: 'search' | 'datetime-local' | 'date' | 'time' | 'week' | 'month')}
   <input
-    type="search"
+    {type}
     class="input input-sm w-full truncate"
     value={values[key]}
     oninput={(event) => {
-      values[key] = event.currentTarget.value.trim();
+      values[key] = type === 'search' ? event.currentTarget.value.trim() : event.currentTarget.value;
       if (values[key] === '') {
         delete values[key];
       }
@@ -79,8 +82,7 @@
 {/snippet}
 
 <!-- calendar filter -->
-<!-- eslint-disable-next-line @typescript-eslint/no-unused-vars -->
-{#snippet calendar(key: string, filter: Filter)}
+{#snippet calendar(key: string)}
   {@const callyId = `cally-${key}`}
   {@const callyPopoverId = `cally-popover-${key}`}
   <button
