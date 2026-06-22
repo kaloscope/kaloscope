@@ -109,6 +109,19 @@ class KaloscopeConfig:
         value = os.environ.get("FILESYSTEM_TRASH_MODE", "").lower()
         return value not in ("0", "no", "off", "false")
 
+    @cached_property
+    def public_instance_mode(self) -> bool:
+        """Check if public instance protections are enabled.
+
+        When enabled, operations that can disrupt shared/public access are
+        blocked even if the current user would otherwise be allowed to run them.
+
+        Returns:
+            True if public instance mode is enabled, False otherwise.
+        """
+        value = os.environ.get("PUBLIC_INSTANCE_MODE", "").lower()
+        return value in ("1", "yes", "on", "true")
+
     def configure(self, app: Sanic):
         """Update the Sanic application configuration and store it in the context.
 

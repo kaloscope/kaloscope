@@ -10,7 +10,7 @@ from tortoise import timezone
 from tortoise.transactions import atomic
 
 from app.core.config import KaloscopeConfig
-from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.exceptions import ErrorCode, ForbiddenException, KaloscopeException
 from app.core.middleware import SessionHolder
 from app.models.base import KVPair
 from app.models.flow import IndexerResource
@@ -104,6 +104,8 @@ class UserService(BaseService[User], model=User):
             cur_pwd: The current password.
             new_pwd: The new password.
         """
+        if KaloscopeConfig.get().public_instance_mode:
+            raise ForbiddenException()
         user = await cls.login(username, cur_pwd, ambiguity=False)
         await User.filter(id=user.id).update(password=encrypt(new_pwd))
         # remove the user's token
