@@ -1,6 +1,6 @@
 import mimetypes
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import aiofiles
 import httpx
@@ -82,10 +82,25 @@ async def proxy_image(
     # request the image from the URL if it is not a local file
     if not (http or https):
         return empty(status=404)
+
+    # prepare the proxy request URL
+    parsed = urlparse(url)
+    referer: str | None = None
+    query_params: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key == "proxy":
+            continue
+        if key == "referer":
+            if value:
+                referer = value
+            continue
+        query_params.append((key, value))
+    url = urlunparse(parsed._replace(query=urlencode(query_params)))
+
     # adjust the request headers
     headers = dict(request.headers)
     headers["host"] = urlparse(url).netloc
-    headers["referer"] = url
+    headers["referer"] = referer or url
     headers.pop("cookie", None)
     headers.pop("authorization", None)
     client: httpx.AsyncClient = request.app.ctx.httpx
