@@ -103,6 +103,22 @@ class DanmakuService:
         return f"{url}?{urlencode(params)}"
 
     @classmethod
+    def _cache_path(cls, media: MediaItem) -> Path:
+        """Get the local danmaku cache path for a media item.
+
+        Args:
+            media: The media item instance.
+
+        Returns:
+            The local danmaku cache path.
+        """
+        if media.danmaku_path:
+            return Path(media.danmaku_path)
+
+        # default path: {media_dir}/.{media_name}.json
+        return Path(media.dir) / f".{media.name}.json"
+
+    @classmethod
     async def match_danmakus(cls, path: str) -> DanmakuWrapper:
         """Match danmakus for the given media resource.
 
@@ -117,11 +133,8 @@ class DanmakuService:
         if not media:
             return DanmakuWrapper(comments=[])
 
-        # default local cache path: {media_dir}/.{media_name}.json
-        danmaku_path = media.danmaku_path
-        danmaku_path = Path(danmaku_path or (Path(media.dir) / f".{media.name}.json"))
-
         # check if the local cache file exists
+        danmaku_path = cls._cache_path(media)
         cached = danmaku_path.exists()
 
         # check if the local cache file is expired
@@ -357,9 +370,9 @@ class DanmakuService:
         """
         # get the media item by the path
         media = await MediaItem.filter(path=path).first()
-        if not media or not media.danmaku_path:
+        if not media:
             return
-        danmaku_path = Path(media.danmaku_path)
+        danmaku_path = cls._cache_path(media)
         if danmaku_path.is_file():
             danmaku_path.unlink()
         await MediaItem.filter(id=media.id).update(danmaku_path=None)
@@ -453,10 +466,7 @@ class DanmakuService:
         if danmakus:
             result.comments = danmakus
             # save to local cache file
-            danmaku_path = media.danmaku_path
-            danmaku_path = Path(
-                danmaku_path or (Path(media.dir) / f".{media.name}.json")
-            )
+            danmaku_path = cls._cache_path(media)
             async with aiofiles.open(danmaku_path, "wb") as f:
                 await f.write(json.dumps([d.model_dump() for d in danmakus]))
 

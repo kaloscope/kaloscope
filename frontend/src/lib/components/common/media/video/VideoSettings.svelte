@@ -166,6 +166,8 @@
 
   // the danmaku metadata matched with the current video
   let danmakuMeta: DanmakuMeta | null = $state(null);
+  // whether local danmaku cache exists for the current video
+  let danmakuCache: boolean = $state(false);
 
   // the manual danmaku search states
   let animeTitle: string = $derived.by(() => danmakuMeta?.anime_title ?? '');
@@ -342,6 +344,7 @@
     // clear the existing danmakus before loading new ones
     danmakuPlugin.clear();
     danmakuMeta = null;
+    danmakuCache = false;
     // fetch the danmakus matched with the current video
     const url = player?.config.url as string;
     const path = extractStreamPath(url);
@@ -349,19 +352,7 @@
       .post('danmaku/match', { json: { path } })
       .json<Resp<DanmakuWrapper>>()
       .then(({ data }) => {
-        const comments = data.comments;
-        if (comments && comments.length > 0) {
-          danmakuPlugin.updateComments(
-            formatDanmakus(comments, danmakuPlugin.danmujs?.container, danmakuPlugin.danmujs?.direction),
-            true
-          );
-          // The font size needs to be reset after updating the comments;
-          // this may be a bug in danmu.js where the style is reset after updating.
-          if ($danmaku !== null) {
-            danmakuPlugin.setFontSize($danmaku.fontSize, null);
-          }
-        }
-        danmakuMeta = data.metadata;
+        updateDanmakus(data);
       });
   }
 
@@ -369,7 +360,7 @@
    * Delete the locally cached danmakus for the current video.
    */
   function deleteLocalDanmakus() {
-    if (!localMedia || danmakuMeta === null) {
+    if (!localMedia || !danmakuCache) {
       return;
     }
     const url = player?.config.url as string;
@@ -379,7 +370,7 @@
       title: `${$_('action.delete', $_('media.danmaku.cache'))}`,
       onconfirm: () => {
         api.post('danmaku/delete', { json: { path } }).then(() => {
-          danmakuMeta = null;
+          danmakuCache = false;
         });
       }
     });
@@ -430,22 +421,42 @@
       })
       .json<Resp<DanmakuWrapper>>()
       .then(({ data }) => {
-        const comments = data.comments;
-        if (comments && comments.length > 0) {
-          danmakuPlugin.updateComments(
-            formatDanmakus(comments, danmakuPlugin.danmujs?.container, danmakuPlugin.danmujs?.direction),
-            true
-          );
-          if ($danmaku !== null) {
-            danmakuPlugin.setFontSize($danmaku.fontSize, null);
-          }
-        }
-        danmakuMeta = data.metadata;
+        updateDanmakus(data);
         index = -1;
       })
       .finally(() => {
         confirming.end();
       });
+  }
+
+  /**
+   * Update the danmakus for the current video.
+   *
+   * @param data - The danmaku data wrapper.
+   */
+  function updateDanmakus(data: DanmakuWrapper) {
+    if (danmakuPlugin === null) {
+      return;
+    }
+    danmakuMeta = data.metadata;
+    const comments = data.comments;
+    if (comments && comments.length > 0) {
+      danmakuCache = true;
+
+      // update the comments
+      danmakuPlugin.updateComments(
+        formatDanmakus(comments, danmakuPlugin.danmujs?.container, danmakuPlugin.danmujs?.direction),
+        true
+      );
+
+      // The font size needs to be reset after updating the comments;
+      // this may be a bug in danmu.js where the style is reset after updating.
+      if ($danmaku !== null) {
+        danmakuPlugin.setFontSize($danmaku.fontSize, null);
+      }
+    } else {
+      danmakuCache = false;
+    }
   }
 </script>
 
@@ -624,18 +635,20 @@
 
       {@render tabLabel('match', icons.boxMultipleSearchFilled, $_('media.danmaku.match'))}
       <div class="tab-content">
-        {#if danmakuMeta !== null}
+        {#if danmakuCache}
           <div class="mb-4 flex-col items-start! gap-1!">
             {@render optionLabel($_('media.danmaku.cache'))}
             <div class="flex w-full items-center justify-between gap-4">
-              <div class="flex min-w-0 flex-col gap-0.5">
-                <span class="truncate text-xs font-medium text-white/50" title={danmakuMeta.anime_title}>
-                  {danmakuMeta.anime_title}
-                </span>
-                <span class="truncate text-xs text-white/30" title={danmakuMeta.episode_title}>
-                  {danmakuMeta.episode_title}
-                </span>
-              </div>
+              {#if danmakuMeta}
+                <div class="flex min-w-0 flex-col gap-0.5">
+                  <span class="truncate text-xs font-medium text-white/50" title={danmakuMeta.anime_title}>
+                    {danmakuMeta.anime_title}
+                  </span>
+                  <span class="truncate text-xs text-white/30" title={danmakuMeta.episode_title}>
+                    {danmakuMeta.episode_title}
+                  </span>
+                </div>
+              {/if}
               <Button
                 icon={icons.delete}
                 text={$_('action.delete')}
