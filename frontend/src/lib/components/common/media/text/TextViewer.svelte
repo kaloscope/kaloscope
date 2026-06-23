@@ -7,7 +7,7 @@
 
   /** Options passed to the text viewer mount function. */
   export type TextViewerOptions = {
-    text: string;
+    text: string | string[];
     title?: string | null;
     chapters?: Chapter[];
     chapterId?: string | null;
@@ -147,6 +147,16 @@
       return groups;
     }, []);
   }
+
+  /**
+   * Normalize text payloads into the viewer's paragraph-based rendering model.
+   *
+   * @param text - The text payload from a flow response.
+   * @returns A single text body to render.
+   */
+  function normalizeTextContent(text: string | string[]): string {
+    return Array.isArray(text) ? text.join('\n\n') : text;
+  }
 </script>
 
 <script lang="ts">
@@ -203,7 +213,7 @@
       return;
     }
     title = options.title ?? '';
-    content = options.text ?? '';
+    content = normalizeTextContent(options.text);
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;

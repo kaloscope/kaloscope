@@ -614,7 +614,7 @@ export type Resource = Optional<{
   media_type: 'video' | 'audio' | 'image' | 'text';
   video_type: 'mp4' | 'flv' | 'hls';
   url: string;
-  text: string;
+  text: string | string[];
   images: string[];
   image_count: number;
   definitions: Definition[];
