@@ -7,12 +7,12 @@
   import { icons } from '$lib/icons';
 
   let { onconfirm }: { onconfirm?: () => void } = $props();
-  let taskId = $state(0);
+  let taskIds = $state<number[]>([]);
 
   // the modal dialog instance
   let modal: Modal;
-  export const showModal = (id: number) => {
-    taskId = id;
+  export const showModal = (ids: number | number[]) => {
+    taskIds = Array.isArray(ids) ? ids : [ids];
     modal.show();
   };
 
@@ -20,7 +20,7 @@
   const loading = createLoading();
 
   /**
-   * Delete a download task by ID.
+   * Delete download tasks by ID.
    *
    * @param form - The form element.
    * @param data - The form data.
@@ -29,7 +29,7 @@
     loading.start();
     api
       .post('download/delete', {
-        json: { ids: [taskId], local: !!data.get('local') }
+        json: { ids: taskIds, local: !!data.get('local') }
       })
       .then(() => {
         modal.close();

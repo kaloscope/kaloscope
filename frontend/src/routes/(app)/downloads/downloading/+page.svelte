@@ -2,9 +2,11 @@
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
   import {
+    alert,
     Badge,
     Button,
     Cell,
+    Checkbox,
     DataView,
     DownloadDelConfirm,
     downloadPrompt,
@@ -26,6 +28,7 @@
   let downloader: number | null = $state(null);
   let downloaders: Downloader[] = $state([]);
   let deleteConfirm: DownloadDelConfirm;
+  let headerCheckbox: Checkbox;
 
   const pagination: PaginatorProps = $state({ current: 1, size: 50, onchange: search });
   const ordering = createSortField();
@@ -67,7 +70,43 @@
       })
       .finally(() => {
         loading.end();
+        syncSelection(auto);
       });
+  }
+
+  /**
+   * Keep selected task IDs aligned with the current page.
+   *
+   * @param preserve - Whether to preserve selection across automatic refresh.
+   */
+  function syncSelection(preserve: boolean = false) {
+    if (!headerCheckbox) {
+      return;
+    }
+    if (!preserve) {
+      headerCheckbox.unselectAll();
+      return;
+    }
+    const currentKeys = new Set(tasks.map((task) => String(task.id)));
+    const selectedKeys = headerCheckbox.getSelectedKeys();
+    const nextKeys = selectedKeys.filter((key) => currentKeys.has(key));
+    selectedKeys.splice(0, selectedKeys.length, ...nextKeys);
+  }
+
+  /**
+   * Delete selected download tasks.
+   */
+  function batchDelete() {
+    const currentKeys = new Set(tasks.map((task) => String(task.id)));
+    const ids = headerCheckbox
+      .getSelectedKeys()
+      .filter((key) => currentKeys.has(key))
+      .map(Number);
+    if (ids.length === 0) {
+      alert({ message: 'select_delete_items' });
+      return;
+    }
+    deleteConfirm.showModal(ids);
   }
 
   /**
@@ -134,7 +173,7 @@
   });
 </script>
 
-<DataView dvh loading={$loading} data={tasks}>
+<DataView dvh loading={$loading} data={tasks} uniqueKey="id">
   {#snippet filters()}
     <Select
       filter
@@ -148,17 +187,29 @@
   {#snippet actions()}
     <Button
       size="md"
+      icon={icons.delete}
+      text={$_('action.batch_delete', $_('entity.task'))}
+      onclick={() => batchDelete()}
+    />
+    <Button
+      size="md"
       icon={icons.addCircle}
       text={$_('action.add', $_('entity.download'))}
       onclick={() => downloadPrompt()}
     />
   {/snippet}
   {#snippet header()}
+    <HCell width="2rem">
+      <Checkbox batch={tasks.length} bind:this={headerCheckbox} />
+    </HCell>
     <HCell width={['8rem', null]} text={$_('download.downloader.title')} sort={ordering.bind('downloader_id')} />
     <HCell width="100%" text={$_('field.name')} sort={ordering.bind('name')} />
     <HCell actions />
   {/snippet}
   {#snippet row(task)}
+    <Cell>
+      <Checkbox key={String(task.id)} />
+    </Cell>
     <Cell class="max-lg:hidden">
       {@const downloader = downloaders.find((d) => d.id === task.downloader_id)}
       {#if downloader}

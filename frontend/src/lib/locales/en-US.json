@@ -249,7 +249,8 @@
     "move_down": "Move Down {0}",
     "toggle_on": "On",
     "toggle_off": "Off",
-    "assign_permissions": "Permissions"
+    "assign_permissions": "Permissions",
+    "batch_delete": "Batch Delete {0}"
   },
   "status": {
     "up": "UP",
@@ -724,6 +725,7 @@
     "get_info_hash_failed": "Failed to get info-hash!",
     "http_request_failed": "HTTP request failed!",
     "select_export_items": "Please select at least one item to export.",
+    "select_delete_items": "Please select at least one item to delete.",
     "export_items_failed": "Failed to export the items!",
     "import_items_failed": "Failed to import the items!",
     "import_items_success": "Successfully imported {0} items!",

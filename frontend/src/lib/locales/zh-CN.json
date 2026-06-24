@@ -249,7 +249,8 @@
     "move_down": "下移{0}",
     "toggle_on": "打开",
     "toggle_off": "关闭",
-    "assign_permissions": "分配权限"
+    "assign_permissions": "分配权限",
+    "batch_delete": "批量删除{0}"
   },
   "status": {
     "up": "正常",
@@ -724,6 +725,7 @@
     "get_info_hash_failed": "获取哈希值失败！",
     "http_request_failed": "发送 HTTP 请求失败！",
     "select_export_items": "请先选择要导出的数据。",
+    "select_delete_items": "请先选择要删除的数据。",
     "export_items_failed": "导出数据失败！",
     "import_items_failed": "导入数据失败！",
     "import_items_success": "成功导入 {0} 条数据！",
