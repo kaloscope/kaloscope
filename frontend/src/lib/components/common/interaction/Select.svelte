@@ -71,7 +71,7 @@
   });
 
   // the dynamic class names
-  let filterClass = $derived(filter ? 'max-w-40 select-sm shadow-sm' : '');
+  let filterClass = $derived(filter ? 'max-w-[min(40%,10rem)] select-sm shadow-sm' : '');
   let selectClass = $derived(`select appearance-none ${filterClass} ${value ? '' : 'text-base-content/50'}`);
 </script>
 
