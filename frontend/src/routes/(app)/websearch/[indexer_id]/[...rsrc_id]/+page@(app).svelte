@@ -82,7 +82,9 @@
     const chapters = rsrc.chapters ?? [];
     // load the viewer/player based on the media type
     if (mediaType === 'text' && textViewer) {
-      if (rsrc.text) {
+      if (rsrc.text === null || rsrc.text === undefined) {
+        fallbackToFirst(chapters);
+      } else {
         textViewer.mount({
           text: rsrc.text,
           title: rsrc.title,
@@ -90,11 +92,11 @@
           chapterId: query.chapter_id,
           chapterChange: onchange
         });
-      } else {
-        fallbackToFirst(chapters);
       }
     } else if (mediaType === 'image' && imageViewer) {
-      if (rsrc.images && rsrc.images.length > 0) {
+      if (rsrc.images === null || rsrc.images === undefined) {
+        fallbackToFirst(chapters);
+      } else {
         imageViewer.mount({
           images: rsrc.images,
           image_count: rsrc.image_count,
@@ -103,11 +105,11 @@
           chapterId: query.chapter_id,
           chapterChange: onchange
         });
-      } else {
-        fallbackToFirst(chapters);
       }
     } else if (mediaType === 'video' && videoPlayer) {
-      if (rsrc.url) {
+      if (rsrc.url === null || rsrc.url === undefined) {
+        fallbackToFirst(chapters);
+      } else {
         videoPlayer.mount({
           url: rsrc.url,
           title: rsrc.title,
@@ -120,8 +122,6 @@
           uploader: rsrc.uploader,
           uploadedAt: rsrc.uploaded_at
         });
-      } else {
-        fallbackToFirst(chapters);
       }
     }
   }
