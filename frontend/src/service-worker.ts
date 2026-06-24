@@ -2,36 +2,28 @@
 /// <reference no-default-lib="true"/>
 /// <reference lib="esnext" />
 /// <reference lib="webworker" />
-import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching';
-import { NavigationRoute, registerRoute } from 'workbox-routing';
+import { cleanupOutdatedCaches, precacheAndRoute } from 'workbox-precaching';
 
 declare let self: ServiceWorkerGlobalScope;
 
-// activate new service worker immediately when skip waiting message is received
+// activate the waiting service worker after the user accepts the update prompt
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
 });
 
-// self.__WB_MANIFEST is default injection point
-precacheAndRoute(self.__WB_MANIFEST);
+// keep mutable app shell files on the network so deployment cache headers can take effect
+const mutableFrontendPaths = new Set(['/', '/index.html', '/404.html', '/manifest.webmanifest', '/_app/version.json']);
+// filter the injected Workbox manifest before precaching
+const precacheManifest = self.__WB_MANIFEST.filter((entry) => {
+  const url = typeof entry === 'string' ? entry : entry.url;
+  const { pathname } = new URL(url, self.location.origin);
+  return !mutableFrontendPaths.has(pathname) && !pathname.endsWith('.html');
+});
 
-// clean up incompatible caches
+// precache immutable build assets only
+precacheAndRoute(precacheManifest);
+
+// clean up incompatible Workbox caches
 cleanupOutdatedCaches();
-
-let denylist: RegExp[] | undefined;
-if (import.meta.env.DEV) {
-  // disable precaching to avoid caching issues in dev mode
-  denylist = [/.*/];
-  // clear all caches when service worker is activated
-  self.addEventListener('activate', (event) => {
-    event.waitUntil(
-      caches.keys().then((cacheNames) => {
-        return Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName)));
-      })
-    );
-  });
-}
-// register a navigation route to allow work offline
-registerRoute(new NavigationRoute(createHandlerBoundToURL('/'), { denylist }));
