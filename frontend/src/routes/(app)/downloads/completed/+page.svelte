@@ -123,7 +123,7 @@
   });
 </script>
 
-<DataView dvh loading={$loading} data={tasks} uniqueKey="id">
+<DataView dvh rowSelect loading={$loading} data={tasks} uniqueKey="id">
   {#snippet filters()}
     <Select
       filter
@@ -162,8 +162,8 @@
     </Cell>
     <Cell>
       <div class="flex w-full flex-col gap-2 pr-2">
-        <div class="flex items-center justify-between gap-2">
-          <span class="text-sm">{task.name}</span>
+        <div class="flex items-center">
+          <span class="text-sm min-w-0 wrap-break-word">{task.name}</span>
         </div>
         <div class="flex justify-between gap-2 text-xs opacity-50">
           <span>{task.ratio.slice(0, -6)}</span>

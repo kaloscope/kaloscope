@@ -26,6 +26,8 @@
     header?: Snippet;
     /** The table row snippet. */
     row?: Snippet<[T, number]>;
+    /** Whether clicking a table row toggles its checkbox. */
+    rowSelect?: boolean;
 
     /** The grid class names. */
     gridClass?: string;
@@ -64,6 +66,7 @@
     rowClass,
     header,
     row,
+    rowSelect,
 
     gridClass,
     itemClass,
@@ -184,7 +187,7 @@
       {#if mode === 'grid' && item}
         <Grid {data} {uniqueKey} {loading} {item} {itemClass} {gridClass} />
       {:else if header && row}
-        <Table {data} {uniqueKey} {loading} {header} {row} {rowClass} {tableClass} />
+        <Table {data} {uniqueKey} {loading} {header} {row} {rowSelect} {rowClass} {tableClass} />
       {/if}
       {#if paginator}
         {@render paginator(loading !== undefined && loading !== null)}

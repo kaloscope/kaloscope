@@ -179,7 +179,7 @@
   });
 </script>
 
-<DataView dvh loading={$loading} data={graphs}>
+<DataView dvh rowSelect loading={$loading} data={graphs}>
   {#snippet filters()}
     <Select
       filter

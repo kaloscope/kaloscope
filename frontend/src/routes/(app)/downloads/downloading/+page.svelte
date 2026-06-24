@@ -173,7 +173,7 @@
   });
 </script>
 
-<DataView dvh loading={$loading} data={tasks} uniqueKey="id">
+<DataView dvh rowSelect loading={$loading} data={tasks} uniqueKey="id">
   {#snippet filters()}
     <Select
       filter
@@ -218,8 +218,8 @@
     </Cell>
     <Cell>
       <div class="flex w-full flex-col gap-2 pr-2">
-        <div class="flex items-center justify-between gap-2 truncate">
-          <span class="truncate text-sm">{task.name}</span>
+        <div class="flex items-center justify-between gap-1">
+          <span class="text-sm min-w-0 wrap-break-word">{task.name}</span>
           {#if task.state === 'error'}
             <iconify-icon
               use:tooltip={{ content: task.error_msg || '', placement: 'left' }}

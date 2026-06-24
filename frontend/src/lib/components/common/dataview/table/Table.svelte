@@ -2,6 +2,32 @@
   import { sniffer } from '$lib/utils';
 
   const isSafari = sniffer.isSafari();
+  const INTERACTIVE_SELECTOR = [
+    'a',
+    'button',
+    'input',
+    'select',
+    'summary',
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="button"]'
+  ].join(',');
+
+  /**
+   * Toggle the row checkbox unless the click starts from an interactive element.
+   *
+   * @param event - The click event.
+   */
+  function toggleRowSelection(event: MouseEvent) {
+    const { target, currentTarget } = event;
+    if (target instanceof Element && target.closest(INTERACTIVE_SELECTOR)) {
+      return;
+    }
+    if (!(currentTarget instanceof Element)) {
+      return;
+    }
+    currentTarget.querySelector<HTMLInputElement>('input.sub-checkbox:not(:disabled)')?.click();
+  }
 </script>
 
 <script lang="ts" generics="T">
@@ -29,9 +55,11 @@
     tableClass?: string;
     /** The class names for each row. */
     rowClass?: string;
+    /** Whether clicking a row toggles its checkbox. */
+    rowSelect?: boolean;
   };
 
-  let { header, data, row, uniqueKey, loading, class: _class, tableClass, rowClass }: TableProps = $props();
+  let { header, data, row, uniqueKey, loading, class: _class, tableClass, rowClass, rowSelect }: TableProps = $props();
   let notLoading = $derived(loading === null || loading === undefined);
   let notEmpty = $derived(data.length > 0);
 </script>
@@ -60,13 +88,21 @@
 {#snippet body()}
   {#if uniqueKey}
     {#each data as rowData, index (rowData[uniqueKey])}
-      <tr class="border-base-content/10 hover:bg-base-200 {rowClass}" animate:flip={{ duration: 500 }}>
+      <tr
+        class="border-base-content/10 hover:bg-base-200 {rowClass}"
+        onclick={rowSelect ? toggleRowSelection : undefined}
+        animate:flip={{ duration: 500 }}
+      >
         {@render row(rowData, index)}
       </tr>
     {/each}
   {:else}
     {#each data as rowData, index (index)}
-      <tr class="border-base-content/10 hover:bg-base-200 {rowClass}" transition:fade={{ duration: 200 }}>
+      <tr
+        class="border-base-content/10 hover:bg-base-200 {rowClass}"
+        onclick={rowSelect ? toggleRowSelection : undefined}
+        transition:fade={{ duration: 200 }}
+      >
         {@render row(rowData, index)}
       </tr>
     {/each}
