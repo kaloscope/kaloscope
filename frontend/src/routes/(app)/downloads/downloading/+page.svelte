@@ -29,6 +29,7 @@
   let downloaders: Downloader[] = $state([]);
   let deleteConfirm: DownloadDelConfirm;
   let headerCheckbox: Checkbox;
+  let navigatorClipboard = $state(false);
 
   const pagination: PaginatorProps = $state({ current: 1, size: 50, onchange: search });
   const ordering = createSortField();
@@ -153,12 +154,30 @@
       });
   }
 
+  /**
+   * Copy the magnet link of a download task.
+   *
+   * @param task - The download task.
+   */
+  async function copyMagnetLink(task: DownloadTask) {
+    if (!task.magnet_link || !navigator.clipboard) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(task.magnet_link);
+      alert({ level: 'success', message: 'magnet_link_copied' });
+    } catch {
+      return;
+    }
+  }
+
   $effect(() => {
     $ordering; // eslint-disable-line
     untrack(() => search());
   });
 
   onMount(() => {
+    navigatorClipboard = !!navigator.clipboard;
     api
       .get('download/manager/list')
       .json<Resp<Downloader[]>>()
@@ -257,6 +276,12 @@
           icon: icons.playFilled,
           text: $_('action.start', $_('entity.task')),
           onclick: () => start(task)
+        },
+        {
+          condition: !!task.magnet_link && navigatorClipboard,
+          icon: icons.magnetUp,
+          text: $_('action.copy', $_('field.link')),
+          onclick: () => copyMagnetLink(task)
         },
         {
           icon: icons.delete,

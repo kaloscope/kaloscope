@@ -131,6 +131,7 @@
   "field": {
     "dir": "目录",
     "file": "文件",
+    "link": "链接",
     "type": "类型",
     "name": "名称",
     "size": "大小",
@@ -722,6 +723,7 @@
     "invalid_yaml_config": "无效的 YAML 配置！",
     "invalid_github_repo": "无效的 GitHub 仓库！",
     "invalid_flow_graph": "必填字段未填写完整！",
+    "magnet_link_copied": "磁力链接已复制！",
     "info_hash_collision": "下载任务已存在！",
     "get_info_hash_failed": "获取哈希值失败！",
     "http_request_failed": "发送 HTTP 请求失败！",

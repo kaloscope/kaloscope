@@ -131,6 +131,7 @@
   "field": {
     "dir": "Directory",
     "file": "File",
+    "link": "Link",
     "type": "Type",
     "name": "Name",
     "size": "Size",
@@ -722,6 +723,7 @@
     "invalid_yaml_config": "Invalid YAML configuration!",
     "invalid_github_repo": "Invalid GitHub repository!",
     "invalid_flow_graph": "Not all required fields are filled!",
+    "magnet_link_copied": "Magnet link copied!",
     "info_hash_collision": "Download already exists!",
     "get_info_hash_failed": "Failed to get info-hash!",
     "http_request_failed": "HTTP request failed!",

@@ -1246,6 +1246,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     hFlip: false,
     body: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"><path d="M14.186 2.753v3.596c0 .487.194.955.54 1.3a1.85 1.85 0 0 0 1.306.539h4.125"/><path d="M20.25 8.568v8.568a4.25 4.25 0 0 1-1.362 2.97a4.28 4.28 0 0 1-3.072 1.14h-7.59a4.3 4.3 0 0 1-3.1-1.124a4.26 4.26 0 0 1-1.376-2.986V6.862a4.25 4.25 0 0 1 1.362-2.97a4.28 4.28 0 0 1 3.072-1.14h5.714a3.5 3.5 0 0 1 2.361.905l2.96 2.722a2.97 2.97 0 0 1 1.031 2.189"/><path d="m8.36 13.682l1.879 1.88a.71.71 0 0 0 1.01 0l3.787-3.787"/></g>'
   },
+  magnetUp: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="none" stroke="currentColor" stroke-width="1.5" d="M20.696 3.837v8.404a8.893 8.893 0 0 1-8.12 8.99a8.7 8.7 0 0 1-9.273-8.697V3.837A1.087 1.087 0 0 1 4.39 2.75h3.26a1.087 1.087 0 0 1 1.087 1.087v8.697a3.261 3.261 0 1 0 6.523 0V3.837a1.087 1.087 0 0 1 1.087-1.087h3.261a1.087 1.087 0 0 1 1.087 1.087ZM8.738 9.273H3.303m17.393 0h-5.435"/>'
+  },
   pinFill: {
     left: 0,
     top: 0,

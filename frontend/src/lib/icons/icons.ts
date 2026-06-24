@@ -138,6 +138,7 @@ const mageIcons = {
   edit: 'mage:edit',
   externalLink: 'mage:external-link',
   fileCheck: 'mage:file-check',
+  magnetUp: 'mage:magnet-up',
   pinFill: 'mage:pin-fill',
   stars: 'mage:stars-c',
   user: 'mage:user',
