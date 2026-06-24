@@ -296,8 +296,9 @@
         schema={querySchema}
         filters={query.filters}
         onfilter={(value) => {
+          query.page_num = 1;
           query.filters = value;
-          search();
+          search(true);
         }}
         maxWidth="36rem"
       />
