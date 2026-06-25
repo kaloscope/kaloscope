@@ -94,9 +94,6 @@
   let showWatches = $derived(loadWatches && watches.length > 0);
   let showSearches = $derived(loadSearches && searches.length > 0);
 
-  const historyDeleteClass =
-    'absolute top-0 right-0 flex h-8 w-8 items-start justify-end rounded-bl-full bg-base-content/5 pt-1 pr-1 text-base-content/45 opacity-0 transition-all group-hover:opacity-70 hover:bg-error/15 hover:text-error hover:opacity-100 focus-visible:bg-error/15 focus-visible:text-error focus-visible:opacity-100 focus-visible:outline-none';
-
   // the player instance and playing state
   let player: VideoPlayer | null = $state(null);
   let playing = $state(false);
@@ -339,7 +336,7 @@
                 </div>
                 <button
                   type="button"
-                  class={historyDeleteClass}
+                  class="history-delete-button"
                   aria-label={$_('action.delete')}
                   onclick={() => deleteHistory(item.id, 'search')}
                 >
@@ -396,7 +393,7 @@
                 </div>
                 <button
                   type="button"
-                  class={historyDeleteClass}
+                  class="history-delete-button"
                   aria-label={$_('action.delete')}
                   onclick={() => deleteHistory(item.id, 'video')}
                 >
@@ -500,20 +497,56 @@
     padding: 0.5rem;
     overflow-y: auto;
     max-height: 18.5rem;
-    > li {
-      min-height: 4.0625rem;
-    }
   }
 
   .history-list-item {
     position: relative;
     min-width: 0;
+    min-height: 4.0625rem;
     overflow: hidden;
     box-shadow: var(--shadow-sm);
     border-radius: var(--radius-box);
     background-color: var(--color-base-100);
+
     &:hover {
       background-color: var(--color-base-200);
+
+      .history-delete-button {
+        opacity: 0.7;
+
+        &:is(:hover, :focus-visible) {
+          opacity: 1;
+        }
+      }
+    }
+  }
+
+  .history-delete-button {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    width: 2rem;
+    height: 2rem;
+    align-items: flex-start;
+    justify-content: flex-end;
+    border-bottom-left-radius: 9999px;
+    background-color: color-mix(in oklab, var(--color-base-content) 5%, transparent);
+    padding-top: 0.25rem;
+    padding-right: 0.25rem;
+    color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+    cursor: pointer;
+    opacity: 0;
+    transition: all var(--default-transition-duration) var(--default-transition-timing-function);
+
+    &:is(:hover, :focus-visible) {
+      background-color: color-mix(in oklab, var(--color-error) 15%, transparent);
+      color: var(--color-error);
+      opacity: 1;
+    }
+
+    &:focus-visible {
+      outline: none;
     }
   }
 
