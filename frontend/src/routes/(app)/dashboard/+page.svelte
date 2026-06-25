@@ -89,11 +89,11 @@
   let boards: Record<number, Board> = $state({});
   let watches: WatchHistory[] = $state([]);
   let searches: SearchHistory[] = $state([]);
-  let showWatches = $derived($user?.preferences?.recent_watches ?? false);
-  let showSearches = $derived($user?.preferences?.recent_searches ?? false);
-  let hasWatchHistory = $derived(showWatches && watches.length > 0);
-  let hasSearchHistory = $derived(showSearches && searches.length > 0);
-  let hasBothHistories = $derived(hasWatchHistory && hasSearchHistory);
+  let loadWatches = $derived($user?.preferences?.recent_watches ?? false);
+  let loadSearches = $derived($user?.preferences?.recent_searches ?? false);
+  let showWatches = $derived(loadWatches && watches.length > 0);
+  let showSearches = $derived(loadSearches && searches.length > 0);
+
   const historyDeleteClass =
     'absolute top-0 right-0 flex h-8 w-8 items-start justify-end rounded-bl-full bg-base-content/5 pt-1 pr-1 text-base-content/45 opacity-0 transition-all group-hover:opacity-70 hover:bg-error/15 hover:text-error hover:opacity-100 focus-visible:bg-error/15 focus-visible:text-error focus-visible:opacity-100 focus-visible:outline-none';
 
@@ -180,7 +180,7 @@
    * Load the user histories if enabled in preferences.
    */
   async function loadHistories() {
-    if (showWatches) {
+    if (loadWatches) {
       try {
         const resp = await api
           .get('user/history/list', { searchParams: { rel_type: 'video', page_num: 0, ordering: '-updated_at' } })
@@ -190,7 +190,7 @@
         watches = [];
       }
     }
-    if (showSearches) {
+    if (loadSearches) {
       try {
         const resp = await api
           .get('user/history/list', { searchParams: { rel_type: 'search', page_num: 0, ordering: '-repetitions' } })
@@ -280,7 +280,7 @@
 
   // load the user histories
   $effect(() => {
-    if (showWatches || showSearches) {
+    if (loadWatches || loadSearches) {
       untrack(loadHistories);
     }
   });
@@ -297,10 +297,13 @@
 
 <Container padding="1rem 0" maxWidth="max(150vh,72rem)">
   <!-- recent histories -->
-  {#if hasSearchHistory || hasWatchHistory}
-    <div class="mb-10 grid gap-4 {hasBothHistories ? 'xl:grid-cols-2' : ''}" transition:fade={{ duration: 200 }}>
+  {#if showSearches || showWatches}
+    <div
+      class="mb-10 grid gap-4 {showWatches && showSearches ? 'lg:grid-cols-2' : ''}"
+      transition:fade={{ duration: 200 }}
+    >
       <!-- recent searches -->
-      {#if hasSearchHistory}
+      {#if showSearches}
         <section class="min-w-0">
           <div class="flex h-8 items-center justify-between px-2">
             <span class="text-xl font-bold opacity-80">{$_('preference.dashboard.search')}</span>
@@ -354,7 +357,7 @@
       {/if}
 
       <!-- recent watches -->
-      {#if hasWatchHistory}
+      {#if showWatches}
         <section class="min-w-0">
           <div class="flex h-8 items-center justify-between px-2">
             <span class="text-xl font-bold opacity-80">{$_('preference.dashboard.watch')}</span>
@@ -424,7 +427,7 @@
 
   <!-- dashboard panels -->
   {#each Object.values(boards) as board (board.id)}
-    <div class="flex h-8 items-center justify-between px-4" transition:fade={{ duration: 200 }}>
+    <div class="flex h-8 items-center justify-between px-2" transition:fade={{ duration: 200 }}>
       <span class="flex-center gap-2 text-xl font-bold opacity-80">
         {#if board.icon}
           <Image src={board.icon} width="1.5rem" />
@@ -432,7 +435,7 @@
         {board.name}
       </span>
       {#if board.loading}
-        <span class="loading loading-sm loading-spinner"></span>
+        <span class="loading loading-sm loading-spinner mx-1.5"></span>
       {:else if board.resources.length > 0}
         <ViewSwitcher modes={board.viewModes} bind:mode={board.viewMode} />
       {/if}
