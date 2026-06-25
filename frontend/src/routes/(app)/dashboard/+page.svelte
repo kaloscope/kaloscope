@@ -315,9 +315,7 @@
             />
           </div>
           <div class="divider mt-0 mb-1"></div>
-          <ul
-            class="grid max-h-96 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-2 overflow-y-auto p-2 max-sm:flex max-sm:max-h-none max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:overflow-y-hidden max-sm:pb-3"
-          >
+          <ul class="history-list">
             {#each searches as item (item.id)}
               <li
                 class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-3 pr-10 shadow-sm transition-colors hover:bg-base-200 max-sm:w-[min(16rem,80vw)] max-sm:shrink-0"
@@ -368,9 +366,7 @@
             />
           </div>
           <div class="divider mt-0 mb-1"></div>
-          <ul
-            class="grid max-h-96 grid-cols-[repeat(auto-fit,minmax(min(100%,20rem),1fr))] gap-2 overflow-y-auto p-2 max-sm:flex max-sm:max-h-none max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:overflow-y-hidden max-sm:pb-3"
-          >
+          <ul class="history-list">
             {#each watches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
@@ -499,3 +495,25 @@
     <VideoPlayer bind:this={player} />
   </div>
 {/if}
+
+<style>
+  .history-list {
+    display: grid;
+    max-height: 18rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+    gap: 0.5rem;
+    overflow-y: auto;
+    padding: 0.5rem;
+  }
+
+  @media (width < 40rem) {
+    .history-list {
+      display: flex;
+      max-height: none;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 0.75rem;
+    }
+  }
+</style>
