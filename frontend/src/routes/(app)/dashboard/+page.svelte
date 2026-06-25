@@ -317,14 +317,12 @@
           <div class="divider mt-0 mb-1"></div>
           <ul class="history-list">
             {#each searches as item (item.id)}
-              <li
-                class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-3 pr-10 shadow-sm transition-colors hover:bg-base-200 max-sm:w-[min(16rem,80vw)] max-sm:shrink-0"
-              >
+              <li class="group history-list-item transition-colors p-3 pr-10 max-sm:w-[min(16rem,80vw)]">
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   tabindex="0"
                   role="button"
-                  class="min-w-0 cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  class="min-w-0 cursor-pointer"
                   onclick={() => gotoSearch(item)}
                   title={item.keyword}
                 >
@@ -370,14 +368,12 @@
             {#each watches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
-              <li
-                class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-2 pr-10 pb-2.5 shadow-sm transition-colors hover:bg-base-200 max-sm:w-[min(20rem,86vw)] max-sm:shrink-0"
-              >
+              <li class="group history-list-item transition-colors p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,86vw)]">
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   tabindex="0"
                   role="button"
-                  class="flex min-w-0 cursor-pointer items-center gap-3 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                  class="flex min-w-0 cursor-pointer items-center gap-3"
                   onclick={() => playMedia(item)}
                   title={parent?.title ?? parent?.name ?? mediaTitle(media)}
                 >
@@ -499,14 +495,33 @@
 <style>
   .history-list {
     display: grid;
-    max-height: 18rem;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
     gap: 0.5rem;
-    overflow-y: auto;
     padding: 0.5rem;
+    overflow-y: auto;
+    max-height: 18.5rem;
+    > li {
+      min-height: 4.0625rem;
+    }
+  }
+
+  .history-list-item {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+    border-radius: var(--radius-box);
+    background-color: var(--color-base-100);
+    &:hover {
+      background-color: var(--color-base-200);
+    }
   }
 
   @media (width < 40rem) {
+    .history-list-item {
+      flex-shrink: 0;
+    }
+
     .history-list {
       display: flex;
       max-height: none;
