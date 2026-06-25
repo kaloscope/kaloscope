@@ -316,11 +316,11 @@
           </div>
           <div class="divider mt-0 mb-1"></div>
           <ul
-            class="grid max-h-96 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-2 overflow-y-auto px-2 py-1"
+            class="grid max-h-96 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-2 overflow-y-auto p-2 max-sm:flex max-sm:max-h-none max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:overflow-y-hidden max-sm:pb-3"
           >
             {#each searches as item (item.id)}
               <li
-                class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-3 pr-10 shadow-sm transition-colors hover:bg-base-200"
+                class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-3 pr-10 shadow-sm transition-colors hover:bg-base-200 max-sm:w-[min(16rem,80vw)] max-sm:shrink-0"
               >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
@@ -344,8 +344,7 @@
                 <button
                   type="button"
                   class={historyDeleteClass}
-                  title={$_('action.delete', $_('preference.history.search'))}
-                  aria-label={$_('action.delete', $_('preference.history.search'))}
+                  aria-label={$_('action.delete')}
                   onclick={() => deleteHistory(item.id, 'search')}
                 >
                   <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
@@ -370,13 +369,13 @@
           </div>
           <div class="divider mt-0 mb-1"></div>
           <ul
-            class="grid max-h-96 grid-cols-[repeat(auto-fit,minmax(min(100%,20rem),1fr))] gap-2 overflow-y-auto px-2 py-1"
+            class="grid max-h-96 grid-cols-[repeat(auto-fit,minmax(min(100%,20rem),1fr))] gap-2 overflow-y-auto p-2 max-sm:flex max-sm:max-h-none max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:overflow-y-hidden max-sm:pb-3"
           >
             {#each watches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
               <li
-                class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-2 pr-10 pb-2.5 shadow-sm transition-colors hover:bg-base-200"
+                class="group relative min-w-0 overflow-hidden rounded-lg bg-base-100 p-2 pr-10 pb-2.5 shadow-sm transition-colors hover:bg-base-200 max-sm:w-[min(20rem,86vw)] max-sm:shrink-0"
               >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
@@ -406,14 +405,13 @@
                 <button
                   type="button"
                   class={historyDeleteClass}
-                  title={$_('action.delete', $_('preference.history.watch'))}
-                  aria-label={$_('action.delete', $_('preference.history.watch'))}
+                  aria-label={$_('action.delete')}
                   onclick={() => deleteHistory(item.id, 'video')}
                 >
                   <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
                 </button>
                 {#if item.percentage !== null}
-                  <div class="absolute bottom-0 left-0 h-0.5 w-full bg-base-200">
+                  <div class="absolute bottom-0 left-0 h-0.75 w-full bg-base-200">
                     <div class="h-full bg-primary/50" style="width: {item.percentage}%"></div>
                   </div>
                 {/if}
