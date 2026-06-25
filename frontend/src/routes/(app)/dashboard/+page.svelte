@@ -28,6 +28,7 @@
   } from '$lib/types';
   import { aspectRatio, buildStreamUrl } from '$lib/utils';
   import { onMount, tick, untrack } from 'svelte';
+  import { flip } from 'svelte/animate';
   import { fade } from 'svelte/transition';
   import type { PageData } from './$types';
 
@@ -314,7 +315,10 @@
           <div class="divider mt-0 mb-1"></div>
           <ul class="history-list">
             {#each searches as item (item.id)}
-              <li class="group history-list-item transition-colors p-3 pr-10 max-sm:w-[min(16rem,80vw)]">
+              <li
+                class="group history-list-item transition-colors p-3 pr-10 max-sm:w-[min(16rem,80vw)]"
+                animate:flip={{ duration: 200 }}
+              >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   tabindex="0"
@@ -324,7 +328,7 @@
                   title={item.keyword}
                 >
                   <div class="flex min-w-0 flex-col gap-1">
-                    <span class="truncate text-sm font-medium">
+                    <span class="truncate text-sm font-medium group-hover:text-primary">
                       {item.keyword}
                     </span>
                     <div class="flex min-w-0 items-center gap-2 text-xs">
@@ -365,7 +369,10 @@
             {#each watches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
-              <li class="group history-list-item transition-colors p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,86vw)]">
+              <li
+                class="group history-list-item transition-colors p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,86vw)]"
+                animate:flip={{ duration: 200 }}
+              >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   tabindex="0"
@@ -377,7 +384,7 @@
                   <Image proxy="store" src={parent?.poster ?? media?.poster} width="3rem" ratio="2/3" />
                   <div class="flex min-w-0 flex-col gap-1">
                     {#if parent}
-                      <span class="truncate text-sm font-medium">
+                      <span class="truncate text-sm font-medium group-hover:text-primary">
                         {parent.title ?? parent.name}
                       </span>
                       <div class="flex min-w-0 items-center gap-2 text-xs">
@@ -386,7 +393,9 @@
                         <span class="shrink-0 opacity-50">{$dateTime(item.updated_at)}</span>
                       </div>
                     {:else}
-                      <span class="truncate text-sm font-medium">{mediaTitle(media)}</span>
+                      <span class="truncate text-sm font-medium group-hover:text-primary">
+                        {mediaTitle(media)}
+                      </span>
                       <span class="text-xs opacity-50">{$dateTime(item.updated_at)}</span>
                     {/if}
                   </div>
