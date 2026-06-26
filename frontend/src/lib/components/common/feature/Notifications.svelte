@@ -23,30 +23,88 @@
   import { Modal } from '$lib/components';
   import { _, dateTime, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import {
+    collectServiceWorkerNotifications,
+    createNotificationDispatchState,
+    KALOSCOPE_NOTIFICATION,
+    requestWebNotificationPermission
+  } from '$lib/notifications';
   import { token } from '$lib/stores';
   import { onMount } from 'svelte';
 
   let { class: _class, triggerClass, onrefresh }: NotificationsProps = $props();
 
-  // the modal dialog for the notifications center
+  // the modal dialog
   let modal: Modal;
+
+  // the dispatch state
+  const notificationDispatchState = createNotificationDispatchState();
 
   // show the notifications center
   export const showModal = () => {
+    if ('Notification' in window) {
+      requestWebNotificationPermission(window.Notification).then((permission) => {
+        if (permission === 'granted' && !notificationDispatchState.initialized) {
+          getAll(true);
+        }
+      });
+    }
     modal.show();
   };
 
   /**
    * Get all notifications.
+   *
+   * @param sw - Whether to send new notifications to the service worker.
    */
-  function getAll() {
+  function getAll(sw = false) {
     api
       .get('notification/list')
       .json<Resp<Notification[]>>()
       .then(({ data }) => {
         notifications = data;
         onrefresh?.(unread);
+        if (sw) {
+          sendServiceWorkerNotifications(notifications);
+        }
       });
+  }
+
+  /**
+   * Send newly received API notifications to the service worker for system display.
+   *
+   * @param notifications - The API notifications to check and display.
+   */
+  async function sendServiceWorkerNotifications(notifications: Notification[]) {
+    if (
+      !('serviceWorker' in navigator) ||
+      !('Notification' in window) ||
+      window.Notification.permission !== 'granted'
+    ) {
+      return;
+    }
+
+    const serviceWorkerNotifications = collectServiceWorkerNotifications(
+      notifications,
+      notificationDispatchState,
+      (notification) => ({
+        title: title(notification),
+        body: content(notification)
+      })
+    );
+    if (serviceWorkerNotifications.length === 0) {
+      return;
+    }
+
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      registration.active?.postMessage({
+        type: KALOSCOPE_NOTIFICATION,
+        notifications: serviceWorkerNotifications
+      });
+    } catch {
+      return;
+    }
   }
 
   /**
@@ -98,7 +156,7 @@
     if ($token) {
       getAll();
       // refresh the notifications every minute
-      const refreshInterval = setInterval(() => getAll(), 60 * 1000);
+      const refreshInterval = setInterval(() => getAll(true), 60 * 1000);
       return () => clearInterval(refreshInterval);
     }
   });
