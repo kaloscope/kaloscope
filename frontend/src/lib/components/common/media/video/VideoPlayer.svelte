@@ -134,6 +134,7 @@
   let chaptersPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('chapters'));
   let fullscreenPlugin: FullscreenPlugin | null = $derived.by(() => player?.getPlugin('fullscreen'));
   let playbackRatePlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('playbackRate'));
+  let texttrackPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('texttrack'));
 
   // the theme color before entering fullscreen mode
   let themeColor: string | null = null;
@@ -322,6 +323,17 @@
         index: 100,
         list: playbackRates
       },
+      texttrack: {
+        index: 101,
+        list: [],
+        isDefaultOpen: false,
+        style: {
+          follow: true,
+          mode: 'stroke',
+          fitVideo: true,
+          line: 'double'
+        }
+      },
       mobile: {
         gradient: 'none',
         gestureX: false,
@@ -363,6 +375,8 @@
     player.on(Events.PLAYNEXT, () => {
       // update the danmakus when the next video is played
       videoSettings.loadLocalDanmakus();
+      // update the subtitles when the next local video is played
+      videoSettings.loadLocalSubtitles();
     });
 
     [Events.FULLSCREEN_CHANGE, Events.CSS_FULLSCREEN_CHANGE].forEach((event) => {
@@ -457,15 +471,25 @@
       if (player.isPlaying) {
         return true;
       }
-      for (const plugin of [chaptersPlugin, playbackRatePlugin]) {
-        if (plugin && plugin.optionsList && plugin.isActive) {
-          plugin.optionsList.hide();
-          plugin.isActive = false;
-          return false;
-        }
+      if (hideOptionPlugins()) {
+        return false;
       }
       return true;
     });
+  }
+
+  /**
+   * Hides active option menus.
+   */
+  function hideOptionPlugins() {
+    for (const plugin of [chaptersPlugin, playbackRatePlugin, texttrackPlugin]) {
+      if (plugin && plugin.optionsList && plugin.isActive) {
+        plugin.optionsList.hide();
+        plugin.isActive = false;
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -611,10 +635,36 @@
         }
       }
 
+      .btn-text span {
+        border-radius: 8px !important;
+      }
+
       .xgplayer-controls {
         .xg-tips {
           /* https://github.com/bytedance/xgplayer/issues/1460 */
           display: none !important;
+        }
+        .xg-right-grid {
+          > :first-child {
+            margin-right: 0;
+          }
+          xg-icon {
+            margin-left: 0;
+            margin-right: 8px;
+          }
+        }
+        .xg-left-grid {
+          > :first-child {
+            margin-left: 0;
+          }
+          xg-icon {
+            margin-left: 8px;
+            margin-right: 0;
+          }
+        }
+        .xg-center-grid xg-icon {
+          margin-left: 8px;
+          margin-right: 8px;
         }
         cursor: default;
         background-image: initial !important;

@@ -2,7 +2,7 @@ import { icons, iconToSVG } from '$lib/icons';
 import { isTranscodedStream, sniffer } from '$lib/utils';
 import { I18N, type BasePlugin, type IPlayerOptions } from 'xgplayer';
 import type { IUrl } from 'xgplayer/es/defaultConfig';
-
+// import plugins
 import FLV from 'xgplayer-flv';
 import HLS from 'xgplayer-hls';
 import MP4 from 'xgplayer-mp4';
@@ -31,6 +31,7 @@ import Volume from 'xgplayer/es/plugins/volume';
 import Chapters from './chapters';
 import Gradient from './gradient';
 import PlaybackRate from './playbackrate';
+import TextTrack from './texttrack';
 import TopBar from './topbar';
 
 // import all i18n json files from locales directory
@@ -71,6 +72,7 @@ const BASE_PLUGINS = [
   Rotate,
   PIP,
   Error,
+  TextTrack,
   Danmu,
   TopBar,
   Gradient,

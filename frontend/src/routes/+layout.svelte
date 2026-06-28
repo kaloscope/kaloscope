@@ -20,6 +20,7 @@
   import 'tippy.js/dist/tippy.css';
   import 'xgplayer/dist/index.min.css';
   import 'xgplayer/es/plugins/danmu/index.css';
+  import 'xgplayer/es/plugins/track/index.css';
   import '../app.css';
 
   let { children }: { children: Snippet } = $props();

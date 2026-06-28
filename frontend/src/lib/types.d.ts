@@ -592,6 +592,18 @@ export type Danmaku = {
 };
 
 /**
+ * The type of the subtitle track.
+ */
+export type Subtitle = {
+  id: string;
+  type: 'external' | 'embedded';
+  label: string;
+  url?: string | null;
+  format?: string | null;
+  language?: string | null;
+};
+
+/**
  * The type of the view mode.
  */
 export type ViewMode = 'table' | 'grid';

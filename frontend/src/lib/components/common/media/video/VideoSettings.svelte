@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { Danmaku, Definition, Resp } from '$lib/types';
+  import type { Danmaku, Definition, Resp, Subtitle } from '$lib/types';
   import { isWhite } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
   import { v4 as uuidv4 } from 'uuid';
@@ -9,6 +9,7 @@
   import type PlaybackRatePlugin from 'xgplayer/es/plugins/playbackRate';
   import type RotatePlugin from 'xgplayer/es/plugins/rotate';
   import type StartPlugin from 'xgplayer/es/plugins/start';
+  import type TextTrackPlugin from 'xgplayer/es/plugins/track';
 
   // video settings
   type LandscapeMode = 'rotate' | 'web_api';
@@ -100,6 +101,30 @@
   }
 
   /**
+   * Formats the subtitles to the format required by the player.
+   *
+   * @param subtitles - The list of subtitle tracks.
+   * @returns The formatted subtitles.
+   */
+  export function formatSubtitles(subtitles: Subtitle[] | null | undefined) {
+    if (!subtitles || subtitles.length === 0) {
+      return [];
+    }
+    return subtitles
+      .filter((subtitle) => subtitle.type === 'external' && !!subtitle.url)
+      .map((subtitle, index) => {
+        const language = subtitle.language || subtitle.id;
+        return {
+          id: subtitle.id,
+          language,
+          label: subtitle.label,
+          url: subtitle.url as string,
+          isDefault: index === 0
+        };
+      });
+  }
+
+  /**
    * Probes the duration of a transcoded video stream.
    *
    * @param url - The URL of the transcoded video stream.
@@ -147,6 +172,7 @@
   let startPlugin: StartPlugin | null = $derived.by(() => player?.getPlugin('start'));
   let rotatePlugin: RotatePlugin | null = $derived.by(() => player?.getPlugin('rotate'));
   let danmakuPlugin: DanmakuPlugin | null = $derived.by(() => player?.getPlugin('danmu'));
+  let textTrackPlugin: TextTrackPlugin | null = $derived.by(() => player?.getPlugin('texttrack'));
   let playbackRatePlugin: PlaybackRatePlugin | null = $derived.by(() => player?.getPlugin('playbackRate'));
 
   // the settings states
@@ -249,6 +275,7 @@
       }
     }
     loadLocalDanmakus();
+    loadLocalSubtitles();
   }
 
   /**
@@ -457,6 +484,37 @@
     } else {
       danmakuCache = false;
     }
+  }
+
+  /**
+   * Load the subtitle data for the current local video.
+   */
+  export function loadLocalSubtitles() {
+    if (!localMedia || textTrackPlugin === null) {
+      return;
+    }
+    // clear existing subtitles before loading new tracks
+    textTrackPlugin.updateSubtitles([], true);
+    const url = player?.config.url as string;
+    const path = extractStreamPath(url);
+    api
+      .post('subtitle/tracks', { json: { path } })
+      .json<Resp<Subtitle[]>>()
+      .then(({ data }) => {
+        updateSubtitles(data);
+      });
+  }
+
+  /**
+   * Update the subtitles for the current video.
+   *
+   * @param data - The subtitle tracks.
+   */
+  function updateSubtitles(data: Subtitle[]) {
+    if (textTrackPlugin === null) {
+      return;
+    }
+    textTrackPlugin.updateSubtitles(formatSubtitles(data), true);
   }
 </script>
 
