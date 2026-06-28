@@ -163,6 +163,12 @@ class TestExtractTitle:
         result = extract_title("[Nekomoe kissaten][Sousou no Frieren][01][1080p][JPSC]")
         assert result == "Sousou no Frieren"
 
+    def test_tv_show_all_brackets_episode_range(self):
+        result = extract_title(
+            "[DMG&SumiSora][Tongari_Boushi_no_Atelier][12-13][1080P][GB][MP4]"
+        )
+        assert result == "Tongari Boushi no Atelier"
+
     # --- Edge cases ---
 
     def test_title_with_multiple_separators(self):
