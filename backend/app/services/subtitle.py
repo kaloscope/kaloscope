@@ -9,6 +9,7 @@ from sanic.log import logger
 
 from app.core.constants import ENCODING, URL_PREFIX
 from app.models.media import MediaItem
+from app.utils.subtitle import ass_to_vtt
 
 
 class SubtitleType(StrEnum):
@@ -32,12 +33,10 @@ class Subtitle(BaseModel):
 class SubtitleService:
     """The service class for local subtitle discovery and loading."""
 
-    # xgplayer-subtitles@3.0.24 parses VTT and ASS; SSA uses the ASS syntax.
-    SUPPORTED_EXTERNAL_FORMATS = {
-        "vtt": "text/vtt; charset=utf-8",
-        "ass": "text/plain; charset=utf-8",
-        "ssa": "text/plain; charset=utf-8",
-    }
+    # xgplayer-subtitles expects WebVTT, so ASS/SSA sources are converted on load.
+    SUPPORTED_EXTERNAL_FORMATS = {"vtt", "ass", "ssa"}
+    WEBVTT_CONTENT_TYPE = "text/vtt; charset=utf-8"
+    PLAYER_SUBTITLE_FORMAT = "vtt"
     LANGUAGE_ALIASES = {"chs", "cht", "cn", "en", "eng", "ja", "jp", "jpn", "zh"}
 
     @classmethod
@@ -114,7 +113,7 @@ class SubtitleService:
             type=SubtitleType.EXTERNAL,
             label=label,
             url=f"{URL_PREFIX}/subtitle/content?path={quote(str(path), safe='')}",
-            format=subtitle_format,
+            format=cls.PLAYER_SUBTITLE_FORMAT,
             language=cls._language(label),
         )
 
@@ -136,7 +135,11 @@ class SubtitleService:
 
         logger.debug("Loading external subtitle file: %s", path)
         async with aiofiles.open(path, encoding=ENCODING) as f:
-            return await f.read(), cls.SUPPORTED_EXTERNAL_FORMATS[subtitle_format]
+            content = await f.read()
+
+        if subtitle_format in {"ass", "ssa"}:
+            content = ass_to_vtt(content)
+        return content, cls.WEBVTT_CONTENT_TYPE
 
     @classmethod
     def _external_format(cls, path: Path) -> str | None:
