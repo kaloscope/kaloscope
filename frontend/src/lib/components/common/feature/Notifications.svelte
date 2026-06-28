@@ -10,8 +10,11 @@
     onrefresh?: (unread: number) => void;
   };
 
-  // the notification templates that need i18n processing
-  const TEMPLATES: string[] = ['DOWNLOAD_FAILED', 'DOWNLOAD_COMPLETED'];
+  // the notification templates that need i18n processing and their optional values
+  const TEMPLATES: Record<string, string[]> = {
+    DOWNLOAD_FAILED: ['error'],
+    DOWNLOAD_COMPLETED: []
+  };
 
   let notifications: Notification[] = $state([]);
   let total = $derived(notifications.length);
@@ -27,7 +30,8 @@
     collectServiceWorkerNotifications,
     createNotificationDispatchState,
     KALOSCOPE_NOTIFICATION,
-    requestWebNotificationPermission
+    requestWebNotificationPermission,
+    withConditionalFlags
   } from '$lib/notifications';
   import { token } from '$lib/stores';
   import { onMount } from 'svelte';
@@ -131,7 +135,7 @@
    */
   function title(notification: Notification): string {
     const title = notification.title;
-    if (TEMPLATES.includes(title)) {
+    if (Object.hasOwn(TEMPLATES, title)) {
       return $_(`notification.${title.toLowerCase()}.title`);
     }
     return title;
@@ -145,8 +149,8 @@
    */
   function content(notification: Notification): string {
     const { title, content } = notification;
-    if (TEMPLATES.includes(title)) {
-      const options = { values: JSON.parse(content) };
+    if (Object.hasOwn(TEMPLATES, title)) {
+      const options = { values: withConditionalFlags(JSON.parse(content), TEMPLATES[title]) };
       return $_(`notification.${title.toLowerCase()}.content`, options);
     }
     return content;

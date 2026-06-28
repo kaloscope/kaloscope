@@ -676,7 +676,7 @@
   "notification": {
     "download_failed": {
       "title": "下载失败",
-      "content": "\"{name}\" 下载失败！错误信息：{error}"
+      "content": "\"{name}\" 下载失败！{has_error, select, yes {错误信息：{error}} other {}}"
     },
     "download_completed": {
       "title": "下载完成",

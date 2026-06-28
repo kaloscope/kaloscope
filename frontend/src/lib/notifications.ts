@@ -32,6 +32,40 @@ export type NotificationDispatchState = {
 };
 
 /**
+ * Add generic yes/no presence flags for template values.
+ *
+ * For example, `{ error: 'x' }` becomes `{ error: 'x', has_error: 'yes' }`,
+ * which lets ICU select messages hide optional fragments without per-template code.
+ *
+ * @param values - The values passed to the i18n formatter.
+ * @param optionalKeys - The keys that are optional and should be checked for presence.
+ * @returns The values with derived `has_*` flags.
+ */
+export function withConditionalFlags(
+  values: Record<string, unknown>,
+  optionalKeys: string[] = []
+): Record<string, unknown> {
+  const result = { ...values };
+
+  for (const key of optionalKeys) {
+    result[key] ??= '';
+  }
+
+  for (const [key, value] of Object.entries(result)) {
+    const flag = `has_${key}`;
+    if (!(flag in result)) {
+      let hasValue = value !== null && value !== undefined;
+      if (hasValue && (typeof value === 'string' || Array.isArray(value))) {
+        hasValue = value.length > 0;
+      }
+      result[flag] = hasValue ? 'yes' : 'no';
+    }
+  }
+
+  return result;
+}
+
+/**
  * Create the client-side state used to avoid sending the same unread notification repeatedly.
  *
  * @returns The initial dispatch state.

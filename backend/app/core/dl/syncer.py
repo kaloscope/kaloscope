@@ -239,7 +239,7 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
             up_speed = 0
             dl_speed = 0
             await Notifications.send(
-                NotificationTemplate.DOWNLOAD_FAILED, name=name, error=error_msg or "--"
+                NotificationTemplate.DOWNLOAD_FAILED, name=name, error=error_msg
             )
 
         # update the state to `COMPLETED` if the percentage has reached 100
