@@ -9,7 +9,7 @@ from sanic.log import logger
 
 from app.core.constants import ENCODING, URL_PREFIX
 from app.models.media import MediaItem
-from app.utils.subtitle import ass_to_vtt
+from app.utils.subtitle import ass_to_vtt, srt_to_vtt
 
 
 class SubtitleType(StrEnum):
@@ -33,8 +33,9 @@ class Subtitle(BaseModel):
 class SubtitleService:
     """The service class for local subtitle discovery and loading."""
 
-    # xgplayer-subtitles expects WebVTT, so ASS/SSA sources are converted on load.
-    SUPPORTED_EXTERNAL_FORMATS = {"vtt", "ass", "ssa"}
+    # xgplayer-subtitles expects WebVTT, so other formats are converted on load.
+    SUPPORTED_EXTERNAL_FORMATS = {"vtt", "ass", "ssa", "srt"}
+    EXTERNAL_CONVERTERS = {"ass": ass_to_vtt, "ssa": ass_to_vtt, "srt": srt_to_vtt}
     WEBVTT_CONTENT_TYPE = "text/vtt; charset=utf-8"
     PLAYER_SUBTITLE_FORMAT = "vtt"
     LANGUAGE_ALIASES = {"chs", "cht", "cn", "en", "eng", "ja", "jp", "jpn", "zh"}
@@ -137,8 +138,8 @@ class SubtitleService:
         async with aiofiles.open(path, encoding=ENCODING) as f:
             content = await f.read()
 
-        if subtitle_format in {"ass", "ssa"}:
-            content = ass_to_vtt(content)
+        if converter := cls.EXTERNAL_CONVERTERS.get(subtitle_format):
+            content = converter(content)
         return content, cls.WEBVTT_CONTENT_TYPE
 
     @classmethod

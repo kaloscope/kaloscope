@@ -1,6 +1,6 @@
 """Unit tests for subtitle conversion utilities."""
 
-from app.utils.subtitle import ass_to_vtt
+from app.utils.subtitle import ass_to_vtt, srt_to_vtt
 
 
 class TestAssToVtt:
@@ -45,3 +45,37 @@ Dialogue: Marked=0,0:00:06.10,0:00:08.00,Default,,0,0,0,,SSA text
 
     def test_empty_when_no_dialogue_is_found(self):
         assert ass_to_vtt("[Script Info]\nTitle: Empty\n") == "WEBVTT\n\n"
+
+
+class TestSrtToVtt:
+    def test_convert_srt_cues_to_webvtt(self):
+        content = (
+            "\ufeff1\r\n"
+            "00:00:01,000 --> 00:00:03,500\r\n"
+            "Hello\r\n"
+            "World\r\n"
+            "\r\n"
+            "2\r\n"
+            "00:00:04,200 --> 00:00:05,000\r\n"
+            "Comma, stays\r\n"
+        )
+
+        assert srt_to_vtt(content) == (
+            "WEBVTT\n"
+            "\n"
+            "1\n"
+            "00:00:01.000 --> 00:00:03.500\n"
+            "Hello\n"
+            "World\n"
+            "\n"
+            "2\n"
+            "00:00:04.200 --> 00:00:05.000\n"
+            "Comma, stays\n"
+        )
+
+    def test_convert_srt_cue_without_index_to_webvtt(self):
+        content = "00:00:06,100 --> 00:00:08,000\nSRT text\n"
+
+        assert srt_to_vtt(content) == (
+            "WEBVTT\n\n1\n00:00:06.100 --> 00:00:08.000\nSRT text\n"
+        )

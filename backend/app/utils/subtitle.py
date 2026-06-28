@@ -5,11 +5,13 @@ from dataclasses import dataclass
 
 _ASS_TAG_RE = re.compile(r"\{[^{}]*\}")
 _ASS_TIME_RE = re.compile(r"^(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?$")
+_SRT_TIME_RE = re.compile(r"^(\d+):(\d{1,2}):(\d{1,2})[,.](\d{1,3})$")
+_SUBTITLE_BLOCK_RE = re.compile(r"\n{2,}")
 
 
 @dataclass(frozen=True)
 class _Cue:
-    """A plain WebVTT cue parsed from an ASS/SSA dialogue."""
+    """A plain subtitle cue converted to WebVTT."""
 
     start: str
     end: str
@@ -111,6 +113,74 @@ def _clean_ass_text(text: str) -> str:
     text = text.replace(r"\N", "\n").replace(r"\n", "\n").replace(r"\h", " ")
     text = _ASS_TAG_RE.sub("", text)
     return "\n".join(line.strip() for line in text.splitlines()).strip()
+
+
+def srt_to_vtt(content: str) -> str:
+    """Convert SubRip subtitle content to WebVTT.
+
+    Args:
+        content: The SubRip subtitle content.
+
+    Returns:
+        The converted WebVTT content.
+    """
+    cues: list[_Cue] = []
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    for block in _SUBTITLE_BLOCK_RE.split(normalized):
+        lines = [line.strip("\ufeff").strip() for line in block.splitlines()]
+        if not lines:
+            continue
+
+        time_index = 1 if len(lines) > 1 and lines[0].isdigit() else 0
+        if cue := _parse_srt_cue(lines, time_index):
+            cues.append(cue)
+
+    return _format_vtt(cues)
+
+
+def _parse_srt_cue(lines: list[str], time_index: int) -> _Cue | None:
+    """Parse a SubRip cue block into a plain cue.
+
+    Args:
+        lines: The normalized cue block lines.
+        time_index: The index of the timing line in the cue block.
+
+    Returns:
+        The parsed cue, or None if the block cannot be converted.
+    """
+    if time_index >= len(lines):
+        return None
+
+    timing = lines[time_index]
+    if "-->" not in timing:
+        return None
+
+    start_value, end_value = [part.strip() for part in timing.split("-->", 1)]
+    start = _format_srt_time(start_value)
+    end = _format_srt_time(end_value.split(maxsplit=1)[0])
+    text = "\n".join(line for line in lines[time_index + 1 :] if line).strip()
+    if not start or not end or not text:
+        return None
+    return _Cue(start=start, end=end, text=text)
+
+
+def _format_srt_time(value: str) -> str | None:
+    """Format a SubRip timestamp as a WebVTT timestamp.
+
+    Args:
+        value: The SubRip timestamp value.
+
+    Returns:
+        The WebVTT timestamp, or None if the value is invalid.
+    """
+    match = _SRT_TIME_RE.match(value.strip())
+    if not match:
+        return None
+
+    hours, minutes, seconds, fraction = match.groups()
+    milliseconds = int(fraction.ljust(3, "0")[:3])
+    return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}.{milliseconds:03d}"
 
 
 def _format_vtt(cues: list[_Cue]) -> str:
