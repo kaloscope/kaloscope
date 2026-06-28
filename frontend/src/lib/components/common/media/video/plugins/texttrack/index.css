@@ -49,6 +49,10 @@
     }
   }
 
+  xg-text-track.xg-text-track xg-text-track-span {
+    text-align: center;
+  }
+
   &.xgplayer-mobile {
     .xg-options-list.xgplayer-texttrack {
       padding: 16px 0;

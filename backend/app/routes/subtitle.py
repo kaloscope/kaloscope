@@ -9,6 +9,13 @@ from app.services.subtitle import SubtitleService
 subtitle = Blueprint("subtitle", url_prefix="/subtitle")
 
 
+class SubtitleContentQuery(MediaResource):
+    """Query parameters for loading local subtitle content."""
+
+    stream: int | None = None
+    """The embedded subtitle stream index."""
+
+
 @subtitle.post("/tracks")
 @validate(json=MediaResource)
 async def list_tracks(_, body: MediaResource) -> HTTPResponse:
@@ -18,10 +25,10 @@ async def list_tracks(_, body: MediaResource) -> HTTPResponse:
 
 
 @subtitle.get("/content")
-@validate(query=MediaResource)
-async def load_content(_, query: MediaResource) -> HTTPResponse:
-    """Load local external subtitle content."""
-    result = await SubtitleService.load_external(query.path)
+@validate(query=SubtitleContentQuery)
+async def load_content(_, query: SubtitleContentQuery) -> HTTPResponse:
+    """Load local subtitle content."""
+    result = await SubtitleService.load_content(query.path, query.stream)
     if not result:
         raise KaloscopeException(ErrorCode.FILE_NOT_EXISTS)
     content, content_type = result

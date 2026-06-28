@@ -101,7 +101,7 @@
   }
 
   /**
-   * Formats the subtitles to the format required by the player.
+   * Formats subtitle track metadata for the TextTrack plugin.
    *
    * @param subtitles - The list of subtitle tracks.
    * @returns The formatted subtitles.
@@ -111,12 +111,12 @@
       return [];
     }
     return subtitles
-      .filter((subtitle) => subtitle.type === 'external' && !!subtitle.url)
+      .filter((subtitle) => !!subtitle.url)
       .map((subtitle, index) => {
-        const language = subtitle.language || subtitle.id;
         return {
           id: subtitle.id,
-          language,
+          // xgplayer also matches by language, which may not be unique
+          // language: subtitle.language,
           label: subtitle.label,
           url: subtitle.url as string,
           isDefault: index === 0
