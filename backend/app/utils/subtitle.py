@@ -183,6 +183,15 @@ def _format_srt_time(value: str) -> str | None:
     return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}.{milliseconds:03d}"
 
 
+def _vtt_time_to_milliseconds(value: str) -> int:
+    """Convert a normalized WebVTT timestamp to milliseconds."""
+    hours, minutes, seconds = value.split(":")
+    second, millisecond = seconds.split(".")
+    return ((int(hours) * 60 + int(minutes)) * 60 + int(second)) * 1000 + int(
+        millisecond
+    )
+
+
 def _format_vtt(cues: list[_Cue]) -> str:
     """Format plain cues as WebVTT content.
 
@@ -193,6 +202,8 @@ def _format_vtt(cues: list[_Cue]) -> str:
         The WebVTT content.
     """
     lines = ["WEBVTT", ""]
-    for index, cue in enumerate(cues, start=1):
+    for index, cue in enumerate(
+        sorted(cues, key=lambda cue: _vtt_time_to_milliseconds(cue.start)), start=1
+    ):
         lines.extend([str(index), f"{cue.start} --> {cue.end}", cue.text, ""])
     return "\n".join(lines) if cues else "WEBVTT\n\n"
