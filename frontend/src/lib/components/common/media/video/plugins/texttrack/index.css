@@ -99,38 +99,39 @@
     }
     @media only screen and (orientation: portrait) {
       xg-icon.xgplayer-texttrack {
-        width: 28px;
-        min-width: 28px;
-        max-width: 28px;
+        width: 30px;
+        min-width: 30px;
+        max-width: 30px;
         .icon-text {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          width: 28px;
-          min-width: 28px;
-          max-width: 28px;
+          width: 30px;
+          min-width: 30px;
+          max-width: 30px;
           padding: 0;
           font-size: 0;
           letter-spacing: 0;
+          background: transparent;
           &::before {
             content: 'CC';
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-width: 20px;
-            height: 14px;
-            border: 1px solid currentColor;
+            min-width: 24px;
+            height: 18px;
+            border: 2px solid currentColor;
             border-radius: 3px;
-            font-size: 8px;
-            font-weight: 900;
+            font-size: 10px;
+            font-weight: 800;
             line-height: 1;
             letter-spacing: 0;
           }
         }
       }
       .xg-options-list.xgplayer-texttrack.xg-side-list.xg-right-side {
-        width: 50%;
-        right: -25%;
+        width: 40%;
+        right: -20%;
       }
       xg-text-track.xg-text-track.text-track-stroke xg-text-track-inner {
         text-shadow:
@@ -140,16 +141,16 @@
     }
     @media only screen and (orientation: landscape) {
       .xg-options-list.xgplayer-texttrack.xg-side-list.xg-right-side {
-        width: 40%;
-        right: -20%;
+        width: 30%;
+        right: -15%;
       }
     }
     &.xgplayer-rotate-fullscreen {
       .xg-options-list.xgplayer-texttrack {
         @media only screen and (orientation: portrait) {
           &.xg-side-list.xg-right-side {
-            width: 40%;
-            right: -20%;
+            width: 30%;
+            right: -15%;
           }
         }
       }

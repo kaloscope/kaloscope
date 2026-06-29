@@ -110,6 +110,7 @@ const fluentUISystemIcons = {
   starHalf: 'fluent:star-half-24-regular',
   starOneQuarter: 'fluent:star-one-quarter-24-regular',
   starThreeQuarter: 'fluent:star-three-quarter-24-regular',
+  subtitlesFilled: 'fluent:subtitles-24-filled',
   subtractCircle: 'fluent:subtract-circle-24-regular',
   tablet: 'fluent:tablet-24-regular',
   textGrammarSettings: 'fluent:text-grammar-settings-24-regular',

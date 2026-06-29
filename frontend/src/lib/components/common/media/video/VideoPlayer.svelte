@@ -319,12 +319,8 @@
         chapterId: options.chapterId,
         chapterChange: options.chapterChange
       },
-      playbackRate: {
-        index: 100,
-        list: playbackRates
-      },
       texttrack: {
-        index: 101,
+        index: 100,
         list: [],
         isDefaultOpen: false,
         style: {
@@ -333,6 +329,10 @@
           fitVideo: true,
           line: 'double'
         }
+      },
+      playbackRate: {
+        index: 101,
+        list: playbackRates
       },
       mobile: {
         gradient: 'none',

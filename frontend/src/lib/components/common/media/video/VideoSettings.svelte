@@ -522,12 +522,26 @@
   bind:this={modal}
   class="video-settings {rotateFullscreen ? 'inset-0 left-full h-dvw w-dvh origin-top-left rotate-90' : ''}"
   boxClass="bg-[hsla(0,0%,10%,0.9)] backdrop-blur-sm {rotateFullscreen ? '' : 'auto-margin-bottom'}"
-  cornerClass="[&>button]:not-hover:text-white/50 [&>button]:hover:bg-white/80"
+  cornerClass="hidden"
 >
-  <div class="tabs-border tabs">
+  <div>
+    <div class="video-settings-header">
+      <div class="video-settings-tabs tabs-border tabs">
+        {@render tabLabel('video', icons.videoFill, $_('media.video.settings'))}
+        {@render tabLabel('track', icons.subtitlesFilled, $_('media.xgplayer.texttrack'))}
+        {@render tabLabel('danmaku', icons.danmakuFill, $_('media.danmaku.settings'))}
+        {#if localMedia}
+          {@render tabLabel('match', icons.boxMultipleSearchFilled, $_('media.danmaku.match'))}
+        {/if}
+      </div>
+
+      <button type="button" class="video-settings-close" aria-label="Close" onclick={(event) => modal.close(event)}>
+        <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
+      </button>
+    </div>
+
     <!-- The video settings tab. -->
-    {@render tabLabel('video', icons.videoFill, $_('media.video.settings'))}
-    <div class="tab-content">
+    <div class="video-settings-content" hidden={tabId !== 'video'}>
       <div>
         {@render optionLabel($_('media.video.speed'))}
         <span
@@ -605,9 +619,11 @@
       {/if}
     </div>
 
+    <!-- The text track settings tab. -->
+    <div class="video-settings-content" hidden={tabId !== 'track'}></div>
+
     <!-- The danmaku settings tab. -->
-    {@render tabLabel('danmaku', icons.danmakuFill, $_('media.danmaku.settings'))}
-    <div class="tab-content">
+    <div class="video-settings-content" hidden={tabId !== 'danmaku'}>
       {#if $danmaku !== null && danmakuPlugin !== null}
         <div>
           {@render optionLabel($_('media.danmaku.toggle'))}
@@ -690,9 +706,7 @@
     {#if localMedia}
       {@const btnClass = 'border-0 bg-primary/30 text-white shadow-none hover:bg-base-300 hover:text-base-content'}
       {@const btnDisabledClass = 'disabled:bg-primary/15 disabled:text-white/15'}
-
-      {@render tabLabel('match', icons.boxMultipleSearchFilled, $_('media.danmaku.match'))}
-      <div class="tab-content">
+      <div class="video-settings-content" hidden={tabId !== 'match'}>
         {#if danmakuCache}
           <div class="mb-4 flex-col items-start! gap-1!">
             {@render optionLabel($_('media.danmaku.cache'))}
@@ -800,10 +814,10 @@
 {#snippet tabLabel(id: string, icon: IconifyIcon, name: string)}
   {@const checked = tabId === id}
   {@const tabClass = checked ? '!text-white/80' : '!text-white/20 hover:!text-white/80'}
-  <label class="tab mb-4 h-8 gap-1 rounded-field px-2 transition-colors {tabClass}">
+  <label class="tab -mt-0.5 mb-4 h-8 gap-1 rounded-field px-1.75 transition-colors {tabClass}">
     <input type="radio" {checked} value={id} bind:group={tabId} />
     <iconify-icon {icon} width="1.125rem" class="mt-0.5 size-4.5"></iconify-icon>
-    <span class="text-lg font-bold">{name}</span>
+    <span class="text-base sm:text-lg font-bold">{name}</span>
   </label>
 {/snippet}
 
@@ -876,10 +890,39 @@
     }
   }
 
-  .tab-content {
+  .video-settings-header {
+    display: flex;
+    align-items: start;
+    column-gap: 0.5rem;
+  }
+
+  .video-settings-tabs {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .video-settings-close {
+    display: flex;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: calc(infinity * 1px);
+    color: color-mix(in oklab, #fff 60%, transparent);
+    cursor: pointer;
+    transition: all var(--default-transition-duration) var(--default-transition-timing-function);
+
+    &:is(:hover, :focus-visible) {
+      background-color: color-mix(in oklab, #fff 12%, transparent);
+      color: color-mix(in oklab, #fff 90%, transparent);
+      outline: none;
+    }
+  }
+
+  .video-settings-content {
     max-height: 30rem;
-    border-radius: 0;
-    border-top-color: color-mix(in oklab, #fff 10%, transparent);
+    border-top: var(--border) solid color-mix(in oklab, #fff 10%, transparent);
     > div {
       display: flex;
       align-items: center;
@@ -890,16 +933,6 @@
       &:first-child {
         margin-top: 0.75rem;
       }
-    }
-  }
-
-  .toggle {
-    background-color: color-mix(in oklab, #fff 60%, transparent);
-    box-shadow: unset;
-    &:checked {
-      color: var(--color-primary-content);
-      border-color: var(--color-primary);
-      background-color: var(--color-primary);
     }
   }
 
@@ -927,6 +960,16 @@
     box-shadow: 0 0 #0000;
     &::placeholder {
       color: color-mix(in oklab, #fff 20%, transparent);
+    }
+  }
+
+  .toggle {
+    background-color: color-mix(in oklab, #fff 60%, transparent);
+    box-shadow: unset;
+    &:checked {
+      color: var(--color-primary-content);
+      border-color: var(--color-primary);
+      background-color: var(--color-primary);
     }
   }
 </style>
