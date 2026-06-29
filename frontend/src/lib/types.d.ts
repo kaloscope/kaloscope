@@ -86,6 +86,7 @@ export type MenuRoute = {
   path?: string;
   icon: string | IconifyIcon;
   iconColor?: string;
+  translate?: boolean;
 };
 
 /**
@@ -95,6 +96,11 @@ export type Menu = {
   title: string;
   routes: MenuRoute[];
 };
+
+/**
+ * The type of the signpost item.
+ */
+export type Signpost = string | { title: string; translate?: boolean };
 
 /**
  * The type of the token.

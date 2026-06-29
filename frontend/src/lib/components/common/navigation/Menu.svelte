@@ -1,11 +1,13 @@
 <script lang="ts" module>
-  import type { Menu, MenuRoute } from '$lib/types';
+  import type { Menu, MenuRoute, Signpost } from '$lib/types';
 
   export type MenuProps = {
     /** List of menu items. */
     menus: Menu[];
     /** Map of properties that should be interpolated in the i18n message. */
     interpolation?: Record<string, string | number | (string | number)[]>;
+    /** Whether route titles should be translated as i18n keys. */
+    translate?: boolean;
   };
 </script>
 
@@ -18,7 +20,7 @@
   import { freeze, signposts } from '$lib/stores';
   import { onMount } from 'svelte';
 
-  let { menus, interpolation = {} }: MenuProps = $props();
+  let { menus, interpolation = {}, translate = true }: MenuProps = $props();
 
   /**
    * Hide the drawer when a menu item is clicked.
@@ -42,11 +44,12 @@
     const updateSignposts = () => {
       // set the signposts based on the current page
       const pathname = page.url.pathname;
-      let titles: string[] = [];
+      let titles: Signpost[] = [];
       loop: for (const menu of menus) {
         for (const route of menu.routes) {
           if (route.path && pathname.startsWith(route.path)) {
-            titles = [menu.title, route.title];
+            const routeTranslate = route.translate ?? translate;
+            titles = [menu.title, routeTranslate ? route.title : { title: route.title, translate: false }];
             break loop;
           }
         }
@@ -98,11 +101,12 @@
 </ul>
 
 {#snippet routeContent(route: MenuRoute)}
+  {@const routeTranslate = route.translate ?? translate}
   {#if typeof route.icon === 'string'}
     <Image src={route.icon} width="1.25rem" />
   {:else}
     <iconify-icon icon={route.icon} width="1.25rem" class="size-5" style:color={route.iconColor}></iconify-icon>
   {/if}
-  {$_(route.title, interpolation[route.title])}
+  {routeTranslate ? $_(route.title, interpolation[route.title]) : route.title}
   <iconify-icon icon={icons.externalLink} width="1rem" class="invisible group-hover:visible"></iconify-icon>
 {/snippet}

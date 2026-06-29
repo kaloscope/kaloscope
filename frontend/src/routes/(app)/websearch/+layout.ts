@@ -41,7 +41,8 @@ export const load: LayoutLoad = async () => {
         routes: graphs.map((graph) => ({
           title: graph.name,
           path: `/websearch/${graph.id}`,
-          icon: graph.icon ?? icons.globe
+          icon: graph.icon ?? icons.globe,
+          translate: false
         }))
       });
     });

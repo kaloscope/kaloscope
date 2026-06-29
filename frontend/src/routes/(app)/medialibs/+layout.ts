@@ -16,7 +16,8 @@ export const load: LayoutLoad = async () => {
           routes: data.map((lib) => ({
             title: lib.name,
             path: `/medialibs/${lib.id}`,
-            icon: LibType[lib.lib_type].icon
+            icon: LibType[lib.lib_type].icon,
+            translate: false
           }))
         });
       }
