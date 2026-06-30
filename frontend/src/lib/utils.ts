@@ -252,10 +252,20 @@ export function escapeHTML(str: string): string {
  * @return The HTML string with italicized parts.
  */
 export function italic(title: string): string {
-  title = escapeHTML(title);
-  return title.replace(
-    /\[([^\]]+)\]/g,
-    '<span class="text-sm font-normal opacity-60">[<span class="italic px-1">$1</span>]</span>'
+  const prefix = '<span class="text-sm font-normal opacity-60">[<span class="italic px-1">';
+  const suffix = '</span>]</span>';
+
+  const start = title.indexOf('[');
+  const end = title.lastIndexOf(']');
+
+  if (start === -1 || end <= start + 1) {
+    return escapeHTML(title);
+  }
+
+  return (
+    escapeHTML(title.slice(0, start)) +
+    `${prefix}${escapeHTML(title.slice(start + 1, end))}${suffix}` +
+    escapeHTML(title.slice(end + 1))
   );
 }
 
