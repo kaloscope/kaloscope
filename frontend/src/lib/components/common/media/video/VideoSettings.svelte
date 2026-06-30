@@ -9,21 +9,50 @@
   import type PlaybackRatePlugin from 'xgplayer/es/plugins/playbackRate';
   import type RotatePlugin from 'xgplayer/es/plugins/rotate';
   import type StartPlugin from 'xgplayer/es/plugins/start';
-  import type TextTrackPlugin from 'xgplayer/es/plugins/track';
+  import type TextTrackPlugin from './plugins/texttrack';
 
-  // video settings
+  // video settings and types
   type LandscapeMode = 'rotate' | 'web_api';
   type PlaybackMode = 'direct' | 'transcode';
   type VideoSettings = {
     landscapeMode: LandscapeMode;
     playbackMode: PlaybackMode;
   };
+
   const video = persisted<VideoSettings>('video', {
     landscapeMode: 'rotate',
     playbackMode: 'direct'
   });
 
-  // danmaku settings
+  // subtitle settings and types
+  type SubtitleDisplayMode = 'stroke' | 'bg';
+  type SubtitleSettings = {
+    autoShow: boolean;
+    languagePreference: string;
+    displayMode: SubtitleDisplayMode;
+    timeOffset: number;
+    fontScale: number;
+    verticalPosition: number;
+  };
+
+  const subtitle = persisted<SubtitleSettings>('subtitle', {
+    autoShow: false,
+    languagePreference: '',
+    displayMode: 'stroke',
+    timeOffset: 0,
+    fontScale: 100,
+    verticalPosition: 2
+  });
+
+  type TrackWrapper = {
+    id?: string | number | null;
+    _language?: string | number | null;
+    label?: string | null;
+    url?: string | null;
+    isDefault?: boolean;
+  };
+
+  // danmaku settings and types
   type DanmakuMode = 'scroll' | 'top' | 'bottom' | 'color';
   type DanmakuSettings = {
     enabled: boolean;
@@ -33,6 +62,7 @@
     fontSize: number;
     speed: number;
   };
+
   const danmaku = persisted<DanmakuSettings>('danmaku', {
     enabled: true,
     blocks: [],
@@ -42,7 +72,6 @@
     speed: 50
   });
 
-  // danmaku types
   type DanmakuMeta = {
     anime_id: string;
     anime_title: string | null;
@@ -51,10 +80,76 @@
     type: string;
     type_description: string | null;
   };
+
   type DanmakuWrapper = {
     metadata: DanmakuMeta | null;
     comments: Danmaku[];
   };
+
+  /**
+   * Find the first subtitle track matching the language preference.
+   *
+   * @param tracks - The formatted subtitle tracks.
+   * @param languagePreference - The regular expression used to match tracks.
+   * @returns The preferred subtitle track, or the first track when no match is found.
+   */
+  export function findPreferredTrack<T extends TrackWrapper>(tracks: T[], languagePreference: string) {
+    if (tracks.length === 0) {
+      return null;
+    }
+    const pattern = languagePreference.trim();
+    if (!pattern) {
+      return tracks[0];
+    }
+    try {
+      const regex = new RegExp(pattern, 'i');
+      return (
+        tracks.find((track) => {
+          const t = [track.label, track._language].filter(Boolean).join('\n');
+          return regex.test(t);
+        }) ?? tracks[0]
+      );
+    } catch {
+      return tracks[0];
+    }
+  }
+
+  /**
+   * Formats subtitle track metadata for the TextTrack plugin.
+   *
+   * @param subtitles - The list of subtitle tracks.
+   * @param settings - The persisted subtitle settings.
+   * @returns The formatted subtitles.
+   */
+  export function formatSubtitles(subtitles: Subtitle[] | null | undefined, settings?: SubtitleSettings | null) {
+    if (!subtitles || subtitles.length === 0) {
+      return [];
+    }
+
+    // format subtitle tracks
+    const tracks = subtitles
+      .filter((subtitle) => !!subtitle.url)
+      .map((subtitle) => {
+        return {
+          id: subtitle.id,
+          // Keep backend language in `_language` for app-side preference matching, but do not pass it to xgplayer:
+          // xgplayer treats tracks with the same language as the same subtitle and may switch to the wrong track
+          // when multiple subtitles share a language marker.
+          _language: subtitle.language,
+          // language: subtitle.language,
+          label: subtitle.label,
+          url: subtitle.url as string,
+          isDefault: false
+        };
+      });
+
+    // find the preferred track
+    const preferredTrack = findPreferredTrack(tracks, settings?.autoShow ? settings.languagePreference : '');
+    return tracks.map((track) => ({
+      ...track,
+      isDefault: track.id === preferredTrack?.id
+    }));
+  }
 
   /**
    * Formats the danmakus to the format required by the player.
@@ -96,30 +191,6 @@
           style: {
             color: color || '#fff' // comment color
           }
-        };
-      });
-  }
-
-  /**
-   * Formats subtitle track metadata for the TextTrack plugin.
-   *
-   * @param subtitles - The list of subtitle tracks.
-   * @returns The formatted subtitles.
-   */
-  export function formatSubtitles(subtitles: Subtitle[] | null | undefined) {
-    if (!subtitles || subtitles.length === 0) {
-      return [];
-    }
-    return subtitles
-      .filter((subtitle) => !!subtitle.url)
-      .map((subtitle, index) => {
-        return {
-          id: subtitle.id,
-          // xgplayer also matches by language, which may not be unique
-          // language: subtitle.language,
-          label: subtitle.label,
-          url: subtitle.url as string,
-          isDefault: index === 0
         };
       });
   }
@@ -261,6 +332,9 @@
         definition = player.config.url;
       }
     }
+    // subtitle
+    applySubtitleSettings();
+    loadLocalSubtitles();
     // danmaku
     if ($danmaku !== null && danmakuPlugin !== null) {
       danmakuPlugin.setArea({ start: 0, end: $danmaku.area / 100 || 0.1 });
@@ -275,7 +349,6 @@
       }
     }
     loadLocalDanmakus();
-    loadLocalSubtitles();
   }
 
   /**
@@ -359,6 +432,62 @@
     }
     rotatePlugin.rotate(true, true, (degree - rotateDegree) / 90);
     rotateDegree = degree;
+  }
+
+  /**
+   * Apply persisted subtitle settings to the text track plugin.
+   *
+   * @param autoSelect - Whether to select the preferred subtitle track.
+   */
+  function applySubtitleSettings(autoSelect: boolean = false) {
+    if ($subtitle === null || textTrackPlugin === null) {
+      return;
+    }
+    textTrackPlugin.applySubtitleSettings($subtitle);
+    if (!autoSelect || !$subtitle.autoShow) {
+      return;
+    }
+
+    // switch to the preferred subtitle track
+    const tracks = (textTrackPlugin.config.list ?? []) as TrackWrapper[];
+    const preferredTrack = findPreferredTrack(tracks, $subtitle.languagePreference);
+    if (!preferredTrack) {
+      return;
+    }
+    textTrackPlugin.switchSubTitle({ id: preferredTrack.id ?? undefined });
+  }
+
+  /**
+   * Load the subtitle data for the current local video.
+   */
+  export function loadLocalSubtitles() {
+    if (!localMedia || textTrackPlugin === null) {
+      return;
+    }
+    // clear existing subtitles before loading new tracks
+    textTrackPlugin.updateSubtitles([], true);
+    const url = player?.config.url as string;
+    const path = extractStreamPath(url);
+    api
+      .post('subtitle/tracks', { json: { path } })
+      .json<Resp<Subtitle[]>>()
+      .then(({ data }) => {
+        updateSubtitles(data);
+      });
+  }
+
+  /**
+   * Update the subtitles for the current video.
+   *
+   * @param data - The subtitle tracks.
+   */
+  function updateSubtitles(data: Subtitle[]) {
+    if (textTrackPlugin === null) {
+      return;
+    }
+    const subtitles = formatSubtitles(data, $subtitle);
+    textTrackPlugin.updateSubtitles(subtitles, true);
+    applySubtitleSettings(true);
   }
 
   /**
@@ -485,37 +614,6 @@
       danmakuCache = false;
     }
   }
-
-  /**
-   * Load the subtitle data for the current local video.
-   */
-  export function loadLocalSubtitles() {
-    if (!localMedia || textTrackPlugin === null) {
-      return;
-    }
-    // clear existing subtitles before loading new tracks
-    textTrackPlugin.updateSubtitles([], true);
-    const url = player?.config.url as string;
-    const path = extractStreamPath(url);
-    api
-      .post('subtitle/tracks', { json: { path } })
-      .json<Resp<Subtitle[]>>()
-      .then(({ data }) => {
-        updateSubtitles(data);
-      });
-  }
-
-  /**
-   * Update the subtitles for the current video.
-   *
-   * @param data - The subtitle tracks.
-   */
-  function updateSubtitles(data: Subtitle[]) {
-    if (textTrackPlugin === null) {
-      return;
-    }
-    textTrackPlugin.updateSubtitles(formatSubtitles(data), true);
-  }
 </script>
 
 <Modal
@@ -528,7 +626,7 @@
     <div class="video-settings-header">
       <div class="video-settings-tabs tabs-border tabs">
         {@render tabLabel('video', icons.videoFill, $_('media.video.settings'))}
-        {@render tabLabel('track', icons.subtitlesFilled, $_('media.xgplayer.texttrack'))}
+        {@render tabLabel('subtitle', icons.subtitlesFilled, $_('media.xgplayer.texttrack'))}
         {@render tabLabel('danmaku', icons.danmakuFill, $_('media.danmaku.settings'))}
         {#if localMedia}
           {@render tabLabel('match', icons.boxMultipleSearchFilled, $_('media.danmaku.match'))}
@@ -619,8 +717,89 @@
       {/if}
     </div>
 
-    <!-- The text track settings tab. -->
-    <div class="video-settings-content" hidden={tabId !== 'track'}></div>
+    <!-- The subtitle settings tab. -->
+    <div class="video-settings-content" hidden={tabId !== 'subtitle'}>
+      {#if $subtitle !== null}
+        <div>
+          {@render optionLabel($_('media.subtitle.auto_show'))}
+          <input
+            type="checkbox"
+            class="toggle"
+            bind:checked={$subtitle.autoShow}
+            onchange={() => applySubtitleSettings(true)}
+          />
+        </div>
+        <div>
+          {@render optionLabel($_('media.subtitle.language_preference'), $_('media.subtitle.language_preference_tip'))}
+          <input
+            class="input subtitle-setting-field"
+            bind:value={$subtitle.languagePreference}
+            placeholder={$_('media.subtitle.language_preference_placeholder')}
+            disabled={!$subtitle.autoShow}
+            onchange={() => applySubtitleSettings(true)}
+          />
+        </div>
+        <div>
+          {@render optionLabel($_('media.subtitle.display_mode'))}
+          <Select
+            native={!rotateFullscreen}
+            options={[
+              { value: 'stroke', label: 'media.subtitle.display_mode_options.stroke' },
+              { value: 'bg', label: 'media.subtitle.display_mode_options.bg' }
+            ]}
+            bind:value={$subtitle.displayMode}
+            onchange={() => applySubtitleSettings()}
+            class="dropdown-top [&_p]:max-h-32!"
+          />
+        </div>
+        <div>
+          {@render optionLabel($_('media.subtitle.time_offset'))}
+          <label class="input subtitle-setting-field subtitle-time-offset-field">
+            <input
+              type="number"
+              min="-3600"
+              max="3600"
+              step="0.1"
+              bind:value={$subtitle.timeOffset}
+              onchange={() => {
+                if ($subtitle !== null) {
+                  const value = Number($subtitle.timeOffset);
+                  const roundedValue = Math.round(value * 10) / 10;
+                  $subtitle.timeOffset = Number.isFinite(value) ? Math.max(-3600, Math.min(3600, roundedValue)) : 0;
+                  applySubtitleSettings();
+                }
+              }}
+            />
+            <span class="subtitle-time-offset-unit">s</span>
+          </label>
+        </div>
+        <div>
+          {@render optionLabel($_('media.subtitle.font_scale'))}
+          <Range
+            bind:value={$subtitle.fontScale}
+            min={50}
+            max={200}
+            step={5}
+            class="pt-2"
+            textClass="text-white/80"
+            sliderClass="range-primary"
+            onchange={() => applySubtitleSettings()}
+          />
+        </div>
+        <div>
+          {@render optionLabel($_('media.subtitle.vertical_position'))}
+          <Range
+            bind:value={$subtitle.verticalPosition}
+            min={0}
+            max={15}
+            class="pt-2"
+            textClass="text-white/80"
+            sliderClass="range-primary"
+            onchange={() => applySubtitleSettings()}
+          />
+        </div>
+      {/if}
+    </div>
 
     <!-- The danmaku settings tab. -->
     <div class="video-settings-content" hidden={tabId !== 'danmaku'}>
@@ -823,11 +1002,11 @@
 
 <!-- The option label rendering snippet. -->
 {#snippet optionLabel(name: string, tip?: string)}
-  <div class="flex max-w-40 min-w-20 shrink-0 gap-1 text-white/60">
-    <span class="text-base font-semibold">{name}</span>
+  <div class="max-w-40 min-w-20 shrink-0 text-white/60">
+    <span class="text-base leading-tight font-semibold">{name}</span>
     {#if tip}
-      <span class="flex-center cursor-help text-lg" use:tooltip={{ content: tip, followCursor: true }}>
-        <iconify-icon icon={icons.questionCircle}></iconify-icon>
+      <span class="option-label-tip" use:tooltip={{ content: tip, followCursor: true }}>
+        <iconify-icon icon={icons.questionCircle} width="1.125rem"></iconify-icon>
       </span>
     {/if}
   </div>
@@ -892,10 +1071,47 @@
     }
   }
 
+  .btn {
+    --size: 1.5rem;
+    --btn-p: 0.5rem;
+    --fontsize: 0.6875rem;
+    color: color-mix(in oklab, #fff 20%, transparent);
+    border-color: hsla(0, 0%, 20%, 0.9);
+    background-color: hsla(0, 0%, 20%, 0.9);
+    box-shadow: unset;
+    &.btn-active {
+      color: color-mix(in oklab, #fff 80%, transparent);
+      border-color: hsla(0, 0%, 30%, 0.9);
+      background-color: hsla(0, 0%, 30%, 0.9);
+    }
+  }
+
+  .input {
+    --size: 2rem;
+    font-size: 0.75rem;
+    color: color-mix(in oklab, #fff 80%, transparent);
+    border-color: color-mix(in oklab, #fff 10%, transparent);
+    background-color: color-mix(in oklab, #fff 5%, transparent);
+    box-shadow: 0 0 #0000;
+    &::placeholder {
+      color: color-mix(in oklab, #fff 20%, transparent);
+    }
+  }
+
+  .toggle {
+    background-color: color-mix(in oklab, #fff 60%, transparent);
+    box-shadow: unset;
+    &:checked {
+      color: var(--color-primary-content);
+      border-color: var(--color-primary);
+      background-color: var(--color-primary);
+    }
+  }
+
   .video-settings-header {
     display: flex;
     align-items: start;
-    column-gap: 0.5rem;
+    column-gap: 0.25rem;
   }
 
   .video-settings-tabs {
@@ -938,40 +1154,41 @@
     }
   }
 
-  .btn {
+  .option-label-tip {
+    display: inline-flex;
+    margin-left: 0.25rem;
+    line-height: 1;
+    vertical-align: middle;
+    color: currentColor;
+    cursor: help;
+    transform: translateY(-0.0625rem);
+  }
+
+  .subtitle-setting-field {
     --size: 1.5rem;
-    --btn-p: 0.5rem;
-    --fontsize: 0.6875rem;
-    color: color-mix(in oklab, #fff 20%, transparent);
-    border-color: hsla(0, 0%, 20%, 0.9);
-    background-color: hsla(0, 0%, 20%, 0.9);
-    box-shadow: unset;
-    &.btn-active {
-      color: color-mix(in oklab, #fff 80%, transparent);
-      border-color: hsla(0, 0%, 30%, 0.9);
-      background-color: hsla(0, 0%, 30%, 0.9);
+    width: 8rem;
+    height: var(--size);
+    min-height: var(--size);
+    font-size: 0.6875rem;
+  }
+
+  .subtitle-time-offset-field {
+    gap: 0;
+    input {
+      appearance: textfield;
+      padding-right: 1.25rem;
+      &::-webkit-inner-spin-button,
+      &::-webkit-outer-spin-button {
+        appearance: none;
+        margin: 0;
+      }
     }
   }
 
-  .input {
-    --size: 2rem;
-    font-size: 0.75rem;
+  .subtitle-time-offset-unit {
+    position: absolute;
+    right: 1.125rem;
     color: color-mix(in oklab, #fff 80%, transparent);
-    border-color: color-mix(in oklab, #fff 10%, transparent);
-    background-color: color-mix(in oklab, #fff 5%, transparent);
-    box-shadow: 0 0 #0000;
-    &::placeholder {
-      color: color-mix(in oklab, #fff 20%, transparent);
-    }
-  }
-
-  .toggle {
-    background-color: color-mix(in oklab, #fff 60%, transparent);
-    box-shadow: unset;
-    &:checked {
-      color: var(--color-primary-content);
-      border-color: var(--color-primary);
-      background-color: var(--color-primary);
-    }
+    pointer-events: none;
   }
 </style>

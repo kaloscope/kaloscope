@@ -445,6 +445,20 @@
         "transcode": "服务端转码"
       }
     },
+    "subtitle": {
+      "auto_show": "自动显示",
+      "language_preference": "语言偏好",
+      "language_preference_placeholder": "zh|chs",
+      "language_preference_tip": "自动显示时按正则优先匹配，留空则使用第一个字幕轨道。",
+      "display_mode": "显示样式",
+      "display_mode_options": {
+        "stroke": "描边",
+        "bg": "背景"
+      },
+      "time_offset": "时间偏移",
+      "font_scale": "字号比例",
+      "vertical_position": "垂直位置"
+    },
     "danmaku": {
       "settings": "弹幕",
       "toggle": "弹幕开关",

@@ -48,9 +48,13 @@
 
   &.xgplayer-rotate-fullscreen {
     xg-text-track.xg-text-track {
-      bottom: 2% !important;
+      bottom: var(--xgplayer-subtitle-bottom, 2%) !important;
       transform: none !important;
     }
+  }
+
+  xg-text-track.xg-text-track xg-text-track-inner {
+    font-size: calc(1em * var(--xgplayer-subtitle-font-scale, 1));
   }
 
   xg-text-track.xg-text-track xg-text-track-span {

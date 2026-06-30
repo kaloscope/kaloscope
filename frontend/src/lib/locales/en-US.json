@@ -445,6 +445,20 @@
         "transcode": "Server Transcode"
       }
     },
+    "subtitle": {
+      "auto_show": "Auto Show",
+      "language_preference": "Language Preference",
+      "language_preference_placeholder": "en|eng",
+      "language_preference_tip": "Auto show prefers the first regex match, or the first track if empty.",
+      "display_mode": "Display Style",
+      "display_mode_options": {
+        "stroke": "Stroke",
+        "bg": "Background"
+      },
+      "time_offset": "Time Offset",
+      "font_scale": "Font Scale",
+      "vertical_position": "Vertical Position"
+    },
     "danmaku": {
       "settings": "Danmaku",
       "toggle": "On/Off",
@@ -526,7 +540,7 @@
       "exitfullscreen_tips": "Exit fullscreen",
       "cssfullscreen_tips": "Cssfullscreen",
       "exitcssfullscreen_tips": "Exit cssfullscreen",
-      "texttrack": "Caption",
+      "texttrack": "Subtitle",
       "texttrack_off": "Off",
       "pip": "PIP",
       "screenshot": "Screenshot",
