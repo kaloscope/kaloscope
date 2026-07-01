@@ -27,6 +27,7 @@ class RepoFetcher:
     """The GitHub repository fetcher."""
 
     _REPO_FETCHER = "repo_fetcher"
+    _INITIAL_SYNC_DELAY = 60
 
     def __init__(self, app: Sanic):
         """Initialize the repository fetcher.
@@ -66,19 +67,23 @@ class RepoFetcher:
 
     async def interval(self):
         """Synchronize the flow repositories."""
-        while True:
-            try:
-                repositories = await FlowRepository.all()
-                for repo in repositories:
-                    await fetch_origin(repo)
+        try:
+            await asyncio.sleep(self._INITIAL_SYNC_DELAY)
+            while True:
+                try:
+                    repositories = await FlowRepository.all()
+                    for repo in repositories:
+                        await fetch_origin(repo)
 
-                await asyncio.sleep(3600)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.error("Failed to synchronize the repositories!", exc_info=True)
-                # wait for 10 minutes before retrying
-                await asyncio.sleep(600)
+                    await asyncio.sleep(3600)
+                except Exception:
+                    logger.error(
+                        "Failed to synchronize the repositories!", exc_info=True
+                    )
+                    # wait for 10 minutes before retrying
+                    await asyncio.sleep(600)
+        except asyncio.CancelledError:
+            pass
 
 
 async def _proxy_environment(url: str) -> dict[str, str]:
