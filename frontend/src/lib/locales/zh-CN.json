@@ -124,6 +124,8 @@
     "nodata": "暂无数据",
     "paginator": {
       "total": "共 {0} 条",
+      "first": "首页",
+      "current": "第 {0} 页",
       "previous": "上一页",
       "next": "下一页"
     }

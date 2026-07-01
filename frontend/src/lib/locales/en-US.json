@@ -124,6 +124,8 @@
     "nodata": "No Data Found",
     "paginator": {
       "total": "{0} entries",
+      "first": "First",
+      "current": "Page {0}",
       "previous": "Previous",
       "next": "Next"
     }

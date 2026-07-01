@@ -86,6 +86,7 @@
 
 {#if total !== null}
   {@const bgClass = simpleMode ? 'bg-linear-to-t from-base-125 to-transparent to-50%' : 'bg-blur-90'}
+  {@const showFirst = simpleMode && current > 2}
   <!-- whether the previous and next buttons are disabled -->
   {@const prevDisabled = current === 1}
   {@const nextDisabled = simpleMode ? total < size : current === pages[pages.length - 1]}
@@ -108,9 +109,16 @@
 
         <div
           class={simpleMode
-            ? 'join mx-auto grid grid-cols-2 rounded-field shadow-sm'
+            ? `join mx-auto rounded-field shadow-sm grid ${showFirst ? 'grid-cols-4' : 'grid-cols-3'}`
             : 'ml-auto flex gap-2 sm:mx-auto sm:gap-1'}
         >
+          <!-- first page button -->
+          {#if showFirst}
+            <button class="text-base-content/80 {prevClass}" onclick={() => onchange?.((current = 1), size)}>
+              {$_('data.paginator.first')}
+            </button>
+          {/if}
+
           <!-- previous page button -->
           {#if prevDisabled}
             <button class="btn-disabled {simpleMode ? 'bg-base-300!' : ''} {prevClass}">
@@ -123,7 +131,11 @@
           {/if}
 
           <!-- page buttons -->
-          {#if !simpleMode}
+          {#if simpleMode}
+            <button class="join-item pointer-events-none text-base-content/50 {btnClass}">
+              {$_('data.paginator.current', current)}
+            </button>
+          {:else}
             {#each pages as num (num)}
               {#if num < 0}
                 <button class="pointer-events-none btn-subtle px-1 max-sm:hidden {btnClass}">...</button>
