@@ -22,6 +22,9 @@ from app.models.network import ProxyProtocol, URLRule
 from app.utils import json
 from app.utils.crypto import xor_decrypt
 
+_GIT_SYNC_TIMEOUT = 30
+"""The timeout for Git operations in seconds."""
+
 
 class RepoFetcher:
     """The GitHub repository fetcher."""
@@ -139,23 +142,21 @@ async def fetch_origin(repo: FlowRepository):
     repo_path.mkdir(parents=True, exist_ok=True)
     proxy_env = await _proxy_environment(repo.repo_url)
     try:
-        with Git().custom_environment(**proxy_env):
-            try:
-                # try to pull the latest changes from the remote repository
-                Repo(repo_path).remotes.origin.pull(kill_after_timeout=30)
-                logger.info(
-                    f"Pulled latest changes for repository:"
-                    f"{Colors.GREEN} %s{Colors.END}",
-                    repo_path,
-                )
-            except InvalidGitRepositoryError:
-                # if the path is not a valid git repository, clone it
-                Repo.clone_from(repo.repo_url, to_path=repo_path)
-                logger.info(
-                    f"Cloned repository from %s to: {Colors.GREEN}%s{Colors.END}",
-                    repo.repo_url,
-                    repo_path,
-                )
+        try:
+            # try to pull the latest changes from the remote repository
+            await asyncio.to_thread(_pull_origin, repo_path, proxy_env)
+            logger.info(
+                f"Pulled latest changes for repository:{Colors.GREEN} %s{Colors.END}",
+                repo_path,
+            )
+        except InvalidGitRepositoryError:
+            # if the path is not a valid git repository, clone it
+            await asyncio.to_thread(_clone_origin, repo.repo_url, repo_path, proxy_env)
+            logger.info(
+                f"Cloned repository from %s to: {Colors.GREEN}%s{Colors.END}",
+                repo.repo_url,
+                repo_path,
+            )
     except GitError:
         logger.error(
             f"Failed to synchronize the repository: {Colors.RED}%s{Colors.END}",
@@ -169,6 +170,25 @@ async def fetch_origin(repo: FlowRepository):
     # update the last synchronized time
     repo.updated_at = timezone.now()
     await repo.save()
+
+
+def _pull_origin(repo_path: Path, proxy_env: dict[str, str]):
+    """Pull a repository with proxy settings and a bounded Git timeout."""
+    repository = Repo(repo_path)
+    with repository.git.custom_environment(**proxy_env):
+        repository.remotes.origin.pull(kill_after_timeout=_GIT_SYNC_TIMEOUT)
+
+
+def _clone_origin(repo_url: str, repo_path: Path, proxy_env: dict[str, str]):
+    """Clone a repository with proxy settings and a bounded Git timeout.
+
+    This intentionally uses the low-level Git clone command because `Repo.clone_from`
+    runs through `as_process=True`, where `kill_after_timeout` does not take effect.
+    """
+    Git.check_unsafe_protocols(repo_url)
+    git = Git()
+    with git.custom_environment(**proxy_env):
+        git.clone("--", repo_url, str(repo_path), kill_after_timeout=_GIT_SYNC_TIMEOUT)
 
 
 async def scan_directory(path: Path, repo: str):
