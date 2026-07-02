@@ -47,10 +47,11 @@ _VIDEO_TAGS_PATTERN = re.compile(
     (?:
         # resolution
         \d{3,4}[pPiI]
+        | \d{3,4}x\d{3,4}
         | 4[kK]
         | UHD
         # source
-        | BluRay | Blu-Ray | BDRip | BDRemux | BD | BDMV
+        | BluRay | Blu-Ray | BDRip | DLRip | BDRemux | BD | BDMV
         | WEB-DL | WEBRip | WEBDL | WEB
         | DVDRip | DVD
         | HD(?:TV|CAM)?

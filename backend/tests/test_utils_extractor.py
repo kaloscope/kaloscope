@@ -183,6 +183,10 @@ class TestExtractTitle:
         result = extract_title("Dune.Part.Two.2024.2160p.UHD.BluRay.HDR10.DTS-HD.MA")
         assert "dune part two" in result.lower()
 
+    def test_title_with_parenthesized_dlrip_tags(self):
+        result = extract_title("[milky] 真・燐月 (DLrip 1280x720 x264 AAC)")
+        assert result == "真・燐月"
+
     def test_plain_movie_name(self):
         result = extract_title("Dune")
         assert result.lower() == "dune"
