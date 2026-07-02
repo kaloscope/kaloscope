@@ -93,7 +93,7 @@ export default class PlaybackRate extends OptionsIcon {
       if (rate) {
         iconText.innerHTML = this.getTextByLang(rate, 'iconText', null);
       } else {
-        iconText.innerHTML = `${this.player.playbackRate}x`;
+        iconText.innerHTML = `${this.player.playbackRate.toFixed(1)}x`;
       }
     }
   }

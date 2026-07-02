@@ -17,11 +17,19 @@
   type VideoSettings = {
     landscapeMode: LandscapeMode;
     playbackMode: PlaybackMode;
+    pressRate?: number;
   };
+
+  const DEFAULT_PRESS_RATE = 2;
+  const PRESS_RATE_OPTIONS = Array.from({ length: 14 }, (_, index) => {
+    const rate = 1.5 + index * 0.5;
+    return { value: rate, label: `${rate.toFixed(1)}x` };
+  });
 
   const video = persisted<VideoSettings>('video', {
     landscapeMode: 'rotate',
-    playbackMode: 'direct'
+    playbackMode: 'direct',
+    pressRate: DEFAULT_PRESS_RATE
   });
 
   // subtitle settings and types
@@ -314,6 +322,7 @@
       $video.playbackMode = isTranscodedStream(url) ? 'transcode' : 'direct';
     }
     // playback rate
+    changePressRate();
     if (playbackRatePlugin !== null) {
       for (const rate of [...playbackRatePlugin.config.list].reverse()) {
         playbackRates[rate.text] = rate.rate;
@@ -419,6 +428,28 @@
     }
     player.playbackRate = rate;
     playbackRate = rate;
+  }
+
+  /**
+   * Change the press rate used by keyboard and mobile press gestures.
+   */
+  function changePressRate() {
+    const rate = $video?.pressRate ?? DEFAULT_PRESS_RATE;
+    if ($video !== null) {
+      $video.pressRate = rate;
+    }
+    const keyboardPlugin = player?.getPlugin('keyboard');
+    if (keyboardPlugin) {
+      keyboardPlugin.config.playbackRate = rate;
+    }
+    const mobilePlugin = player?.getPlugin('mobile');
+    if (mobilePlugin) {
+      mobilePlugin.config.pressRate = rate;
+    }
+    const rateElement = player?.root?.querySelector<HTMLElement>('xg-trigger.trigger .xg-playbackrate i');
+    if (rateElement) {
+      rateElement.textContent = `${rate}X`;
+    }
   }
 
   /**
@@ -686,6 +717,18 @@
           <Select options={[{ value: '', label: 'media.video.default' }]} disabled />
         {/if}
       </div>
+      {#if $video !== null}
+        <div>
+          {@render optionLabel($_('media.video.press_rate'))}
+          <Select
+            native={!rotateFullscreen}
+            options={PRESS_RATE_OPTIONS}
+            bind:value={$video.pressRate}
+            onchange={changePressRate}
+            class="dropdown-top [&_p]:max-h-32!"
+          />
+        </div>
+      {/if}
       {#if $video !== null}
         <div>
           {@render optionLabel($_('media.video.landscape.title'), $_('media.video.landscape.tip'))}

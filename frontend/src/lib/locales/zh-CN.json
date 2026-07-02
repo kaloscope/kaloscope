@@ -434,6 +434,7 @@
       "rotate": "旋转",
       "default": "默认",
       "definition": "清晰度",
+      "press_rate": "长按倍率",
       "landscape": {
         "title": "横屏模式",
         "tip": "仅部分移动设备支持 Web API 方式锁定横屏。",

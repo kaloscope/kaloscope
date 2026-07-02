@@ -337,6 +337,7 @@
       mobile: {
         gradient: 'none',
         gestureX: false,
+        pressRate: 2,
         disablePress: true
       },
       controls: {
@@ -638,8 +639,13 @@
       .xg-top-note {
         top: 56px !important;
         height: 28px !important;
-        width: 96px !important;
-        margin-left: -48px !important;
+        min-width: 96px !important;
+        width: auto !important;
+        margin-left: 0 !important;
+        padding: 0 12px !important;
+        transform: translateX(-50%);
+        box-sizing: border-box;
+        white-space: nowrap;
         background-color: hsla(0, 0%, 30%, 0.3) !important;
         span {
           height: 28px !important;
@@ -652,8 +658,12 @@
       }
 
       .xgplayer-controls {
+        --xg-control-icon-gap: 8px;
+        @media (min-width: 40rem) {
+          --xg-control-icon-gap: 16px;
+        }
+        /* https://github.com/bytedance/xgplayer/issues/1460 */
         .xg-tips {
-          /* https://github.com/bytedance/xgplayer/issues/1460 */
           display: none !important;
         }
         .xg-right-grid {
@@ -662,7 +672,7 @@
           }
           xg-icon {
             margin-left: 0;
-            margin-right: 8px;
+            margin-right: var(--xg-control-icon-gap);
           }
         }
         .xg-left-grid {
@@ -670,13 +680,13 @@
             margin-left: 0;
           }
           xg-icon {
-            margin-left: 8px;
+            margin-left: var(--xg-control-icon-gap);
             margin-right: 0;
           }
         }
         .xg-center-grid xg-icon {
-          margin-left: 8px;
-          margin-right: 8px;
+          margin-left: var(--xg-control-icon-gap);
+          margin-right: var(--xg-control-icon-gap);
         }
         cursor: default;
         background-image: initial !important;

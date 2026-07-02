@@ -502,7 +502,7 @@
     gap: 0.5rem;
     padding: 0.5rem;
     overflow-y: auto;
-    max-height: 18.5rem;
+    max-height: 19rem;
   }
 
   .history-list-item {

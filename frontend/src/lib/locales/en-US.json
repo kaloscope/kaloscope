@@ -434,6 +434,7 @@
       "rotate": "Rotate",
       "default": "Default",
       "definition": "Definition",
+      "press_rate": "Press Rate",
       "landscape": {
         "title": "Landscape Mode",
         "tip": "Only certain mobile devices support locking landscape mode via the Web API.",
