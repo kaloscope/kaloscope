@@ -346,6 +346,18 @@
       fullscreen: {
         switchCallback: toggleFullscreen
       },
+      keyboard: {
+        seekStep: 5,
+        playbackRate: 2,
+        keyCodeMap: {
+          left: {
+            pressAction: 'seekBack'
+          },
+          right: {
+            pressAction: 'changePlaybackRate'
+          }
+        }
+      },
       miniprogress: true,
       pip: true
     });
