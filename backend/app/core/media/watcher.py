@@ -119,6 +119,7 @@ class LibWatcher:
     """The media library watcher."""
 
     _LISTENER = "lib_listener"
+    _STARTUP_SCAN_DELAY = 100
     _observers: dict[str, tuple[BaseObserver, Queue]] = {}
 
     def __init__(self, app: Sanic):
@@ -149,7 +150,7 @@ class LibWatcher:
         """Start the watcher."""
         libs = await MediaLib.all()
         for lib in libs:
-            await self.add_observer(lib)
+            await self.add_observer(lib, delay_scan=True)
         self._app.add_task(self._listener(), name=self._LISTENER)
 
     async def shutdown(self):
@@ -178,11 +179,12 @@ class LibWatcher:
                 logger.error("Failed to process the watcher action!", exc_info=True)
                 await asyncio.sleep(5)
 
-    async def add_observer(self, lib: MediaLib):
+    async def add_observer(self, lib: MediaLib, *, delay_scan: bool = False):
         """Add a directory observer to monitor the specified path.
 
         Args:
             lib: The media library that will be monitored.
+            delay_scan: Whether to delay the initial full scan.
         """
         if self._watcher_lock.acquire(block=False):
             try:
@@ -198,7 +200,12 @@ class LibWatcher:
                     # create a task to consume events
                     self._app.add_task(self._event_consumer(events), name=encrypt(path))
                     # scan the directory for existing files
-                    self._app.add_task(self.scan_directory(lib, nfo=False, valid=True))
+                    scan_task = (
+                        self._startup_scan(lib)
+                        if delay_scan
+                        else self.scan_directory(lib, nfo=False, valid=True)
+                    )
+                    self._app.add_task(scan_task)
                     self._observing_paths.append(path)
             finally:
                 self._watcher_lock.release()
@@ -271,6 +278,15 @@ class LibWatcher:
             True if the path is being scanned, False otherwise.
         """
         return path in self._scanning_paths
+
+    async def _startup_scan(self, lib: MediaLib):
+        """Delay startup scans until after Sanic workers acknowledge startup.
+
+        Args:
+            lib: The media library instance.
+        """
+        await asyncio.sleep(self._STARTUP_SCAN_DELAY)
+        await self.scan_directory(lib, nfo=False, valid=True)
 
     async def scan_directory(
         self, target: MediaLib | str, *, nfo: bool = True, valid: bool = False

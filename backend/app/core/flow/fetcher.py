@@ -30,7 +30,7 @@ class RepoFetcher:
     """The GitHub repository fetcher."""
 
     _REPO_FETCHER = "repo_fetcher"
-    _INITIAL_SYNC_DELAY = 60
+    _INITIAL_SYNC_DELAY = 70
 
     def __init__(self, app: Sanic):
         """Initialize the repository fetcher.
