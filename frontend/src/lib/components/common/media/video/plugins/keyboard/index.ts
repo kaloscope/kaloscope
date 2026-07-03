@@ -9,6 +9,7 @@ const PLAYBACK_RATE_VISIBLE = 'playbackrate';
 export default class KeyboardWithPlaybackRateNote extends Keyboard {
   private playbackRateTrigger: HTMLElement | null = null;
   private isForwardPlaybackRateActive = false;
+  private isForwardSeekPending = false;
 
   private onWindowBlur = () => {
     this.handleKeyUp(new Event('blur'));
@@ -35,9 +36,27 @@ export default class KeyboardWithPlaybackRateNote extends Keyboard {
    */
   changePlaybackRate(event: Event) {
     super.changePlaybackRate(event);
+    this.isForwardSeekPending = false;
     this.isForwardPlaybackRateActive = true;
     window.addEventListener('keyup', this.onWindowKeyUp, true);
     this.showPlaybackRateNote();
+  }
+
+  /**
+   * Defers the first right-arrow seek until keyup so long presses do not seek before switching speed.
+   *
+   * @param event - The keyboard event that may start or continue a press.
+   */
+  handleKeyDown(event: KeyboardEvent) {
+    if (this.shouldDeferForwardSeek(event)) {
+      this.isForwardSeekPending = true;
+      this.preventDefault(event);
+      return;
+    }
+    if (event.repeat && this.isForwardKey(event)) {
+      this.isForwardSeekPending = false;
+    }
+    super.handleKeyDown(event);
   }
 
   /**
@@ -47,6 +66,12 @@ export default class KeyboardWithPlaybackRateNote extends Keyboard {
    */
   handleKeyUp(event: Event) {
     const shouldStop = this.shouldStopForward(event);
+    if (this.isForwardSeekPending) {
+      this.isForwardSeekPending = false;
+      if (this.isForwardKey(event)) {
+        this.seek(event);
+      }
+    }
     if (this.isForwardPlaybackRateActive && !shouldStop) {
       this.resetKeyPressState();
       return;
@@ -80,8 +105,45 @@ export default class KeyboardWithPlaybackRateNote extends Keyboard {
     if (event.type === 'blur') {
       return true;
     }
+    return this.isForwardKey(event);
+  }
+
+  /**
+   * Checks whether the initial forward seek should be delayed until keyup.
+   *
+   * @param event - The keyboard event to check.
+   * @returns Whether the event should be held as a pending short-press seek.
+   */
+  private shouldDeferForwardSeek(event: KeyboardEvent) {
+    const forward = this.keyCodeMap?.right;
+    return (
+      !event.repeat &&
+      this.isForwardKey(event) &&
+      forward?.action === 'seek' &&
+      forward.pressAction === 'changePlaybackRate'
+    );
+  }
+
+  /**
+   * Checks whether a keyboard event belongs to the forward shortcut.
+   *
+   * @param event - The event to check.
+   * @returns Whether the event is the configured forward key.
+   */
+  private isForwardKey(event: Event) {
     const keyboardEvent = event as KeyboardEvent;
-    return keyboardEvent.key === 'ArrowRight';
+    return keyboardEvent.key === 'ArrowRight' || keyboardEvent.keyCode === this.keyCodeMap?.right?.keyCode;
+  }
+
+  /**
+   * Prevents the browser and xgplayer default shortcut handling for a deferred keydown.
+   *
+   * @param event - The event to stop.
+   */
+  private preventDefault(event: KeyboardEvent) {
+    event.preventDefault();
+    event.returnValue = false;
+    event.stopPropagation();
   }
 
   /**
