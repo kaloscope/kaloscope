@@ -268,17 +268,6 @@ class LibWatcher:
                 logger.error("Failed to consume the media event!", exc_info=True)
                 await asyncio.sleep(1)
 
-    def is_scanning(self, path: str) -> bool:
-        """Check if the specified path is being scanned.
-
-        Args:
-            path: The directory path to check.
-
-        Returns:
-            True if the path is being scanned, False otherwise.
-        """
-        return path in self._scanning_paths
-
     async def _startup_scan(self, lib: MediaLib):
         """Delay startup scans until after Sanic workers acknowledge startup.
 
@@ -319,12 +308,12 @@ class LibWatcher:
         try:
             if lib is None:
                 lib = await MediaLib.filter(dir=path).get()
-            await self._scan_directory(lib, nfo=nfo)
+            await self._enqueue_events(lib, nfo=nfo)
         finally:
             self._scanning_paths.remove(path)
 
-    async def _scan_directory(self, lib: MediaLib, *, nfo: bool = True):
-        """Scan the directory for existing files and create events.
+    async def _enqueue_events(self, lib: MediaLib, *, nfo: bool = True):
+        """Scan the directory for existing files and enqueue events.
 
         Args:
             lib: The media library instance.
@@ -406,6 +395,17 @@ class LibWatcher:
         for item in items:
             if item.id not in set(existing_ids) and not Path(item.path).exists():
                 await _create_media_event(FileDeletedEvent(item.path))
+
+    def is_scanning(self, path: str) -> bool:
+        """Check if the specified path is being scanned.
+
+        Args:
+            path: The directory path to check.
+
+        Returns:
+            True if the path is being scanned, False otherwise.
+        """
+        return path in self._scanning_paths
 
 
 async def consume_event(event: MediaEvent):
