@@ -6,6 +6,7 @@
   import type { Chapter, Resource, Resp } from '$lib/types';
   import { onMount, tick } from 'svelte';
   import { queryParameters, ssp } from 'sveltekit-search-params';
+  import { UAParser } from 'ua-parser-js';
 
   // the URL query parameters
   const query = queryParameters(
@@ -48,13 +49,21 @@
     if (!chapterChange) {
       chapterFallbackTried = false;
     }
+    const userAgent = UAParser(navigator.userAgent);
     loading.start();
     api
       .post(`flow/graph/${page.params.indexer_id}/execute`, {
         json: {
           $start: 'details_start',
           id: page.params.rsrc_id,
-          chapter_id: query.chapter_id
+          chapter_id: query.chapter_id,
+          ua: {
+            ...userAgent,
+            navigator: {
+              platform: navigator.platform,
+              maxTouchPoints: navigator.maxTouchPoints
+            }
+          }
         }
       })
       .json<Resp<Resource | null>>()
