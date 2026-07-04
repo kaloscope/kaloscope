@@ -6,7 +6,7 @@ from app.models.flow import GraphCategory
 DETAILS_CONFIG = """
 specific:
   media_type: video # video | audio | image | text
-  video_type: # mp4 | flv | hls
+  video_type: # mp4 | flv | hls | dash
 """.lstrip()
 
 

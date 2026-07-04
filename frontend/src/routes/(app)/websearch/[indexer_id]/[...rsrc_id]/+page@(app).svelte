@@ -115,6 +115,8 @@
           title: rsrc.title,
           danmakus: rsrc.danmakus,
           videoType: videoType,
+          fallbackUrl: rsrc.fallback_url,
+          fallbackVideoType: rsrc.fallback_video_type,
           chapters: chapters,
           chapterId: query.chapter_id,
           chapterChange: onchange,

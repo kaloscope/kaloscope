@@ -4,8 +4,10 @@
   "uploader": "Admin",
   "uploaded_at": "10 Hours Ago",
   "media_type": "video", // video | audio | image | text
-  "video_type": "hls", // mp4 | flv | hls
   "url": "https://.../video.m3u8",
+  "video_type": "hls", // mp4 | flv | hls | dash
+  "fallback_url": "https://.../video.mp4",
+  "fallback_video_type": "mp4",
   "text": "...", // string | string[]
   "images": ["https://.../image1.jpg", "https://.../image2.jpg"],
   "definitions": [
