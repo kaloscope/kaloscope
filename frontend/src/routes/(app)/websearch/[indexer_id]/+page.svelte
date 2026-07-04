@@ -23,7 +23,7 @@
   import { icons } from '$lib/icons';
   import { captureScrollPosition, restorePosition } from '$lib/stores';
   import type { IndexerAuth, Page, Resource, Resp, ViewMode, ViewModes } from '$lib/types';
-  import { aspectRatio } from '$lib/utils';
+  import { aspectRatio, sniffer } from '$lib/utils';
   import { tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { queryParameters, ssp } from 'sveltekit-search-params';
@@ -179,6 +179,7 @@
           page_num: query.page_num,
           page_size: query.page_size,
           keyword: query.keyword,
+          mobile: sniffer.isMobile(),
           ...(query.filters ? JSON.parse(query.filters) : {})
         }
       })
