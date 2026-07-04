@@ -630,8 +630,10 @@ export type Resource = Optional<{
   uploader: string;
   uploaded_at: string;
   media_type: 'video' | 'audio' | 'image' | 'text';
-  video_type: 'mp4' | 'flv' | 'hls';
   url: string;
+  video_type: 'mp4' | 'flv' | 'hls' | 'dash';
+  fallback_url: string;
+  fallback_video_type: 'mp4' | 'flv' | 'hls';
   text: string | string[];
   images: string[];
   image_count: number;
