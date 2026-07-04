@@ -335,11 +335,11 @@
       });
     }
     // definition
-    if (player?.config.definitions) {
-      definitions = player?.config.definitions;
-      if (definitions.length > 0 && typeof player.config.url === 'string') {
-        definition = player.config.url;
-      }
+    definitions = ((player?.config.definitions as { list?: Definition[] } | undefined)?.list ?? []).filter(
+      (d) => d.url && d.definition
+    );
+    if (definitions.length > 0 && typeof player?.config.url === 'string') {
+      definition = player.config.url;
     }
     // subtitle
     applySubtitleSettings();

@@ -29,6 +29,7 @@ import Time from 'xgplayer/es/plugins/time';
 import TimeSegments from 'xgplayer/es/plugins/time/timesegments';
 import Volume from 'xgplayer/es/plugins/volume';
 import Chapters from './chapters';
+import Definitions from './definitions';
 import Gradient from './gradient';
 import Keyboard from './keyboard';
 import PlaybackRate from './playbackrate';
@@ -77,6 +78,7 @@ const BASE_PLUGINS = [
   Danmu,
   TopBar,
   Gradient,
+  Definitions,
   Chapters,
   PlaybackRate
 ];

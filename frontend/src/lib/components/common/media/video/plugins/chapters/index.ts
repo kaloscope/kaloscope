@@ -37,34 +37,27 @@ export default class Chapters extends OptionsIcon {
     };
   }
 
-  get isDefinition() {
-    return (this.config.list as Chapter[]).some((item) => item.definition);
-  }
-
   onIconClick = () => {
-    const plugin = this.player.getPlugin('playbackRate');
-    if (plugin && plugin.optionsList && plugin.isActive) {
-      plugin.optionsList.hide();
-      plugin.isActive = false;
+    for (const name of ['definitions', 'playbackRate']) {
+      const plugin = this.player.getPlugin(name);
+      if (plugin && plugin.optionsList && plugin.isActive) {
+        plugin.optionsList.hide();
+        plugin.isActive = false;
+      }
     }
   };
 
   onItemClick = (event: DelegateEvent, data: ChangeData) => {
     super.onItemClick(event, data);
-    const { id, url, showText, definition } = data.to;
+    const { id, url, showText } = data.to;
     if (typeof this.config.chapterChange === 'function') {
       this.config.chapterChange({
         id: id,
         url: url,
-        title: showText,
-        definition: definition === 'true'
+        title: showText
       });
     } else if (typeof url === 'string') {
-      if (definition === 'true') {
-        this.player.config.settings.changeDefinition(url);
-      } else {
-        this.playNext(url, showText);
-      }
+      this.playNext(url, showText);
     }
   };
 
@@ -87,7 +80,7 @@ export default class Chapters extends OptionsIcon {
   registerIcons() {
     return {
       chapters: {
-        icon: iconToSVG(this.isDefinition ? icons.shadow : icons.listCheck),
+        icon: iconToSVG(icons.listCheck),
         class: 'size-6 text-white/80'
       }
     };
@@ -96,12 +89,6 @@ export default class Chapters extends OptionsIcon {
   afterCreate() {
     super.afterCreate();
     this.renderItemList();
-    if (this.isDefinition) {
-      this.on('url_change', (url: string) => {
-        this.player.config.url = url;
-        this.renderItemList();
-      });
-    }
   }
 
   renderItemList() {
@@ -118,7 +105,6 @@ export default class Chapters extends OptionsIcon {
         id: item.id || '',
         url: item.url || '',
         showText: item.title,
-        definition: item.definition || false,
         selected: (item.id || item.url) === (config.chapterId || url || '')
       };
       if (chapterItem.selected) {

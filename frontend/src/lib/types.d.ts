@@ -568,7 +568,6 @@ export type Chapter = {
   url?: string | null;
   title: string;
   volume?: string | null;
-  definition?: boolean;
 };
 
 /** Group of chapters keyed by volume name. */

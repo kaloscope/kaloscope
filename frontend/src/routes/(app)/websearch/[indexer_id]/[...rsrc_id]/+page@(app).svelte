@@ -36,19 +36,23 @@
   // the loading state
   const loading = createLoading();
 
+  // the active chapter ID
+  let activeChapterId: string | null = $state(null);
   // guard to limit fallback to first chapter once per load
   let chapterFallbackTried: boolean = false;
 
   /**
    * Fetch the details of the resource.
    *
-   * @param chapterChange - Whether this request is triggered by a chapter change.
+   * @param chapterId - The chapter ID to request.
    */
-  function details(chapterChange: boolean = false) {
+  function details(chapterId: string | null = null) {
     // reset fallback guard on initial loads
-    if (!chapterChange) {
+    if (chapterId === null) {
       chapterFallbackTried = false;
     }
+    activeChapterId = chapterId ?? query.chapter_id ?? null;
+
     const userAgent = UAParser(navigator.userAgent);
     loading.start();
     api
@@ -56,7 +60,7 @@
         json: {
           $start: 'details_start',
           id: page.params.rsrc_id,
-          chapter_id: query.chapter_id,
+          chapter_id: activeChapterId,
           ua: {
             ...userAgent,
             navigator: {
@@ -68,7 +72,7 @@
       })
       .json<Resp<Resource | null>>()
       .then(({ data }) => {
-        if (chapterChange) {
+        if (chapterId !== null) {
           refreshKey = new Date().getTime();
         }
         tick().then(() => onload(data));
@@ -89,6 +93,7 @@
     }
     resource = rsrc;
     const chapters = rsrc.chapters ?? [];
+    activeChapterId ??= chapters[0]?.id ?? null;
     // load the viewer/player based on the media type
     if (mediaType === 'text' && textViewer) {
       if (rsrc.text === null || rsrc.text === undefined) {
@@ -98,7 +103,7 @@
           text: rsrc.text,
           title: rsrc.title,
           chapters: chapters,
-          chapterId: query.chapter_id,
+          chapterId: activeChapterId,
           chapterChange: onchange
         });
       }
@@ -111,7 +116,7 @@
           image_count: rsrc.image_count,
           title: rsrc.title,
           chapters: chapters,
-          chapterId: query.chapter_id,
+          chapterId: activeChapterId,
           chapterChange: onchange
         });
       }
@@ -125,7 +130,7 @@
           danmakus: rsrc.danmakus,
           videoType: videoType,
           chapters: chapters,
-          chapterId: query.chapter_id,
+          chapterId: activeChapterId,
           chapterChange: onchange,
           definitions: rsrc.definitions,
           uploader: rsrc.uploader,
@@ -153,16 +158,16 @@
    * @param chapter - The chapter object.
    */
   function onchange(chapter: Chapter) {
-    const { id, url, title, definition } = chapter;
+    const { id, url, title } = chapter;
     // change the video chapter directly if the URL is available
     if (mediaType === 'video' && videoPlayer && url) {
-      videoPlayer.mount({ next: !definition, url, title });
+      videoPlayer.mount({ next: true, url, title });
       return;
     }
     // update the query parameter and request the new chapter
     if (id && id !== query.chapter_id) {
       query.chapter_id = id;
-      details(true);
+      details(id);
     }
   }
 

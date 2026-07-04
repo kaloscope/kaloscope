@@ -157,6 +157,7 @@
   // the plugins used in the player
   let mobilePlugin: MobilePlugin | null = $derived.by(() => player?.getPlugin('mobile'));
   let chaptersPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('chapters'));
+  let definitionsPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('definitions'));
   let fullscreenPlugin: FullscreenPlugin | null = $derived.by(() => player?.getPlugin('fullscreen'));
   let playbackRatePlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('playbackRate'));
   let texttrackPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('texttrack'));
@@ -253,16 +254,10 @@
         .map((c) => ({
           id: c.id,
           url: c.url,
-          title: c.title,
-          definition: false
+          title: c.title
         }));
     }
-    return extractDefinitions(options).map((d) => ({
-      id: null,
-      url: d.url,
-      title: String(d.definition),
-      definition: true
-    }));
+    return [];
   };
 
   /**
@@ -289,9 +284,7 @@
       return;
     }
 
-    let videoType = options.videoType;
-    let url = resolvePlaybackUrl(options.url, videoType);
-    let definitions = extractDefinitions(options);
+    let url = resolvePlaybackUrl(options.url, options.videoType);
 
     // reset the transcode auto-retry flag so a new video gets its own retry
     transcodeRetriedUrl = null;
@@ -318,11 +311,10 @@
       height: options.height ?? height,
       autoplay: options.autoplay ?? true,
       startTime: options.startTime ?? undefined,
-      videoType: videoType,
+      videoType: options.videoType,
       customDuration: duration,
       // bind the video settings component to the player config
       settings: videoSettings,
-      definitions: definitions,
       topBarAutoHide: false,
       topBar: {
         back: options.back,
@@ -345,14 +337,18 @@
         default: 1,
         showValueLabel: true
       },
-      chapters: {
+      definitions: {
         index: 99,
-        list: extractChapters({ ...options, definitions }),
+        list: extractDefinitions(options)
+      },
+      chapters: {
+        index: 100,
+        list: extractChapters(options),
         chapterId: options.chapterId,
         chapterChange: options.chapterChange
       },
       texttrack: {
-        index: 100,
+        index: 101,
         list: [],
         isDefaultOpen: false,
         style: {
@@ -363,7 +359,7 @@
         }
       },
       playbackRate: {
-        index: 101,
+        index: 102,
         list: playbackRates
       },
       mobile: {
@@ -527,7 +523,7 @@
    * Hides active option menus.
    */
   function hideOptionPlugins() {
-    for (const plugin of [chaptersPlugin, playbackRatePlugin, texttrackPlugin]) {
+    for (const plugin of [definitionsPlugin, chaptersPlugin, playbackRatePlugin, texttrackPlugin]) {
       if (plugin && plugin.optionsList && plugin.isActive) {
         plugin.optionsList.hide();
         plugin.isActive = false;
