@@ -1,7 +1,11 @@
 import re
+from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+import httpx
 from aiofiles import os as async_os
+from pydantic import BaseModel, Field
 from sanic import Blueprint, HTTPResponse, Request, empty, json, redirect
 from sanic.exceptions import InvalidRangeType, RangeNotSatisfiable
 from sanic.log import logger
@@ -10,7 +14,12 @@ from sanic_ext import validate
 from tortoise.expressions import Q, RawSQL
 
 from app.core.decorators import authorize
-from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
+from app.core.exceptions import (
+    BadRequestException,
+    ErrorCode,
+    ForbiddenException,
+    KaloscopeException,
+)
 from app.core.media.shelver import (
     gen_nfo,
     get_nfo_path,
@@ -45,6 +54,19 @@ from app.utils.transcode import (
 
 # subroutes for all media related operations
 media = Blueprint("media", url_prefix="/media")
+
+REMOTE_MEDIA_RESPONSE_HEADERS = [
+    "accept-ranges",
+    "cache-control",
+    "content-disposition",
+    "content-length",
+    "content-range",
+    "content-type",
+    "etag",
+    "expires",
+    "last-modified",
+]
+SENSITIVE_REMOTE_MEDIA_HEADERS = {"authorization", "cookie"}
 
 
 @media.get("/lib/list")
@@ -284,3 +306,66 @@ async def serve_hls_file(
         file_path,
         headers={"Cache-Control": "no-store"},
     )
+
+
+class RemoteMediaProxy(BaseModel):
+    """Request model for proxying a remote media stream."""
+
+    url: str = Field(min_length=1)
+    referer: str | None = Field(max_length=1024, default=None)
+
+
+@media.get("/proxy")
+@validate(query=RemoteMediaProxy)
+async def proxy_remote_media(
+    request: Request, query: RemoteMediaProxy
+) -> HTTPResponse | ResponseStream:
+    """Proxy a remote media stream that requires playback-only request headers."""
+    url, headers = _remote_media_request(query.url, query.referer, request.headers)
+    client: httpx.AsyncClient = request.app.ctx.httpx
+
+    async def _stream(stream):
+        try:
+            async with client.stream("GET", url, headers=headers) as r:
+                stream.response.status = r.status_code
+                for header in REMOTE_MEDIA_RESPONSE_HEADERS:
+                    if value := r.headers.get(header):
+                        stream.response.headers[header.title()] = value
+                async for chunk in r.aiter_raw():
+                    await stream.write(chunk)
+        except httpx.RequestError as e:
+            logger.error(
+                "An error occurred while proxying remote media %s.",
+                url,
+                exc_info=True,
+            )
+            raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED) from e
+
+    return ResponseStream(_stream)
+
+
+def _remote_media_request(
+    url: str, referer: str | None, request_headers: Mapping[str, str]
+) -> tuple[str, dict[str, str]]:
+    parsed = urlparse(url)
+    query_params: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key == "referer":
+            referer = referer or value or None
+        else:
+            query_params.append((key, value))
+
+    url = urlunparse(parsed._replace(query=urlencode(query_params)))
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ForbiddenException
+
+    dropped = SENSITIVE_REMOTE_MEDIA_HEADERS | {"host", "referer"}
+    headers = {
+        str(key): str(value)
+        for key, value in request_headers.items()
+        if str(key).lower() not in dropped
+    }
+    headers["Host"] = parsed.netloc
+    headers["Referer"] = referer or url
+    return url, headers

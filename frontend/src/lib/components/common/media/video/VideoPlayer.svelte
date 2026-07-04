@@ -3,7 +3,6 @@
   import { MEDIA_STREAM_PREFIX } from '$lib/constants';
   import type { Chapter, Danmaku, Definition, MediaItem, Optional, Page, Resp } from '$lib/types';
   import { extractStreamPath } from '$lib/utils';
-  import type { IUrl } from 'xgplayer/es/defaultConfig';
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
   import type MobilePlugin from 'xgplayer/es/plugins/mobile';
@@ -22,7 +21,7 @@
    * The type of the video options.
    */
   export type VideoOptions = {
-    url: IUrl;
+    url: string;
   } & Optional<{
     width: string | number;
     height: string | number;
@@ -30,6 +29,10 @@
     startTime: number;
     /** The type of the video source, e.g., 'mp4', 'flv', 'hls', etc. */
     videoType: string;
+    /** A compatibility fallback URL for browsers that cannot play the primary source. */
+    fallbackUrl: string;
+    /** The type of the fallback video source. */
+    fallbackVideoType: string;
     /** The danmakus (video comments) to be displayed on the video. */
     danmakus: Danmaku[];
     /** The video chapters for TV shows or multi-part videos. */
@@ -207,7 +210,10 @@
    */
   const extractDefinitions = (options: VideoOptions): Definition[] => {
     if (options.definitions && options.definitions.length > 0) {
-      return options.definitions.filter((d) => d.url && d.definition);
+      return options.definitions
+        .filter((d) => d.url && d.definition)
+        .map((d) => ({ ...d, url: resolvePlaybackUrl(d.url, options.videoType) }))
+        .filter((d) => d.url);
     }
     return [];
   };
@@ -238,6 +244,29 @@
   };
 
   /**
+   * Resolves app-level video URL values into xgplayer URL values.
+   *
+   * @param url - The app-level video URL.
+   * @param videoType - The source video type.
+   * @returns A URL value xgplayer can consume.
+   */
+  function resolvePlaybackUrl(url: string, videoType?: string | null): string {
+    if (videoType?.toLowerCase() === 'dash' && /^\s*(?:<\?xml[\s\S]*?)?<MPD[\s>]/i.test(url)) {
+      const origin = globalThis.location?.origin ?? '';
+      if (origin) {
+        url = url.replace(/(<BaseURL>)\/_api\//g, `$1${origin}/_api/`);
+      }
+      const bytes = new TextEncoder().encode(url);
+      let binary = '';
+      for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+      }
+      return `data:application/dash+xml;base64,${btoa(binary)}`;
+    }
+    return url;
+  }
+
+  /**
    * The playback rates available for the player.
    *
    * https://h5player.bytedance.com/plugins/internalplugins/playbackrate.html#list
@@ -261,18 +290,29 @@
       return;
     }
 
+    let url = options.url;
+    let videoType = options.videoType;
+    let definitions = extractDefinitions(options);
+    if (options.fallbackUrl && options.videoType?.toLowerCase() === 'dash' && (sniffer.isIos() || sniffer.isIpad())) {
+      url = options.fallbackUrl;
+      videoType = options.fallbackVideoType ?? 'mp4';
+      definitions = [];
+    }
+    url = resolvePlaybackUrl(url, videoType);
+    const chapters = extractChapters({ ...options, definitions });
+
     // reset the transcode auto-retry flag so a new video gets its own retry
     transcodeRetriedUrl = null;
 
     // probe the full duration for transcoded streams before creating the player instance
-    let duration = await probeDuration(options.url);
+    let duration = await probeDuration(url);
 
     // if the player is already mounted, just switch the URL
     if (player) {
       if (options.next) {
-        player.playNext({ url: options.url, topBar: { title: options.title }, customDuration: duration });
+        player.playNext({ url, topBar: { title: options.title }, customDuration: duration });
       } else {
-        videoSettings.changeDefinition(options.url);
+        videoSettings.changeDefinition(url);
       }
       return;
     }
@@ -281,16 +321,16 @@
     SimplePlayer.defaultPreset = DefaultPreset;
     player = new SimplePlayer({
       id: id,
-      url: options.url,
+      url: url,
       width: options.width ?? width,
       height: options.height ?? height,
       autoplay: options.autoplay ?? true,
       startTime: options.startTime ?? undefined,
-      videoType: options.videoType,
+      videoType: videoType,
       customDuration: duration,
       // bind the video settings component to the player config
       settings: videoSettings,
-      definitions: extractDefinitions(options),
+      definitions: definitions,
       topBarAutoHide: false,
       topBar: {
         back: options.back,
@@ -315,7 +355,7 @@
       },
       chapters: {
         index: 99,
-        list: extractChapters(options),
+        list: chapters,
         chapterId: options.chapterId,
         chapterChange: options.chapterChange
       },
