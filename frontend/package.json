@@ -42,7 +42,8 @@
     "xgplayer": "^3.0.24",
     "xgplayer-flv": "^3.0.24",
     "xgplayer-hls": "^3.0.24",
-    "xgplayer-mp4": "^3.0.24"
+    "xgplayer-mp4": "^3.0.24",
+    "xgplayer-shaka": "^3.0.24"
   },
   "devDependencies": {
     "@eslint/compat": "^2.1.0",
