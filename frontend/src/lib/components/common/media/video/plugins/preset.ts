@@ -6,6 +6,7 @@ import type { IUrl } from 'xgplayer/es/defaultConfig';
 import FLV from 'xgplayer-flv';
 import HLS from 'xgplayer-hls';
 import MP4 from 'xgplayer-mp4';
+import Shaka from 'xgplayer-shaka';
 import Thumbnail from 'xgplayer/es/plugins/common/thumbnail';
 import Danmu from 'xgplayer/es/plugins/danmu';
 import Enter from 'xgplayer/es/plugins/enter';
@@ -152,6 +153,8 @@ function guessVideoType(url?: IUrl): string | null {
       return 'flv';
     } else if (url.indexOf('.m3u8') > -1) {
       return 'hls';
+    } else if (url.indexOf('.mpd') > -1 || url.startsWith('data:application/dash+xml')) {
+      return 'dash';
     }
   }
   return null;
@@ -188,6 +191,12 @@ function videoPlugins(videoType: string | null | undefined, url: IUrl | undefine
     const native = document.createElement('video').canPlayType('application/vnd.apple.mpegurl');
     if (!native && HLS.isSupported()) {
       return [HLS];
+    }
+  } else if (videoType === 'dash') {
+    // https://h5player.bytedance.com/plugins/extension/third-party-plugin.html#xgplayer-shaka
+    const supported = Shaka.isSupported();
+    if (supported) {
+      return [Shaka];
     }
   }
   return [];
