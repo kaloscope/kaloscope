@@ -24,8 +24,7 @@ Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,Comma, stays
             "\n"
             "1\n"
             "00:00:01.000 --> 00:00:03.500\n"
-            "Hello\n"
-            "World again\n"
+            "Hello<br/>World again\n"
             "\n"
             "2\n"
             "00:00:04.200 --> 00:00:05.000\n"
@@ -41,6 +40,26 @@ Dialogue: Marked=0,0:00:06.10,0:00:08.00,Default,,0,0,0,,SSA text
 
         assert ass_to_vtt(content) == (
             "WEBVTT\n\n1\n00:00:06.100 --> 00:00:08.000\nSSA text\n"
+        )
+
+    def test_same_time_dialogues_stay_separate(self):
+        content = """
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Main subtitle
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Deputy subtitle
+"""
+
+        assert ass_to_vtt(content) == (
+            "WEBVTT\n"
+            "\n"
+            "1\n"
+            "00:00:01.000 --> 00:00:03.000\n"
+            "Main subtitle\n"
+            "\n"
+            "2\n"
+            "00:00:01.000 --> 00:00:03.000\n"
+            "Deputy subtitle\n"
         )
 
     def test_ass_sort_by_start_time(self):

@@ -110,7 +110,7 @@ def _clean_ass_text(text: str) -> str:
     Returns:
         The plain subtitle text.
     """
-    text = text.replace(r"\N", "\n").replace(r"\n", "\n").replace(r"\h", " ")
+    text = text.replace(r"\N", "<br/>").replace(r"\n", "<br/>").replace(r"\h", " ")
     text = _ASS_TAG_RE.sub("", text)
     return "\n".join(line.strip() for line in text.splitlines()).strip()
 

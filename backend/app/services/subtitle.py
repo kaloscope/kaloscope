@@ -173,9 +173,9 @@ class SubtitleService:
 
         logger.debug("Loading external subtitle file: %s", path)
         async with aiofiles.open(path, "rb") as f:
-            raw_content = await f.read()
-        match = from_bytes(raw_content).best()
-        content = str(match) if match else raw_content.decode(ENCODING)
+            raw = await f.read()
+        matches = from_bytes(raw).best()
+        content = str(matches) if matches else raw.decode(ENCODING)
 
         if converter := cls.EXTERNAL_CONVERTERS.get(subtitle_format):
             content = converter(content)
