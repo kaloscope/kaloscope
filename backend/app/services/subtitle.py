@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import aiofiles
+from charset_normalizer import from_bytes
 from langcodes import standardize_tag, tag_is_valid
 from langcodes.tag_parser import LanguageTagError
 from pydantic import BaseModel
@@ -171,8 +172,10 @@ class SubtitleService:
             return None
 
         logger.debug("Loading external subtitle file: %s", path)
-        async with aiofiles.open(path, encoding=ENCODING) as f:
-            content = await f.read()
+        async with aiofiles.open(path, "rb") as f:
+            raw_content = await f.read()
+        match = from_bytes(raw_content).best()
+        content = str(match) if match else raw_content.decode(ENCODING)
 
         if converter := cls.EXTERNAL_CONVERTERS.get(subtitle_format):
             content = converter(content)

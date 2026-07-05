@@ -30,6 +30,7 @@ dependencies = [
   "send2trash (>=2.1.0,<3.0.0)",
   "filelock (>=3.29.5,<4.0.0)",
   "langcodes (>=3.5.1,<4.0.0)",
+  "charset-normalizer (>=3.4.7,<4.0.0)",
 ]
 
 [tool.poetry]
