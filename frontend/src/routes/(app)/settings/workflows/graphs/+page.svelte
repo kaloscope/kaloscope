@@ -182,6 +182,7 @@
 <DataView dvh rowSelect loading={$loading} data={graphs}>
   {#snippet filters()}
     <Select
+      translate
       filter
       options={enumToOptions(GraphCategory)}
       bind:value={graphCategory}
@@ -190,6 +191,7 @@
       class="max-md:hidden"
     />
     <Select
+      translate
       filter
       options={enumToOptions(GraphState)}
       bind:value={graphState}

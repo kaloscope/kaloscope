@@ -130,6 +130,7 @@
     <fieldset class="fieldset">
       <Label required>{$_('field.category')}</Label>
       <Select
+        translate
         options={enumToOptions(GraphCategory, false)}
         bind:value={category}
         name="category"

@@ -102,6 +102,7 @@
     <fieldset class="fieldset">
       <Label required>{$_('field.type')}</Label>
       <Select
+        translate
         options={enumToOptions(LibType, false)}
         bind:value={lib_type}
         name="lib_type"

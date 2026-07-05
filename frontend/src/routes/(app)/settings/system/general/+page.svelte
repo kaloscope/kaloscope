@@ -104,6 +104,7 @@
         {$_('general.transcode.quality.title')}
       </Label>
       <Select
+        translate
         options={qualityOptions}
         bind:value={configs['transcode.quality']}
         onchange={() => setValue('transcode.quality')}
@@ -115,6 +116,7 @@
         {$_('general.transcode.hwaccel.title')}
       </Label>
       <Select
+        translate
         options={hwaccelOptions}
         bind:value={configs['transcode.hwaccel']}
         onchange={() => setValue('transcode.hwaccel')}

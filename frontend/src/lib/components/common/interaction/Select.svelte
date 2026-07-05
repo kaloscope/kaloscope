@@ -24,6 +24,8 @@
     disabled: boolean;
     /** Whether to use the filter style. */
     filter: boolean;
+    /** Whether option labels should be translated as i18n keys. */
+    translate: boolean;
     /** The class names for the select. */
     class: string;
     /** The select change event handler. */
@@ -46,6 +48,7 @@
     required = false,
     disabled = false,
     filter = false,
+    translate = false,
     class: _class,
     onchange
   }: SelectProps = $props();
@@ -73,6 +76,16 @@
   // the dynamic class names
   let filterClass = $derived(filter ? 'max-w-[min(40%,10rem)] select-sm shadow-sm' : '');
   let selectClass = $derived(`select appearance-none ${filterClass} ${value ? '' : 'text-base-content/50'}`);
+
+  /**
+   * Render an option label.
+   *
+   * @param label - The option label to render.
+   * @returns The translated label, or the original label when translation is disabled.
+   */
+  function optionLabel(label: string | undefined) {
+    return translate && label ? $_(label, { default: label }) : label;
+  }
 </script>
 
 {#if native}
@@ -83,17 +96,17 @@
     {:else if options}
       {#each options as option (option.value)}
         <option value={option.value} disabled={option.disabled}>
-          {$_(option.label, { default: option.label })}
+          {optionLabel(option.label)}
         </option>
       {/each}
     {/if}
   </select>
 {:else if options}
   <!-- custom dropdown select -->
-  {@const label = options.filter((o) => o.value === value)[0]?.label}
+  {@const label = options.find((o) => o.value === value)?.label}
   <Dropdown class="dropdown-end [&:open_.select]:border-primary/80! {_class}" contentClass="bg-base-200 my-1">
     {#snippet trigger()}
-      <div class={selectClass}>{$_(label, { default: label })}</div>
+      <div class={selectClass}>{optionLabel(label)}</div>
     {/snippet}
     <ul class="menu">
       {#each options as option (option.value)}
@@ -115,7 +128,7 @@
                 <path d="M20.285 2l-11.285 11.567-5.286-5.011-3.714 3.716 9 8.728 15-15.285z"></path>
               </svg>
             </span>
-            {$_(option.label, { default: option.label })}
+            {optionLabel(option.label)}
           </button>
         </li>
       {/each}

@@ -196,7 +196,7 @@
   {#snippet filters()}
     <Select
       filter
-      options={[{ value: '', label: 'enum.all' }, ...downloaders.map((d) => ({ value: d.id, label: d.name }))]}
+      options={[{ value: '', label: $_('enum.all') }, ...downloaders.map((d) => ({ value: d.id, label: d.name }))]}
       bind:value={downloader}
       label={$_('download.downloader.title')}
       onchange={() => search()}

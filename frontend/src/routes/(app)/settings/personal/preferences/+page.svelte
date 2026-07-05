@@ -56,6 +56,7 @@
       <fieldset class="fieldset">
         <Label>{$_('preference.navigation.homepage')}</Label>
         <Select
+          translate
           options={homepageOptions}
           bind:value={$user.preferences.homepage}
           onchange={() => update('homepage')}
@@ -65,6 +66,7 @@
       <fieldset class="fieldset">
         <Label tip={$_('preference.navigation.vibration.tip')}>{$_('preference.navigation.vibration.title')}</Label>
         <Select
+          translate
           options={[
             { value: false, label: 'action.toggle_off' },
             { value: true, label: 'action.toggle_on' }
@@ -101,6 +103,7 @@
       <fieldset class="fieldset">
         <Label>{$_('preference.privacy.search')}</Label>
         <Select
+          translate
           options={[
             { value: 0, label: 'preference.privacy.untrack' },
             { value: 1, label: `1 ${$_('duration.day').toLowerCase()}` },
@@ -115,6 +118,7 @@
       <fieldset class="fieldset">
         <Label>{$_('preference.privacy.watch')}</Label>
         <Select
+          translate
           options={[
             { value: 0, label: 'preference.privacy.untrack' },
             { value: 1, label: `1 ${$_('duration.day').toLowerCase()}` },

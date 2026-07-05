@@ -101,7 +101,7 @@
   {#snippet filters()}
     <Select
       filter
-      options={[{ value: '', label: 'enum.all' }, ...graphs.map((d) => ({ value: d.id, label: d.name }))]}
+      options={[{ value: '', label: $_('enum.all') }, ...graphs.map((d) => ({ value: d.id, label: d.name }))]}
       bind:value={graph}
       label={$_('field.graph')}
       onchange={() => search()}

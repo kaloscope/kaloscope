@@ -160,7 +160,7 @@
         bind:document={jsonParams}
       />
       <Label required>{$_('field.trigger')}</Label>
-      <Select options={enumToOptions(JobTrigger, false)} bind:value={trigger} name="trigger" class="w-full" />
+      <Select translate options={enumToOptions(JobTrigger, false)} bind:value={trigger} name="trigger" class="w-full" />
       {#if trigger === 'date'}
         <Label required>{$_('field.run_date')}</Label>
         <input class="input w-full" bind:value={run_date} {...schema.run_date} />
@@ -172,6 +172,7 @@
         <div class="flex gap-2">
           <input class="input w-1/2" bind:value={interval_num} {...schema.interval_num} />
           <Select
+            translate
             required
             options={enumToOptions(IntervalUnit, false)}
             bind:value={interval_unit}

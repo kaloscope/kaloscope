@@ -727,7 +727,7 @@
             class="dropdown-top [&_p]:max-h-32!"
           />
         {:else}
-          <Select options={[{ value: '', label: 'media.video.default' }]} disabled />
+          <Select translate options={[{ value: '', label: 'media.video.default' }]} disabled />
         {/if}
       </div>
       {#if $video !== null}
@@ -746,6 +746,7 @@
         <div>
           {@render optionLabel($_('media.video.landscape.title'), $_('media.video.landscape.tip'))}
           <Select
+            translate
             native={!rotateFullscreen}
             options={[
               { value: 'rotate', label: 'media.video.landscape.rotate' },
@@ -759,6 +760,7 @@
           <div>
             {@render optionLabel($_('media.video.playback.title'), $_('media.video.playback.tip'))}
             <Select
+              translate
               native={!rotateFullscreen}
               options={[
                 { value: 'direct', label: 'media.video.playback.direct' },
@@ -802,6 +804,7 @@
           <div>
             {@render optionLabel($_('media.subtitle.display_mode'))}
             <Select
+              translate
               native={!rotateFullscreen}
               options={[
                 { value: 'stroke', label: 'media.subtitle.display_mode_options.stroke' },

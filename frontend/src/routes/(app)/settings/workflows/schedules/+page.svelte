@@ -157,6 +157,7 @@
 <DataView dvh loading={$loading} data={jobs}>
   {#snippet filters()}
     <Select
+      translate
       filter
       options={enumToOptions(JobTrigger)}
       bind:value={jobTrigger}
@@ -165,6 +166,7 @@
       class="max-md:hidden"
     />
     <Select
+      translate
       filter
       options={enumToOptions(JobState)}
       bind:value={jobState}

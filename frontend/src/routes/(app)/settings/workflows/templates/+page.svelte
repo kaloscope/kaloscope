@@ -144,7 +144,7 @@
     <Select
       filter
       options={[
-        { value: '', label: 'enum.all' },
+        { value: '', label: $_('enum.all') },
         ...tmplRepos.map((r) => ({ value: r.repo_name, label: r.repo_name }))
       ]}
       bind:value={tmplRepo}
@@ -152,6 +152,7 @@
       onchange={() => search()}
     />
     <Select
+      translate
       filter
       options={enumToOptions(GraphCategory)}
       bind:value={tmplCategory}
