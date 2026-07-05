@@ -621,6 +621,7 @@ export type Resource = Optional<{
   id: string;
   title: string;
   cover: string;
+  ranking: number;
   rating: number;
   link: string;
   size: string;

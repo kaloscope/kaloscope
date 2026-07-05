@@ -72,13 +72,14 @@
 </script>
 
 <script lang="ts">
-  import { Badge, Button, Cell, Image, Rating, Uploader, downloadPrompt } from '$lib/components';
+  import { Badge, Button, Cell, Image, Rating, Ranking, Uploader, downloadPrompt } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores';
 
   let { indexerId, indexerConfig, mode, rsrc, coverRatio, searchButton }: SearchHitProps = $props();
   let detailsConfig = $derived(indexerConfig.details);
+  let hasRanking = $derived(rsrc.ranking !== null && rsrc.ranking !== undefined);
 
   /**
    * Mark a resource as favorite.
@@ -149,7 +150,11 @@
       <div class="relative shrink-0">
         <Image transparent src={rsrc.cover} height={coverHeight(ratio)} {ratio} />
         <div class="absolute inset-0 flex size-full flex-col">
-          <Rating score={rsrc.rating} class="mt-0.5 ml-0.5 self-start px-1! text-xs" />
+          {#if hasRanking}
+            <Ranking compact rank={rsrc.ranking} class="self-start" />
+          {:else}
+            <Rating score={rsrc.rating} class="mt-0.5 ml-0.5 self-start px-1! text-xs" />
+          {/if}
           {#if rsrc.category}
             <span
               class="mt-auto max-w-full self-center truncate px-0.5 text-white opacity-80 text-stroke"
@@ -209,7 +214,11 @@
   <div class="flex h-full flex-col">
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div tabindex="0" role="button" class="group @container relative {pointerClass}" onclick={() => gotoDetails(rsrc)}>
-      <Rating score={rsrc.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]" />
+      {#if hasRanking}
+        <Ranking rank={rsrc.ranking} class="absolute top-0 left-0 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]" />
+      {:else}
+        <Rating score={rsrc.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]" />
+      {/if}
       <div class="absolute top-0 right-0 z-1 flex gap-2 p-1 opacity-0 group-hover:opacity-100 {transClass}">
         {#if detailsConfig && rsrc.favorite !== undefined}
           <Button

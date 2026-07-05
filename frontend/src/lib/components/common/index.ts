@@ -12,6 +12,7 @@ export { default as Label, type LabelProps } from './display/Label.svelte';
 export { default as Logo, type LogoProps } from './display/Logo.svelte';
 export { default as Overlay, type OverlayProps } from './display/Overlay.svelte';
 export { default as Rating, type RatingProps } from './display/Rating.svelte';
+export { default as Ranking, type RankingProps } from './display/Ranking.svelte';
 export { default as Status, type StatusProps } from './display/Status.svelte';
 export { default as URLWrapper, type URLWrapperProps } from './display/URLWrapper.svelte';
 
