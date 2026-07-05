@@ -183,7 +183,7 @@
             {#if meta?.country}
               <span class="badge badge-outline">{meta.country}</span>
             {/if}
-            <Rating score={media.rating} stroke={false} class="h-6 border" />
+            <Rating score={media.rating} class="h-6 border" />
           </div>
 
           <!-- tagline -->

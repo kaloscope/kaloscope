@@ -153,7 +153,7 @@
           {#if hasRanking}
             <Ranking compact rank={rsrc.ranking} class="self-start" />
           {:else}
-            <Rating score={rsrc.rating} class="mt-0.5 ml-0.5 self-start px-1! text-xs" />
+            <Rating compact score={rsrc.rating} class="mt-0.5 ml-0.5 self-start" />
           {/if}
           {#if rsrc.category}
             <span
