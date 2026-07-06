@@ -541,6 +541,7 @@ export type Handle = {
 export type Field = {
   id: string;
   field_type: string;
+  span?: number | null;
   label: string | null;
   tooltip: string | null;
   required: boolean;

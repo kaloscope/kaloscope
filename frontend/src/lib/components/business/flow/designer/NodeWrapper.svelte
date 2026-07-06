@@ -1,7 +1,7 @@
 <script lang="ts">
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { NodeSchema } from '$lib/types';
+  import type { Field, NodeSchema } from '$lib/types';
   import { useEdges, useNodes, useStore, type NodeProps } from '@xyflow/svelte';
   import { v7 as uuidv7 } from 'uuid';
   import NodeHandle from './NodeHandle.svelte';
@@ -71,6 +71,16 @@
     nodes.current = nodes.current.filter((node) => node.id !== id);
     edges.current = edges.current.filter((edge) => edge.source !== id && edge.target !== id);
   }
+
+  /**
+   * Get the grid column span for a node field.
+   *
+   * @param field - The node field schema.
+   */
+  function fieldLayoutStyle(field: Field) {
+    const span = field.span ?? 100;
+    return `grid-column: span ${span} / span ${span};`;
+  }
 </script>
 
 <div class="group relative w-max min-w-80 rounded-box backdrop-blur-lg transition-all {shadowClass} {borderClass}">
@@ -91,11 +101,15 @@
       <iconify-icon icon={icons.delete} width="1.25rem"></iconify-icon>
     </button>
   </div>
-  <div class="relative -mt-px flex flex-col rounded-b-box p-3 {bodyClass}">
-    {#each schema.fields as field (field.id)}
-      {@const Field = fields[field.field_type]}
-      <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
-    {/each}
+  <div class="relative -mt-px rounded-b-box p-3 {bodyClass}">
+    <div class="-mx-1 grid" style="grid-template-columns: repeat(100, minmax(0, 1fr));">
+      {#each schema.fields as field (field.id)}
+        {@const Field = fields[field.field_type]}
+        <div class="min-w-0 px-1" style={fieldLayoutStyle(field)}>
+          <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
+        </div>
+      {/each}
+    </div>
     {#each schema.handles as handle (handle.id)}
       <NodeHandle nodeId={id} {...handle} />
     {/each}

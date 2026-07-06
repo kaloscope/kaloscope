@@ -11,12 +11,15 @@ class Field[V](ABC):
 
     id: str = field(init=False, repr=False)
     field_type: str = field(init=False, repr=False)
+    span: int | None = None
     label: str | None = field(kw_only=False, default=None)
     tooltip: str | None = None
     required: bool = False
     default: V
 
     def __post_init__(self):
+        if self.span is not None and not 1 <= self.span <= 100:
+            raise ValueError("span must be between 1 and 100")
         self.field_type = self._field_type()
 
     @abstractmethod
