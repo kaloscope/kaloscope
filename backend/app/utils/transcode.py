@@ -14,7 +14,6 @@ from sanic.log import logger
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
-from app.models.general import GlobalConfig
 
 _SEGMENT_WAIT_TIMEOUT = 30.0
 _SEGMENT_WAIT_INTERVAL = 0.25
@@ -123,6 +122,8 @@ async def _ffmpeg() -> str:
     Returns:
         The ffmpeg executable name or path.
     """
+    from app.models.general import GlobalConfig
+
     path = await GlobalConfig.get_or_none(key="ffmpeg.path")
     if path and isinstance(path.value, str) and Path(path.value).is_file():
         return path.value
@@ -152,6 +153,8 @@ async def _vaapi_device() -> str | None:
     Returns:
         The render device path if it exists, or `None` if not.
     """
+    from app.models.general import GlobalConfig
+
     dev = await GlobalConfig.get_or_none(key="vaapi.device")
     path = (
         dev.value
@@ -407,9 +410,7 @@ async def _build_hls_cmd(
         cmd.extend(
             [
                 "-init_hw_device",
-                f"vaapi=va:{qsv_dev}",
-                "-init_hw_device",
-                "qsv=qs@va",
+                f"qsv=qs:hw,child_device={qsv_dev},child_device_type=vaapi",
                 "-filter_hw_device",
                 "qs",
             ]
