@@ -6,17 +6,13 @@
   import type { GlobalConfig, Page, Resp } from '$lib/types';
   import { onMount } from 'svelte';
 
-  // hardware acceleration options
-  // https://github.com/jellyfin/jellyfin-web/blob/master/src/apps/dashboard/routes/playback/transcoding.tsx
+  // hardware acceleration options supported by the backend
   const hwaccelOptions = [
     { value: null, label: 'general.transcode.hwaccel.none' },
-    { value: 'amf', label: 'AMD AMF' },
     { value: 'qsv', label: 'Intel Quicksync (QSV)' },
     { value: 'nvenc', label: 'Nvidia NVENC' },
-    { value: 'v4l2m2m', label: 'Video4Linux2 (V4L2)' },
     { value: 'vaapi', label: 'Video Acceleration API (VAAPI)' },
-    { value: 'videotoolbox', label: 'Apple VideoToolBox' },
-    { value: 'rkmpp', label: 'Rockchip MPP (RKMPP)' }
+    { value: 'videotoolbox', label: 'Apple VideoToolBox' }
   ];
 
   // quality options

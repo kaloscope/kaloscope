@@ -740,12 +740,9 @@ export type GlobalConfig = {
 };
 
 /**
- * Available hardware acceleration types for real-time transcoding.
- *
- * Mirrors Jellyfin's `HardwareAccelerationType` enum:
- * https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.Model/Entities/HardwareAccelerationType.cs
+ * Supported hardware acceleration types for real-time transcoding.
  */
-export type HWAccelType = 'amf' | 'qsv' | 'nvenc' | 'v4l2m2m' | 'vaapi' | 'videotoolbox' | 'rkmpp';
+export type HWAccelType = 'qsv' | 'nvenc' | 'vaapi' | 'videotoolbox';
 
 /**
  * Transcode options for media streaming.

@@ -30,19 +30,12 @@ class EncoderConfig:
 
 
 # hardware acceleration types (mapped to encoder name and ffmpeg flags)
-HWAccelType = Literal[
-    "amf", "qsv", "nvenc", "v4l2m2m", "vaapi", "videotoolbox", "rkmpp"
-]
+HWAccelType = Literal["qsv", "nvenc", "vaapi", "videotoolbox"]
 _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
     None: EncoderConfig(
         encoder="libx264",
         hwaccel=None,
         hwaccel_output_format=None,
-    ),
-    "amf": EncoderConfig(
-        encoder="h264_amf",
-        hwaccel="d3d11va",
-        hwaccel_output_format="d3d11va",
     ),
     "qsv": EncoderConfig(
         encoder="h264_qsv",
@@ -54,11 +47,6 @@ _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
         hwaccel="cuda",
         hwaccel_output_format="cuda",
     ),
-    "v4l2m2m": EncoderConfig(
-        encoder="h264_v4l2m2m",
-        hwaccel=None,
-        hwaccel_output_format=None,
-    ),
     "vaapi": EncoderConfig(
         encoder="h264_vaapi",
         hwaccel="vaapi",
@@ -68,11 +56,6 @@ _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
         encoder="h264_videotoolbox",
         hwaccel="videotoolbox",
         hwaccel_output_format="videotoolbox",
-    ),
-    "rkmpp": EncoderConfig(
-        encoder="h264_rkmpp",
-        hwaccel="rkmpp",
-        hwaccel_output_format=None,
     ),
 }
 
@@ -107,6 +90,10 @@ class TranscodeOptions:
     quality: QualityLevel = "medium"
     resolution: ResolutionLimit = "original"
     framerate: float = 30.0
+
+    def __post_init__(self):
+        if self.hwaccel not in _ENCODER_CONFIG:
+            self.hwaccel = None
 
     @property
     def encoder_config(self) -> EncoderConfig:
@@ -458,9 +445,9 @@ async def _build_hls_cmd(
     # video filter chain
     vf_parts: list[str] = []
     if needs_scale:
-        target_height = f"trunc(min({options.max_height},ih)/2)*2"
         # scale filter to limit the output height while preserving aspect ratio,
         # and ensure the dimensions are compatible with H.264 encoders
+        target_height = f"trunc(min({options.max_height},ih)/2)*2"
         vf_parts.append(
             f"scale='max(trunc(iw*{target_height}/ih/16)*16,16)':'{target_height}'"
         )
@@ -505,32 +492,6 @@ async def _build_hls_cmd(
                 bitrate,
                 "-bufsize",
                 bufsize,
-            ]
-        )
-
-    elif enc == "h264_amf":
-        bitrate = _HW_BITRATE.get(options.quality, "3000k")
-        amf_quality = (
-            "balanced"
-            if options.quality == "medium"
-            else ("quality" if options.quality == "high" else "speed")
-        )
-        cmd.extend(
-            [
-                "-quality",
-                amf_quality,
-                "-rc",
-                "cbr",
-                "-qmin",
-                "0",
-                "-qmax",
-                "32",
-                "-b:v",
-                bitrate,
-                "-maxrate",
-                bitrate,
-                "-bufsize",
-                str(int(bitrate[:-1]) * 2) + "k",
             ]
         )
 
@@ -631,7 +592,7 @@ async def _build_hls_cmd(
     # -------------------- Keyframe / GOP --------------------
 
     _FORCE_KEYFRAMES = ("libx264", "h264_vaapi")
-    _GOP_ENCODERS = ("h264_qsv", "h264_nvenc", "h264_amf", "h264_rkmpp")
+    _GOP_ENCODERS = ("h264_qsv", "h264_nvenc")
 
     if enc in _FORCE_KEYFRAMES:
         cmd.extend(
