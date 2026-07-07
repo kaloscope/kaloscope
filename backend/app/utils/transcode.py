@@ -275,7 +275,8 @@ async def ensure_transcode(
     lock = _acquire_lock(out_dir)
     if lock is None:
         logger.debug("HLS transcode already in progress: %s", out_dir)
-        await _wait_segment(m3u8_path)
+        if not await _wait_segment(m3u8_path):
+            raise RuntimeError("HLS first segment was not ready in time")
         return media_hash, profile
 
     # start the ffmpeg process if we acquired the lock
@@ -306,7 +307,7 @@ async def ensure_transcode(
                 raise RuntimeError(
                     "ffmpeg exited before generating the first HLS segment"
                 )
-            logger.warning("HLS first segment not ready yet: %s", out_dir)
+            raise RuntimeError("HLS first segment was not ready in time")
 
     except Exception:
         _release_lock(lock)
@@ -457,11 +458,11 @@ async def _build_hls_cmd(
     # video filter chain
     vf_parts: list[str] = []
     if needs_scale:
+        target_height = f"trunc(min({options.max_height},ih)/2)*2"
         # scale filter to limit the output height while preserving aspect ratio,
-        # and ensure the dimensions are divisible by 16 for better encoder compatibility
+        # and ensure the dimensions are compatible with H.264 encoders
         vf_parts.append(
-            f"scale='max(trunc(iw*min({options.max_height},ih)/ih/16)*16,16)'"
-            f":'min({options.max_height},ih)'"
+            f"scale='max(trunc(iw*{target_height}/ih/16)*16,16)':'{target_height}'"
         )
 
     # QSV: when frames stay on the GPU, use QSV VPP to normalize them to NV12.
