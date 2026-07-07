@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sanic import Blueprint, HTTPResponse, json
 from sanic_ext import validate
 
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, ErrorCode, ForbiddenException
 from app.utils.disk import disk_usage, format_bytes
 
 # the concatenation of the drive and root
@@ -125,3 +125,41 @@ async def get_stats(_, query: StatsRequest) -> HTTPResponse:
         stats["used"] = usage.used_space()
         stats["free"] = usage.free_space()
     return json(stats)
+
+
+class CreateDirRequest(BaseModel):
+    """Request model for creating a directory."""
+
+    parent: str
+    name: str
+
+
+@filesystem.post("/mkdir")
+@validate(json=CreateDirRequest)
+async def create_dir(_, body: CreateDirRequest) -> HTTPResponse:
+    """Create a child directory in the given parent directory."""
+    parent = Path(body.parent)
+    name = body.name.strip()
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or Path(name).is_absolute()
+        or len(Path(name).parts) != 1
+    ):
+        raise BadRequestException
+    if not parent.is_dir():
+        raise BadRequestException
+    if not os.access(parent, os.R_OK | os.W_OK | os.X_OK):
+        raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+
+    path = parent / name
+    if path.exists():
+        raise BadRequestException(ErrorCode.DUPLICATE_DIRECTORY)
+
+    try:
+        path.mkdir()
+    except OSError as exc:
+        raise BadRequestException from exc
+    return json(str(path.resolve()))

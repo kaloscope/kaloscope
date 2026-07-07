@@ -347,6 +347,9 @@
     }
   },
   "filesystem": {
+    "new_folder": "New Folder",
+    "new_folder_message": "Enter a name for the new folder under the selected directory:",
+    "new_folder_placeholder": "Folder Name",
     "show_hidden": "Show Hidden Files"
   },
   "download": {

@@ -31,6 +31,7 @@ class ErrorCode(StrEnum):
     PATTERN_ALREADY_EXISTS = auto()
     SCAN_IN_PROGRESS = auto()
     INCORRECT_PASSWORD = auto()
+    PERMISSION_DENIED = auto()
     DUPLICATE_DIRECTORY = auto()
     INVALID_YAML_CONFIG = auto()
     INFO_HASH_COLLISION = auto()

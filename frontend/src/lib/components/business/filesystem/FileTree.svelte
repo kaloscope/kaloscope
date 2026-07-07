@@ -11,7 +11,7 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
-  import { Modal, alert } from '$lib/components';
+  import { Modal, alert, prompt } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -41,6 +41,48 @@
 
   // the loading state
   const loading = createLoading();
+
+  /**
+   * Prompt for a directory name and create it under the selected directory.
+   */
+  function promptCreateDir() {
+    const parent = current || rootPath;
+    if (!parent) {
+      alert({ level: 'error', message: 'bad_request' });
+      return;
+    }
+    prompt({
+      icon: icons.addCircle,
+      title: $_('filesystem.new_folder'),
+      message: $_('filesystem.new_folder_message'),
+      placeholder: $_('filesystem.new_folder_placeholder'),
+      onconfirm: (name) => createDir(parent, name)
+    });
+  }
+
+  /**
+   * Create a child directory and select it in the tree.
+   *
+   * @param parent - The path to create the directory under.
+   * @param name - The new directory name.
+   */
+  async function createDir(parent: string, name?: string) {
+    const folderName = name?.trim();
+    if (!folderName) {
+      alert({ level: 'error', message: 'bad_request' });
+      return;
+    }
+    loading.start();
+    try {
+      const resp = await api.post('filesystem/mkdir', { json: { parent, name: folderName } }).json<Resp<string>>();
+      current = resp.data;
+      paths = await list(rootPath, current);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      loading.end();
+    }
+  }
 
   /**
    * List the files and directories in the given path.
@@ -137,6 +179,17 @@
       </label>
     </fieldset>
     <div class="modal-action">
+      {#if onlyDirs}
+        <button
+          type="button"
+          class="btn mr-auto"
+          onclick={promptCreateDir}
+          disabled={$loading !== null || !(current || rootPath)}
+        >
+          <iconify-icon icon={icons.addCircle} width="1.25rem" class="size-5"></iconify-icon>
+          {$_('filesystem.new_folder')}
+        </button>
+      {/if}
       <button type="button" class="btn" onclick={() => modal.close()}>
         {$_('message.cancel')}
       </button>

@@ -347,6 +347,9 @@
     }
   },
   "filesystem": {
+    "new_folder": "新建文件夹",
+    "new_folder_message": "请输入要在当前选中目录下创建的文件夹名称：",
+    "new_folder_placeholder": "文件夹名称",
     "show_hidden": "显示隐藏文件"
   },
   "download": {
