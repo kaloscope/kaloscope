@@ -29,15 +29,15 @@ FROM python:3.13-slim
 RUN echo "deb http://deb.debian.org/debian trixie non-free non-free-firmware" >> /etc/apt/sources.list
 
 # install runtime dependencies
-# - git:                    required by gitpython
-# - libxml2, libxslt:       required by lxml
+# - git:                    needed by gitpython
+# - libxml2/libxslt1.1:     needed by lxml
 # - gosu:                   used to drop privileges
 # - aria2:                  optional download manager
-# - curl:                   used to download mkcert at runtime
-# - libnss3-tools:          required by mkcert to install CA certificates
-# - media-types:            required to guess MIME types of files based on their extensions
-# - ffmpeg:                 used to transcode videos for streaming
-# - intel-media-va-driver:  Intel iHD VA-API driver for GPU hardware video acceleration (amd64 only)
+# - curl/libnss3-tools:     used by mkcert at runtime
+# - media-types:            used for MIME type detection
+# - ffmpeg:                 used for media transcoding
+# - intel-media-va-driver:  Intel VAAPI runtime (amd64 only)
+# - libvpl2/libmfx-gen1.2:  Intel QSV runtime (amd64 only)
 RUN apt-get update && apt-get install -y --no-install-recommends \
   git \
   libxml2 \
@@ -48,8 +48,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libnss3-tools \
   media-types \
   ffmpeg \
-  && dpkg --print-architecture | grep -q '^amd64$' \
-  && apt-get install -y --no-install-recommends intel-media-va-driver || true \
+  && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+  apt-get install -y --no-install-recommends \
+  intel-media-va-driver \
+  libvpl2 \
+  libmfx-gen1.2; \
+  fi \
   && rm -rf /var/lib/apt/lists/*
 
 # download and install mkcert
