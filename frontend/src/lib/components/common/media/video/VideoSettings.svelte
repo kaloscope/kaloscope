@@ -235,10 +235,11 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { persisted } from '$lib/stores';
-  import { extractStreamPath, isTranscodedStream } from '$lib/utils';
+  import { extractStreamPath, isTranscodedStream, sniffer } from '$lib/utils';
   import { tick } from 'svelte';
   import { fade } from 'svelte/transition';
   import { Events } from 'xgplayer';
+  import HLS from 'xgplayer-hls';
 
   let { player }: { player: Player | null } = $props();
   // whether the current video is a local media file
@@ -384,6 +385,23 @@
   }
 
   /**
+   * Ensures transcoded HLS playback has the correct media plugin.
+   *
+   * xgplayer chooses media plugins when the player is created. Local files are
+   * initially mounted as `/media/stream`, so switching to `&transcode=true`
+   * needs to install HLS before restarting the playback pipeline.
+   */
+  function prepareTranscodePlayback() {
+    if (!player || sniffer.isIos() || player.getPlugin('hls') || !HLS.isSupported()) {
+      return;
+    }
+    for (const pluginName of ['flv', 'mp4Plugin', 'ShakaPlugin']) {
+      player.unRegisterPlugin(pluginName, true);
+    }
+    player.registerPlugin(HLS);
+  }
+
+  /**
    * Change the video definition.
    *
    * @param url - The new video URL.
@@ -393,6 +411,14 @@
       return;
     }
     const duration = await probeDuration(url);
+
+    // handle transcoded HLS streams
+    if (isTranscodedStream(url) && typeof url === 'string') {
+      prepareTranscodePlayback();
+      player.playNext({ url, customDuration: duration });
+      definition = url;
+      return;
+    }
 
     // handle DASH streams
     if (player.config.videoType === 'dash' && typeof url === 'string') {
