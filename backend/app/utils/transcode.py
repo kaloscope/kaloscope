@@ -16,6 +16,9 @@ from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
 from app.models.general import GlobalConfig
 
+_SEGMENT_WAIT_TIMEOUT = 30.0
+_SEGMENT_WAIT_INTERVAL = 0.25
+
 
 @dataclass
 class EncoderConfig:
@@ -298,7 +301,12 @@ async def ensure_transcode(
         asyncio.ensure_future(_monitor_ffmpeg(proc, lock))
 
         # wait for at least one segment so the player can start immediately
-        await _wait_segment(m3u8_path)
+        if not await _wait_segment(m3u8_path, proc=proc):
+            if proc.returncode is not None:
+                raise RuntimeError(
+                    "ffmpeg exited before generating the first HLS segment"
+                )
+            logger.warning("HLS first segment not ready yet: %s", out_dir)
 
     except Exception:
         _release_lock(lock)
@@ -738,12 +746,16 @@ _SEGMENT_LINE_RE = re.compile(r"^(?!\s*#)(.+\.ts)\s*$", re.MULTILINE)
 
 
 async def _wait_segment(
-    m3u8_path: Path, timeout: float = 10.0, interval: float = 0.25
+    m3u8_path: Path,
+    proc: asyncio.subprocess.Process | None = None,
+    timeout: float = _SEGMENT_WAIT_TIMEOUT,
+    interval: float = _SEGMENT_WAIT_INTERVAL,
 ) -> bool:
     """Block until `m3u8_path` exists and contains at least one segment.
 
     Args:
         m3u8_path: The M3U8 file path.
+        proc: The ffmpeg subprocess to watch.
         timeout: The max seconds to wait.
         interval: The polling interval in seconds.
 
@@ -762,6 +774,11 @@ async def _wait_segment(
                 continue
             if _SEGMENT_LINE_RE.search(content.strip()):
                 return True
+
+        # no more segments can be produced after ffmpeg exits
+        if proc is not None and proc.returncode is not None:
+            return False
+
         await asyncio.sleep(interval)
         elapsed += interval
     return False
