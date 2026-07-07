@@ -29,15 +29,16 @@ FROM python:3.13-slim
 RUN echo "deb http://deb.debian.org/debian trixie non-free non-free-firmware" >> /etc/apt/sources.list
 
 # install runtime dependencies
-# - git:                    needed by gitpython
-# - libxml2/libxslt1.1:     needed by lxml
-# - gosu:                   used to drop privileges
-# - aria2:                  optional download manager
-# - curl/libnss3-tools:     used by mkcert at runtime
-# - media-types:            used for MIME type detection
-# - ffmpeg:                 used for media transcoding
-# - intel-media-va-driver:  Intel VAAPI runtime (amd64 only)
-# - libvpl2/libmfx-gen1.2:  Intel QSV runtime (amd64 only)
+# - git:                             needed by gitpython
+# - libxml2/libxslt1.1:              needed by lxml
+# - gosu:                            used to drop privileges
+# - aria2:                           optional download manager
+# - curl/libnss3-tools:              used by mkcert at runtime
+# - media-types:                     used for MIME type detection
+# - ffmpeg:                          used for media transcoding
+# - intel-media-va-driver-non-free:  Intel iHD VAAPI runtime with encode shaders (amd64 only)
+# - libvpl2/libmfx-gen1.2:           Intel oneVPL/QSV runtime for newer GPUs (amd64 only)
+# - libmfx1:                         legacy Intel Media SDK runtime for older QSV GPUs (amd64 only)
 RUN apt-get update && apt-get install -y --no-install-recommends \
   git \
   libxml2 \
@@ -50,9 +51,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
   apt-get install -y --no-install-recommends \
-  intel-media-va-driver \
+  intel-media-va-driver-non-free \
   libvpl2 \
-  libmfx-gen1.2; \
+  libmfx-gen1.2 \
+  && curl -fsSL http://deb.debian.org/debian/pool/main/i/intel-mediasdk/libmfx1_22.5.4-1_amd64.deb -o /tmp/libmfx1.deb \
+  && echo "19754c2ad5cf13015ebe8e1bd7fbc412ca410d810c036b167ba2b0d9bee36926 /tmp/libmfx1.deb" | sha256sum -c - \
+  && dpkg -i /tmp/libmfx1.deb \
+  && rm -f /tmp/libmfx1.deb; \
   fi \
   && rm -rf /var/lib/apt/lists/*
 
