@@ -277,6 +277,8 @@ async def ensure_transcode(
 
     # start the ffmpeg process if we acquired the lock
     try:
+        _cleanup_stale_hls(out_dir)
+
         # probe the real source framerate so GOP-based keyframe placement
         # (used by hardware encoders) aligns with the HLS segment boundaries
         fps = await probe_framerate(media_path)
@@ -347,6 +349,23 @@ def _release_lock(lock: FileLock):
     """
     with contextlib.suppress(Exception):
         lock.release()
+
+
+def _cleanup_stale_hls(out_dir: Path):
+    """Remove stale HLS files before rebuilding an incomplete transcode.
+
+    Args:
+        out_dir: The output directory to clean.
+    """
+    targets = [
+        out_dir / "index.m3u8",
+        out_dir / "index.m3u8.tmp",
+        *out_dir.glob("segment_*.ts"),
+        *out_dir.glob("segment_*.ts.tmp"),
+    ]
+    for path in targets:
+        if path.is_file():
+            path.unlink()
 
 
 async def _build_hls_cmd(
