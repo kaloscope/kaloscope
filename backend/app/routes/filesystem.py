@@ -163,3 +163,27 @@ async def create_dir(_, body: CreateDirRequest) -> HTTPResponse:
     except OSError as exc:
         raise BadRequestException from exc
     return json(str(path.resolve()))
+
+
+class DeleteDirRequest(BaseModel):
+    """Request model for deleting a directory."""
+
+    path: str
+
+
+@filesystem.post("/rmdir")
+@validate(json=DeleteDirRequest)
+async def delete_dir(_, body: DeleteDirRequest) -> HTTPResponse:
+    """Delete an empty directory and return its parent directory."""
+    path = Path(body.path)
+    parent = path.parent
+    if not path.is_dir() or parent == path:
+        raise BadRequestException
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+
+    try:
+        path.rmdir()
+    except OSError as exc:
+        raise BadRequestException from exc
+    return json(str(parent.resolve()))
