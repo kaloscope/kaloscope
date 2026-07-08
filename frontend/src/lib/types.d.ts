@@ -158,6 +158,7 @@ export type Path = {
   is_dir: boolean;
   is_empty: boolean | null;
   is_hidden: boolean;
+  expandable: boolean;
   file_type: string | null;
   open?: boolean;
   loading?: boolean;

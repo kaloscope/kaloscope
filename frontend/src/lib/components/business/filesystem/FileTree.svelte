@@ -262,7 +262,7 @@
     {#each paths.filter((p) => showHidden || !p.is_hidden) as path (path.path)}
       {@const activeClass = current === path.path ? 'item-emphasis' : ''}
       <li>
-        {#if path.is_dir && !path.is_empty}
+        {#if path.is_dir && path.expandable}
           <details bind:open={path.open}>
             <summary class={activeClass} onclick={() => unfold(path)}>
               {@render item(path)}

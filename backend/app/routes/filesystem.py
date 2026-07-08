@@ -37,22 +37,31 @@ async def list_files(_, query: ListRequest) -> HTTPResponse:
     if expand_to is not None and not os.access(expand_to, os.R_OK):
         expand_to = None
 
-    # check if the path is readable
-    def readable(p: Path) -> bool:
+    # check if the path is readable under the current listing filter
+    def _readable(p: Path, *, only_dirs: bool) -> bool:
         try:
-            return os.access(p, os.R_OK) and (not query.only_dirs or p.is_dir())
+            return os.access(p, os.R_OK) and (not only_dirs or p.is_dir())
         except OSError:
             return False
 
-    # check if the directory is empty
-    def is_empty(p: Path) -> bool:
+    # check if the directory can be expanded in the current listing filter
+    def _expandable(p: Path) -> bool:
         try:
-            return not any(filter(readable, p.iterdir()))
+            return any(
+                _readable(child, only_dirs=query.only_dirs) for child in p.iterdir()
+            )
         except OSError:
-            return True
+            return False
+
+    # check if the directory is physically empty
+    def _is_empty(p: Path) -> bool:
+        try:
+            return next(p.iterdir(), None) is None
+        except OSError:
+            return False
 
     # check if the file is hidden
-    def is_hidden(p: Path) -> bool:
+    def _is_hidden(p: Path) -> bool:
         if sys.platform == "win32":
             try:
                 return bool(p.stat().st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN)
@@ -61,36 +70,43 @@ async def list_files(_, query: ListRequest) -> HTTPResponse:
         return p.name.startswith(".")
 
     # recursively build the file entry
-    def build_entry(p: Path) -> dict:
+    def _build_entry(p: Path) -> dict:
         absolute_path = str(p.resolve())
         is_dir = p.is_dir()
-        empty_dir = is_empty(p) if is_dir else None
+        is_empty = _is_empty(p) if is_dir else None
+        expandable = _expandable(p) if is_dir else False
         entry = {
             "name": p.name,
             "path": absolute_path,
             "is_dir": is_dir,
-            "is_empty": empty_dir,
-            "is_hidden": is_hidden(p),
+            "is_empty": is_empty,
+            "is_hidden": _is_hidden(p),
+            "expandable": expandable,
             "file_type": guess_file_type(p)[0] if p.is_file() else None,
             "open": False,
         }
         # expand children along the expand_to path
         if expand_to is not None:
-            if empty_dir is None or empty_dir:
+            if not expandable:
                 return entry
             if expand_to.is_relative_to(absolute_path):
                 children = sorted(
-                    filter(readable, p.iterdir()),
+                    filter(
+                        lambda child: _readable(child, only_dirs=query.only_dirs),
+                        p.iterdir(),
+                    ),
                     key=lambda f: (not f.is_dir(), f.name),
                 )
-                entry["children"] = [build_entry(f) for f in children]
+                entry["children"] = [_build_entry(f) for f in children]
                 entry["open"] = True
         return entry
 
-    files = filter(readable, path.iterdir())
+    files = filter(
+        lambda child: _readable(child, only_dirs=query.only_dirs), path.iterdir()
+    )
     return json(
         [
-            build_entry(file)
+            _build_entry(file)
             for file in sorted(files, key=lambda f: (not f.is_dir(), f.name))
         ]
     )
