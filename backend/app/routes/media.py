@@ -36,6 +36,7 @@ from app.models.media import (
     MediaQuery,
     MediaResource,
     TranscodeQuery,
+    TranscodeTaskQuery,
 )
 from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowTriggerService
@@ -43,10 +44,13 @@ from app.services.media import MediaItemService, MediaLibService
 from app.utils.extractor import extract_title
 from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
 from app.utils.transcode import (
+    delete_tasks,
     ensure_transcode,
+    list_tasks,
     output_dir,
     probe_duration,
     read_m3u8,
+    stop_tasks,
 )
 
 # subroutes for all media related operations
@@ -323,3 +327,62 @@ async def proxy_remote_media(
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED) from e
 
     return ResponseStream(_stream)
+
+
+@media.get("/transcode/list")
+@validate(query=TranscodeTaskQuery)
+async def list_transcodes(_, query: TranscodeTaskQuery) -> HTTPResponse:
+    """List in-memory and finished transcode tasks."""
+    tasks = await list_tasks()
+
+    # attach media item info to tasks if available
+    hashes = {task["hash"] for task in tasks if task.get("hash")}
+    if hashes:
+        items = await MediaItem.filter(hash__in=hashes).values(
+            "hash", "name", "title", "path"
+        )
+        hash_items = {}
+        for item in items:
+            hash_items.setdefault(item["hash"], item)
+        for task in tasks:
+            if item := hash_items.get(task["hash"]):
+                task["name"] = item["title"] or item["name"] or task["name"]
+                task["path"] = item["path"]
+
+    # filter tasks by state and keyword
+    if query.state:
+        tasks = [task for task in tasks if task["state"] == query.state]
+    if query.keyword:
+        keyword = query.keyword.lower()
+        tasks = [
+            task for task in tasks if keyword in str(task.get("name") or "").lower()
+        ]
+
+    # sort tasks by ordering field
+    if query.ordering:
+        reverse = query.ordering.startswith("-")
+        field = query.ordering[1:] if reverse else query.ordering
+        tasks.sort(
+            key=lambda task: (task.get(field) is None, task.get(field)),
+            reverse=reverse,
+        )
+
+    return json(tasks)
+
+
+@media.post("/transcode/stop")
+@authorize(role=UserRole.ADMIN)
+@validate(json=IDs)
+async def stop_transcodes(_, body: IDs) -> HTTPResponse:
+    """Stop running transcode tasks by ID."""
+    ids = await stop_tasks([str(id) for id in body.ids])
+    return json({"ids": ids})
+
+
+@media.post("/transcode/delete")
+@authorize(role=UserRole.ADMIN)
+@validate(json=IDs)
+async def delete_transcodes(_, body: IDs) -> HTTPResponse:
+    """Delete non-running transcode outputs by ID."""
+    ids = await delete_tasks([str(id) for id in body.ids])
+    return json({"ids": ids})

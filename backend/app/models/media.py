@@ -205,3 +205,9 @@ class TranscodeQuery(MediaResource):
         await _option("quality")
         await _option("resolution")
         return TranscodeOptions(**kwargs)
+
+
+class TranscodeTaskQuery(BaseModel):
+    state: str | None = None
+    keyword: str | None = None
+    ordering: str | None = None

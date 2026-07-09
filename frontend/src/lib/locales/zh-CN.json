@@ -59,6 +59,10 @@
         "medialibs": "媒体库管理",
         "downloaders": "下载器设置"
       },
+      "monitor": {
+        "title": "系统监控",
+        "transcodes": "转码任务"
+      },
       "workflows": {
         "title": "工作流",
         "templates": "流程模板",
@@ -92,6 +96,13 @@
       "downloading": "下载中",
       "paused": "已暂停",
       "completed": "已完成",
+      "error": "异常"
+    },
+    "transcode_state": {
+      "running": "转码中",
+      "stopping": "停止中",
+      "stopped": "已停止",
+      "finished": "已完成",
       "error": "异常"
     },
     "transfer_method": {
@@ -209,6 +220,8 @@
     "variables": "变量",
     "download": "下载任务",
     "downloads": "下载任务",
+    "transcode": "转码任务",
+    "transcodes": "转码任务",
     "metadata": "元数据",
     "media_lib": "媒体库",
     "media_libs": "媒体库",
@@ -222,6 +235,7 @@
     "edit": "编辑{0}",
     "view": "查看{0}",
     "enter": "搜索{0}",
+    "stop": "停止{0}",
     "start": "开始{0}",
     "pause": "暂停{0}",
     "resume": "恢复{0}",
@@ -331,19 +345,31 @@
       "hwaccel": {
         "title": "硬件加速",
         "tip": "选择视频转码的硬件加速方式。",
-        "none": "无（软件编码）"
+        "none": "无",
+        "qsv": "QSV",
+        "vaapi": "VAAPI",
+        "nvenc": "NVENC",
+        "videotoolbox": "VideoToolBox"
+      },
+      "resolution": {
+        "original": "原始分辨率",
+        "1080p": "1080p",
+        "720p": "720p",
+        "480p": "480p"
       },
       "quality": {
         "title": "转码质量",
         "tip": "更高质量产生更好的画质，但消耗更多存储空间和 CPU/GPU 资源。",
-        "low": "低（快速）",
-        "medium": "中（均衡）",
-        "high": "高（最佳）"
+        "low": "低",
+        "medium": "中",
+        "high": "高"
       },
       "vaapi_device": {
         "title": "VAAPI 设备",
         "tip": "VAAPI 渲染设备路径，留空则使用系统默认值。"
-      }
+      },
+      "segments": "{0} 个分片",
+      "batch_delete_title": "删除 {0} 个转码任务"
     }
   },
   "filesystem": {

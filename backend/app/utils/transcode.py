@@ -3,20 +3,43 @@
 import asyncio
 import contextlib
 import math
+import os
 import re
+import shutil
+import signal
+import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import aiofiles
 from filelock import FileLock, Timeout
+from sanic import Sanic
+from sanic.exceptions import SanicException
 from sanic.log import logger
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
+from app.utils.disk import format_bytes
 
 _SEGMENT_WAIT_TIMEOUT = 30.0
 _SEGMENT_WAIT_INTERVAL = 0.25
+
+_TASKS: dict[str, dict[str, Any]] = {}
+_TASKS_LOCK = threading.RLock()
+
+
+@dataclass
+class TranscodeStats:
+    """Derived statistics for a transcoded HLS output directory."""
+
+    finished: bool = False
+    duration: float = 0.0
+    segments: int = 0
+    size: int = 0
+    progress: int | None = None
+    updated_at: str | None = None
 
 
 @dataclass
@@ -29,7 +52,7 @@ class EncoderConfig:
 
 
 # hardware acceleration types (mapped to encoder name and ffmpeg flags)
-HWAccelType = Literal["qsv", "nvenc", "vaapi", "videotoolbox"]
+HWAccelType = Literal["qsv", "vaapi", "nvenc", "videotoolbox"]
 _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
     None: EncoderConfig(
         encoder="libx264",
@@ -41,15 +64,15 @@ _ENCODER_CONFIG: dict[str | None, EncoderConfig] = {
         hwaccel="qsv",
         hwaccel_output_format="qsv",
     ),
-    "nvenc": EncoderConfig(
-        encoder="h264_nvenc",
-        hwaccel="cuda",
-        hwaccel_output_format="cuda",
-    ),
     "vaapi": EncoderConfig(
         encoder="h264_vaapi",
         hwaccel="vaapi",
         hwaccel_output_format=None,
+    ),
+    "nvenc": EncoderConfig(
+        encoder="h264_nvenc",
+        hwaccel="cuda",
+        hwaccel_output_format="cuda",
     ),
     "videotoolbox": EncoderConfig(
         encoder="h264_videotoolbox",
@@ -114,6 +137,428 @@ class TranscodeOptions:
     def profile(self) -> str:
         """Transcode profile identifier (filesystem-safe directory name)."""
         return f"{self.quality}_{self.resolution}_{str(self.hwaccel).lower()}"
+
+
+def _task_store():
+    """Return the cross-worker task store and lock, with a test fallback.
+
+    Returns:
+        A tuple containing the task mapping and its synchronization lock.
+    """
+    try:
+        shared = Sanic.get_app().shared_ctx
+        return shared.transcode_tasks, shared.transcode_tasks_lock
+    except (AttributeError, SanicException):
+        return _TASKS, _TASKS_LOCK
+
+
+def estimate_progress(encoded_duration: float, duration: float | None) -> int | None:
+    """Estimate transcode progress from encoded and source durations.
+
+    Args:
+        encoded_duration: The duration already encoded, in seconds.
+        duration: The total source duration in seconds, if known.
+
+    Returns:
+        The estimated percentage capped at 99, or `None` if unavailable.
+    """
+    if duration and duration > 0 and encoded_duration > 0:
+        return min(99, max(0, int(encoded_duration / duration * 100)))
+    return None
+
+
+def parse_profile(profile: str) -> dict[str, str | None]:
+    """Parse a transcode profile directory name into UI tags.
+
+    Profiles are generated as `{quality}_{resolution}_{hwaccel}` by
+    `TranscodeOptions.profile`. Unknown profile shapes return empty fields so
+    callers can still display the raw profile as a fallback tag.
+
+    Args:
+        profile: The transcode profile directory name.
+
+    Returns:
+        The parsed quality, resolution, and hardware acceleration tags.
+    """
+    quality, sep1, rest = profile.partition("_")
+    resolution, sep2, hwaccel = rest.rpartition("_")
+    if not sep1 or not sep2:
+        return {"quality": None, "resolution": None, "hwaccel": None}
+    if quality not in _QUALITY_CRF or resolution not in _RESOLUTION_MAX_HEIGHT:
+        return {"quality": None, "resolution": None, "hwaccel": None}
+
+    hwaccel = hwaccel.lower()
+    valid_hwaccels = {*_ENCODER_CONFIG.keys(), "software", "none", "null"}
+    if hwaccel not in valid_hwaccels:
+        return {"quality": None, "resolution": None, "hwaccel": None}
+
+    return {
+        "quality": quality,
+        "resolution": resolution,
+        "hwaccel": None if hwaccel in ("none", "null", "software") else hwaccel,
+    }
+
+
+_EXTINF_RE = re.compile(r"^#EXTINF:([0-9]+(?:\.[0-9]+)?)", re.MULTILINE)
+"""Regular expression to extract segment and duration from HLS playlists."""
+
+
+def output_stats(out_dir: Path | str, duration: float | None = None) -> TranscodeStats:
+    """Read HLS output files and derive progress information.
+
+    Args:
+        out_dir: The HLS output directory.
+        duration: The total source duration in seconds, if known.
+
+    Returns:
+        Statistics derived from the output files and playlist.
+    """
+    out_dir = Path(out_dir)
+    stats = TranscodeStats()
+    if not out_dir.is_dir():
+        return stats
+
+    for path in out_dir.rglob("*"):
+        if path.is_file():
+            with contextlib.suppress(OSError):
+                stats.size += path.stat().st_size
+
+    m3u8_path = out_dir / "index.m3u8"
+    if not m3u8_path.is_file():
+        return stats
+
+    try:
+        content = m3u8_path.read_text(encoding=ENCODING)
+        stat = m3u8_path.stat()
+    except OSError:
+        return stats
+
+    segments = [float(match.group(1)) for match in _EXTINF_RE.finditer(content)]
+    stats.finished = "#EXT-X-ENDLIST" in content
+    stats.duration = round(sum(segments), 3)
+    stats.segments = len(segments)
+    stats.updated_at = datetime.fromtimestamp(stat.st_mtime, UTC).isoformat()
+
+    if stats.finished:
+        stats.progress = 100
+    else:
+        stats.progress = estimate_progress(stats.duration, duration)
+
+    return stats
+
+
+def _remove_endlist(out_dir: Path | str | None) -> None:
+    """Remove a completion marker from an interrupted HLS playlist.
+
+    Args:
+        out_dir: The HLS output directory, or `None` if unavailable.
+    """
+    if out_dir is None:
+        return
+    m3u8_path = Path(out_dir) / "index.m3u8"
+    if not m3u8_path.is_file():
+        return
+    try:
+        content = m3u8_path.read_text(encoding=ENCODING)
+        original_lines = content.splitlines()
+        lines = [line for line in original_lines if line.strip() != "#EXT-X-ENDLIST"]
+        if len(lines) == len(original_lines):
+            return
+        content = "\n".join(lines)
+        if content:
+            content += "\n"
+        m3u8_path.write_text(content, encoding=ENCODING)
+    except OSError:
+        logger.warning("Failed to remove HLS ENDLIST marker: %s", m3u8_path)
+
+
+def scan_outputs(root: Path | str | None = None) -> list[dict[str, Any]]:
+    """Scan the transcoded workspace for finished and interrupted HLS outputs.
+
+    Args:
+        root: The transcode root directory, or `None` to use the workspace.
+
+    Returns:
+        Task snapshots derived from HLS output directories.
+    """
+    root = (
+        Path(root)
+        if root is not None
+        else Path(KaloscopeConfig.get_workspace("transcoded"))
+    )
+    if not root.is_dir():
+        return []
+
+    tasks: list[dict[str, Any]] = []
+    for hash_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        media_hash = hash_dir.name
+        for profile_dir in sorted(path for path in hash_dir.iterdir() if path.is_dir()):
+            profile = profile_dir.name
+            stats = output_stats(profile_dir)
+            if not stats.finished and stats.segments == 0:
+                continue
+            profile_tags = parse_profile(profile)
+            state = "finished" if stats.finished else "stopped"
+            tasks.append(
+                {
+                    "id": f"{media_hash}:{profile}",
+                    "name": f"{media_hash}/{profile}",
+                    "path": None,
+                    "hash": media_hash,
+                    "state": state,
+                    "progress": 100 if stats.finished else stats.progress,
+                    "duration": stats.duration if stats.finished else None,
+                    "encoded_duration": stats.duration,
+                    "encoded_segments": stats.segments,
+                    "encoded_size": stats.size,
+                    "pid": None,
+                    "profile": profile,
+                    "quality": profile_tags["quality"],
+                    "resolution": profile_tags["resolution"],
+                    "hwaccel": profile_tags["hwaccel"],
+                    "started_at": None,
+                    "finished_at": stats.updated_at,
+                    "error_msg": None,
+                }
+            )
+    return tasks
+
+
+def delete_output(
+    media_hash: str, profile: str, root: Path | str | None = None
+) -> bool:
+    """Delete a deterministic transcode output directory.
+
+    Args:
+        media_hash: The source media hash directory name.
+        profile: The transcode profile directory name.
+        root: The transcode root directory, or `None` to use the workspace.
+
+    Returns:
+        `True` if the output directory existed and was deleted.
+    """
+    root = (
+        Path(root)
+        if root is not None
+        else Path(KaloscopeConfig.get_workspace("transcoded"))
+    )
+    out_dir = root / media_hash / profile
+    try:
+        root_resolved = root.resolve()
+        out_resolved = out_dir.resolve()
+    except OSError:
+        return False
+    if not out_resolved.is_relative_to(root_resolved) or not out_dir.is_dir():
+        return False
+
+    shutil.rmtree(out_dir)
+    with contextlib.suppress(OSError):
+        out_dir.parent.rmdir()
+    return True
+
+
+async def register_task(
+    media_path: str,
+    media_hash: str,
+    options: TranscodeOptions,
+    out_dir: Path,
+    proc: asyncio.subprocess.Process,
+    duration: float | None,
+) -> str:
+    """Register a newly started ffmpeg process in the shared task store.
+
+    Args:
+        media_path: The source media file path.
+        media_hash: The source media hash.
+        options: The transcode parameters used by the process.
+        out_dir: The HLS output directory.
+        proc: The running ffmpeg subprocess.
+        duration: The total source duration in seconds, if known.
+
+    Returns:
+        The registered task ID.
+    """
+    task_id = f"{media_hash}:{options.profile}"
+    tasks, lock = _task_store()
+    lock.acquire()
+    try:
+        tasks[task_id] = {
+            "id": task_id,
+            "name": Path(media_path).name,
+            "path": media_path,
+            "hash": media_hash,
+            "state": "running",
+            "duration": duration,
+            "pid": proc.pid,
+            "profile": options.profile,
+            "quality": options.quality,
+            "resolution": options.resolution,
+            "hwaccel": options.hwaccel,
+            "out_dir": str(out_dir),
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None,
+            "error_msg": None,
+        }
+    finally:
+        lock.release()
+    return task_id
+
+
+async def finish_task(
+    task_id: str, returncode: int | None, error_msg: str | None = None
+) -> None:
+    """Mark a registered ffmpeg task as finished.
+
+    Args:
+        task_id: The registered task ID.
+        returncode: The ffmpeg process exit code.
+        error_msg: The captured ffmpeg error message, if available.
+    """
+    tasks, lock = _task_store()
+    lock.acquire()
+    try:
+        task = tasks.get(task_id)
+        if task is None:
+            return
+        task = dict(task)
+        task["finished_at"] = datetime.now(UTC).isoformat()
+        if returncode == 0:
+            task["state"] = "finished"
+        elif task["state"] == "stopping" or returncode == 255:
+            task["state"] = "stopped"
+            _remove_endlist(task.get("out_dir"))
+        else:
+            task["state"] = "error"
+            task["error_msg"] = error_msg
+            _remove_endlist(task.get("out_dir"))
+        tasks[task_id] = task
+    finally:
+        lock.release()
+
+
+async def list_tasks() -> list[dict[str, Any]]:
+    """List runtime and finished filesystem transcode tasks.
+
+    Returns:
+        Runtime task snapshots followed by unregistered filesystem outputs.
+    """
+    store, lock = _task_store()
+    lock.acquire()
+    try:
+        tasks = [_task_snapshot(task) for task in store.values()]
+    finally:
+        lock.release()
+
+    task_ids = {task["id"] for task in tasks}
+    for task in scan_outputs():
+        if task["id"] not in task_ids:
+            tasks.append(task)
+    for task in tasks:
+        task["encoded_size_text"] = format_bytes(task["encoded_size"])
+    return tasks
+
+
+def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+    """Convert shared task metadata into an API-friendly dictionary.
+
+    Args:
+        task: The stored runtime task metadata.
+
+    Returns:
+        The task metadata enriched with output statistics.
+    """
+    snapshot = dict(task)
+    stats = output_stats(snapshot.pop("out_dir"), snapshot.get("duration"))
+    state = snapshot["state"]
+    progress = (
+        100
+        if state == "finished"
+        else estimate_progress(stats.duration, snapshot.get("duration"))
+    )
+    if state in ("error", "stopped") and progress is None:
+        progress = 0
+
+    snapshot.update(
+        progress=progress,
+        duration=snapshot.get("duration") or stats.duration or None,
+        encoded_duration=stats.duration,
+        encoded_segments=stats.segments,
+        encoded_size=stats.size,
+        finished_at=snapshot.get("finished_at") or stats.updated_at,
+    )
+    return snapshot
+
+
+async def stop_tasks(ids: list[str]) -> list[str]:
+    """Request termination for running shared transcode tasks.
+
+    Args:
+        ids: The task IDs to stop.
+
+    Returns:
+        The IDs of running tasks handled by the request.
+    """
+    stopped: list[str] = []
+    tasks, lock = _task_store()
+    lock.acquire()
+    try:
+        for task_id in ids:
+            task = tasks.get(task_id)
+            if task is None:
+                continue
+            task = dict(task)
+            if task["state"] != "running":
+                continue
+            task["state"] = "stopping"
+            try:
+                if task.get("pid") is not None:
+                    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                    os.kill(task["pid"], sigkill)
+            except ProcessLookupError:
+                task["finished_at"] = datetime.now(UTC).isoformat()
+                out_dir = task.get("out_dir")
+                if out_dir and _is_complete(Path(out_dir) / "index.m3u8"):
+                    task["state"] = "finished"
+                else:
+                    task["state"] = "stopped"
+                    _remove_endlist(out_dir)
+            tasks[task_id] = task
+            stopped.append(task_id)
+    finally:
+        lock.release()
+    return stopped
+
+
+async def delete_tasks(ids: list[str]) -> list[str]:
+    """Delete non-running transcode outputs and remove runtime records.
+
+    Args:
+        ids: The task IDs to delete.
+
+    Returns:
+        The task IDs removed from the task store or output workspace.
+    """
+    deleted: list[str] = []
+    tasks, lock = _task_store()
+    lock.acquire()
+    try:
+        for task_id in ids:
+            task = tasks.get(task_id)
+            if task is not None:
+                task = dict(task)
+            if task is not None and task["state"] in ("running", "stopping"):
+                continue
+            media_hash, sep, profile = task_id.partition(":")
+            if not media_hash or not sep or not profile:
+                continue
+            root = Path(task["out_dir"]).parents[1] if task is not None else None
+            deleted_output = delete_output(media_hash, profile, root=root)
+            if deleted_output or task is not None:
+                tasks.pop(task_id, None)
+                deleted.append(task_id)
+    finally:
+        lock.release()
+    return deleted
 
 
 async def _ffmpeg() -> str:
@@ -288,8 +733,14 @@ async def ensure_transcode(
             stderr=asyncio.subprocess.PIPE,
         )
 
+        # register the task in the memory store
+        duration = await probe_duration(media_path)
+        task_id = await register_task(
+            media_path, media_hash, options, out_dir, proc, duration
+        )
+
         # monitor completion in the background
-        asyncio.ensure_future(_monitor_ffmpeg(proc, lock))
+        asyncio.ensure_future(_monitor_ffmpeg(proc, lock, task_id))
 
         # wait for at least one segment so the player can start immediately
         if not await _wait_segment(m3u8_path, proc=proc):
@@ -747,12 +1198,15 @@ async def _wait_segment(
     return False
 
 
-async def _monitor_ffmpeg(proc: asyncio.subprocess.Process, lock: FileLock):
+async def _monitor_ffmpeg(
+    proc: asyncio.subprocess.Process, lock: FileLock, task_id: str | None = None
+):
     """Wait for ffmpeg to finish, log errors, and release the lock.
 
     Args:
         proc: The ffmpeg subprocess to monitor.
         lock: The `FileLock` instance.
+        task_id: The registered task ID, if task tracking is enabled.
     """
     stderr_data = b""
     try:
@@ -762,18 +1216,20 @@ async def _monitor_ffmpeg(proc: asyncio.subprocess.Process, lock: FileLock):
         pass
     await proc.wait()
 
+    error_tail = None
     if proc.returncode not in (0, 255):
-        tail = ""
         if stderr_data:
             with contextlib.suppress(Exception):
-                tail = stderr_data.decode(errors="replace")[-500:]
+                error_tail = stderr_data.decode(errors="replace")[-500:]
         logger.error(
             "ffmpeg HLS exited with code %d for '%s': %s",
             proc.returncode,
             Path(lock.lock_file).parent,
-            tail,
+            error_tail or "",
         )
 
+    if task_id:
+        await finish_task(task_id, proc.returncode, error_tail)
     _release_lock(lock)
     logger.debug("ffmpeg HLS finished for '%s'", Path(lock.lock_file).parent)
 

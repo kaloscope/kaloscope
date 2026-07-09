@@ -9,9 +9,9 @@
   // hardware acceleration options supported by the backend
   const hwaccelOptions = [
     { value: null, label: 'general.transcode.hwaccel.none' },
-    { value: 'qsv', label: 'Intel Quicksync (QSV)' },
-    { value: 'nvenc', label: 'Nvidia NVENC' },
+    { value: 'qsv', label: 'Intel QuickSync (QSV)' },
     { value: 'vaapi', label: 'Video Acceleration API (VAAPI)' },
+    { value: 'nvenc', label: 'Nvidia NVENC' },
     { value: 'videotoolbox', label: 'Apple VideoToolBox' }
   ];
 

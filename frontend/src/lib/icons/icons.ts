@@ -17,6 +17,7 @@ const fluentUISystemIcons = {
   arrowHookUpRight: 'fluent:arrow-hook-up-right-24-regular',
   arrowNextFilled: 'fluent:arrow-next-24-filled',
   arrowPreviousFilled: 'fluent:arrow-previous-24-filled',
+  arrowRepeatAll: 'fluent:arrow-repeat-all-24-regular',
   arrowReset: 'fluent:arrow-reset-24-regular',
   arrowRotateClockwise: 'fluent:arrow-rotate-clockwise-24-regular',
   arrowRouting: 'fluent:arrow-routing-24-regular',

@@ -77,6 +77,16 @@ export const load: LayoutLoad = async () => {
         ]
       },
       {
+        title: 'nav.settings.monitor.title',
+        routes: [
+          {
+            title: 'nav.settings.monitor.transcodes',
+            path: '/settings/monitor/transcodes',
+            icon: icons.arrowRepeatAll
+          }
+        ]
+      },
+      {
         title: 'nav.settings.workflows.title',
         routes: [
           {

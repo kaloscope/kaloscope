@@ -116,6 +116,9 @@ async def init_shared_ctx(app: Sanic):
     shared.dl_syncer_lock = multiprocessing.Lock()
     shared.dl_syncer_flag = multiprocessing.Event()
     shared.dl_sync_fast = multiprocessing.Event()
+    # shared objects for transcoding task monitoring
+    shared.transcode_tasks = sync_manager.dict()
+    shared.transcode_tasks_lock = multiprocessing.Lock()
     logger.debug(_msg(Colors.BLUE, "Shared context initialized:\n"), shared)
 
 

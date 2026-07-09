@@ -86,6 +86,34 @@ export const DownloadState = createEnum({
   }
 });
 
+export const TranscodeState = createEnum({
+  running: {
+    label: 'enum.transcode_state.running',
+    icon: icons.loading,
+    iconColor: 'var(--color-success)'
+  },
+  stopping: {
+    label: 'enum.transcode_state.stopping',
+    icon: icons.pauseFilled,
+    iconColor: 'var(--color-warning)'
+  },
+  stopped: {
+    label: 'enum.transcode_state.stopped',
+    icon: icons.dismissCircle,
+    iconColor: null
+  },
+  finished: {
+    label: 'enum.transcode_state.finished',
+    icon: icons.fileCheck,
+    iconColor: 'var(--color-success)'
+  },
+  error: {
+    label: 'enum.transcode_state.error',
+    icon: icons.dismissCircle,
+    iconColor: 'var(--color-error)'
+  }
+});
+
 export const TransferMethod = createEnum({
   hardlink: {
     label: 'enum.transfer_method.hardlink',

@@ -59,6 +59,10 @@
         "medialibs": "Libraries",
         "downloaders": "Downloaders"
       },
+      "monitor": {
+        "title": "Monitoring",
+        "transcodes": "Transcode Tasks"
+      },
       "workflows": {
         "title": "Workflows",
         "templates": "Templates",
@@ -92,6 +96,13 @@
       "downloading": "Downloading",
       "paused": "Paused",
       "completed": "Completed",
+      "error": "Error"
+    },
+    "transcode_state": {
+      "running": "Running",
+      "stopping": "Stopping",
+      "stopped": "Stopped",
+      "finished": "Finished",
       "error": "Error"
     },
     "transfer_method": {
@@ -209,6 +220,8 @@
     "variables": "Variables",
     "download": "Download",
     "downloads": "Downloads",
+    "transcode": "Transcode Task",
+    "transcodes": "Transcode Tasks",
     "metadata": "Metadata",
     "media_lib": "Media Library",
     "media_libs": "Media Libraries",
@@ -222,6 +235,7 @@
     "edit": "Edit {0}",
     "view": "View {0}",
     "enter": "Enter {0}",
+    "stop": "Stop {0}",
     "start": "Start {0}",
     "pause": "Pause {0}",
     "resume": "Resume {0}",
@@ -331,19 +345,31 @@
       "hwaccel": {
         "title": "Hardware Acceleration",
         "tip": "Select the hardware acceleration method for video transcoding.",
-        "none": "None (Software)"
+        "none": "None",
+        "qsv": "QSV",
+        "vaapi": "VAAPI",
+        "nvenc": "NVENC",
+        "videotoolbox": "VideoToolBox"
+      },
+      "resolution": {
+        "original": "Original",
+        "1080p": "1080p",
+        "720p": "720p",
+        "480p": "480p"
       },
       "quality": {
         "title": "Transcode Quality",
         "tip": "Higher quality produces better video but uses more storage and CPU/GPU resources.",
-        "low": "Low (Faster)",
-        "medium": "Medium (Balanced)",
-        "high": "High (Better)"
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High"
       },
       "vaapi_device": {
         "title": "VAAPI Device",
         "tip": "Path to the VAAPI render device. Leave empty to use the system default."
-      }
+      },
+      "segments": "{0} segments",
+      "batch_delete_title": "Delete {0} Transcode Tasks"
     }
   },
   "filesystem": {

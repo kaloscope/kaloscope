@@ -6,6 +6,7 @@ import {
   JobState,
   JobTrigger,
   LibType,
+  TranscodeState,
   TransferMethod,
   UserRole
 } from '$lib/enums';
@@ -744,13 +745,40 @@ export type GlobalConfig = {
 /**
  * Supported hardware acceleration types for real-time transcoding.
  */
-export type HWAccelType = 'qsv' | 'nvenc' | 'vaapi' | 'videotoolbox';
+export type HWAccelType = 'qsv' | 'vaapi' | 'nvenc' | 'videotoolbox';
+export type TranscodeQuality = 'low' | 'medium' | 'high';
+export type TranscodeResolution = 'original' | '1080p' | '720p' | '480p';
 
 /**
  * Transcode options for media streaming.
  */
 export type TranscodeOptions = {
   hwaccel: HWAccelType | null;
-  quality: 'low' | 'medium' | 'high';
-  resolution: 'original' | '1080p' | '720p' | '480p';
+  quality: TranscodeQuality;
+  resolution: TranscodeResolution;
+};
+
+/**
+ * The type of a transcode task shown in system monitoring.
+ */
+export type TranscodeTask = {
+  id: string;
+  name: string;
+  path: string | null;
+  hash: string;
+  state: keyof typeof TranscodeState;
+  progress: number | null;
+  duration: number | null;
+  encoded_duration: number;
+  encoded_segments: number;
+  encoded_size: number;
+  encoded_size_text: string;
+  pid: number | null;
+  profile: string;
+  quality: TranscodeQuality | null;
+  resolution: TranscodeResolution | null;
+  hwaccel: HWAccelType | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_msg: string | null;
 };
