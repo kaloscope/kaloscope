@@ -161,7 +161,9 @@ if [ "$ENABLE_ARIA2" = "true" ]; then
 fi
 
 # start sanic web server
-SANIC_ARGS="--host 0.0.0.0 --port 8000 --fast"
+# SQLite only supports one concurrent writer, so use a single Sanic worker to
+# prevent multi-process writes from intermittently failing with "database is locked".
+SANIC_ARGS="--host 0.0.0.0 --port 8000"
 if [ "$AUTO_TLS" = "true" ]; then
   SANIC_ARGS="$SANIC_ARGS --auto-tls"
 fi
@@ -170,8 +172,7 @@ if [ "$DEBUG_MODE" = "true" ]; then
 fi
 exec poetry run sanic app.main:app $SANIC_ARGS
 EOF
-RUN chmod +x /app/entrypoint.sh
-
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 EXPOSE 8000
 EXPOSE 6888
 EXPOSE 6888/udp
