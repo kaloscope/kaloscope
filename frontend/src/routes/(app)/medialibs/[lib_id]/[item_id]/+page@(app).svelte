@@ -7,7 +7,7 @@
   import { icons } from '$lib/icons';
   import { attachMediaProgress, hasProgress, isWatched, loadMediaProgress } from '$lib/progress';
   import { historyBack, user } from '$lib/stores';
-  import type { Chapter, MediaItem, MediaMeta, MediaProgress, Resp } from '$lib/types';
+  import type { Chapter, MediaItem, MediaMeta, MediaProgress, MediaProgressResult, Resp } from '$lib/types';
   import { buildStreamUrl } from '$lib/utils';
   import { onMount, tick } from 'svelte';
 
@@ -66,8 +66,36 @@
       title: mediaTitle(target),
       chapters,
       chapterId: String(target.id),
-      chapterChange: changeChapter
+      chapterChange: changeChapter,
+      onProgress: applyProgress,
+      onProgressSaved: applyProgressResult
     });
+  }
+
+  /**
+   * Apply a player progress update to the existing detail-page objects.
+   */
+  function applyProgress(progress: MediaProgress) {
+    if (media?.id === progress.media_id) {
+      media.progress = progress;
+    }
+    const part = media?.children?.find((item) => item.id === progress.media_id);
+    if (part) {
+      part.progress = progress;
+    }
+    if (_media?.id === progress.media_id) {
+      _media.progress = progress;
+    }
+  }
+
+  /**
+   * Reconcile local progress with the media and parent values returned by the server.
+   */
+  function applyProgressResult(result: MediaProgressResult) {
+    applyProgress(result.progress);
+    if (result.parent_progress) {
+      applyProgress(result.parent_progress);
+    }
   }
 
   /**
@@ -147,11 +175,10 @@
 
   async function markWatched(item: MediaItem) {
     try {
-      const resp = await api.post('media/progress/mark', { json: { media_id: item.id } }).json<Resp<MediaProgress>>();
-      item.progress = resp.data;
-      if (media) {
-        media = await getDetails(media.id);
-      }
+      const resp = await api
+        .post('media/progress/mark', { json: { media_id: item.id } })
+        .json<Resp<MediaProgressResult>>();
+      applyProgressResult(resp.data);
     } catch (error) {
       console.error(error);
     }

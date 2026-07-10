@@ -349,6 +349,20 @@ class UserMediaProgressService(
         return MediaProgressStatus.WATCHING
 
     @classmethod
+    async def dump_result(
+        cls,
+        progress: UserMediaProgress,
+        parent_progress: UserMediaProgress | None,
+    ) -> dict[str, dict | None]:
+        """Dump a media progress together with its parent aggregate progress."""
+        return {
+            "progress": await cls.dump(progress),
+            "parent_progress": (
+                await cls.dump(parent_progress) if parent_progress else None
+            ),
+        }
+
+    @classmethod
     async def list(cls, user: UserInfo, obj: MediaProgressQuery) -> list[dict]:
         """List progress entries for the current user and media IDs."""
         filters = {"user_id": user.id, "media_id__in": obj.ids}
@@ -374,7 +388,7 @@ class UserMediaProgressService(
     @atomic()
     async def record(
         cls, user: UserInfo, obj: MediaProgressRecord
-    ) -> UserMediaProgress:
+    ) -> tuple[UserMediaProgress, UserMediaProgress | None]:
         """Record playback progress for one media item."""
         media = await cls._get_accessible_media(user, obj.media_id)
 
@@ -398,14 +412,14 @@ class UserMediaProgressService(
                 percentage=percentage,
             ),
         )
-        await cls._sync_parent(user.id, media)
-        return progress
+        parent_progress = await cls._sync_parent(user.id, media)
+        return progress, parent_progress
 
     @classmethod
     @atomic()
     async def mark_watched(
         cls, user: UserInfo, obj: MediaProgressMark
-    ) -> UserMediaProgress:
+    ) -> tuple[UserMediaProgress, UserMediaProgress | None]:
         """Mark a media item as watched for the current user."""
         media = await cls._get_accessible_media(user, obj.media_id)
 
@@ -418,12 +432,15 @@ class UserMediaProgressService(
                 "manual": True,
             },
         )
+        parent_progress = None
         if media.parent_id is not None:
-            await cls._sync_parent(user.id, media)
-        return progress
+            parent_progress = await cls._sync_parent(user.id, media)
+        return progress, parent_progress
 
     @classmethod
-    async def _sync_parent(cls, user_id: int, media) -> None:
+    async def _sync_parent(
+        cls, user_id: int, media
+    ) -> UserMediaProgress | None:
         """Refresh a parent show's aggregate progress from its visible children."""
         from app.models.media import MediaItem
 
@@ -434,7 +451,7 @@ class UserMediaProgressService(
             user_id=user_id, media_id=media.parent_id
         )
         if parent_progress and parent_progress.manual:
-            return
+            return parent_progress
 
         children = await MediaItem.filter(parent_id=media.parent_id, visible=True)
         if not children:
@@ -463,7 +480,7 @@ class UserMediaProgressService(
         else:
             return
 
-        await UserMediaProgress.update_or_create(
+        parent_progress, _ = await UserMediaProgress.update_or_create(
             user_id=user_id,
             media_id=media.parent_id,
             defaults={
@@ -473,6 +490,7 @@ class UserMediaProgressService(
                 "manual": False,
             },
         )
+        return parent_progress
 
 
 class UserPermissionService(BaseService[UserPermission], model=UserPermission):

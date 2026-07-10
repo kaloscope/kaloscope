@@ -1,7 +1,16 @@
 <script lang="ts" module>
   import { api } from '$lib/api';
   import { MEDIA_STREAM_PREFIX } from '$lib/constants';
-  import type { Chapter, Danmaku, Definition, MediaItem, MediaProgress, Optional, Resp } from '$lib/types';
+  import type {
+    Chapter,
+    Danmaku,
+    Definition,
+    MediaItem,
+    MediaProgress,
+    MediaProgressResult,
+    Optional,
+    Resp
+  } from '$lib/types';
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
   import type MobilePlugin from 'xgplayer/es/plugins/mobile';
@@ -28,6 +37,8 @@
     startTime: number;
     mediaId: number;
     progress: MediaProgress;
+    onProgress: (progress: MediaProgress) => void;
+    onProgressSaved: (result: MediaProgressResult) => void;
     /** The type of the video source, e.g., 'mp4', 'flv', 'hls', etc. */
     videoType: string;
     /** The danmakus (video comments) to be displayed on the video. */
@@ -166,6 +177,9 @@
   let resumePercentage: number | null = $state(null);
   let resumeTimer: number | null = null;
   let progressWrite: Promise<unknown> = Promise.resolve();
+  let activeProgress: MediaProgress | null = null;
+  let onProgress: ((progress: MediaProgress) => void) | undefined;
+  let onProgressSaved: ((result: MediaProgressResult) => void) | undefined;
 
   /**
    * Toggles the fullscreen state of the player.
@@ -285,6 +299,11 @@
     }
 
     let url = resolvePlaybackUrl(options.url, options.videoType);
+    const nextMediaId = options.mediaId ?? null;
+    const mediaChanged = nextMediaId !== activeMediaId;
+    if (player && activeMediaId && mediaChanged) {
+      recordActiveHistory(true);
+    }
     const progress = options.progress;
     const resumeTime =
       options.startTime ??
@@ -301,7 +320,13 @@
 
     // probe the full duration for transcoded streams before creating the player instance
     let duration = await probeDuration(url);
-    activeMediaId = options.mediaId ?? null;
+    activeMediaId = nextMediaId;
+    if (mediaChanged) {
+      lastRecordAt = 0;
+    }
+    activeProgress = progress ?? null;
+    onProgress = options.onProgress ?? undefined;
+    onProgressSaved = options.onProgressSaved ?? undefined;
 
     // if the player is already mounted, just switch the URL
     if (player) {
@@ -561,18 +586,44 @@
   }
 
   function recordActiveHistory(force: boolean = false) {
-    const now = Date.now();
-    if (!force && now - lastRecordAt < 15000) {
-      return;
-    }
-    lastRecordAt = now;
     const json = recordHistory(player, activeMediaId);
     if (!json) {
       return;
     }
+    const nowIso = new Date().toISOString();
+    const progress: MediaProgress = {
+      id: activeProgress?.media_id === json.media_id ? activeProgress.id : 0,
+      created_at: activeProgress?.media_id === json.media_id ? activeProgress.created_at : nowIso,
+      updated_at: nowIso,
+      user_id: activeProgress?.media_id === json.media_id ? activeProgress.user_id : 0,
+      media_id: json.media_id,
+      position: json.position,
+      percentage: json.percentage,
+      status: json.percentage >= 80 ? 'watched' : 'watching',
+      manual: false
+    };
+    activeProgress = progress;
+    onProgress?.(progress);
+
+    const currentTime = Date.now();
+    if (!force && currentTime - lastRecordAt < 15000) {
+      return;
+    }
+    lastRecordAt = currentTime;
     progressWrite = progressWrite
       .catch((error) => console.error(error))
-      .then(() => api.post('media/progress/record', { json, keepalive: true }));
+      .then(() =>
+        api
+          .post('media/progress/record', { json, keepalive: true })
+          .json<Resp<MediaProgressResult>>()
+          .then(({ data }) => {
+            if (data.progress.media_id === activeMediaId) {
+              activeProgress = data.progress;
+            }
+            onProgressSaved?.(data);
+          })
+      )
+      .catch((error) => console.error(error));
   }
 
   function showResumeNotice(percentage: number) {
@@ -608,6 +659,14 @@
     if (isMobile) {
       window.addEventListener('orientationchange', onorientationchange);
     }
+    const saveBeforePageExit = () => recordActiveHistory(true);
+    const saveWhenHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        recordActiveHistory(true);
+      }
+    };
+    window.addEventListener('pagehide', saveBeforePageExit);
+    document.addEventListener('visibilitychange', saveWhenHidden);
     // freeze the background to prevent scrolling when the player is active
     freeze.set(true);
     return () => {
@@ -620,6 +679,8 @@
       if (isMobile) {
         window.removeEventListener('orientationchange', onorientationchange);
       }
+      window.removeEventListener('pagehide', saveBeforePageExit);
+      document.removeEventListener('visibilitychange', saveWhenHidden);
       // recover the theme color meta tag
       if (themeColor) {
         const metaTag = document.querySelector('meta[name="theme-color"]');

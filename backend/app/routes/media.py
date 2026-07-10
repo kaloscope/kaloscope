@@ -232,8 +232,10 @@ async def record_media_progress(
 ) -> HTTPResponse:
     """Record current user's media playback progress."""
     user: UserInfo = request.ctx.user
-    progress = await UserMediaProgressService.record(user, body)
-    return json(await UserMediaProgressService.dump(progress))
+    progress, parent_progress = await UserMediaProgressService.record(user, body)
+    return json(
+        await UserMediaProgressService.dump_result(progress, parent_progress)
+    )
 
 
 @media.post("/progress/mark")
@@ -244,8 +246,10 @@ async def mark_media_progress(
 ) -> HTTPResponse:
     """Mark a media item as watched for the current user."""
     user: UserInfo = request.ctx.user
-    progress = await UserMediaProgressService.mark_watched(user, body)
-    return json(await UserMediaProgressService.dump(progress))
+    progress, parent_progress = await UserMediaProgressService.mark_watched(user, body)
+    return json(
+        await UserMediaProgressService.dump_result(progress, parent_progress)
+    )
 
 
 @media.get("/stream")

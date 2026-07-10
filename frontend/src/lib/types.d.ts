@@ -267,6 +267,11 @@ export type MediaProgress = {
   manual: boolean;
 };
 
+export type MediaProgressResult = {
+  progress: MediaProgress;
+  parent_progress: MediaProgress | null;
+};
+
 /**
  * The type of the media item.
  */
