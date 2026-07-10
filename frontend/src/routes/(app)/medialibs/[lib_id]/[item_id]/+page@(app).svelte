@@ -5,8 +5,9 @@
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { attachMediaProgress, hasProgress, isWatched, loadMediaProgress } from '$lib/progress';
   import { historyBack, user } from '$lib/stores';
-  import type { MediaItem, MediaMeta, Resp } from '$lib/types';
+  import type { MediaItem, MediaMeta, MediaProgress, Resp } from '$lib/types';
   import { buildStreamUrl } from '$lib/utils';
   import { onMount, tick } from 'svelte';
 
@@ -61,6 +62,7 @@
       if (parts.length) {
         for (const part of parts) {
           chapters.push({
+            id: String(part.id),
             url: buildStreamUrl(part.path),
             title: mediaTitle(part)
           });
@@ -68,9 +70,17 @@
       }
       player?.mount({
         url: buildStreamUrl(target.path),
+        mediaId: target.id,
+        progress: target.progress,
         back: () => (playing = false),
         title: mediaTitle(target),
-        chapters: chapters
+        chapters: chapters,
+        chapterChange: (chapter) => {
+          const part = parts.find((part) => String(part.id) === chapter.id);
+          if (part) {
+            selectMedia(part);
+          }
+        }
       });
     });
   }
@@ -83,7 +93,14 @@
    */
   async function getDetails(id: number): Promise<MediaItem> {
     const resp = await api.get(`media/${id}`).json<Resp<MediaItem>>();
+    await hydrateProgress(resp.data);
     return resp.data;
+  }
+
+  async function hydrateProgress(item: MediaItem) {
+    const items = [item, ...(item.children ?? [])];
+    const progress = await loadMediaProgress(items.map((item) => item.id)).catch(() => new Map<number, MediaProgress>());
+    attachMediaProgress(items, progress);
   }
 
   /**
@@ -99,6 +116,31 @@
       const data = await getDetails(item.id);
       _media = data;
       _meta = data.metadata ?? null;
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  function progressLabel(item: MediaItem, short: boolean = false): string {
+    const progress = item.progress;
+    if (!progress) {
+      return $_('media.progress.unwatched');
+    }
+    if (isWatched(progress)) {
+      return $_('media.progress.watched');
+    }
+    return short ? `${progress.percentage}%` : $_('media.progress.percentage', [progress.percentage]);
+  }
+
+  async function markWatched(item: MediaItem) {
+    try {
+      const resp = await api
+        .post('media/progress/mark', { json: { media_id: item.id } })
+        .json<Resp<MediaProgress>>();
+      item.progress = resp.data;
+      if (media) {
+        media = await getDetails(media.id);
+      }
     } catch (error) {
       console.error(error);
     }
@@ -184,6 +226,15 @@
               <span class="badge badge-outline">{meta.country}</span>
             {/if}
             <Rating score={media.rating} class="h-6 border" />
+            {#if hasProgress(media.progress)}
+              <span class="badge h-6 border-0 bg-base-content/10">{progressLabel(media)}</span>
+            {/if}
+            {#if !isWatched(media.progress)}
+              <button class="btn btn-xs h-6 btn-subtle" onclick={() => markWatched(media!)}>
+                <iconify-icon icon={icons.checkmark} width="0.9rem"></iconify-icon>
+                {$_('media.progress.mark_watched')}
+              </button>
+            {/if}
           </div>
 
           <!-- tagline -->
@@ -279,6 +330,13 @@
                   </span>
                   <span class="text-xs opacity-50">{part.aired}</span>
                 </div>
+                <span
+                  class="badge badge-sm shrink-0 border-0"
+                  class:badge-success={isWatched(part.progress)}
+                  class:badge-soft={!isWatched(part.progress)}
+                >
+                  {progressLabel(part)}
+                </span>
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   tabindex="0"

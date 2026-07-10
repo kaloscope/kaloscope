@@ -253,6 +253,21 @@ export type MediaLib = {
 };
 
 /**
+ * The type of the media watch progress.
+ */
+export type MediaProgress = {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  user_id: number;
+  media_id: number;
+  position: number;
+  percentage: number;
+  status: 'watching' | 'watched';
+  manual: boolean;
+};
+
+/**
  * The type of the media item.
  */
 export type MediaItem = {
@@ -280,6 +295,7 @@ export type MediaItem = {
   rating: number | null;
   children?: MediaItem[];
   metadata?: MediaMeta | null;
+  progress?: MediaProgress | null;
 };
 
 /**

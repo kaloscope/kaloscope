@@ -1,8 +1,7 @@
 <script lang="ts" module>
   import { api } from '$lib/api';
   import { MEDIA_STREAM_PREFIX } from '$lib/constants';
-  import type { Chapter, Danmaku, Definition, MediaItem, Optional, Page, Resp } from '$lib/types';
-  import { extractStreamPath } from '$lib/utils';
+  import type { Chapter, Danmaku, Definition, MediaItem, MediaProgress, Optional, Resp } from '$lib/types';
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
   import type MobilePlugin from 'xgplayer/es/plugins/mobile';
@@ -27,6 +26,8 @@
     height: string | number;
     autoplay: boolean;
     startTime: number;
+    mediaId: number;
+    progress: MediaProgress;
     /** The type of the video source, e.g., 'mp4', 'flv', 'hls', etc. */
     videoType: string;
     /** The danmakus (video comments) to be displayed on the video. */
@@ -95,51 +96,47 @@
    *
    * @param player - The player instance.
    */
-  function recordHistory(player: Player | null) {
-    if (!player) {
+  function recordHistory(player: Player | null, mediaId: number | null) {
+    if (!player || !mediaId) {
       return;
     }
-    const url = player.config.url;
-    if (typeof url === 'string' && url.startsWith(MEDIA_STREAM_PREFIX)) {
-      const path = extractStreamPath(url);
-      let position = player.currentTime;
-      let duration = player.duration;
-      if (isNaN(position) || isNaN(duration) || position < 0 || duration <= 0) {
-        return;
-      }
-      position = Math.floor(position);
-      duration = Math.ceil(duration);
-      if (position > duration) {
-        position = duration;
-      }
-      const percentage = Math.floor((position / duration) * 100);
-      api
-        .get('media/list', { searchParams: { page_num: 0, path } })
-        .json<Resp<Page<MediaItem>>>()
-        .then(({ data }) => {
-          for (const item of data.items) {
-            api.post('user/history/record', {
-              json: {
-                rel_type: 'video',
-                rel_id: item.id,
-                position: position,
-                percentage: percentage
-              }
-            });
-          }
-        });
+    let position = player.currentTime;
+    let duration = player.duration;
+    if (isNaN(position) || isNaN(duration) || position < 0 || duration <= 0) {
+      return;
     }
+    position = Math.floor(position);
+    duration = Math.ceil(duration);
+    if (position > duration) {
+      position = duration;
+    }
+    const percentage = Math.floor((position / duration) * 100);
+    const json = {
+      media_id: mediaId,
+      position: position,
+      percentage: percentage
+    };
+    api.post('media/progress/record', { json });
+    api.post('user/history/record', {
+      json: {
+        rel_type: 'video',
+        rel_id: mediaId,
+        position: position,
+        percentage: percentage
+      }
+    });
   }
 </script>
 
 <script lang="ts">
   import { freeze } from '$lib/stores';
   import { sniffer } from '$lib/utils';
+  import { _ } from '$lib/i18n';
   import { onMount } from 'svelte';
   import { v4 as uuidv4 } from 'uuid';
   import Player, { Events, SimplePlayer } from 'xgplayer';
   import DefaultPreset from './plugins/preset';
-  import VideoSettings, { formatDanmakus, probeDuration } from './VideoSettings.svelte';
+  import VideoSettings, { autoResumeEnabled, formatDanmakus, probeDuration } from './VideoSettings.svelte';
 
   const { width = '100%', height = '100%' }: VideoPlayerOptions = $props();
   // player ID
@@ -172,6 +169,10 @@
   let rotateFullscreen: boolean = $state(false);
   // track the last URL that was auto-retried with transcode to prevent infinite loops
   let transcodeRetriedUrl: string | null = null;
+  let activeMediaId: number | null = null;
+  let lastRecordAt = 0;
+  let resumePercentage: number | null = $state(null);
+  let resumeTimer: number | null = null;
 
   /**
    * Toggles the fullscreen state of the player.
@@ -291,6 +292,17 @@
     }
 
     let url = resolvePlaybackUrl(options.url, options.videoType);
+    activeMediaId = options.mediaId ?? null;
+    const progress = options.progress;
+    const resumeTime =
+      options.startTime ??
+      (autoResumeEnabled() && progress?.status === 'watching' && progress.position > 0 ? progress.position : undefined);
+
+    if (autoResumeEnabled() && progress?.status === 'watching' && progress.percentage > 0) {
+      showResumeNotice(progress.percentage);
+    } else {
+      hideResumeNotice();
+    }
 
     // reset the transcode auto-retry flag so a new video gets its own retry
     transcodeRetriedUrl = null;
@@ -301,9 +313,12 @@
     // if the player is already mounted, just switch the URL
     if (player) {
       if (options.next) {
-        player.playNext({ url, topBar: { title: options.title }, customDuration: duration });
+        player.playNext({ url, topBar: { title: options.title }, customDuration: duration, startTime: resumeTime });
       } else {
         videoSettings.changeDefinition(url);
+        if (resumeTime !== undefined) {
+          player.currentTime = resumeTime;
+        }
       }
       return;
     }
@@ -316,7 +331,7 @@
       width: options.width ?? width,
       height: options.height ?? height,
       autoplay: options.autoplay ?? true,
-      startTime: options.startTime ?? undefined,
+      startTime: resumeTime,
       videoType: options.videoType,
       customDuration: duration,
       // bind the video settings component to the player config
@@ -351,7 +366,13 @@
         index: 100,
         list: extractChapters(options),
         chapterId: options.chapterId,
-        chapterChange: options.chapterChange
+        chapterChange: (chapter: Chapter) => {
+          const mediaId = Number(chapter.id);
+          if (Number.isFinite(mediaId) && mediaId > 0) {
+            activeMediaId = mediaId;
+          }
+          options.chapterChange?.(chapter);
+        }
       },
       texttrack: {
         index: 101,
@@ -409,6 +430,15 @@
    * @param player - The player instance.
    */
   function listenEvents(player: Player) {
+    const recordActiveHistory = (force: boolean = false) => {
+      const now = Date.now();
+      if (!force && now - lastRecordAt < 15000) {
+        return;
+      }
+      lastRecordAt = now;
+      recordHistory(player, activeMediaId);
+    };
+
     player.once(Events.PLAYING, () => {
       // enable the gestures on mobile devices
       if (mobilePlugin) {
@@ -425,6 +455,10 @@
       // update the subtitles when the next local video is played
       videoSettings.loadLocalSubtitles();
     });
+
+    player.on(Events.TIME_UPDATE, () => recordActiveHistory());
+    player.on(Events.PAUSE, () => recordActiveHistory(true));
+    player.on(Events.ENDED, () => recordActiveHistory(true));
 
     [Events.FULLSCREEN_CHANGE, Events.CSS_FULLSCREEN_CHANGE].forEach((event) => {
       player.on(event, (fullscreen) => {
@@ -548,6 +582,33 @@
     }
   }
 
+  function showResumeNotice(percentage: number) {
+    resumePercentage = percentage;
+    if (resumeTimer !== null) {
+      clearTimeout(resumeTimer);
+    }
+    resumeTimer = window.setTimeout(() => {
+      resumePercentage = null;
+      resumeTimer = null;
+    }, 6000);
+  }
+
+  function hideResumeNotice() {
+    resumePercentage = null;
+    if (resumeTimer !== null) {
+      clearTimeout(resumeTimer);
+      resumeTimer = null;
+    }
+  }
+
+  function restartPlayback() {
+    if (player) {
+      player.currentTime = 0;
+      player.play();
+    }
+    hideResumeNotice();
+  }
+
   onMount(() => {
     // add the event listener for orientation change on mobile devices
     const isMobile = sniffer.isMobile();
@@ -559,8 +620,9 @@
     return () => {
       freeze.set(false);
       // destroy the player instance
-      recordHistory(player);
+      recordHistory(player, activeMediaId);
       player?.destroy();
+      hideResumeNotice();
       // remove the event listener
       if (isMobile) {
         window.removeEventListener('orientationchange', onorientationchange);
@@ -580,6 +642,15 @@
 <!-- The video player container. -->
 <div bind:this={container} class="relative" style:width style:height>
   <div {id}></div>
+
+  {#if resumePercentage !== null}
+    <div class="absolute top-14 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-field bg-black/55 px-3 py-2 text-sm text-white shadow-lg backdrop-blur-sm">
+      <span>{$_('media.progress.resume', [resumePercentage])}</span>
+      <button class="btn btn-xs border-0 bg-white/15 text-white hover:bg-white/25" onclick={restartPlayback}>
+        {$_('media.progress.restart')}
+      </button>
+    </div>
+  {/if}
 
   <!-- The danmaku container. -->
   <div

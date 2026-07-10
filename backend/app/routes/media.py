@@ -37,9 +37,16 @@ from app.models.media import (
     MediaResource,
     TranscodeQuery,
 )
-from app.models.user import UserInfo, UserRole
+from app.models.user import (
+    MediaProgressMark,
+    MediaProgressQuery,
+    MediaProgressRecord,
+    UserInfo,
+    UserRole,
+)
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.user import UserMediaProgressService
 from app.utils.extractor import extract_title
 from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
 from app.utils.transcode import (
@@ -204,6 +211,41 @@ async def probe_media_duration(_, query: MediaResource) -> HTTPResponse:
     """Probe the media file duration via ffprobe."""
     duration = await probe_duration(query.path)
     return json({"duration": duration or 0})
+
+
+@media.post("/progress/list")
+@authorize()
+@validate(json=MediaProgressQuery)
+async def list_media_progresses(
+    request: Request, body: MediaProgressQuery
+) -> HTTPResponse:
+    """List current user's progress for the given media items."""
+    user: UserInfo = request.ctx.user
+    return json(await UserMediaProgressService.list(user.id, body))
+
+
+@media.post("/progress/record")
+@authorize()
+@validate(json=MediaProgressRecord)
+async def record_media_progress(
+    request: Request, body: MediaProgressRecord
+) -> HTTPResponse:
+    """Record current user's media playback progress."""
+    user: UserInfo = request.ctx.user
+    progress = await UserMediaProgressService.record(user.id, body)
+    return json(await UserMediaProgressService.dump(progress))
+
+
+@media.post("/progress/mark")
+@authorize()
+@validate(json=MediaProgressMark)
+async def mark_media_progress(
+    request: Request, body: MediaProgressMark
+) -> HTTPResponse:
+    """Mark a media item as watched for the current user."""
+    user: UserInfo = request.ctx.user
+    progress = await UserMediaProgressService.mark_watched(user.id, body)
+    return json(await UserMediaProgressService.dump(progress))
 
 
 @media.get("/stream")

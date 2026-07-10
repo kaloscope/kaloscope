@@ -252,6 +252,7 @@
     tick().then(() => {
       player?.mount({
         url: buildStreamUrl(media.path),
+        mediaId: media.id,
         back: () => (playing = false),
         title: mediaTitle(media),
         startTime: w.position

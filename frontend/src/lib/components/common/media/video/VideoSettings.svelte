@@ -10,6 +10,8 @@
   import type RotatePlugin from 'xgplayer/es/plugins/rotate';
   import type StartPlugin from 'xgplayer/es/plugins/start';
   import type TextTrackPlugin from './plugins/texttrack';
+  import { persisted } from '$lib/stores';
+  import { get } from 'svelte/store';
 
   // video settings and types
   type LandscapeMode = 'rotate' | 'web_api';
@@ -17,6 +19,7 @@
   type VideoSettings = {
     landscapeMode: LandscapeMode;
     playbackMode: PlaybackMode;
+    autoResume?: boolean;
     pressRate?: number;
   };
 
@@ -29,8 +32,13 @@
   const video = persisted<VideoSettings>('video', {
     landscapeMode: 'rotate',
     playbackMode: 'direct',
+    autoResume: true,
     pressRate: DEFAULT_PRESS_RATE
   });
+
+  export function autoResumeEnabled(): boolean {
+    return get(video)?.autoResume ?? true;
+  }
 
   // subtitle settings and types
   type SubtitleDisplayMode = 'stroke' | 'bg';
@@ -234,7 +242,6 @@
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { persisted } from '$lib/stores';
   import { extractStreamPath, isTranscodedStream, sniffer } from '$lib/utils';
   import { tick } from 'svelte';
   import { fade } from 'svelte/transition';
@@ -317,6 +324,9 @@
    * Initialize the settings.
    */
   export function init() {
+    if ($video !== null) {
+      $video.autoResume ??= true;
+    }
     // playback mode
     if (localMedia && $video !== null) {
       const url = player?.config.url;
@@ -766,6 +776,10 @@
             onchange={changePressRate}
             class="dropdown-top [&_p]:max-h-32!"
           />
+        </div>
+        <div>
+          {@render optionLabel($_('media.video.auto_resume'))}
+          <input type="checkbox" class="toggle" bind:checked={$video.autoResume} />
         </div>
       {/if}
       {#if $video !== null}

@@ -385,6 +385,15 @@
     "tags": "Tags",
     "delete_local": "Also delete the local files",
     "delete_local_confirm": "Are you sure you want to delete the local files?",
+    "progress": {
+      "watching": "Watching",
+      "watched": "Watched",
+      "unwatched": "Unwatched",
+      "percentage": "Watched {0}%",
+      "resume": "Last watched {0}%",
+      "restart": "Start Over",
+      "mark_watched": "Mark Watched"
+    },
     "text": {
       "chapters": "Chapters",
       "settings": "Settings",
@@ -440,6 +449,7 @@
       "default": "Default",
       "definition": "Definition",
       "press_rate": "Press Rate",
+      "auto_resume": "Auto Resume",
       "landscape": {
         "title": "Landscape Mode",
         "tip": "Only certain mobile devices support locking landscape mode via the Web API.",

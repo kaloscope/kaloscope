@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
 from sanic.request.form import File
 from tortoise.fields import (
+    BooleanField,
     CharEnumField,
     CharField,
     ForeignKeyField,
@@ -29,6 +30,11 @@ class HistoryType(StrEnum):
     VIDEO = auto()
 
 
+class MediaProgressStatus(StrEnum):
+    WATCHING = auto()
+    WATCHED = auto()
+
+
 class PermType(StrEnum):
     INDEXER = auto()
     MEDIA_LIB = auto()
@@ -44,6 +50,7 @@ class User(TortoiseModel):
     # relational fields
     favorites: ReverseRelation["UserFavorite"]
     histories: ReverseRelation["UserHistory"]
+    media_progresses: ReverseRelation["UserMediaProgress"]
     permissions: ReverseRelation["UserPermission"]
     notifications: ReverseRelation
 
@@ -52,7 +59,14 @@ class User(TortoiseModel):
         ordering = ["role", "-created_at"]
 
     class PydanticMeta:
-        exclude = ("password", "favorites", "histories", "permissions", "notifications")
+        exclude = (
+            "password",
+            "favorites",
+            "histories",
+            "media_progresses",
+            "permissions",
+            "notifications",
+        )
 
 
 class UserSession(TortoiseModel):
@@ -102,6 +116,29 @@ class UserHistory(TortoiseModel):
 
     class PydanticMeta:
         exclude = ("user",)
+
+
+class UserMediaProgress(TortoiseModel):
+    user_id: int
+    user: ForeignKeyRelation[User] = ForeignKeyField(
+        "models.User", related_name="media_progresses", db_index=True
+    )
+    media_id: int
+    media: ForeignKeyRelation["MediaItem"] = ForeignKeyField(
+        "models.MediaItem", related_name="user_progresses", db_index=True
+    )
+    position = IntField(default=0)
+    percentage = IntField(default=0)
+    status = CharEnumField(max_length=16, enum_type=MediaProgressStatus)
+    manual = BooleanField(default=False)
+
+    class Meta:
+        table = "user_media_progress"
+        ordering = ["-updated_at"]
+        unique_together = (("user", "media"),)
+
+    class PydanticMeta:
+        exclude = ("user", "media")
 
 
 class UserPermission(TortoiseModel):
@@ -183,3 +220,17 @@ class HistoryEntry(BaseModel):
     keyword: str | None = Field(max_length=4096, default=None)
     position: NonNegativeInt | None = None
     percentage: int | None = Field(ge=0, le=100, default=None)
+
+
+class MediaProgressQuery(BaseModel):
+    ids: list[PositiveInt] = Field(min_length=1, max_length=999)
+
+
+class MediaProgressRecord(BaseModel):
+    media_id: PositiveInt
+    position: NonNegativeInt = 0
+    percentage: int = Field(ge=0, le=100)
+
+
+class MediaProgressMark(BaseModel):
+    media_id: PositiveInt

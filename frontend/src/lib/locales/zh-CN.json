@@ -385,6 +385,15 @@
     "tags": "标签",
     "delete_local": "同时删除本地文件",
     "delete_local_confirm": "是否确认删除本地文件？",
+    "progress": {
+      "watching": "正在看",
+      "watched": "看过",
+      "unwatched": "未看",
+      "percentage": "看到 {0}%",
+      "resume": "上次看到 {0}%",
+      "restart": "从头开始",
+      "mark_watched": "标记看过"
+    },
     "text": {
       "chapters": "章节",
       "settings": "阅读设置",
@@ -440,6 +449,7 @@
       "default": "默认",
       "definition": "清晰度",
       "press_rate": "长按倍率",
+      "auto_resume": "自动续播",
       "landscape": {
         "title": "横屏模式",
         "tip": "仅部分移动设备支持 Web API 方式锁定横屏。",

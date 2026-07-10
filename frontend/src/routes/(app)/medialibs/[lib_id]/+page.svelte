@@ -15,6 +15,7 @@
   } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
+  import { attachMediaProgress, hasProgress, isWatched, loadMediaProgress } from '$lib/progress';
   import { captureScrollPosition, compactRecord, restorePosition, subroutes, user } from '$lib/stores';
   import type { MediaItem, Page, Resp } from '$lib/types';
   import { tick, untrack } from 'svelte';
@@ -86,7 +87,9 @@
         }
       })
       .json<Resp<Page<MediaItem>>>()
-      .then(({ data }) => {
+      .then(async ({ data }) => {
+        const progress = await loadMediaProgress(data.items.map((item) => item.id)).catch(() => new Map());
+        attachMediaProgress(data.items, progress);
         items = data.items;
         pagination.total = data.total;
       })
@@ -138,6 +141,13 @@
       });
     }
   });
+
+  function progressLabel(item: MediaItem): string {
+    if (!item.progress) {
+      return '';
+    }
+    return isWatched(item.progress) ? $_('media.progress.watched') : $_('media.progress.watching');
+  }
 </script>
 
 <Container class="pull-to-refresh" loading={$outerLoading}>
@@ -177,6 +187,11 @@
         onclick={() => goto(`${page.url.pathname}/${item.id}`)}
       >
         <Rating score={item.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.875rem,8cqw,1rem)]" />
+        {#if hasProgress(item.progress)}
+          <span class="badge absolute top-8 left-1 z-1 border-0 bg-base-100/85 text-xs shadow-sm backdrop-blur-sm">
+            {progressLabel(item)}
+          </span>
+        {/if}
         <div
           class:hidden={$user?.role !== 'admin'}
           class="absolute right-0 bottom-0 z-1 p-1 opacity-0 group-hover:opacity-100 {transClass}"
