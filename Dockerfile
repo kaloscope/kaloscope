@@ -172,7 +172,8 @@ if [ "$DEBUG_MODE" = "true" ]; then
 fi
 exec poetry run sanic app.main:app $SANIC_ARGS
 EOF
-RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8000
 EXPOSE 6888
 EXPOSE 6888/udp
