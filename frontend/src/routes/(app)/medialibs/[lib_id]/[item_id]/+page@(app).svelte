@@ -72,6 +72,7 @@
         url: buildStreamUrl(target.path),
         mediaId: target.id,
         progress: target.progress,
+        chapterProgress: Object.fromEntries(parts.map((part) => [String(part.id), part.progress ?? null])),
         back: () => (playing = false),
         title: mediaTitle(target),
         chapters: chapters,
@@ -99,7 +100,7 @@
 
   async function hydrateProgress(item: MediaItem) {
     const items = [item, ...(item.children ?? [])];
-    const progress = await loadMediaProgress(items.map((item) => item.id)).catch(() => new Map<number, MediaProgress>());
+    const progress = await loadMediaProgress(items.map((item) => item.id));
     attachMediaProgress(items, progress);
   }
 

@@ -28,6 +28,7 @@
     startTime: number;
     mediaId: number;
     progress: MediaProgress;
+    chapterProgress: Record<string, MediaProgress | null>;
     /** The type of the video source, e.g., 'mp4', 'flv', 'hls', etc. */
     videoType: string;
     /** The danmakus (video comments) to be displayed on the video. */
@@ -116,16 +117,9 @@
       position: position,
       percentage: percentage
     };
-    api.post('media/progress/record', { json });
-    api.post('user/history/record', {
-      json: {
-        rel_type: 'video',
-        rel_id: mediaId,
-        position: position,
-        percentage: percentage
-      }
-    });
+    return json;
   }
+
 </script>
 
 <script lang="ts">
@@ -173,6 +167,7 @@
   let lastRecordAt = 0;
   let resumePercentage: number | null = $state(null);
   let resumeTimer: number | null = null;
+  let progressWrite: Promise<unknown> = Promise.resolve();
 
   /**
    * Toggles the fullscreen state of the player.
@@ -370,6 +365,17 @@
           const mediaId = Number(chapter.id);
           if (Number.isFinite(mediaId) && mediaId > 0) {
             activeMediaId = mediaId;
+            const progress = options.chapterProgress?.[String(chapter.id)];
+            if (autoResumeEnabled() && progress?.status === 'watching' && progress.position > 0) {
+              window.setTimeout(() => {
+                if (player && activeMediaId === mediaId) {
+                  player.currentTime = progress.position;
+                  showResumeNotice(progress.percentage);
+                }
+              });
+            } else {
+              hideResumeNotice();
+            }
           }
           options.chapterChange?.(chapter);
         }
@@ -430,15 +436,6 @@
    * @param player - The player instance.
    */
   function listenEvents(player: Player) {
-    const recordActiveHistory = (force: boolean = false) => {
-      const now = Date.now();
-      if (!force && now - lastRecordAt < 15000) {
-        return;
-      }
-      lastRecordAt = now;
-      recordHistory(player, activeMediaId);
-    };
-
     player.once(Events.PLAYING, () => {
       // enable the gestures on mobile devices
       if (mobilePlugin) {
@@ -582,6 +579,21 @@
     }
   }
 
+  function recordActiveHistory(force: boolean = false) {
+    const now = Date.now();
+    if (!force && now - lastRecordAt < 15000) {
+      return;
+    }
+    lastRecordAt = now;
+    const json = recordHistory(player, activeMediaId);
+    if (!json) {
+      return;
+    }
+    progressWrite = progressWrite
+      .catch((error) => console.error(error))
+      .then(() => api.post('media/progress/record', { json, keepalive: true }));
+  }
+
   function showResumeNotice(percentage: number) {
     resumePercentage = percentage;
     if (resumeTimer !== null) {
@@ -620,7 +632,7 @@
     return () => {
       freeze.set(false);
       // destroy the player instance
-      recordHistory(player, activeMediaId);
+      recordActiveHistory(true);
       player?.destroy();
       hideResumeNotice();
       // remove the event listener

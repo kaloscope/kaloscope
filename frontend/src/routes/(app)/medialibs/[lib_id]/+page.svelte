@@ -88,7 +88,7 @@
       })
       .json<Resp<Page<MediaItem>>>()
       .then(async ({ data }) => {
-        const progress = await loadMediaProgress(data.items.map((item) => item.id)).catch(() => new Map());
+        const progress = await loadMediaProgress(data.items.map((item) => item.id));
         attachMediaProgress(data.items, progress);
         items = data.items;
         pagination.total = data.total;

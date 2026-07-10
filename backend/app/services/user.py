@@ -26,8 +26,8 @@ from app.models.user import (
     User,
     UserFavorite,
     UserHistory,
-    UserMediaProgress,
     UserInfo,
+    UserMediaProgress,
     UserPermission,
     UserRole,
 )
@@ -349,26 +349,38 @@ class UserMediaProgressService(
         return MediaProgressStatus.WATCHING
 
     @classmethod
-    async def list(cls, user_id: int, obj: MediaProgressQuery) -> list[dict]:
+    async def list(cls, user: UserInfo, obj: MediaProgressQuery) -> list[dict]:
         """List progress entries for the current user and media IDs."""
-        progresses = await UserMediaProgress.filter(
-            user_id=user_id, media_id__in=obj.ids
-        )
+        filters = {"user_id": user.id, "media_id__in": obj.ids}
+        if user.perms is not None:
+            filters["media__lib_id__in"] = user.perms.media_lib_ids
+        progresses = await UserMediaProgress.filter(**filters)
         return await cls.dump_list(progresses)
 
     @classmethod
-    @atomic()
-    async def record(cls, user_id: int, obj: MediaProgressRecord) -> UserMediaProgress:
-        """Record playback progress for one media item."""
+    async def _get_accessible_media(cls, user: UserInfo, media_id: int):
+        """Return a media item only when it belongs to a library visible to the user."""
         from app.models.media import MediaItem
 
-        media = await MediaItem.get_or_none(id=obj.media_id)
+        query = MediaItem.filter(id=media_id)
+        if user.perms is not None:
+            query = query.filter(lib_id__in=user.perms.media_lib_ids)
+        media = await query.first()
         if media is None:
             raise KaloscopeException(ErrorCode.BAD_REQUEST)
+        return media
+
+    @classmethod
+    @atomic()
+    async def record(
+        cls, user: UserInfo, obj: MediaProgressRecord
+    ) -> UserMediaProgress:
+        """Record playback progress for one media item."""
+        media = await cls._get_accessible_media(user, obj.media_id)
 
         percentage = max(0, min(obj.percentage, 100))
         progress, _ = await UserMediaProgress.update_or_create(
-            user_id=user_id,
+            user_id=user.id,
             media_id=media.id,
             defaults={
                 "position": obj.position,
@@ -377,23 +389,28 @@ class UserMediaProgressService(
                 "manual": False,
             },
         )
-        await cls._sync_parent(user_id, media)
+        await UserHistoryService.record(
+            user.id,
+            HistoryEntry(
+                rel_type=HistoryType.VIDEO,
+                rel_id=media.id,
+                position=obj.position,
+                percentage=percentage,
+            ),
+        )
+        await cls._sync_parent(user.id, media)
         return progress
 
     @classmethod
     @atomic()
     async def mark_watched(
-        cls, user_id: int, obj: MediaProgressMark
+        cls, user: UserInfo, obj: MediaProgressMark
     ) -> UserMediaProgress:
         """Mark a media item as watched for the current user."""
-        from app.models.media import MediaItem
-
-        media = await MediaItem.get_or_none(id=obj.media_id)
-        if media is None:
-            raise KaloscopeException(ErrorCode.BAD_REQUEST)
+        media = await cls._get_accessible_media(user, obj.media_id)
 
         progress, _ = await UserMediaProgress.update_or_create(
-            user_id=user_id,
+            user_id=user.id,
             media_id=media.id,
             defaults={
                 "percentage": 100,
@@ -402,7 +419,7 @@ class UserMediaProgressService(
             },
         )
         if media.parent_id is not None:
-            await cls._sync_parent(user_id, media)
+            await cls._sync_parent(user.id, media)
         return progress
 
     @classmethod

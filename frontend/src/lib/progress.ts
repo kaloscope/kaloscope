@@ -8,12 +8,18 @@ export async function loadMediaProgress(ids: number[]): Promise<Map<number, Medi
   if (uniqueIds.length === 0) {
     return new Map();
   }
-  const resp = await api
-    .post('media/progress/list', {
-      json: { ids: uniqueIds }
-    })
-    .json<Resp<MediaProgress[]>>();
-  return new Map(resp.data.map((progress) => [progress.media_id, progress]));
+  const result = new Map<number, MediaProgress>();
+  for (let offset = 0; offset < uniqueIds.length; offset += 999) {
+    const resp = await api
+      .post('media/progress/list', {
+        json: { ids: uniqueIds.slice(offset, offset + 999) }
+      })
+      .json<Resp<MediaProgress[]>>();
+    for (const progress of resp.data) {
+      result.set(progress.media_id, progress);
+    }
+  }
+  return result;
 }
 
 export function attachMediaProgress<T extends MediaItem>(items: T[], progresses: Map<number, MediaProgress>) {

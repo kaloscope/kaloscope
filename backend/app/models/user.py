@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
 from sanic.request.form import File
@@ -17,6 +17,9 @@ from tortoise.fields import (
 
 from app.models.base import Pageable, RequestFilesMixin, TortoiseModel
 from app.models.flow import FlowGraph
+
+if TYPE_CHECKING:
+    from app.models.media import MediaItem
 
 
 # -------------------- Enumerations --------------------
