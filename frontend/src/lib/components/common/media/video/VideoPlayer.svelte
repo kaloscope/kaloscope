@@ -180,6 +180,8 @@
   let activeProgress: MediaProgress | null = null;
   let onProgress: ((progress: MediaProgress) => void) | undefined;
   let onProgressSaved: ((result: MediaProgressResult) => void) | undefined;
+  let lastPublishedMediaId: number | null = null;
+  let lastPublishedPosition = -1;
 
   /**
    * Toggles the fullscreen state of the player.
@@ -603,7 +605,11 @@
       manual: false
     };
     activeProgress = progress;
-    onProgress?.(progress);
+    if (progress.media_id !== lastPublishedMediaId || progress.position !== lastPublishedPosition) {
+      lastPublishedMediaId = progress.media_id;
+      lastPublishedPosition = progress.position;
+      onProgress?.(progress);
+    }
 
     const currentTime = Date.now();
     if (!force && currentTime - lastRecordAt < 15000) {

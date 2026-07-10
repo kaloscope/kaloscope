@@ -25,6 +25,7 @@
   // the player instance and playing state
   let player: VideoPlayer | null = $state(null);
   let playing = $state(false);
+  let selectionRequest = 0;
 
   // the sorted child media items
   let parts: MediaItem[] = $derived.by(() => {
@@ -148,11 +149,21 @@
    * @param item - The child media item.
    */
   async function selectMedia(item: MediaItem): Promise<MediaItem | null> {
+    const request = ++selectionRequest;
     if (_media?.id === item.id) {
       return _media;
     }
     try {
       const data = await getDetails(item.id);
+      if (request !== selectionRequest) {
+        return null;
+      }
+      if (
+        item.progress &&
+        (!data.progress || new Date(item.progress.updated_at).getTime() > new Date(data.progress.updated_at).getTime())
+      ) {
+        data.progress = item.progress;
+      }
       _media = data;
       _meta = data.metadata ?? null;
       return data;

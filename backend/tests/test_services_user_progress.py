@@ -1,11 +1,18 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from app.models.user import MediaProgressQuery, MediaProgressStatus, UserMediaProgress
-from app.services.user import UserMediaProgressService
+from app.models.user import (
+    HistoryEntry,
+    HistoryType,
+    MediaProgressQuery,
+    MediaProgressStatus,
+    UserHistory,
+    UserMediaProgress,
+)
+from app.services.user import UserHistoryService, UserMediaProgressService
 
 
 @pytest.mark.parametrize(
@@ -26,7 +33,7 @@ def test_media_progress_status_from_percentage(
 
 def test_list_media_progress_filters_restricted_libraries(monkeypatch):
     query_result = object()
-    filter_mock = MagicMock(return_value=query_result)
+    filter_mock = AsyncMock(return_value=query_result)
     dump_mock = AsyncMock(return_value=[])
     monkeypatch.setattr(UserMediaProgress, "filter", filter_mock)
     monkeypatch.setattr(UserMediaProgressService, "dump_list", dump_mock)
@@ -39,9 +46,35 @@ def test_list_media_progress_filters_restricted_libraries(monkeypatch):
     )
 
     assert result == []
-    filter_mock.assert_called_once_with(
+    filter_mock.assert_awaited_once_with(
         user_id=7,
         media_id__in=[2, 3],
         media__lib_id__in=[11, 13],
     )
     dump_mock.assert_awaited_once_with(query_result)
+
+
+def test_progress_checkpoint_does_not_increment_history_repetitions(monkeypatch):
+    history = SimpleNamespace(repetitions=4, save=AsyncMock())
+    monkeypatch.setattr(
+        UserHistoryService, "retention_days", AsyncMock(return_value=3)
+    )
+    update_mock = AsyncMock(return_value=(history, False))
+    monkeypatch.setattr(UserHistory, "update_or_create", update_mock)
+
+    result = asyncio.run(
+        UserHistoryService.record(
+            7,
+            HistoryEntry(
+                rel_type=HistoryType.VIDEO,
+                rel_id=11,
+                position=120,
+                percentage=40,
+            ),
+            increment_repetitions=False,
+        )
+    )
+
+    assert result is history
+    assert history.repetitions == 4
+    history.save.assert_not_awaited()

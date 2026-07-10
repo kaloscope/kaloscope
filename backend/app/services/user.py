@@ -267,12 +267,20 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
         return days if isinstance(days, int) and days >= 0 else 0
 
     @classmethod
-    async def record(cls, user_id: int, obj: HistoryEntry) -> UserHistory | None:
+    async def record(
+        cls,
+        user_id: int,
+        obj: HistoryEntry,
+        *,
+        increment_repetitions: bool = True,
+    ) -> UserHistory | None:
         """Record a user history entry, incrementing repetitions on duplicate.
 
         Args:
             user_id: The user ID.
             obj: The history entry data.
+            increment_repetitions: Whether an existing entry represents a new
+                repetition. Periodic playback checkpoints set this to false.
 
         Returns:
             The user history instance, or None if the entry is invalid.
@@ -306,7 +314,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                 )
 
         # increment repetitions if not created
-        if history is not None and not created:
+        if history is not None and not created and increment_repetitions:
             history.repetitions += 1
             await history.save(update_fields=["repetitions", "updated_at"])
 
@@ -411,6 +419,7 @@ class UserMediaProgressService(
                 position=obj.position,
                 percentage=percentage,
             ),
+            increment_repetitions=False,
         )
         parent_progress = await cls._sync_parent(user.id, media)
         return progress, parent_progress
