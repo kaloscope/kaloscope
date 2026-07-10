@@ -28,7 +28,6 @@
     startTime: number;
     mediaId: number;
     progress: MediaProgress;
-    chapterProgress: Record<string, MediaProgress | null>;
     /** The type of the video source, e.g., 'mp4', 'flv', 'hls', etc. */
     videoType: string;
     /** The danmakus (video comments) to be displayed on the video. */
@@ -119,7 +118,6 @@
     };
     return json;
   }
-
 </script>
 
 <script lang="ts">
@@ -287,7 +285,6 @@
     }
 
     let url = resolvePlaybackUrl(options.url, options.videoType);
-    activeMediaId = options.mediaId ?? null;
     const progress = options.progress;
     const resumeTime =
       options.startTime ??
@@ -304,6 +301,7 @@
 
     // probe the full duration for transcoded streams before creating the player instance
     let duration = await probeDuration(url);
+    activeMediaId = options.mediaId ?? null;
 
     // if the player is already mounted, just switch the URL
     if (player) {
@@ -361,24 +359,7 @@
         index: 100,
         list: extractChapters(options),
         chapterId: options.chapterId,
-        chapterChange: (chapter: Chapter) => {
-          const mediaId = Number(chapter.id);
-          if (Number.isFinite(mediaId) && mediaId > 0) {
-            activeMediaId = mediaId;
-            const progress = options.chapterProgress?.[String(chapter.id)];
-            if (autoResumeEnabled() && progress?.status === 'watching' && progress.position > 0) {
-              window.setTimeout(() => {
-                if (player && activeMediaId === mediaId) {
-                  player.currentTime = progress.position;
-                  showResumeNotice(progress.percentage);
-                }
-              });
-            } else {
-              hideResumeNotice();
-            }
-          }
-          options.chapterChange?.(chapter);
-        }
+        chapterChange: options.chapterChange
       },
       texttrack: {
         index: 101,
@@ -656,7 +637,9 @@
   <div {id}></div>
 
   {#if resumePercentage !== null}
-    <div class="absolute top-14 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-field bg-black/55 px-3 py-2 text-sm text-white shadow-lg backdrop-blur-sm">
+    <div
+      class="absolute top-14 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-field bg-black/55 px-3 py-2 text-sm text-white shadow-lg backdrop-blur-sm"
+    >
       <span>{$_('media.progress.resume', [resumePercentage])}</span>
       <button class="btn btn-xs border-0 bg-white/15 text-white hover:bg-white/25" onclick={restartPlayback}>
         {$_('media.progress.restart')}
