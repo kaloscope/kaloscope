@@ -61,7 +61,8 @@
       },
       "monitor": {
         "title": "Monitoring",
-        "transcodes": "Transcode Tasks"
+        "transcodes": "Transcode Tasks",
+        "logs": "System Logs"
       },
       "workflows": {
         "title": "Workflows",
@@ -586,6 +587,17 @@
     },
     "segments": "{0} segments",
     "batch_delete_title": "Delete {0} Transcode Tasks"
+  },
+  "logstream": {
+    "connection": {
+      "connecting": "Connecting",
+      "connected": "Connected",
+      "reconnecting": "Reconnecting"
+    },
+    "empty": "No system logs",
+    "levels": "Log levels",
+    "follow": "Follow",
+    "clear_confirm": "Clear all buffered system logs?"
   },
   "flow": {
     "readonly": "Read-Only Mode",

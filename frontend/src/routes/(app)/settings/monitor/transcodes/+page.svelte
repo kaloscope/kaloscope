@@ -204,7 +204,7 @@
             <div class="text-sm wrap-break-word">
               {task.title ?? task.name}
               {#if task.subtitle}
-                <span class="italic-text">[{task.subtitle}]</span>
+                <span class="italic-text opacity-70">[{task.subtitle}]</span>
               {/if}
             </div>
             {#if task.path}

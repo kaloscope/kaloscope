@@ -61,7 +61,8 @@
       },
       "monitor": {
         "title": "系统监控",
-        "transcodes": "转码任务"
+        "transcodes": "转码任务",
+        "logs": "系统日志"
       },
       "workflows": {
         "title": "工作流",
@@ -586,6 +587,17 @@
     },
     "segments": "{0} 个分片",
     "batch_delete_title": "删除 {0} 个转码任务"
+  },
+  "logstream": {
+    "connection": {
+      "connecting": "正在连接",
+      "connected": "已连接",
+      "reconnecting": "正在重连"
+    },
+    "empty": "暂无系统日志",
+    "levels": "日志级别",
+    "follow": "跟随",
+    "clear_confirm": "确定要清空系统日志吗？"
   },
   "flow": {
     "readonly": "只读模式",

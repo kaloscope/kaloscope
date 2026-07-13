@@ -784,3 +784,30 @@ export type TranscodeTask = {
   finished_at: string | null;
   error_msg: string | null;
 };
+
+/**
+ * Supported severity levels for system log monitoring.
+ */
+export type SystemLogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
+
+/**
+ * A compact system log record delivered through the monitor stream.
+ */
+export type SystemLog = {
+  id: number;
+  level: SystemLogLevel;
+  logger: string;
+  message: string;
+  process_id: number;
+  process_name: string;
+  created: number;
+};
+
+/**
+ * Service-wide system log monitor state.
+ */
+export type SystemLogState = {
+  paused: boolean;
+  run_id: string;
+  buffer_id: number;
+};

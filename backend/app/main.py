@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import os
+from contextlib import suppress
 from multiprocessing.managers import SyncManager
 from pathlib import Path
 
@@ -19,6 +20,14 @@ from app.core.cookiejar import SQLiteCookieJar
 from app.core.dl.syncer import DLSyncer
 from app.core.exceptions import error_handler
 from app.core.flow.engine import FlowEngine
+from app.core.logstream import (
+    LOG_ACTIONS_CAPACITY,
+    LOG_QUEUE_CAPACITY,
+    LogCollector,
+    create_log_snapshot,
+    register_log_monitor,
+    unregister_log_monitor,
+)
 from app.core.media.watcher import LibWatcher
 from app.core.middleware import SessionHolder, on_request, on_response
 from app.core.monkeypatch import apply_monkey_patches
@@ -56,12 +65,14 @@ async def main_process_start(app: Sanic):
     await init_shared_ctx(app)
     await init_workspace(app)
     await upgrade_db(app)
+    await start_log_collector(app)
 
 
 @app.before_server_start
 async def before_server_start(app: Sanic):
     """Handle the worker process startup event."""
     app.loop.set_debug(False)
+    await attach_log_monitor(app)
     await start_orm(app)
     await start_http_client(app)
     await start_flow_engine(app)
@@ -80,11 +91,13 @@ async def before_server_stop(app: Sanic):
     await close_flow_engine(app)
     await close_http_client(app)
     await close_orm(app)
+    await detach_log_monitor(app)
 
 
 @app.main_process_stop
 async def main_process_stop(app: Sanic):
     """Handle the main process shutdown event."""
+    await stop_log_collector(app)
     await close_shared_ctx(app)
 
 
@@ -121,6 +134,11 @@ async def init_shared_ctx(app: Sanic):
     # shared objects for transcoding task monitoring
     shared.transcode_tasks = sync_manager.dict()
     shared.transcode_tasks_lock = multiprocessing.Lock()
+    # shared objects for the real-time log monitor
+    shared.log_queue = multiprocessing.Queue(maxsize=LOG_QUEUE_CAPACITY)
+    shared.log_actions = multiprocessing.Queue(maxsize=LOG_ACTIONS_CAPACITY)
+    shared.log_snapshot = sync_manager.dict({"value": create_log_snapshot()})
+    shared.log_snapshot_revision = multiprocessing.Value("Q", 0)
     logger.debug(_msg(Colors.BLUE, "Shared context initialized:\n"), shared)
 
 
@@ -146,6 +164,50 @@ async def upgrade_db(app: Sanic):
     await migrate(config=tortoise_config)
     await Tortoise.close_connections()
     logger.debug(_msg(Colors.BLUE, "Database schema upgraded."), _worker(app))
+
+
+async def start_log_collector(app: Sanic):
+    """Start the silent main-process log collector."""
+    try:
+        log_collector = LogCollector(
+            app.shared_ctx.log_queue,
+            app.shared_ctx.log_actions,
+            app.shared_ctx.log_snapshot,
+            app.shared_ctx.log_snapshot_revision,
+        )
+        log_collector.start()
+        app.ctx.log_collector = log_collector
+    except Exception:
+        pass
+
+
+async def stop_log_collector(app: Sanic):
+    """Stop the log collector and release its queue without diagnostics."""
+    log_collector = getattr(app.ctx, "log_collector", None)
+    if log_collector is not None:
+        with suppress(Exception):
+            log_collector.stop()
+    for queue_name in ("log_queue", "log_actions"):
+        shared_queue = getattr(app.shared_ctx, queue_name, None)
+        if shared_queue is None:
+            continue
+        with suppress(Exception):
+            shared_queue.close()
+        with suppress(Exception):
+            shared_queue.join_thread()
+
+
+async def attach_log_monitor(app: Sanic):
+    """Attach the silent log monitor to one worker."""
+    with suppress(Exception):
+        app.ctx.log_monitor = register_log_monitor(app.shared_ctx.log_queue)
+
+
+async def detach_log_monitor(app: Sanic):
+    """Remove the log monitor installed by one worker."""
+    log_monitor = getattr(app.ctx, "log_monitor", None)
+    with suppress(Exception):
+        unregister_log_monitor(log_monitor)
 
 
 async def start_orm(app: Sanic):

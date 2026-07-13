@@ -35,6 +35,7 @@ const fluentUISystemIcons = {
   checkmark: 'fluent:checkmark-24-regular',
   checkmarkCircle: 'fluent:checkmark-circle-24-regular',
   clipboardCode: 'fluent:clipboard-code-24-regular',
+  clipboardTextLtr: 'fluent:clipboard-text-ltr-24-regular',
   cloudCube: 'fluent:cloud-cube-24-regular',
   code: 'fluent:code-24-regular',
   contentView: 'fluent:content-view-24-regular',
