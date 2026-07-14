@@ -47,6 +47,31 @@ export const load: LayoutLoad = async () => {
       1,
       0,
       {
+        title: 'nav.settings.workflows.title',
+        routes: [
+          {
+            title: 'nav.settings.workflows.templates',
+            path: '/settings/workflows/templates',
+            icon: icons.appStore
+          },
+          {
+            title: 'nav.settings.workflows.variables',
+            path: '/settings/workflows/variables',
+            icon: icons.bracesVariable
+          },
+          {
+            title: 'nav.settings.workflows.graphs',
+            path: '/settings/workflows/graphs',
+            icon: icons.documentFlowchart
+          },
+          {
+            title: 'nav.settings.workflows.schedules',
+            path: '/settings/workflows/schedules',
+            icon: icons.clock
+          }
+        ]
+      },
+      {
         title: 'nav.settings.system.title',
         routes: [
           {
@@ -88,31 +113,6 @@ export const load: LayoutLoad = async () => {
             title: 'nav.settings.monitor.logs',
             path: '/settings/monitor/logs',
             icon: icons.clipboardTextLtr
-          }
-        ]
-      },
-      {
-        title: 'nav.settings.workflows.title',
-        routes: [
-          {
-            title: 'nav.settings.workflows.templates',
-            path: '/settings/workflows/templates',
-            icon: icons.appStore
-          },
-          {
-            title: 'nav.settings.workflows.variables',
-            path: '/settings/workflows/variables',
-            icon: icons.bracesVariable
-          },
-          {
-            title: 'nav.settings.workflows.graphs',
-            path: '/settings/workflows/graphs',
-            icon: icons.documentFlowchart
-          },
-          {
-            title: 'nav.settings.workflows.schedules',
-            path: '/settings/workflows/schedules',
-            icon: icons.clock
           }
         ]
       }
