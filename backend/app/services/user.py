@@ -270,7 +270,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
             obj: The history entry data.
 
         Returns:
-            The user history instance, or None if the entry is invalid.
+            The user history instance, or `None` if the entry is invalid.
         """
         if await cls.retention_days(user_id, obj.rel_type) == 0:
             # do not record history if the retention days is set to 0

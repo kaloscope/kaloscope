@@ -164,7 +164,7 @@ async def send_records(
         run_id: The current backend service lifetime identifier.
 
     Returns:
-        The final sent record ID, or None if sending is interrupted.
+        The final sent record ID, or `None` if sending is interrupted.
     """
     last_id = 0
     events: list[str] = []

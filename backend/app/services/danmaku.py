@@ -185,7 +185,7 @@ class DanmakuService:
             media: The media item instance.
 
         Returns:
-            The matched metadata, or None if not found.
+            The matched metadata, or `None` if not found.
         """
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
         try:

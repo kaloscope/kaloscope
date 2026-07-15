@@ -19,7 +19,7 @@ def get_element(
         attrs: Optional attribute key-value pairs to filter by.
 
     Returns:
-        The first matching sub-element, or None if not found.
+        The first matching sub-element, or `None` if not found.
     """
     if element is None:
         return None
@@ -39,7 +39,7 @@ def get_text(element: etree._Element | None, tag_name: str) -> str | None:
         tag_name: The tag name of the sub-element.
 
     Returns:
-        The text content of the sub-element, or None if not found.
+        The text content of the sub-element, or `None` if not found.
     """
     if element is None:
         return None
@@ -58,7 +58,7 @@ def get_all_text(element: etree._Element | None, tag_name: str) -> list[str] | N
         tag_name: The tag name of the sub-elements.
 
     Returns:
-        The list of text content of the sub-elements, or None if not found.
+        The list of text content of the sub-elements, or `None` if not found.
     """
     if element is None:
         return None
@@ -74,7 +74,7 @@ def get_integer(element: etree._Element | None, tag_name: str) -> int | None:
         tag_name: The tag name of the sub-element.
 
     Returns:
-        The integer content of the sub-element, or None if not found or invalid.
+        The integer content of the sub-element, or `None` if not found or invalid.
     """
     text = get_text(element, tag_name)
     if text and text.isdigit():
@@ -90,7 +90,7 @@ def get_decimal(element: etree._Element | None, tag_name: str) -> Decimal | None
         tag_name: The tag name of the sub-element.
 
     Returns:
-        The decimal content of the sub-element, or None if not found or invalid.
+        The decimal content of the sub-element, or `None` if not found or invalid.
     """
     text = get_text(element, tag_name)
     if text:

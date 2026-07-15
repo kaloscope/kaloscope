@@ -187,7 +187,7 @@ def extract_year(name: str) -> int | None:
         name: The raw file name or path stem string.
 
     Returns:
-        The four-digit year as an integer, or None if not found.
+        The four-digit year as an integer, or `None` if not found.
     """
     match = _YEAR_PATTERN.search(name)
     if match:
@@ -202,7 +202,7 @@ def extract_season(name: str) -> int | None:
         name: The raw file name or path stem string.
 
     Returns:
-        The season number as an integer, or None if not found.
+        The season number as an integer, or `None` if not found.
     """
     match = _SEASON_PATTERN.search(name)
     if match:
@@ -221,7 +221,7 @@ def extract_episode(name: str) -> int | None:
         name: The raw file name or path stem string.
 
     Returns:
-        The episode number as an integer, or None if not found.
+        The episode number as an integer, or `None` if not found.
     """
     match = _EPISODE_PATTERN.search(name)
     if match:

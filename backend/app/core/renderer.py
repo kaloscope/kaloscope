@@ -155,7 +155,7 @@ def jsonpath_first(obj: Any, expr: str) -> Any:
         expr: The JSONPath expression.
 
     Returns:
-        The first matched value, or None if not found.
+        The first matched value, or `None` if not found.
     """
     jsonpath = compile_jsonpath(expr)
     if isinstance(obj, str):
@@ -231,7 +231,7 @@ def xpath_first(obj: Any, expr: str) -> Any:
         expr: The XPath expression.
 
     Returns:
-        The first matched value, or None if not found.
+        The first matched value, or `None` if not found.
     """
     xpath = compile_xpath(expr)
     if isinstance(obj, str):
@@ -269,7 +269,7 @@ def regex_first(string: str, expr: str) -> Any:
         expr: The regular expression.
 
     Returns:
-        The first captured group, or None if not found.
+        The first captured group, or `None` if not found.
     """
     pattern = compile_regex(expr)
     match = pattern.search(string)
@@ -467,7 +467,7 @@ def _datetime(value: Any, tz: float | None = None) -> datetime.datetime | None:
         tz: The timezone offset in hours (e.g. 8 for UTC+8).
 
     Returns:
-        The converted datetime object, or None if the value cannot be parsed.
+        The converted datetime object, or `None` if the value cannot be parsed.
     """
     if isinstance(value, datetime.datetime):
         return value
@@ -537,7 +537,7 @@ def year(value: Any, tz: float | None = None) -> int | None:
         tz: The timezone offset in hours.
 
     Returns:
-        The 4-digit year as an integer, or None if not found.
+        The 4-digit year as an integer, or `None` if not found.
     """
     if value is None or isinstance(value, bool):
         return None

@@ -25,7 +25,7 @@ def cn_to_int(string: str) -> int | None:
         string: The input string containing Chinese numeral characters.
 
     Returns:
-        The integer value represented by the input string, or None if the string
+        The integer value represented by the input string, or `None` if the string
         is not a valid Chinese numeral.
     """
     if not string:

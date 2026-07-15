@@ -254,7 +254,7 @@ async def save_icon(icon: Any, path: str | None = None) -> str | None:
         path: The relative path to the existing icon file, if any.
 
     Returns:
-        The relative path to the saved icon file, or None if no icon is provided.
+        The relative path to the saved icon file, or `None` if no icon is provided.
     """
     if icon is None:
         return None

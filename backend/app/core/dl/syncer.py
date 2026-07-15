@@ -312,7 +312,7 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
     Returns:
         A tuple of (is_metadata, followed_gid). `is_metadata` is True if the
         result is detected as a metadata-fetching task, and `followed_gid` is
-        the GID of the actual download task if available, or None otherwise.
+        the GID of the actual download task if available, or `None` otherwise.
     """
     metadata = False
     if (

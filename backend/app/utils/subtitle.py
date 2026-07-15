@@ -68,7 +68,7 @@ def _parse_ass_dialogue(payload: str, fields: list[str]) -> _Cue | None:
         fields: The normalized field names from the matching `Format:` line.
 
     Returns:
-        The parsed cue, or None if the dialogue cannot be converted.
+        The parsed cue, or `None` if the dialogue cannot be converted.
     """
     parts = payload.split(",", maxsplit=len(fields) - 1)
     if len(parts) != len(fields):
@@ -90,7 +90,7 @@ def _format_ass_time(value: str) -> str | None:
         value: The ASS/SSA timestamp value.
 
     Returns:
-        The WebVTT timestamp, or None if the value is invalid.
+        The WebVTT timestamp, or `None` if the value is invalid.
     """
     match = _ASS_TIME_RE.match(value.strip())
     if not match:
@@ -147,7 +147,7 @@ def _parse_srt_cue(lines: list[str], time_index: int) -> _Cue | None:
         time_index: The index of the timing line in the cue block.
 
     Returns:
-        The parsed cue, or None if the block cannot be converted.
+        The parsed cue, or `None` if the block cannot be converted.
     """
     if time_index >= len(lines):
         return None
@@ -172,7 +172,7 @@ def _format_srt_time(value: str) -> str | None:
         value: The SubRip timestamp value.
 
     Returns:
-        The WebVTT timestamp, or None if the value is invalid.
+        The WebVTT timestamp, or `None` if the value is invalid.
     """
     match = _SRT_TIME_RE.match(value.strip())
     if not match:

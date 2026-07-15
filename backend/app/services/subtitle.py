@@ -90,7 +90,7 @@ class SubtitleService:
             stream_index: The embedded subtitle stream index.
 
         Returns:
-            The subtitle content and content type, or None if the resource is
+            The subtitle content and content type, or `None` if the resource is
             unsupported.
         """
         path = Path(subtitle_path)
@@ -135,7 +135,7 @@ class SubtitleService:
             video_path: The related video file path.
 
         Returns:
-            The resolved subtitle track, or None if the file is unsupported.
+            The resolved subtitle track, or `None` if the file is unsupported.
         """
         path = Path(subtitle_path)
         subtitle_format = cls._external_subtitle_format(path)
@@ -163,7 +163,7 @@ class SubtitleService:
             subtitle_path: The external subtitle file path.
 
         Returns:
-            The subtitle content and content type, or None if the file is unsupported.
+            The subtitle content and content type, or `None` if the file is unsupported.
         """
         path = Path(subtitle_path)
         subtitle_format = cls._external_subtitle_format(path)
@@ -189,7 +189,7 @@ class SubtitleService:
             path: The subtitle file path.
 
         Returns:
-            The subtitle format, or None if the file is unsupported.
+            The subtitle format, or `None` if the file is unsupported.
         """
         subtitle_format = path.suffix.lstrip(".").lower()
         if path.is_file() and subtitle_format in cls.SUPPORTED_EXTERNAL_FORMATS:
@@ -232,7 +232,7 @@ class SubtitleService:
             label: The readable subtitle label.
 
         Returns:
-            The inferred language marker, or None if it cannot be inferred.
+            The inferred language marker, or `None` if it cannot be inferred.
         """
         normalized = label.strip().replace("_", "-")
         if not normalized:
@@ -283,7 +283,7 @@ class SubtitleService:
             ordinal: The one-based supported subtitle stream ordinal.
 
         Returns:
-            The resolved subtitle track, or None if the stream is unsupported.
+            The resolved subtitle track, or `None` if the stream is unsupported.
         """
         codec = str(stream.get("codec_name") or "").lower()
         if stream.get("codec_type") != "subtitle" or (
@@ -323,7 +323,7 @@ class SubtitleService:
             stream_index: The ffmpeg stream index to extract.
 
         Returns:
-            The WebVTT content and content type, or None if extraction failed.
+            The WebVTT content and content type, or `None` if extraction failed.
         """
         path = Path(video_path)
         if not path.is_file():
@@ -464,7 +464,7 @@ class SubtitleService:
             tags: The ffprobe stream tags.
 
         Returns:
-            The language marker, or None if it cannot be inferred.
+            The language marker, or `None` if it cannot be inferred.
         """
         language = tags.get("language")
         if not isinstance(language, str) or not language.strip():

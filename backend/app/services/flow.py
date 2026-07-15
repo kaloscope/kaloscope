@@ -193,7 +193,7 @@ class FlowTemplateService(BaseService[FlowTemplate], model=FlowTemplate):
             tmpl: The serialized template dict.
 
         Returns:
-            The serialized newest template dict, or None if no newer template exists.
+            The serialized newest template dict, or `None` if no newer template exists.
         """
         newest = (
             await FlowTemplate.filter(
@@ -388,7 +388,7 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
             ids: The list of flow graph IDs to export.
 
         Returns:
-            A bytes object with the zip data, or None if empty.
+            A bytes object with the zip data, or `None` if empty.
         """
         if not ids:
             return None
@@ -404,7 +404,7 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
                 icon: The icon file path.
 
             Returns:
-                A base64 encoded string of the icon file, or None if not found.
+                A base64 encoded string of the icon file, or `None` if not found.
             """
             if not icon:
                 return None

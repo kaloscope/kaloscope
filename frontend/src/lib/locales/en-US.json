@@ -649,6 +649,7 @@
         "loop_continue": "Loop Continue"
       },
       "label": {
+        "http_client": "Client",
         "http_method": "Method",
         "http_url": "URL",
         "http_headers": "Headers",

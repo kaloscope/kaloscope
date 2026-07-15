@@ -6,6 +6,7 @@ from multiprocessing.managers import SyncManager
 from pathlib import Path
 
 import httpx
+from curl_cffi import AsyncSession
 from hishel import AsyncSqliteStorage
 from hishel.httpx import AsyncCacheTransport
 from sanic import Sanic
@@ -248,6 +249,7 @@ async def start_http_client(app: Sanic):
         logging.getLogger("httpcore").setLevel(logging.DEBUG)
     app.ctx.cookies = SQLiteCookieJar(app)
     await app.ctx.cookies.load()
+    # initialize the HTTPX client
     app.ctx.httpx = httpx.AsyncClient(
         http2=True,
         follow_redirects=True,
@@ -257,13 +259,21 @@ async def start_http_client(app: Sanic):
             storage=AsyncSqliteStorage(database_path=_cache_path(app)),
         ),
     )
+    # initialize the curl-cffi client
+    app.ctx.curl_cffi = AsyncSession(
+        allow_redirects=True,
+        cookies=app.ctx.cookies,
+        trust_env=False,
+    )
     logger.debug(_msg(Colors.BLUE, "HTTP client initialized."), _worker(app))
 
 
 async def close_http_client(app: Sanic):
     """Close the HTTP client."""
-    client: httpx.AsyncClient = app.ctx.httpx
-    await client.aclose()
+    httpx_client: httpx.AsyncClient = app.ctx.httpx
+    await httpx_client.aclose()
+    curl_client: AsyncSession = app.ctx.curl_cffi
+    await curl_client.close()
     cookies: SQLiteCookieJar = app.ctx.cookies
     await cookies.save()
     logger.debug(_msg(Colors.YELLOW, "HTTP client closed."), _worker(app))

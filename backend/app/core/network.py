@@ -2,6 +2,7 @@ import asyncio
 import ipaddress
 import time
 from fnmatch import fnmatch
+from urllib.parse import quote
 
 import dns.asyncquery
 import dns.flags
@@ -39,7 +40,7 @@ class DNSCache:
             host: The hostname to look up in the cache.
 
         Returns:
-            The cached IP address if valid, or None if not found / expired.
+            The cached IP address if valid, or `None` if not found / expired.
         """
         entries = self._cache.get(nameserver)
         if entries and (entry := entries.get(host)):
@@ -134,7 +135,7 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
             rules: A list of URLRule objects to check.
 
         Returns:
-            The first matching URLRule, or None if no rules match.
+            The first matching URLRule, or `None` if no rules match.
         """
         for rule in rules:
             # ensure pattern ends with '*' for prefix matching
@@ -153,7 +154,7 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
             resolvers: A list of DNS resolvers to query for the hostname.
 
         Returns:
-            The resolved IP address, or None if no rules match.
+            The resolved IP address, or `None` if no rules match.
         """
         # check cache first, return the first cached result if available
         for resolver in resolvers:
@@ -176,7 +177,7 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
             resolver: The DNS resolver configuration.
 
         Returns:
-            The resolved IP address, or None on failure / DNSSEC validation error.
+            The resolved IP address, or `None` on failure / DNSSEC validation error.
         """
         try:
             query = dns.message.make_query(host, dns.rdatatype.A)
@@ -225,13 +226,7 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
             The response from the proxied request.
         """
 
-        # construct the proxy URL with authentication if needed
-        scheme = "socks5" if proxy.protocol == ProxyProtocol.SOCKS5 else "http"
-        if (username := proxy.username) and (password := proxy.password):
-            password = xor_decrypt(password)
-            proxy_url = f"{scheme}://{username}:{password}@{proxy.host}:{proxy.port}"
-        else:
-            proxy_url = f"{scheme}://{proxy.host}:{proxy.port}"
+        proxy_url = _build_proxy_url(proxy)
 
         # create or reuse the transport for the proxy
         transport = self._proxy_transports.get(proxy_url)
@@ -252,9 +247,56 @@ def ip_address(address: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | 
         address: The string to check.
 
     Returns:
-        An IP address object, or None if the string is not a valid IP address.
+        An IP address object, or `None` if the string is not a valid IP address.
     """
     try:
         return ipaddress.ip_address(address)
     except ValueError:
         return None
+
+
+async def resolve_proxy(url: str) -> str | None:
+    """Resolve the proxy URL from the first matching rule for `url`.
+
+    Args:
+        url: The request URL to match against configured proxy rules.
+
+    Returns:
+        The first matching proxy URL, or `None` if no rule matches.
+    """
+    proxy_rules = (
+        await URLRule.filter(http_proxy=True, proxy_id__not_isnull=True)
+        .select_related("proxy")
+        .order_by("priority")
+    )
+    for rule in proxy_rules:
+        # ensure pattern ends with '*' for prefix matching
+        pattern = p if (p := rule.pattern).endswith("*") else p + "*"
+        if not fnmatch(url, pattern):
+            continue
+        if (proxy := rule.proxy) is None:
+            return None
+        logger.debug(
+            "URL matches pattern '%s', routing via proxy '%s'",
+            rule.pattern,
+            proxy.name,
+        )
+        return _build_proxy_url(proxy)
+    return None
+
+
+def _build_proxy_url(proxy: HTTPProxy) -> str:
+    """Build a URL for `proxy`, including credentials when configured.
+
+    Args:
+        proxy: The proxy configuration to encode.
+
+    Returns:
+        The proxy URL.
+    """
+    scheme = "socks5" if proxy.protocol == ProxyProtocol.SOCKS5 else "http"
+    if (username := proxy.username) and (password := proxy.password):
+        username = quote(username, safe="")
+        password = quote(xor_decrypt(password), safe="")
+        return f"{scheme}://{username}:{password}@{proxy.host}:{proxy.port}"
+    return f"{scheme}://{proxy.host}:{proxy.port}"

@@ -649,6 +649,7 @@
         "loop_continue": "循环继续"
       },
       "label": {
+        "http_client": "客户端",
         "http_method": "请求方法",
         "http_url": "请求地址",
         "http_headers": "请求头",
