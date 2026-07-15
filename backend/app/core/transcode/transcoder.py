@@ -22,6 +22,7 @@ from app.core.transcode.hls import (
 )
 from app.core.transcode.hwaccels.base import (
     HDRType,
+    MediaChapter,
     MediaProbe,
     TranscodeContext,
     classify_hdr,
@@ -288,7 +289,7 @@ async def _probe_hdr10_plus(media_path: str, stream_index: int) -> bool:
     return False
 
 
-async def _probe_media(media_path: str) -> MediaProbe:
+async def probe_media(media_path: str) -> MediaProbe:
     """Probe the container and select its primary video and audio streams.
 
     Args:
@@ -308,7 +309,8 @@ async def _probe_media(media_path: str) -> MediaProbe:
         "quiet",
         "-show_entries",
         (
-            "format=duration:stream=index,codec_type,codec_name,profile,"
+            "format=duration:chapter=id,start_time,end_time:chapter_tags=title:"
+            "stream=index,codec_type,codec_name,profile,"
             "bits_per_sample,bits_per_raw_sample,avg_frame_rate,r_frame_rate,"
             "pix_fmt,width,height,"
             "sample_aspect_ratio,field_order,"
@@ -351,6 +353,33 @@ async def _probe_media(media_path: str) -> MediaProbe:
         if isinstance(raw_duration, (str, int, float)):
             with contextlib.suppress(ValueError, TypeError):
                 duration = float(raw_duration)
+
+    chapters: list[MediaChapter] = []
+    raw_chapters = data.get("chapters")
+    if isinstance(raw_chapters, list):
+        for index, chapter in enumerate(raw_chapters, start=1):
+            if not isinstance(chapter, dict):
+                continue
+            try:
+                start = float(chapter.get("start_time"))
+                end = float(chapter.get("end_time"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0:
+                continue
+            if end <= start:
+                continue
+            raw_id = chapter.get("id")
+            chapter_id = str(raw_id) if isinstance(raw_id, (int, str)) else str(index)
+            tags = chapter.get("tags")
+            raw_title = tags.get("title") if isinstance(tags, dict) else None
+            title = (
+                raw_title.strip()
+                if isinstance(raw_title, str) and raw_title.strip()
+                else f"Chapter {index}"
+            )
+            chapters.append(MediaChapter(chapter_id, title, start, end))
+        chapters.sort(key=lambda chapter: chapter.start)
 
     avg_frame_rate = None
     r_frame_rate = None
@@ -503,6 +532,7 @@ async def _probe_media(media_path: str) -> MediaProbe:
         rotation=rotation,
         field_order=field_order,
         duration=duration,
+        chapters=tuple(chapters),
         avg_frame_rate=avg_frame_rate,
         r_frame_rate=r_frame_rate,
         codec=codec,
@@ -518,45 +548,6 @@ async def _probe_media(media_path: str) -> MediaProbe:
         dovi_bl_present=dovi_bl_present,
         dovi_bl_signal_compatibility_id=dovi_compat_id,
     )
-
-
-async def probe_duration(media_path: str) -> float | None:
-    """Probe the media file duration in seconds via ffprobe.
-
-    Args:
-        media_path: The media file path to probe.
-
-    Returns:
-        Duration in seconds, or `None` if ffprobe exits unsuccessfully or
-        returns a non-numeric duration.
-
-    Raises:
-        OSError: If the ffprobe process cannot be started.
-        UnicodeDecodeError: If ffprobe output is not valid UTF-8.
-    """
-    return (await _probe_media(media_path)).duration
-
-
-async def probe_framerate(media_path: str) -> float | None:
-    """Probe the average framerate of the media's first video stream via ffprobe.
-
-    The framerate is reported by ffprobe as a rational string (e.g. `"30000/1001"`)
-    and is parsed into a float here. It is used to approximate a one-segment GOP
-    for hardware encoders when the input has a constant frame rate.
-
-    Args:
-        media_path: The media file path to probe.
-
-    Returns:
-        Frames per second, or `None` if ffprobe exits unsuccessfully or returns
-        an invalid or non-positive value.
-
-    Raises:
-        OSError: If the ffprobe process cannot be started.
-        UnicodeDecodeError: If ffprobe output is not valid UTF-8.
-    """
-    rate = (await _probe_media(media_path)).avg_frame_rate
-    return float(rate) if rate is not None else None
 
 
 def _require_video_stream(metadata: MediaProbe) -> int:
@@ -638,7 +629,7 @@ async def ensure_transcode(
     try:
         cleanup_stale_hls(out_dir)
 
-        metadata = await _probe_media(media_path)
+        metadata = await probe_media(media_path)
         _require_video_stream(metadata)
         _require_supported_hdr(metadata)
         _require_supported_geometry(metadata, options)

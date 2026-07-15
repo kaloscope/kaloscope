@@ -139,7 +139,7 @@
   import { v4 as uuidv4 } from 'uuid';
   import Player, { Events, SimplePlayer } from 'xgplayer';
   import DefaultPreset from './plugins/preset';
-  import VideoSettings, { formatDanmakus, probeDuration } from './VideoSettings.svelte';
+  import VideoSettings, { formatDanmakus } from './VideoSettings.svelte';
 
   const { width = '100%', height = '100%' }: VideoPlayerOptions = $props();
   // player ID
@@ -295,11 +295,12 @@
     // reset the transcode auto-retry flag so a new video gets its own retry
     transcodeRetriedUrl = null;
 
-    // probe the full duration for transcoded streams before creating the player instance
-    let duration = await probeDuration(url);
+    // probe the media to get the duration and progress dots
+    const { duration, progressDot } = await videoSettings.probeMedia(url);
 
     // if the player is already mounted, just switch the URL
     if (player) {
+      player.getPlugin('progresspreview')?.updateAllDots(progressDot);
       if (options.next) {
         player.playNext({ url, topBar: { title: options.title }, customDuration: duration });
       } else {
@@ -318,6 +319,7 @@
       autoplay: options.autoplay ?? true,
       startTime: options.startTime ?? undefined,
       videoType: options.videoType,
+      progressDot: progressDot,
       customDuration: duration,
       // bind the video settings component to the player config
       settings: videoSettings,

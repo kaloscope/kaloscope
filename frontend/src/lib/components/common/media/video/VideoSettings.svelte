@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { Danmaku, Definition, Resp, Subtitle } from '$lib/types';
+  import type { Danmaku, Definition, MediaProbe, Resp, Subtitle } from '$lib/types';
   import { isWhite } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
   import { v4 as uuidv4 } from 'uuid';
@@ -202,28 +202,6 @@
         };
       });
   }
-
-  /**
-   * Probes the duration of a transcoded video stream.
-   *
-   * @param url - The URL of the transcoded video stream.
-   * @returns The duration in seconds, or undefined if probing failed.
-   */
-  export async function probeDuration(url: IUrl): Promise<number | undefined> {
-    let duration: number | undefined;
-    if (isTranscodedStream(url)) {
-      try {
-        const path = extractStreamPath(url as string);
-        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<{ duration: number }>>();
-        if (resp.data.duration > 0) {
-          duration = resp.data.duration;
-        }
-      } catch {
-        // probe failed, just ignore the error and let the player handle it
-      }
-    }
-    return duration;
-  }
 </script>
 
 <script lang="ts">
@@ -294,6 +272,48 @@
    * Get the current landscape mode setting.
    */
   export const landscapeMode = () => $video?.landscapeMode;
+
+  /**
+   * Probe playback metadata for a local media stream.
+   *
+   * @param url - The media stream URL.
+   * @returns The duration and progress markers used by the player.
+   */
+  export async function probeMedia(url: IUrl) {
+    let metadata: MediaProbe | undefined;
+    if (typeof url === 'string' && url.startsWith(MEDIA_STREAM_PREFIX)) {
+      try {
+        const path = extractStreamPath(url);
+        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<MediaProbe>>();
+        metadata = resp.data;
+      } catch {
+        // continue playback if the probe failed
+      }
+    }
+
+    return {
+      duration: isTranscodedStream(url) ? metadata?.duration : undefined,
+      progressDot: (metadata?.chapters ?? []).map((chapter) => ({
+        id: chapter.id,
+        text: chapter.title,
+        time: chapter.start,
+        duration: 0
+      }))
+    };
+  }
+
+  /**
+   * Probe the full duration required by server-transcoded HLS playback.
+   *
+   * @param url - The media stream URL.
+   * @returns The duration of the media stream in seconds.
+   */
+  async function probeDuration(url: IUrl): Promise<number | undefined> {
+    if (!isTranscodedStream(url)) {
+      return;
+    }
+    return (await probeMedia(url)).duration;
+  }
 
   /**
    * Toggle the rotation direction of the modal.

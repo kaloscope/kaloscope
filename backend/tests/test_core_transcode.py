@@ -665,7 +665,7 @@ def test_probe_media(monkeypatch):
     monkeypatch.setattr(transcoder, "_ffprobe", AsyncMock(return_value="ffprobe"))
     monkeypatch.setattr(transcoder.asyncio, "create_subprocess_exec", create)
 
-    result = asyncio.run(transcoder._probe_media("input.mkv"))
+    result = asyncio.run(transcoder.probe_media("input.mkv"))
 
     assert result == MediaProbe(
         video_stream_index=2,
@@ -696,7 +696,8 @@ def test_probe_media(monkeypatch):
     assert await_args is not None
     args = await_args.args
     assert (
-        "format=duration:stream=index,codec_type,codec_name,profile,"
+        "format=duration:chapter=id,start_time,end_time:chapter_tags=title:"
+        "stream=index,codec_type,codec_name,profile,"
         "bits_per_sample,bits_per_raw_sample,avg_frame_rate,r_frame_rate,"
         "pix_fmt,width,height,"
         "sample_aspect_ratio,field_order,"
@@ -715,6 +716,54 @@ def test_probe_media(monkeypatch):
         frame_args[frame_args.index("-show_entries") + 1]
         == "frame=stream_index:frame_side_data=side_data_type"
     )
+
+
+def test_probe_media_chapters(monkeypatch):
+    proc = SimpleNamespace(
+        returncode=0,
+        communicate=AsyncMock(
+            return_value=(
+                b'{"chapters":['
+                b'{"id":9012216534194587836,"start_time":"202.994000",'
+                b'"end_time":"587.045000","tags":{"title":"Episode"}},'
+                b'{"id":1734728195631322526,"start_time":"0.000000",'
+                b'"end_time":"113.030000","tags":{"title":"Opening"}}],'
+                b'"format":{"duration":"587.045000"}}',
+                b"",
+            )
+        ),
+    )
+    monkeypatch.setattr(transcoder, "_ffprobe", AsyncMock(return_value="ffprobe"))
+    monkeypatch.setattr(
+        transcoder.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=proc),
+    )
+
+    result = asyncio.run(transcoder.probe_media("input.mkv"))
+
+    assert [
+        {
+            "id": chapter.id,
+            "title": chapter.title,
+            "start": chapter.start,
+            "end": chapter.end,
+        }
+        for chapter in result.chapters
+    ] == [
+        {
+            "id": "1734728195631322526",
+            "title": "Opening",
+            "start": 0.0,
+            "end": 113.03,
+        },
+        {
+            "id": "9012216534194587836",
+            "title": "Episode",
+            "start": 202.994,
+            "end": 587.045,
+        },
+    ]
 
 
 @pytest.mark.parametrize(
@@ -808,7 +857,7 @@ def test_probe_bit_depth_precedence(monkeypatch, raw_fields, expected):
         AsyncMock(return_value=proc),
     )
 
-    assert asyncio.run(transcoder._probe_media("input.mkv")).bit_depth == expected
+    assert asyncio.run(transcoder.probe_media("input.mkv")).bit_depth == expected
 
 
 def test_probe_hdr10_plus(monkeypatch):
@@ -902,7 +951,7 @@ def test_hdr10_plus_non_pq(monkeypatch):
     )
     monkeypatch.setattr(transcoder, "_probe_hdr10_plus", hdr10_plus_probe)
 
-    result = asyncio.run(transcoder._probe_media("input.mkv"))
+    result = asyncio.run(transcoder.probe_media("input.mkv"))
 
     assert result.hdr10_plus is False
     hdr10_plus_probe.assert_not_awaited()
@@ -939,7 +988,7 @@ def test_probe_media_invalid(monkeypatch, returncode, stdout, expected):
         AsyncMock(return_value=proc),
     )
 
-    assert asyncio.run(transcoder._probe_media("input.mkv")) == expected
+    assert asyncio.run(transcoder.probe_media("input.mkv")) == expected
 
 
 def test_probe_timeout(monkeypatch):
@@ -956,7 +1005,7 @@ def test_probe_timeout(monkeypatch):
         AsyncMock(return_value=proc),
     )
 
-    assert asyncio.run(transcoder._probe_media("input.mkv")) == MediaProbe()
+    assert asyncio.run(transcoder.probe_media("input.mkv")) == MediaProbe()
     proc.kill.assert_called_once_with()
     assert proc.communicate.await_count == 2
 
@@ -2712,7 +2761,7 @@ def test_setup_failure_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr(transcoder, "cleanup_stale_hls", Mock())
     monkeypatch.setattr(
         transcoder,
-        "_probe_media",
+        "probe_media",
         AsyncMock(
             return_value=MediaProbe(
                 video_stream_index=0,
@@ -2761,7 +2810,7 @@ def test_preflight_failure_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(transcoder, "cleanup_stale_hls", Mock())
     monkeypatch.setattr(
         transcoder,
-        "_probe_media",
+        "probe_media",
         AsyncMock(
             return_value=MediaProbe(
                 video_stream_index=0,
@@ -2838,7 +2887,7 @@ def test_hardware_failure_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(transcoder, "is_complete", Mock(return_value=False))
     monkeypatch.setattr(transcoder, "_acquire_lock", lambda _path: lock)
     monkeypatch.setattr(transcoder, "cleanup_stale_hls", Mock())
-    monkeypatch.setattr(transcoder, "_probe_media", AsyncMock(return_value=metadata))
+    monkeypatch.setattr(transcoder, "probe_media", AsyncMock(return_value=metadata))
     monkeypatch.setattr(
         transcoder,
         "_prepare_hardware",
@@ -3016,7 +3065,7 @@ def test_startup_failure_detail(monkeypatch, tmp_path):
     monkeypatch.setattr(transcoder, "cleanup_stale_hls", Mock())
     monkeypatch.setattr(
         transcoder,
-        "_probe_media",
+        "probe_media",
         AsyncMock(return_value=MediaProbe(video_stream_index=0, duration=60.0)),
     )
     monkeypatch.setattr(
@@ -3081,7 +3130,7 @@ def test_timeout_keeps_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(transcoder, "_acquire_lock", lambda _path: lock)
     monkeypatch.setattr(
         transcoder,
-        "_probe_media",
+        "probe_media",
         AsyncMock(
             return_value=MediaProbe(
                 video_stream_index=0,

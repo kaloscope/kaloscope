@@ -1,7 +1,6 @@
-import { api } from '$lib/api';
 import { icons, iconToSVG } from '$lib/icons';
-import type { Chapter, Resp } from '$lib/types';
-import { extractStreamPath, isTranscodedStream } from '$lib/utils';
+import type { Chapter } from '$lib/types';
+import { isTranscodedStream } from '$lib/utils';
 import OptionList from 'xgplayer/es/plugins/common/optionList';
 import OptionsIcon from 'xgplayer/es/plugins/common/optionsIcon';
 import './index.css';
@@ -72,18 +71,8 @@ export default class Chapters extends OptionsIcon {
   };
 
   private async playNext(url: string, title: string | number | undefined) {
-    let duration: number | undefined;
-    if (isTranscodedStream(url)) {
-      try {
-        const path = extractStreamPath(url);
-        const resp = await api.get('media/probe', { searchParams: { path } }).json<Resp<{ duration: number }>>();
-        if (resp.data.duration > 0) {
-          duration = resp.data.duration;
-        }
-      } catch {
-        // probe failed
-      }
-    }
+    const { duration, progressDot } = await this.player.config.settings.probeMedia(url);
+    this.player.getPlugin('progresspreview')?.updateAllDots(progressDot);
     this.player.playNext({ url, topBar: { title }, customDuration: duration });
   }
 

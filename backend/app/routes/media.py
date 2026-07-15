@@ -31,7 +31,7 @@ from app.core.transcode import (
     ensure_transcode,
     list_tasks,
     output_dir,
-    probe_duration,
+    probe_media,
     read_m3u8,
     stop_tasks,
 )
@@ -206,13 +206,26 @@ async def get_item_title(_, query: MediaResource) -> HTTPResponse:
 
 @media.get("/probe")
 @validate(query=MediaResource)
-async def probe_media_duration(_, query: MediaResource) -> HTTPResponse:
-    """Probe the media file duration via ffprobe."""
+async def probe_media_metadata(_, query: MediaResource) -> HTTPResponse:
+    """Probe media duration and embedded chapters via ffprobe."""
     path = query.path
     if not await MediaItem.filter(path=path).exists():
         raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
-    duration = await probe_duration(path)
-    return json({"duration": duration or 0})
+    metadata = await probe_media(path)
+    return json(
+        {
+            "duration": metadata.duration or 0,
+            "chapters": [
+                {
+                    "id": chapter.id,
+                    "title": chapter.title,
+                    "start": chapter.start,
+                    "end": chapter.end,
+                }
+                for chapter in metadata.chapters
+            ],
+        }
+    )
 
 
 @media.get("/stream")

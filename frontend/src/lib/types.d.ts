@@ -16,7 +16,7 @@ import type { HandleType, Position } from '@xyflow/system';
 import type { IconifyIcon } from 'iconify-icon';
 
 /**
- * Make all properties in T optional.
+ * Makes every property in `T` optional and nullable.
  */
 export type Optional<T> = {
   [P in keyof T]?: T[P] | null;
@@ -49,17 +49,17 @@ export interface Page<T> {
 }
 
 /**
- * The type of the scroll position.
+ * Options that control scrolling behavior.
  */
 export type ScrollPosition = ScrollToOptions & { panel?: boolean };
 
 /**
- * The type of the select option value.
+ * A value accepted by a selectable option.
  */
 export type OptionValue = string | number | boolean | null | undefined;
 
 /**
- * The type of the select option.
+ * A selectable option presented to the user.
  */
 export type Option = {
   value: OptionValue;
@@ -68,7 +68,7 @@ export type Option = {
 };
 
 /**
- * The type of the navigation item.
+ * An application navigation item.
  */
 export type Nav = {
   title: string;
@@ -80,7 +80,7 @@ export type Nav = {
 };
 
 /**
- * The type of the menu route item.
+ * A route entry displayed in a menu.
  */
 export type MenuRoute = {
   title: string;
@@ -91,7 +91,7 @@ export type MenuRoute = {
 };
 
 /**
- * The type of the menu.
+ * A navigation menu.
  */
 export type Menu = {
   title: string;
@@ -99,12 +99,12 @@ export type Menu = {
 };
 
 /**
- * The type of the signpost item.
+ * A signpost displayed in the interface.
  */
 export type Signpost = string | { title: string; translate?: boolean };
 
 /**
- * The type of the token.
+ * An authentication result for the current user.
  */
 export type Token = {
   token: string;
@@ -112,7 +112,7 @@ export type Token = {
 };
 
 /**
- * The type of the user.
+ * A user account recognized by the application.
  */
 export type User = {
   id: number;
@@ -140,7 +140,7 @@ export type User = {
 };
 
 /**
- * The type of the notification.
+ * A notification delivered to a user.
  */
 type Notification = {
   id: number;
@@ -151,7 +151,7 @@ type Notification = {
 };
 
 /**
- * The type of the file path.
+ * A file-system entry used by the path browser.
  */
 export type Path = {
   name: string;
@@ -167,7 +167,7 @@ export type Path = {
 };
 
 /**
- * The type of the file path statistics.
+ * Statistics reported for a file-system path.
  */
 export type PathStats = {
   name: string;
@@ -182,7 +182,7 @@ export type PathStats = {
 };
 
 /**
- * The type of the global variable.
+ * A globally available application variable.
  */
 export type GlobalVariable = {
   id: number;
@@ -195,7 +195,7 @@ export type GlobalVariable = {
 };
 
 /**
- * The type of the URL rule.
+ * A URL-matching rule for DNS and proxy routing.
  */
 export type URLRule = {
   id: number;
@@ -210,7 +210,7 @@ export type URLRule = {
 };
 
 /**
- * The type of the DNS resolver.
+ * A secure DNS resolver configuration.
  */
 export type DNSResolver = {
   id: number;
@@ -223,7 +223,7 @@ export type DNSResolver = {
 };
 
 /**
- * The type of the HTTP proxy server.
+ * An HTTP or SOCKS5 proxy configuration.
  */
 export type HTTPProxy = {
   id: number;
@@ -238,7 +238,7 @@ export type HTTPProxy = {
 };
 
 /**
- * The type of the media library.
+ * A media library managed by the application.
  */
 export type MediaLib = {
   id: number;
@@ -254,7 +254,7 @@ export type MediaLib = {
 };
 
 /**
- * The type of the media item.
+ * A file or directory indexed in a media library.
  */
 export type MediaItem = {
   id: number;
@@ -284,7 +284,7 @@ export type MediaItem = {
 };
 
 /**
- * The type of the actor.
+ * An actor credited in media metadata.
  */
 export type Actor = {
   name: string | null;
@@ -293,7 +293,7 @@ export type Actor = {
 };
 
 /**
- * The type of the media metadata.
+ * Descriptive metadata associated with a media item.
  */
 export type MediaMeta = {
   nfo_path: string;
@@ -323,7 +323,25 @@ export type MediaMeta = {
 };
 
 /**
- * The type of the downloader.
+ * An embedded chapter in a media container.
+ */
+export type MediaChapter = {
+  id: string;
+  title: string;
+  start: number;
+  end: number;
+};
+
+/**
+ * Metadata returned by the local media probe endpoint.
+ */
+export type MediaProbe = {
+  duration: number;
+  chapters: MediaChapter[];
+};
+
+/**
+ * A download service configured in the application.
  */
 export type Downloader = {
   id: number;
@@ -340,7 +358,7 @@ export type Downloader = {
 };
 
 /**
- * The type of the download directory.
+ * A destination directory exposed by a downloader.
  */
 export type DownloadDir = {
   path: string;
@@ -348,7 +366,7 @@ export type DownloadDir = {
 };
 
 /**
- * The type of the download task.
+ * A task managed by a download service.
  */
 export type DownloadTask = {
   id: number;
@@ -381,7 +399,7 @@ export type DownloadTask = {
 };
 
 /**
- * The type of the download plan.
+ * A plan for scheduling automated downloads.
  */
 export type DownloadPlan = {
   id: number;
@@ -410,7 +428,7 @@ export type DownloadPlan = {
 };
 
 /**
- * The type of the flow repository.
+ * A repository that provides workflow templates.
  */
 export type FlowRepo = {
   id: number;
@@ -426,7 +444,7 @@ export type FlowRepo = {
 };
 
 /**
- * The type of the flow template.
+ * A workflow template published by a repository.
  */
 export type FlowTemplate = {
   id: number;
@@ -448,7 +466,7 @@ export type FlowTemplate = {
 };
 
 /**
- * The type of the flow graph.
+ * A graph that defines an executable workflow.
  */
 export type FlowGraph = {
   id: number;
@@ -476,7 +494,7 @@ export type FlowGraph = {
 };
 
 /**
- * The type of the flow graph context.
+ * A validator registry shared by the workflow graph editor.
  */
 export type FlowGraphContext = {
   validators: Set<() => boolean>;
@@ -484,17 +502,7 @@ export type FlowGraphContext = {
 };
 
 /**
- * The type of the flow execution log.
- */
-export type FlowLog = {
-  at: string;
-  type: string;
-  data: Record<string, any> | null; // eslint-disable-line
-  document: any; // eslint-disable-line
-};
-
-/**
- * The type of the flow trigger.
+ * A workflow attached as a trigger.
  */
 export type FlowTrigger = {
   id?: number | null;
@@ -504,7 +512,17 @@ export type FlowTrigger = {
 };
 
 /**
- * The type of the flow job.
+ * A log entry produced during workflow execution.
+ */
+export type FlowLog = {
+  at: string;
+  type: string;
+  data: Record<string, any> | null; // eslint-disable-line
+  document: any; // eslint-disable-line
+};
+
+/**
+ * A scheduled or repeatable workflow job.
  */
 export type FlowJob = {
   id: number;
@@ -526,7 +544,7 @@ export type FlowJob = {
 };
 
 /**
- * The type of the node handle.
+ * A connection handle on a workflow node.
  */
 export type Handle = {
   id: string;
@@ -538,7 +556,7 @@ export type Handle = {
 };
 
 /**
- * The type of the node field.
+ * A configurable field in a workflow node schema.
  */
 export type Field = {
   id: string;
@@ -551,7 +569,7 @@ export type Field = {
 };
 
 /**
- * The type of the node schema.
+ * The schema that defines a workflow node type.
  */
 export type NodeSchema = {
   node_type: string;
@@ -564,7 +582,7 @@ export type NodeSchema = {
 };
 
 /**
- * The type of the resource chapter.
+ * A chapter or episode exposed by a resource.
  */
 export type Chapter = {
   id?: string | null;
@@ -573,14 +591,14 @@ export type Chapter = {
   volume?: string | null;
 };
 
-/** Group of chapters keyed by volume name. */
+/** A collection of related resource chapters. */
 export type ChapterGroup = {
   volume: string | null;
   chapters: Chapter[];
 };
 
 /**
- * The type of the video definition.
+ * A playable definition of a video resource.
  */
 export type Definition = {
   url: string;
@@ -588,7 +606,7 @@ export type Definition = {
 };
 
 /**
- * The type of the danmaku.
+ * A timed danmaku comment.
  */
 export type Danmaku = {
   id?: string | null;
@@ -600,7 +618,7 @@ export type Danmaku = {
 };
 
 /**
- * The type of the subtitle track.
+ * An external or embedded subtitle track.
  */
 export type Subtitle = {
   id: string;
@@ -612,13 +630,13 @@ export type Subtitle = {
 };
 
 /**
- * The type of the view mode.
+ * A supported resource display mode.
  */
 export type ViewMode = 'table' | 'grid';
 export type ViewModes = [ViewMode, ...ViewMode[]];
 
 /**
- * The type of the websearch result.
+ * A resource returned by an indexer workflow.
  */
 export type Resource = Optional<{
   id: string;
@@ -645,7 +663,7 @@ export type Resource = Optional<{
 }>;
 
 /**
- * The type of the favorite resource.
+ * A resource saved to a user's favorites.
  */
 export type Favorite = {
   id: number;
@@ -659,7 +677,7 @@ export type Favorite = {
 };
 
 /**
- * The type of the search filter.
+ * A search filter configuration supplied by an indexer.
  */
 export type Filter = {
   type:
@@ -679,12 +697,12 @@ export type Filter = {
 };
 
 /**
- * The type of the indexer authentication.
+ * Authentication metadata for an indexer.
  */
 export type IndexerAuth = { name?: string | null } | null;
 
 /**
- * The type of the indexer configuration.
+ * Configuration that controls an indexer's behavior.
  */
 export type IndexerConfig = Optional<{
   auth: Optional<{
@@ -732,7 +750,7 @@ export type IndexerConfig = Optional<{
 }>;
 
 /**
- * The type of the global config.
+ * A persisted global configuration entry.
  */
 export type GlobalConfig = {
   id: number;
@@ -743,14 +761,14 @@ export type GlobalConfig = {
 };
 
 /**
- * Supported hardware acceleration types for real-time transcoding.
+ * A hardware acceleration backend supported by real-time transcoding.
  */
 export type HWAccelType = 'qsv' | 'vaapi' | 'nvenc' | 'videotoolbox';
 export type TranscodeQuality = 'low' | 'medium' | 'high';
 export type TranscodeResolution = 'original' | '1080p' | '720p' | '480p';
 
 /**
- * Transcode options for media streaming.
+ * Options that control real-time media transcoding.
  */
 export type TranscodeOptions = {
   hwaccel: HWAccelType | null;
@@ -759,7 +777,7 @@ export type TranscodeOptions = {
 };
 
 /**
- * The type of a transcode task shown in system monitoring.
+ * A transcoding task displayed in system monitoring.
  */
 export type TranscodeTask = {
   id: string;
@@ -786,12 +804,12 @@ export type TranscodeTask = {
 };
 
 /**
- * Supported severity levels for system log monitoring.
+ * A severity level used by system log monitoring.
  */
 export type SystemLogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
 /**
- * A compact system log record delivered through the monitor stream.
+ * A compact log record delivered through the system monitor stream.
  */
 export type SystemLog = {
   id: number;
@@ -804,7 +822,7 @@ export type SystemLog = {
 };
 
 /**
- * Service-wide system log monitor state.
+ * The service-wide state of system log monitoring.
  */
 export type SystemLogState = {
   paused: boolean;

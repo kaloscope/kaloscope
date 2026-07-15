@@ -29,6 +29,16 @@ class HDRType(StrEnum):
 
 
 @dataclass(frozen=True)
+class MediaChapter:
+    """A seekable chapter embedded in a media container."""
+
+    id: str
+    title: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
 class MediaProbe:
     """Selected stream indexes and metadata probed from a media container."""
 
@@ -40,6 +50,7 @@ class MediaProbe:
     rotation: int | None = None
     field_order: str | None = None
     duration: float | None = None
+    chapters: tuple[MediaChapter, ...] = ()
     avg_frame_rate: Fraction | None = None
     r_frame_rate: Fraction | None = None
     codec: str | None = None

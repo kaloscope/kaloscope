@@ -27,8 +27,7 @@ from app.core.transcode.tasks import (
 )
 from app.core.transcode.transcoder import (
     ensure_transcode,
-    probe_duration,
-    probe_framerate,
+    probe_media,
 )
 
 __all__ = [
@@ -50,8 +49,7 @@ __all__ = [
     "output_dir",
     "output_stats",
     "parse_profile",
-    "probe_duration",
-    "probe_framerate",
+    "probe_media",
     "read_m3u8",
     "register_task",
     "scan_outputs",
