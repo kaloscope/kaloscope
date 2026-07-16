@@ -1,7 +1,9 @@
 <script lang="ts" module>
+  import { persisted } from '$lib/stores';
   import type { Danmaku, Definition, MediaProbe, Resp, Subtitle } from '$lib/types';
   import { isWhite } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
+  import { get } from 'svelte/store';
   import { v4 as uuidv4 } from 'uuid';
   import type Player from 'xgplayer';
   import type { IUrl } from 'xgplayer/es/defaultConfig';
@@ -69,7 +71,12 @@
     opacity: number;
     fontSize: number;
     speed: number;
+    merge?: boolean;
+    blockPattern?: string;
   };
+
+  const DANMAKU_MERGE_WINDOW = 10_000;
+  const DANMAKU_MERGE_MIN_COUNT = 2;
 
   const danmaku = persisted<DanmakuSettings>('danmaku', {
     enabled: true,
@@ -77,7 +84,9 @@
     area: 75,
     opacity: 50,
     fontSize: 20,
-    speed: 50
+    speed: 50,
+    merge: false,
+    blockPattern: ''
   });
 
   type DanmakuMeta = {
@@ -165,12 +174,14 @@
    * @param danmakus - The list of video comments.
    * @param container - The danmaku container element.
    * @param direction - The danmaku direction.
+   * @param settings - The persisted filtering settings.
    * @returns The formatted danmakus.
    */
   export function formatDanmakus(
     danmakus: Danmaku[] | null | undefined,
     container?: HTMLDivElement,
-    direction?: 'r2l' | 'b2t'
+    direction?: 'r2l' | 'b2t',
+    settings: DanmakuSettings | null = get(danmaku)
   ) {
     if (!danmakus || danmakus.length === 0) {
       return [];
@@ -185,22 +196,50 @@
       defaultDuration = Math.max(5000, Math.min(10000, duration));
     }
 
+    let blockPattern: RegExp | null = null;
+    const pattern = settings?.blockPattern?.trim();
+    if (pattern) {
+      try {
+        blockPattern = new RegExp(pattern, 'iu');
+      } catch {
+        // ignore invalid expressions while the user is editing the setting
+      }
+    }
+
+    let comments = danmakus.filter((danmaku) => danmaku.text && !blockPattern?.test(danmaku.text));
+    if (settings?.merge) {
+      const groups = new Map<string, { comment: Danmaku; count: number }>();
+      for (const comment of comments) {
+        const window = Math.floor((comment.start ?? 0) / DANMAKU_MERGE_WINDOW);
+        const key = `${window}:${comment.text}`;
+        const group = groups.get(key);
+        if (group) {
+          group.count += 1;
+        } else {
+          groups.set(key, { comment, count: 1 });
+        }
+      }
+
+      comments = [...groups.values()].map(({ comment, count }) => ({
+        ...comment,
+        text: count >= DANMAKU_MERGE_MIN_COUNT ? `${comment.text} X${count}` : comment.text
+      }));
+    }
+
     // https://github.com/bytedance/danmu.js
-    return danmakus
-      .filter((danmaku) => danmaku.text)
-      .map(({ id, text, start, duration, mode, color }) => {
-        return {
-          id: id || uuidv4(), // unique id
-          txt: text, // comment text
-          start: start || 0, // start time in milliseconds
-          duration: duration || defaultDuration, // duration in milliseconds
-          mode: mode || 'scroll', // display mode: 'scroll', 'top', 'bottom'
-          color: !!color && !isWhite(color), // mark the danmaku as colored
-          style: {
-            color: color || '#fff' // comment color
-          }
-        };
-      });
+    return comments.map(({ id, text, start, duration, mode, color }) => {
+      return {
+        id: id || uuidv4(), // unique id
+        txt: text, // comment text
+        start: start || 0, // start time in milliseconds
+        duration: duration || defaultDuration, // duration in milliseconds
+        mode: mode || 'scroll', // display mode: 'scroll', 'top', 'bottom'
+        color: !!color && !isWhite(color), // mark the danmaku as colored
+        style: {
+          color: color || '#fff' // comment color
+        }
+      };
+    });
   }
 </script>
 
@@ -212,7 +251,6 @@
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { persisted } from '$lib/stores';
   import { extractStreamPath, isTranscodedStream, sniffer } from '$lib/utils';
   import { tick } from 'svelte';
   import { fade } from 'svelte/transition';
@@ -1070,6 +1108,14 @@
               danmakuPlugin.danmujs?.setPlayRate('scroll', value);
             }}
           />
+        </div>
+        <div>
+          {@render optionLabel($_('media.danmaku.merge'), $_('media.danmaku.merge_tip'))}
+          <input type="checkbox" class="toggle" bind:checked={$danmaku.merge} />
+        </div>
+        <div class="flex-col items-start! gap-1!">
+          {@render optionLabel($_('media.danmaku.block_pattern'), $_('media.danmaku.block_pattern_tip'))}
+          <input class="input w-full" bind:value={$danmaku.blockPattern} placeholder={'^\\d+$|^\\p{P}+$'} />
         </div>
       {/if}
     </div>

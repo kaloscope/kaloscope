@@ -458,6 +458,10 @@
       "opacity": "不透明度",
       "font_size": "弹幕字号",
       "block": "屏蔽类型",
+      "merge": "合并重复",
+      "merge_tip": "合并内容相同的弹幕。",
+      "block_pattern": "正则过滤",
+      "block_pattern_tip": "屏蔽匹配正则表达式的弹幕。",
       "mode": {
         "scroll": "滚动",
         "top": "顶部",

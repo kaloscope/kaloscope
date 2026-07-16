@@ -458,6 +458,10 @@
       "opacity": "Opacity",
       "font_size": "Font Size",
       "block": "Block",
+      "merge": "Merge",
+      "merge_tip": "Merge comments with identical content.",
+      "block_pattern": "Regex Filter",
+      "block_pattern_tip": "Block comments matching the regular expression.",
       "mode": {
         "scroll": "Scroll",
         "top": "Top",
