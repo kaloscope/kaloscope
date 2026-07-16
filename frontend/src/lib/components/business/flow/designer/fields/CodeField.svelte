@@ -109,7 +109,7 @@
 </script>
 
 {#if field.collapse}
-  <fieldset class="collapse-arrow collapse border">
+  <fieldset class="collapse-arrow collapse overflow-hidden border">
     <input type="checkbox" />
     <div class="collapse-title bg-base-150 py-2 text-base [&:after]:top-[1.4rem]!">
       {$label(field.label)}

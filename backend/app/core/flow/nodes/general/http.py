@@ -34,7 +34,7 @@ _IMPERSONATION_HEADERS = {
 class HTTPNode(Node):
     client = SelectField(
         required=True,
-        options={"httpx": "httpx", "curl-cffi": "curl-cffi"},
+        options={"httpx": "httpx", "curl_cffi": "curl_cffi"},
         default="httpx",
     )
     method = SelectField(
@@ -49,10 +49,11 @@ class HTTPNode(Node):
             "OPTIONS": "OPTIONS",
         },
         default="GET",
+        span=20,
     )
-    url = URLField(required=True, maxlength=1024)
+    url = URLField(required=True, maxlength=1024, span=80)
     headers = KVPairsField(placeholder=("key", "value"))
-    body = CodeField(language="jinja2", width="32rem")
+    body = CodeField(language="jinja2", width="32rem", collapse=True)
     ___ = DividerField("response")
     formatter = CodeField(
         "formatter",
@@ -115,8 +116,8 @@ class HTTPNode(Node):
         # make the request
         app_ctx = Sanic.get_app().ctx
         try:
-            if cls.client.extract(node_data) == "curl-cffi":
-                # use curl-cffi client
+            if cls.client.extract(node_data) == "curl_cffi":
+                # use curl_cffi client
                 curl_client: AsyncSession = app_ctx.curl_cffi
                 response = await curl_client.request(
                     method,
@@ -135,7 +136,7 @@ class HTTPNode(Node):
                     impersonate="chrome",
                 )
             else:
-                # use httpx client
+                # use HTTPX client
                 httpx_client: httpx.AsyncClient = app_ctx.httpx
                 response = await httpx_client.request(
                     method,

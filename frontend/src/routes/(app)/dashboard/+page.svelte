@@ -316,7 +316,7 @@
           <ul class="history-list">
             {#each searches as item (item.id)}
               <li
-                class="group history-list-item transition-colors p-3 pr-10 max-sm:w-[min(20rem,85vw)]"
+                class="group history-list-item p-3 pr-10 transition-colors max-sm:w-[min(20rem,85vw)]"
                 animate:flip={{ duration: 200 }}
               >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -370,7 +370,7 @@
               {@const media = item.media}
               {@const parent = media?.parent}
               <li
-                class="group history-list-item transition-colors p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,85vw)]"
+                class="group history-list-item p-2 pr-10 pb-2.5 transition-colors max-sm:w-[min(20rem,85vw)]"
                 animate:flip={{ duration: 200 }}
               >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -428,7 +428,7 @@
         {board.name}
       </span>
       {#if board.loading}
-        <span class="loading loading-sm loading-spinner mx-1.5"></span>
+        <span class="loading mx-1.5 loading-sm loading-spinner"></span>
       {:else if board.resources.length > 0}
         <ViewSwitcher modes={board.viewModes} bind:mode={board.viewMode} />
       {/if}

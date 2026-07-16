@@ -580,7 +580,7 @@
     />
     <div class="-mt-2.5 grid grid-cols-2 gap-1.5">
       <div>
-        <label class="input input-sm w-full gap-3 rounded-t-box rounded-b-none ps-2">
+        <label class="input w-full gap-3 rounded-t-box rounded-b-none ps-2 input-sm">
           <iconify-icon icon={icons.bracesVariable} width="1rem"></iconify-icon>
           <input
             type="text"

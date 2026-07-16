@@ -234,7 +234,7 @@
         {#if task.state === 'running'}
           <progress class="progress progress-success" value={task.progress || undefined} max="100"></progress>
         {:else if task.state === 'finished'}
-          <progress class="progress opacity-50 progress-success" value={task.progress || 100} max="100"></progress>
+          <progress class="progress progress-success opacity-50" value={task.progress || 100} max="100"></progress>
         {:else}
           <progress class="progress opacity-50" value={task.progress || 0} max="100"></progress>
         {/if}

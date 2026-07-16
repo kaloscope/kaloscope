@@ -182,7 +182,7 @@
     <Cell>
       <div class="flex w-full flex-col gap-2 pr-2">
         <div class="flex items-center">
-          <span class="text-sm min-w-0 wrap-break-word">{task.name}</span>
+          <span class="min-w-0 text-sm wrap-break-word">{task.name}</span>
         </div>
         <div class="flex justify-between gap-2 text-xs opacity-50">
           <span>{task.ratio.slice(0, -6)}</span>

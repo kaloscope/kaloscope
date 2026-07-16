@@ -359,27 +359,27 @@
       <!-- interval and batch limit -->
       <Label required>{$_('field.interval')}</Label>
       <div class="flex gap-2">
-        <input class="input input-sm w-1/2" bind:value={interval_num} {...schema.interval_num} />
+        <input class="input w-1/2 input-sm" bind:value={interval_num} {...schema.interval_num} />
         <Select disabled options={[{ value: 'hours', label: $_('duration.hours') }]} class="w-1/2 select-sm" />
       </div>
       <div class="flex min-w-0 gap-2 *:min-w-0">
         <div class="w-1/2 space-y-1.5">
           <Label>{$_('field.interval_start')}</Label>
-          <input class="input input-sm w-full" bind:value={interval_start} {...schema.interval_start} />
+          <input class="input w-full input-sm" bind:value={interval_start} {...schema.interval_start} />
         </div>
         <div class="w-1/2 space-y-1.5">
           <Label>{$_('field.interval_end')}</Label>
-          <input class="input input-sm w-full" bind:value={interval_end} {...schema.interval_end} />
+          <input class="input w-full input-sm" bind:value={interval_end} {...schema.interval_end} />
         </div>
       </div>
       <div class="flex gap-2">
         <div class="w-1/2 space-y-1.5">
           <Label required>{$_('field.batch_limit')}</Label>
-          <input class="input input-sm w-full" bind:value={batch_limit} {...schema.batch_limit} />
+          <input class="input w-full input-sm" bind:value={batch_limit} {...schema.batch_limit} />
         </div>
         <div class="w-1/2 space-y-1.5">
           <Label>{$_('field.total_limit')}</Label>
-          <input class="input input-sm w-full" bind:value={total_limit} {...schema.total_limit} />
+          <input class="input w-full input-sm" bind:value={total_limit} {...schema.total_limit} />
         </div>
       </div>
 
@@ -403,7 +403,7 @@
           {#if directory}
             <button
               type="button"
-              class="input input-sm w-full cursor-pointer"
+              class="input w-full cursor-pointer input-sm"
               onclick={() => fileTree.showModal(directory?.path)}
             >
               <iconify-icon icon={icons.folder} width="1.5rem" class="opacity-50"></iconify-icon>
@@ -417,7 +417,7 @@
               <span class="italic-text max-sm:hidden">{directory.free}</span>
             </button>
           {:else}
-            <label class="input input-sm w-full">
+            <label class="input w-full input-sm">
               <iconify-icon icon={icons.folder} width="1.5rem" class="opacity-50"></iconify-icon>
               <input type="text" class="grow" bind:value={dir} />
             </label>
@@ -433,7 +433,7 @@
           ...mediaLibs.map((lib) => ({ value: lib.id, label: lib.name }))
         ]}
         bind:value={transfer_lib_id}
-        class="input-sm w-full"
+        class="w-full input-sm"
       />
       {#if transfer_lib_id}
         <Label required>{$_('download.transfer.method')}</Label>
@@ -451,13 +451,13 @@
         <div class="flex gap-2">
           <input
             placeholder={$_('download.transfer.sub_pattern')}
-            class="input input-sm w-full truncate"
+            class="input w-full truncate input-sm"
             bind:value={sub_pattern}
             {...schema.sub_pattern}
           />
           <input
             placeholder={$_('download.transfer.sub_repl')}
-            class="input input-sm w-full truncate"
+            class="input w-full truncate input-sm"
             bind:value={sub_repl}
             {...schema.sub_repl}
             disabled={!sub_pattern}

@@ -238,7 +238,7 @@
     <Cell>
       <div class="flex w-full flex-col gap-2 pr-2">
         <div class="flex items-center justify-between gap-1">
-          <span class="text-sm min-w-0 wrap-break-word">{task.name}</span>
+          <span class="min-w-0 text-sm wrap-break-word">{task.name}</span>
           {#if task.state === 'error'}
             <iconify-icon
               use:tooltip={{ content: task.error_msg || '', placement: 'left' }}

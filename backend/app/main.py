@@ -259,7 +259,7 @@ async def start_http_client(app: Sanic):
             storage=AsyncSqliteStorage(database_path=_cache_path(app)),
         ),
     )
-    # initialize the curl-cffi client
+    # initialize the curl_cffi client
     app.ctx.curl_cffi = AsyncSession(
         allow_redirects=True,
         cookies=app.ctx.cookies,

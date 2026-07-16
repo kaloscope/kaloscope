@@ -923,7 +923,7 @@
               $_('media.subtitle.language_preference_tip')
             )}
             <input
-              class="input subtitle-setting-field"
+              class="subtitle-setting-field input"
               bind:value={$subtitle.languagePreference}
               placeholder={$_('media.subtitle.language_preference_placeholder')}
               disabled={!$subtitle.autoShow}
@@ -946,7 +946,7 @@
           </div>
           <div>
             {@render optionLabel($_('media.subtitle.time_offset'))}
-            <label class="input subtitle-setting-field subtitle-time-offset-field">
+            <label class="subtitle-setting-field subtitle-time-offset-field input">
               <input
                 type="number"
                 min="-3600"
@@ -1189,7 +1189,7 @@
   <label class="tab -mt-0.5 mb-4 h-8 gap-1 rounded-field px-1.75 transition-colors {tabClass}">
     <input type="radio" {checked} value={id} bind:group={tabId} />
     <iconify-icon {icon} width="1.125rem" class="mt-0.5 size-4.5"></iconify-icon>
-    <span class="text-base sm:text-lg font-bold">{name}</span>
+    <span class="text-base font-bold sm:text-lg">{name}</span>
   </label>
 {/snippet}
 

@@ -295,7 +295,7 @@
       icon={icons.addCircle}
       text={$_('action.add', $_('entity.dns_resolver'))}
       square={false}
-      class="font-normal btn-soft"
+      class="btn-soft font-normal"
       onclick={() => resolverCreator?.showModal()}
     />
   </div>
@@ -343,7 +343,7 @@
       icon={icons.addCircle}
       text={$_('action.add', $_('entity.proxy_server'))}
       square={false}
-      class="font-normal btn-soft"
+      class="btn-soft font-normal"
       onclick={() => proxyCreator?.showModal()}
     />
   </div>

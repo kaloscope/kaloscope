@@ -17,7 +17,7 @@
     <span class="line-clamp-2 opacity-50" title={info}>{info}</span>
   {/if}
   {#if extra}
-    <span class="opacity-40 italic shrink-0 truncate pr-0.5 {up || at ? 'max-w-1/2' : 'max-w-full'}" title={extra}>
+    <span class="shrink-0 truncate pr-0.5 italic opacity-40 {up || at ? 'max-w-1/2' : 'max-w-full'}" title={extra}>
       {extra}
     </span>
   {/if}

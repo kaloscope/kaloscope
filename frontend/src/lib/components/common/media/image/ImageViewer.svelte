@@ -418,16 +418,16 @@
   <!-- top bar -->
   {#if controlsVisible}
     <div
-      class="absolute top-0 inset-x-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
+      class="absolute inset-x-0 top-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
     >
       <div class="flex items-center gap-1">
-        <button class="btn btn-xs btn-ghost border-0 shadow-none" onclick={() => historyBack()} aria-label="Back">
+        <button class="btn border-0 btn-ghost shadow-none btn-xs" onclick={() => historyBack()} aria-label="Back">
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if chapters.length > 1}
           <button
-            class="btn btn-xs btn-ghost border-0 shadow-none"
+            class="btn border-0 btn-ghost shadow-none btn-xs"
             aria-label="Chapters"
             onclick={() => {
               chaptersOpen = true;
@@ -439,7 +439,7 @@
         {/if}
       </div>
 
-      <span class="min-w-0 flex-center text-sm">
+      <span class="flex-center min-w-0 text-sm">
         <span class="truncate" class:mr-2={imageCount > 0}>{currentTitle}</span>
         {#if imageCount > 0}
           <span class="shrink-0 tabular-nums opacity-60">{imageIndex + 1} / {imageCount}</span>
@@ -447,7 +447,7 @@
       </span>
 
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none"
+        class="btn border-0 btn-ghost shadow-none btn-xs"
         aria-label="Reading settings"
         onclick={() => (settingsOpen = !settingsOpen)}
       >
@@ -465,20 +465,20 @@
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed left-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
+      class="fixed top-0 left-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
       transition:fly={{ x: -300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <div class="flex items-center gap-1">
           <h3 class="text-base font-bold">{$_('media.image.chapters')}</h3>
           <!-- svelte-ignore a11y_consider_explicit_label -->
-          <button class="btn btn-xs border-0 bg-transparent shadow-none text-white/80" onclick={toggleSort}>
+          <button class="btn border-0 bg-transparent text-white/80 shadow-none btn-xs" onclick={toggleSort}>
             <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
             </iconify-icon>
           </button>
         </div>
         <button
-          class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
+          class="btn border-0 bg-transparent text-white/80 shadow-none btn-xs"
           aria-label="Close"
           onclick={() => (chaptersOpen = false)}
         >
@@ -510,7 +510,7 @@
       {/each}
       {#if loading}
         <div class="flex-center pt-6 pb-12 text-white/40">
-          <span class="loading loading-spinner loading-md"></span>
+          <span class="loading loading-md loading-spinner"></span>
         </div>
       {/if}
     </div>
@@ -534,7 +534,7 @@
     </div>
     {#if loading || imageLoading}
       <div class="pointer-events-none fixed inset-0 z-1 flex items-center justify-center text-white/60">
-        <span class="loading loading-spinner loading-xl"></span>
+        <span class="loading loading-xl loading-spinner"></span>
       </div>
     {/if}
   {/if}
@@ -548,13 +548,13 @@
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed right-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
+      class="fixed top-0 right-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
       transition:fly={{ x: 300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 class="text-base font-bold">{$_('media.image.settings')}</h3>
         <button
-          class="btn btn-xs border-0 bg-transparent shadow-none text-white/80"
+          class="btn border-0 bg-transparent text-white/80 shadow-none btn-xs"
           aria-label="Close"
           onclick={() => (settingsOpen = false)}
         >
@@ -594,11 +594,11 @@
   <!-- bottom bar -->
   {#if controlsVisible && chapters.length > 1}
     <div
-      class="absolute bottom-0 inset-x-0 z-1 flex justify-center gap-6 bg-black/50 p-2 text-white/80 backdrop-blur-sm"
+      class="absolute inset-x-0 bottom-0 z-1 flex justify-center gap-6 bg-black/50 p-2 text-white/80 backdrop-blur-sm"
       transition:fade={{ duration: 200 }}
     >
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none disabled:text-white/20"
+        class="btn border-0 btn-ghost shadow-none btn-xs disabled:text-white/20"
         aria-label="Previous chapter"
         disabled={!previousChapter}
         onclick={() => previousChapter && selectChapter(previousChapter)}
@@ -606,7 +606,7 @@
         <iconify-icon icon={icons.arrowPreviousFilled} width="1.25rem"></iconify-icon>
       </button>
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none disabled:text-white/20"
+        class="btn border-0 btn-ghost shadow-none btn-xs disabled:text-white/20"
         aria-label="Next chapter"
         disabled={!nextChapter}
         onclick={() => nextChapter && selectChapter(nextChapter)}
@@ -645,7 +645,7 @@
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >
-      <span class="min-w-0 wrap-break-word text-left">{chapter.title}</span>
+      <span class="min-w-0 text-left wrap-break-word">{chapter.title}</span>
     </button>
   </li>
 {/snippet}

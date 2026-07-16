@@ -26,9 +26,9 @@
   </Label>
   <div class="flex flex-col gap-2">
     <div class="flex items-center gap-2">
-      <input type="text" class="input input-sm w-1/2" placeholder={keyPlaceholder} disabled />
+      <input type="text" class="input w-1/2 input-sm" placeholder={keyPlaceholder} disabled />
       <span>:</span>
-      <input type="text" class="input input-sm w-1/2" placeholder={valuePlaceholder} disabled />
+      <input type="text" class="input w-1/2 input-sm" placeholder={valuePlaceholder} disabled />
       <button
         aria-label="Add"
         class="btn ml-auto btn-square btn-subtle btn-sm"
@@ -46,7 +46,7 @@
         <!-- svelte-ignore binding_property_non_reactive -->
         <input
           type="text"
-          class="nodrag input input-sm w-1/2 truncate"
+          class="nodrag input w-1/2 truncate input-sm"
           placeholder={keyPlaceholder}
           bind:value={entry.key}
           oninput={() => updateNodeData(field.nodeId, { [field.id]: data })}
@@ -55,7 +55,7 @@
         <!-- svelte-ignore binding_property_non_reactive -->
         <input
           type="text"
-          class="nodrag input input-sm w-1/2 truncate"
+          class="nodrag input w-1/2 truncate input-sm"
           placeholder={valuePlaceholder}
           bind:value={entry.value}
           oninput={() => updateNodeData(field.nodeId, { [field.id]: data })}

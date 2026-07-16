@@ -289,14 +289,14 @@
   <!-- top bar -->
   {#if controlsVisible}
     <div
-      class="absolute top-0 inset-x-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
+      class="absolute inset-x-0 top-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
       style:color={colors.muted}
       style:background-color={colors.bar}
       transition:fade={{ duration: 200 }}
     >
       <div class="flex items-center gap-1">
         <button
-          class="btn btn-xs btn-ghost border-0 shadow-none"
+          class="btn border-0 btn-ghost shadow-none btn-xs"
           style:color={colors.muted}
           onclick={() => historyBack()}
           aria-label="Back"
@@ -305,7 +305,7 @@
         </button>
         {#if chapters.length > 1}
           <button
-            class="btn btn-xs btn-ghost border-0 shadow-none"
+            class="btn border-0 btn-ghost shadow-none btn-xs"
             style:color={colors.muted}
             aria-label="Chapters"
             onclick={() => {
@@ -321,7 +321,7 @@
       <span class="min-w-0 truncate text-center text-sm">{currentTitle}</span>
 
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none"
+        class="btn border-0 btn-ghost shadow-none btn-xs"
         style:color={colors.muted}
         aria-label="Reading settings"
         onclick={() => (settingsOpen = !settingsOpen)}
@@ -340,7 +340,7 @@
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed left-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
+      class="fixed top-0 left-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
       style:color={colors.text}
       style:background-color={colors.panel}
       transition:fly={{ x: -300, duration: 200 }}
@@ -349,13 +349,13 @@
         <div class="flex items-center gap-1">
           <h3 class="text-base font-bold">{$_('media.text.chapters')}</h3>
           <!-- svelte-ignore a11y_consider_explicit_label -->
-          <button class="btn btn-xs border-0 bg-transparent shadow-none" style:color={colors.text} onclick={toggleSort}>
+          <button class="btn border-0 bg-transparent shadow-none btn-xs" style:color={colors.text} onclick={toggleSort}>
             <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
             </iconify-icon>
           </button>
         </div>
         <button
-          class="btn btn-xs border-0 bg-transparent shadow-none"
+          class="btn border-0 bg-transparent shadow-none btn-xs"
           style:color={colors.text}
           aria-label="Close"
           onclick={() => (chaptersOpen = false)}
@@ -375,7 +375,7 @@
     >
       {#if content}
         <div
-          class="mx-auto min-w-0 max-w-3xl wrap-break-word transition-all duration-300 [word-break:normal]"
+          class="mx-auto max-w-3xl min-w-0 wrap-break-word [word-break:normal] transition-all duration-300"
           style:font-family={FONTS[$settings.font]}
           style:font-size="{$settings.fontSize}px"
           style:line-height={$settings.lineHeight}
@@ -404,7 +404,7 @@
       transition:fade={{ duration: 150 }}
     ></button>
     <div
-      class="fixed right-0 top-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
+      class="fixed top-0 right-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
       style:color={colors.text}
       style:background-color={colors.panel}
       transition:fly={{ x: 300, duration: 200 }}
@@ -412,7 +412,7 @@
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 class="text-base font-bold">{$_('media.text.settings')}</h3>
         <button
-          class="btn btn-xs border-0 bg-transparent shadow-none"
+          class="btn border-0 bg-transparent shadow-none btn-xs"
           style:color={colors.text}
           aria-label="Close"
           onclick={() => (settingsOpen = false)}
@@ -467,13 +467,13 @@
   <!-- bottom bar -->
   {#if controlsVisible && chapters.length > 1}
     <div
-      class="absolute bottom-0 inset-x-0 z-1 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
+      class="absolute inset-x-0 bottom-0 z-1 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
       style:color={colors.muted}
       style:background-color={colors.bar}
       transition:fade={{ duration: 200 }}
     >
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
+        class="btn border-0 btn-ghost shadow-none btn-xs disabled:opacity-20"
         style:color={colors.muted}
         aria-label="Previous chapter"
         disabled={!previousChapter}
@@ -482,7 +482,7 @@
         <iconify-icon icon={icons.arrowPreviousFilled} width="1.25rem"></iconify-icon>
       </button>
       <button
-        class="btn btn-xs btn-ghost border-0 shadow-none disabled:opacity-20"
+        class="btn border-0 btn-ghost shadow-none btn-xs disabled:opacity-20"
         style:color={colors.muted}
         aria-label="Next chapter"
         disabled={!nextChapter}
@@ -522,7 +522,7 @@
       title={chapter.title}
       onclick={() => selectChapter(chapter)}
     >
-      <span class="min-w-0 wrap-break-word text-left">{chapter.title}</span>
+      <span class="min-w-0 text-left wrap-break-word">{chapter.title}</span>
     </button>
   </li>
 {/snippet}
@@ -535,13 +535,13 @@
       <span class="tabular-nums">{$settings?.[key]}{unit}</span>
     </span>
     <div class="flex items-center gap-2">
-      <button class="btn btn-xs text-sm font-mono border! opacity-50 shadow-none" onclick={() => clamp(key, -step)}>
+      <button class="btn border! font-mono text-sm opacity-50 shadow-none btn-xs" onclick={() => clamp(key, -step)}>
         -
       </button>
       {#if $settings !== null}
-        <input type="range" class="range range-xs flex-1" {min} {max} {step} bind:value={$settings[key]} />
+        <input type="range" class="range flex-1 range-xs" {min} {max} {step} bind:value={$settings[key]} />
       {/if}
-      <button class="btn btn-xs text-sm font-mono border! opacity-50 shadow-none" onclick={() => clamp(key, step)}>
+      <button class="btn border! font-mono text-sm opacity-50 shadow-none btn-xs" onclick={() => clamp(key, step)}>
         +
       </button>
     </div>

@@ -47,7 +47,7 @@
   </Label>
   <input
     type="number"
-    class="nodrag input input-sm w-full"
+    class="nodrag input w-full input-sm"
     required={field.required}
     min={field.min}
     max={field.max}

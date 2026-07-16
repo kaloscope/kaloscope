@@ -176,7 +176,7 @@
       <div class="flex-center gap-2">
         <Image src={tmpl.icon} icon={icons.box3d} width="3.5rem" shadow transparent />
         <div class="w-full min-w-0 space-y-1">
-          <div class="text-lg font-bold opacity-90 text-shadow-xs truncate" title={tmpl.name}>
+          <div class="truncate text-lg font-bold opacity-90 text-shadow-xs" title={tmpl.name}>
             {tmpl.name}
           </div>
           <div class="flex flex-wrap items-baseline gap-1">

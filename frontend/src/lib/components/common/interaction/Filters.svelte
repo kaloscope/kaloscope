@@ -114,7 +114,7 @@
 {#snippet scalar(key: string, type: 'search' | 'datetime-local' | 'date' | 'time' | 'week' | 'month')}
   <input
     {type}
-    class="input input-sm w-full truncate"
+    class="input w-full truncate input-sm"
     value={values[key]}
     oninput={(event) => {
       values[key] = type === 'search' ? event.currentTarget.value.trim() : event.currentTarget.value;
@@ -133,7 +133,7 @@
     id={callyId}
     popovertarget={callyPopoverId}
     type="button"
-    class="input input-sm w-full"
+    class="input w-full input-sm"
     style="anchor-name:--{callyId}"
     onclick={() => {
       setTimeout(() => {

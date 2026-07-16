@@ -105,7 +105,7 @@
     <div class="-mx-1 grid" style="grid-template-columns: repeat(100, minmax(0, 1fr));">
       {#each schema.fields as field (field.id)}
         {@const Field = fields[field.field_type]}
-        <div class="min-w-0 px-1" style={fieldLayoutStyle(field)}>
+        <div class="min-w-0 px-1 [&:not(:first-child):has(>.collapse)]:mt-3" style={fieldLayoutStyle(field)}>
           <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
         </div>
       {/each}

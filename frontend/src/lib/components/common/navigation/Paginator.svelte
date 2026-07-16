@@ -109,7 +109,7 @@
 
         <div
           class={simpleMode
-            ? `join mx-auto rounded-field shadow-sm grid ${showFirst ? 'grid-cols-4' : 'grid-cols-3'}`
+            ? `join mx-auto grid rounded-field shadow-sm ${showFirst ? 'grid-cols-4' : 'grid-cols-3'}`
             : 'ml-auto flex gap-2 sm:mx-auto sm:gap-1'}
         >
           <!-- first page button -->
@@ -132,7 +132,7 @@
 
           <!-- page buttons -->
           {#if simpleMode}
-            <button class="join-item pointer-events-none text-base-content/50 {btnClass}">
+            <button class="pointer-events-none join-item text-base-content/50 {btnClass}">
               {$_('data.paginator.current', current)}
             </button>
           {:else}
