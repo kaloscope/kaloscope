@@ -292,6 +292,9 @@
 
     let url = resolvePlaybackUrl(options.url, options.videoType);
 
+    // store the raw danmakus for later use
+    videoSettings.setDanmakus(options.danmakus);
+
     // reset the transcode auto-retry flag so a new video gets its own retry
     transcodeRetriedUrl = null;
 

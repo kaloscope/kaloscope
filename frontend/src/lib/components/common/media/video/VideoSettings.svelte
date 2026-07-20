@@ -293,6 +293,8 @@
   let danmakuMeta: DanmakuMeta | null = $state(null);
   // whether local danmaku cache exists for the current video
   let danmakuCache: boolean = $state(false);
+  // the raw danmakus for applying settings
+  let rawDanmakus: Danmaku[] = [];
 
   // the manual danmaku search states
   let animeTitle: string = $derived.by(() => danmakuMeta?.anime_title ?? '');
@@ -310,6 +312,15 @@
    * Get the current landscape mode setting.
    */
   export const landscapeMode = () => $video?.landscapeMode;
+
+  /**
+   * Store the raw danmakus for applying settings.
+   *
+   * @param comments - The raw video comments.
+   */
+  export function setDanmakus(comments?: Danmaku[] | null) {
+    rawDanmakus = comments ?? [];
+  }
 
   /**
    * Probe playback metadata for a local media stream.
@@ -708,6 +719,7 @@
     }
     // clear the existing danmakus before loading new ones
     danmakuPlugin.clear();
+    rawDanmakus = [];
     danmakuMeta = null;
     danmakuCache = false;
     // fetch the danmakus matched with the current video
@@ -804,23 +816,34 @@
       return;
     }
     danmakuMeta = data.metadata;
-    const comments = data.comments;
-    if (comments && comments.length > 0) {
+    setDanmakus(data.comments);
+    if (rawDanmakus.length > 0) {
       danmakuCache = true;
-
-      // update the comments
-      danmakuPlugin.updateComments(
-        formatDanmakus(comments, danmakuPlugin.danmujs?.container, danmakuPlugin.danmujs?.direction),
-        true
-      );
-
-      // The font size needs to be reset after updating the comments;
-      // this may be a bug in danmu.js where the style is reset after updating.
-      if ($danmaku !== null) {
-        danmakuPlugin.setFontSize($danmaku.fontSize, null);
-      }
+      applyDanmakuSettings();
     } else {
       danmakuCache = false;
+    }
+  }
+
+  /**
+   * Reapply the danmaku settings to the current comments.
+   *
+   * @param settings - The settings to apply.
+   */
+  function applyDanmakuSettings(settings: DanmakuSettings | null = $danmaku) {
+    if (danmakuPlugin === null || rawDanmakus.length === 0) {
+      return;
+    }
+    const danmujs = danmakuPlugin.danmujs;
+    const comments = formatDanmakus(rawDanmakus, danmujs?.container, danmujs?.direction, settings);
+
+    danmakuPlugin.clear();
+    danmakuPlugin.updateComments(comments, true);
+
+    // The font size needs to be reset after updating the comments;
+    // this may be a bug in danmu.js where the style is reset after updating.
+    if (settings !== null) {
+      danmakuPlugin.setFontSize(settings.fontSize, null);
     }
   }
 </script>
@@ -1111,11 +1134,21 @@
         </div>
         <div>
           {@render optionLabel($_('media.danmaku.merge'), $_('media.danmaku.merge_tip'))}
-          <input type="checkbox" class="toggle" bind:checked={$danmaku.merge} />
+          <input
+            type="checkbox"
+            class="toggle"
+            bind:checked={$danmaku.merge}
+            onchange={(event) => applyDanmakuSettings({ ...$danmaku, merge: event.currentTarget.checked })}
+          />
         </div>
         <div class="flex-col items-start! gap-1!">
           {@render optionLabel($_('media.danmaku.block_pattern'), $_('media.danmaku.block_pattern_tip'))}
-          <input class="input w-full" bind:value={$danmaku.blockPattern} placeholder={'^\\d+$|^\\p{P}+$'} />
+          <input
+            class="input w-full"
+            bind:value={$danmaku.blockPattern}
+            placeholder={'^\\d+$|^\\p{P}+$'}
+            oninput={(event) => applyDanmakuSettings({ ...$danmaku, blockPattern: event.currentTarget.value })}
+          />
         </div>
       {/if}
     </div>
