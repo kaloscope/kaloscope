@@ -5,6 +5,8 @@ import { Events, Plugin } from 'xgplayer';
 const { POSITIONS } = Plugin;
 
 export default class TopBar extends Plugin {
+  private clickTimeStamp = 0;
+
   static get pluginName() {
     return 'topBar';
   }
@@ -29,7 +31,19 @@ export default class TopBar extends Plugin {
     return `${uploader ? `UP: ${uploader}` : ''}${uploader && uploadedAt ? ' ・ ' : ''}${uploadedAt}`;
   }
 
+  private isClickDebounced() {
+    const now = Date.now();
+    if (now - this.clickTimeStamp < 300) {
+      return true;
+    }
+    this.clickTimeStamp = now;
+    return false;
+  }
+
   onBackIconClick = (event: Event) => {
+    if (this.isClickDebounced()) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     if (typeof this.config.back === 'function') {
@@ -40,6 +54,9 @@ export default class TopBar extends Plugin {
   };
 
   onSettingsIconClick = (event: Event) => {
+    if (this.isClickDebounced()) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     if (this.player.config.settings) {
@@ -48,7 +65,7 @@ export default class TopBar extends Plugin {
   };
 
   toggleMarquee() {
-    const titleEl = this.root.querySelector('.font-title');
+    const titleEl = this.root?.querySelector('.font-title');
     const titleCopyEl = titleEl?.querySelector('span:last-child');
     const titleParentEl = titleEl?.parentElement;
     if (titleEl && titleCopyEl && titleParentEl) {
@@ -79,7 +96,7 @@ export default class TopBar extends Plugin {
       if (newTitle && newTitle !== this.title) {
         // update title when playNext with a different title
         this.config.title = newTitle;
-        const titleEl = this.root.querySelector('.font-title');
+        const titleEl = this.root?.querySelector('.font-title');
         if (titleEl) {
           titleEl.innerHTML = `
             <span class="pr-8!">${this.title}</span>

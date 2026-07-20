@@ -89,7 +89,7 @@ export default class Definitions extends OptionsIcon {
       return definitionItem;
     });
     super.renderItemList(items, this.curIndex);
-    this.optionsList?.root.classList.add('xgplayer-definitions');
+    this.optionsList?.root?.classList.add('xgplayer-definitions');
   }
 
   show() {

@@ -150,9 +150,11 @@ export default class KeyboardWithPlaybackRateNote extends Keyboard {
    * Resets the base key press state without restoring playback rate.
    */
   private resetKeyPressState() {
-    this._keyState.isKeyDown = false;
-    this._keyState.isPress = false;
-    this._keyState.tt = 0;
+    if (this._keyState) {
+      this._keyState.isKeyDown = false;
+      this._keyState.isPress = false;
+      this._keyState.tt = 0;
+    }
   }
 
   /**
