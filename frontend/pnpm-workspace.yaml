@@ -10,3 +10,6 @@ allowBuilds:
   es5-ext: true
   esbuild: true
   sharp: true
+overrides:
+  '@sveltejs/kit>cookie': 0.7.2
+  svelte-i18n>esbuild: 0.28.1
