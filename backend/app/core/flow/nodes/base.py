@@ -55,6 +55,7 @@ class NodeSchema:
     icon: str
     group: NodeGroup
     order: int
+    width: str | None
     fields: tuple[Field, ...]
     handles: tuple[Handle, ...]
     categories: tuple[GraphCategory, ...]
@@ -146,6 +147,7 @@ class Node(metaclass=NodeMeta):
         group: NodeGroup,
         *,
         order: int = 0,
+        width: str | None = None,
         icon: str | None = None,
         categories: tuple[GraphCategory, ...] = (),
     ):
@@ -154,6 +156,7 @@ class Node(metaclass=NodeMeta):
         Args:
             group: The group of the node.
             order: The order of the node in the group.
+            width: The width of the node content area.
             icon: The icon name of the node for the frontend UI.
             categories: The available graph categories for the node.
         """
@@ -166,6 +169,7 @@ class Node(metaclass=NodeMeta):
                 icon or "app",
                 group,
                 order,
+                width,
                 tuple(node_cls._fields),
                 tuple(node_cls._handles),
                 categories,
@@ -303,11 +307,16 @@ def node_register(
     def register(
         *,
         order: int = 0,
+        width: str | None = None,
         icon: str | None = None,
         categories: tuple[GraphCategory, ...] = (),
     ):
         return Node.register(
-            group, order=order, icon=icon or _icon, categories=categories or _categories
+            group,
+            order=order,
+            width=width,
+            icon=icon or _icon,
+            categories=categories or _categories,
         )
 
     return register

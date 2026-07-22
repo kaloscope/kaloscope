@@ -577,6 +577,7 @@ export type NodeSchema = {
   icon: keyof typeof icons;
   group: string;
   order: number;
+  width: string | null;
   fields: Field[];
   handles: Handle[];
 };

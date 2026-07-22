@@ -102,7 +102,7 @@
     </button>
   </div>
   <div class="relative -mt-px rounded-b-box p-3 {bodyClass}">
-    <div class="-mx-1 grid" style="grid-template-columns: repeat(100, minmax(0, 1fr));">
+    <div class="-mx-1 grid" style="grid-template-columns: repeat(100, minmax(0, 1fr));" style:width={schema.width}>
       {#each schema.fields as field (field.id)}
         {@const Field = fields[field.field_type]}
         <div class="min-w-0 px-1 [&:not(:first-child):has(>.collapse)]:mt-3" style={fieldLayoutStyle(field)}>
