@@ -108,7 +108,7 @@ def _get_strict_builtins() -> dict[str, Any]:
     return _STRICT_BUILTINS
 
 
-@general_node(order=4, icon="code")
+@general_node(order=5, icon="code")
 class ScriptNode(Node):
     script = ScriptField("code", required=True)
 

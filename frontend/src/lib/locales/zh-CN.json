@@ -642,6 +642,7 @@
         "http": "HTTP 请求",
         "text": "保存文本",
         "variables": "设置变量",
+        "cache": "缓存数据",
         "script": "脚本"
       },
       "handle": {
@@ -667,6 +668,9 @@
         "config": "配置",
         "varname": "变量名",
         "variables": "JSON 格式键值对",
+        "cache_key": "缓存键",
+        "cache_ttl": "有效期（秒）",
+        "cache_value": "缓存值",
         "expression": "表达式",
         "merge_maximum": "合并数量",
         "timeout": "超时时间（秒）",
@@ -682,6 +686,7 @@
       },
       "tooltip": {
         "format_response": "格式化响应结果并合并到全局上下文中。",
+        "cache_ttl": "设为 0 表示永不过期。缓存值将在工作流下次执行时载入。",
         "merge_maximum": "输出前等待的最大输入数量，超出部分将被丢弃。",
         "merge_timeout": "首次输入到达后的最大等待时间。",
         "force_end": "立即结束流程，无需等待其它节点执行完毕。"

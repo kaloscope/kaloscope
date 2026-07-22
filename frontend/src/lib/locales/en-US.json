@@ -642,6 +642,7 @@
         "http": "HTTP Request",
         "text": "Save Text",
         "variables": "Variables",
+        "cache": "Cache",
         "script": "Script"
       },
       "handle": {
@@ -667,6 +668,9 @@
         "config": "Configuration",
         "varname": "Variable Name",
         "variables": "JSON Object",
+        "cache_key": "Cache Key",
+        "cache_ttl": "TTL (s)",
+        "cache_value": "Cache Value",
         "expression": "Expression",
         "merge_maximum": "Merge Limit",
         "timeout": "Timeout (s)",
@@ -682,6 +686,7 @@
       },
       "tooltip": {
         "format_response": "Format the response and merge it into the global context.",
+        "cache_ttl": "Set to 0 to never expire. The value loads on the next workflow run.",
         "merge_maximum": "Max inputs to wait for before output; extras are discarded.",
         "merge_timeout": "Max wait time after the first input arrives.",
         "force_end": "End the workflow immediately without waiting for other nodes to complete."

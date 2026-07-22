@@ -21,6 +21,7 @@ from tortoise.fields import (
 )
 
 from app.models.base import Pageable, RequestFilesMixin, TortoiseModel
+from app.utils.json import JSONType
 
 
 # -------------------- Enumerations --------------------
@@ -265,7 +266,7 @@ class FlowVariable(TortoiseModel):
         "models.FlowGraph", related_name="variables", db_index=True
     )
     key = CharField(max_length=64)
-    value = JSONField[dict[str, Any]]()
+    value = JSONField[JSONType]()
     expires = IntField(null=True)
 
     class Meta:
