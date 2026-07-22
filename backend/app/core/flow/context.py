@@ -16,7 +16,7 @@ from app.utils.dict import TrackableDict
 with open(Path(__file__).parents[3] / "pyproject.toml", "rb") as _f:
     _KS_VERSION: str = tomllib.load(_f)["project"]["version"]
 
-AUTH_KEY = "auth"
+AUTH_KEY = "$auth"
 """The key to the indexer authentication in the local variables."""
 
 MANUAL_KEY = "$manual"

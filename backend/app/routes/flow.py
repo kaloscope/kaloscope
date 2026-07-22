@@ -298,7 +298,7 @@ async def get_indexer_auth(request: Request, id: int) -> HTTPResponse:
     var = await FlowVariable.get_or_none(
         Q(graph_id=id, key=AUTH_KEY) & (Q(expires__gte=now) | Q(expires__isnull=True))
     )
-    if var is not None and "name" in var.value:
+    if var is not None and isinstance(var.value, dict) and "name" in var.value:
         return json(var.value)
     # check the auth cookie
     config = await start_config(id, "auth")
