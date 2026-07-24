@@ -174,6 +174,27 @@
     }
   }
 
+  // the colors for the week tabs
+  const WEEKDAY_COLORS = ['#ef4444', '#f97316', '#eab308', '#84cc16', '#22c55e', '#0ea5e9', '#2563eb'];
+
+  /**
+   * Get the metadata for a week tab.
+   *
+   * @param today - The current date.
+   * @param index - The index of the tab.
+   * @param weekStart - The week start day.
+   * @returns The metadata for the week tab.
+   */
+  function getWeekMeta(today: Date, index: number, weekStart: number | null | undefined) {
+    const todayIndex = (today.getDay() - (weekStart ?? 0) + 7) % 7;
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + index - todayIndex);
+
+    return {
+      label: `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`,
+      color: WEEKDAY_COLORS[date.getDay()]
+    };
+  }
+
   /**
    * Load the user histories if enabled in preferences.
    */
@@ -435,11 +456,25 @@
     </div>
     <div class="divider my-0"></div>
     {#if board.resources.length > 0}
+      {@const weekMode = !!board.config.board?.calendar?.week && board.resources.length === 7}
       <div class="tabs-border mb-10 tabs" transition:fade>
         {#each board.resources as rsrcs, index (index)}
-          <label class="tab {board.resources.length === 1 ? 'hidden' : ''}">
+          {@const week = weekMode ? getWeekMeta(new Date(), index, board.config.board?.calendar?.week_start) : null}
+          <label
+            class="tab {board.resources.length === 1 ? 'hidden' : ''}"
+            class:week-tab={weekMode}
+            style:color={board.activeId === index ? week?.color : undefined}
+          >
             <input type="radio" checked={board.activeId === index} onclick={() => (board.activeId = index)} />
-            <span class="font-semibold {board.activeId === index ? 'text-shadow-xs' : ''}">{rsrcs.title}</span>
+            <span
+              class="font-semibold {board.activeId === index ? 'text-shadow-xs' : ''}"
+              class:week-tab-label={weekMode}
+            >
+              {rsrcs.title}
+              {#if week}
+                <small class="week-tab-date">{week.label}</small>
+              {/if}
+            </span>
           </label>
           {#if board.activeId === index}
             <div class="tab-content mt-2" transition:fade>
@@ -496,6 +531,30 @@
 {/if}
 
 <style>
+  .week-tab {
+    height: 3rem;
+    padding-inline: 0.875rem;
+    transition: color 200ms ease;
+  }
+
+  .week-tab-label {
+    display: flex;
+    min-width: 3rem;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    line-height: 1;
+  }
+
+  .week-tab-date {
+    min-width: 2.75rem;
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    opacity: 0.65;
+  }
+
   .history-list {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
