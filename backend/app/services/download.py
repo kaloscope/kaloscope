@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from tortoise.transactions import atomic
 
 from app.core.constants import ENCODING
 from app.core.dl.adapter import load_config
-from app.core.dl.syncer import Unique, execute_download_plan
+from app.core.dl.syncer import Unique, execute_download_plan, resolve_details
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.download import (
     DownloadAdd,
@@ -247,19 +248,63 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
         adapter = load_config(downloader.config)
-        try:
-            await adapter.call(
-                "delete", {**asdict(Unique.from_task(task)), "local": local}
-            )
-        except KaloscopeException as e:
-            if e.extra is not None and e.extra.get("responded"):
-                # As long as the downloader responded (even with an error),
-                # we treat the delete as successful. We only need to ensure
-                # the delete request was delivered.
-                pass
-            else:
-                raise
+        unique = asdict(Unique.from_task(task))
 
+        # get the local path when using aria2 with `local=True`
+        local_path = None
+        local_safe = False
+        if local and downloader.preset == "aria2":
+            name = task.name
+            result = None
+            try:
+                result = await resolve_details(adapter, unique)
+            except KaloscopeException as e:
+                local_safe = (
+                    e.extra is not None
+                    and e.extra.get("responded")
+                    and str(e).startswith("GID ")
+                    and str(e).endswith(" is not found")
+                )
+            if isinstance(result, dict):
+                unique["id"] = str(result.get("unique_id") or unique["id"])
+                local_safe = str(result.get("raw_state") or "").lower() in {
+                    "complete",
+                    "error",
+                    "removed",
+                }
+            if name in {task.info_hash, task.info_hash_v2}:
+                name = str(result.get("name") or "") if isinstance(result, dict) else ""
+            if name:
+                relative = Path(name)
+                if name not in {".", ".."} and relative.name == name:
+                    local_path = Path(task.dir) / relative
+
+        # call the `delete` method
+        try:
+            await adapter.call("delete", {**unique, "local": local})
+        except KaloscopeException as e:
+            if not local_safe:
+                if e.extra is not None and e.extra.get("responded"):
+                    # As long as the downloader responded (even with an error),
+                    # we treat the delete as successful. We only need to ensure
+                    # the delete request was delivered.
+                    local_path = None
+                else:
+                    raise
+
+        # delete local aria2 files when the RPC succeeds or the task is safe
+        if local_path is not None:
+            if local_path.exists():
+                if local_path.is_dir() and not local_path.is_symlink():
+                    shutil.rmtree(local_path)
+                else:
+                    local_path.unlink()
+
+            control_path = Path(f"{local_path}.aria2")
+            if control_path.exists():
+                control_path.unlink()
+
+        # delete the download task
         await DownloadTask.filter(id=id).delete()
 
     @classmethod
