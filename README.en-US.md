@@ -93,6 +93,7 @@ The parameters used above are described below.
 | -------------- | -------- | ------------------------------------------------------------------------ |
 | `/workspace`   | Yes      | Persistent storage that keeps application data across container restarts |
 
+> [!NOTE]
 > For more configuration details, see the [`Deployment Guide`](https://kaloscope.org/docs/deployment).
 
 ## Features
