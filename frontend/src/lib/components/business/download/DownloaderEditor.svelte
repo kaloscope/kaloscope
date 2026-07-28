@@ -4,7 +4,6 @@
   type DownloaderEditorProps = Partial<{
     id: number;
     preset: string;
-    exists: string[];
     config: string;
     onsave: (result: Downloader) => void;
   }>;
@@ -56,7 +55,7 @@ methods:
   import { yaml } from '@codemirror/lang-yaml';
   import { onMount } from 'svelte';
 
-  let { id, preset = '', exists = [], config = CONFIG_TEMPLATE, onsave }: DownloaderEditorProps = $props();
+  let { id, preset = '', config = CONFIG_TEMPLATE, onsave }: DownloaderEditorProps = $props();
   let codeMirror: CodeMirror;
 
   // the modal dialog instance
@@ -141,7 +140,7 @@ methods:
         <option value="">{$_('enum.none')}</option>
         {#if presets}
           {#each Object.keys(presets).sort((a, b) => a.localeCompare(b)) as key (key)}
-            <option value={key} disabled={exists.includes(key)}>{key}</option>
+            <option value={key}>{key}</option>
           {/each}
         {/if}
       </select>

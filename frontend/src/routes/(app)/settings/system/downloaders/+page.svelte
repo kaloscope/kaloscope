@@ -178,7 +178,6 @@
 {#key refreshKey}
   <DownloaderEditor
     bind:this={creator}
-    exists={downloaders.map((d) => d.preset).filter((p) => p !== null)}
     onsave={() => {
       getAll();
       refreshKey = new Date().getTime();
