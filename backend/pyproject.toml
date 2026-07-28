@@ -1,6 +1,6 @@
 [project]
 name = "kaloscope-backend"
-version = "0.8.4"
+version = "0.8.5"
 description = "Backend for Kaloscope project"
 authors = [{ name = "Xylitol", email = "jam.xylitol@gmail.com" }]
 license = { text = "GPL-3.0-or-later" }
