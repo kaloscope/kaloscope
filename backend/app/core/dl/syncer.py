@@ -205,15 +205,7 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
 
         # try to get the details if the details method is supported
         if item is None and "details" in adapter.methods:
-            result = await adapter.call("details", asdict(unique))
-            if isinstance(result, dict):
-                metadata, gid = _followed_by(result)
-                if not metadata:
-                    item = result
-                elif gid:
-                    result = await adapter.call("details", {"id": gid})
-                    if isinstance(result, dict):
-                        item = result
+            item = await resolve_details(adapter, asdict(unique))
 
         # continue the loop if the task is not matched
         if not item:
@@ -293,6 +285,30 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
                     task.id,
                     exc_info=True,
                 )
+
+
+async def resolve_details(adapter: Adapter, unique: dict) -> dict | None:
+    """Resolve the details of a download task.
+
+    Args:
+        adapter: The downloader adapter.
+        unique: The unique identifier of the download task.
+
+    Returns:
+        The resolved task details, or `None` if they are unavailable.
+    """
+    result = await adapter.call("details", unique)
+    if not isinstance(result, dict):
+        return None
+
+    metadata, gid = _followed_by(result)
+    if not metadata:
+        return result
+    if gid:
+        result = await adapter.call("details", {"id": gid})
+        if isinstance(result, dict):
+            return result
+    return None
 
 
 def _followed_by(result: dict) -> tuple[bool, str | None]:
