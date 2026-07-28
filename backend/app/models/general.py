@@ -69,6 +69,10 @@ class Notification(TortoiseModel):
     class Meta:
         table = "notification"
         ordering = ["-created_at"]
+        indexes = (
+            ("user_id", "created_at"),
+            ("role", "created_at"),
+        )
 
     class PydanticMeta:
         exclude = ("user",)

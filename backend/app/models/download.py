@@ -52,7 +52,7 @@ class TransferMethod(StrEnum):
 
 # -------------------- ORM Models --------------------
 class Downloader(TortoiseModel):
-    preset = CharField(max_length=16, unique=True, null=True)
+    preset = CharField(max_length=16, null=True)
     config = TextField()
     name = CharField(max_length=64, unique=True)
     host = CharField(max_length=255, null=True)
@@ -141,6 +141,10 @@ class DownloadPlanHistory(TortoiseModel):
 
     class Meta:
         table = "download_plan_history"
+        indexes = (
+            ("plan_id", "info_hash"),
+            ("plan_id", "info_hash_v2"),
+        )
 
 
 class DownloadTask(TortoiseModel):
@@ -204,6 +208,7 @@ class DownloadTask(TortoiseModel):
     class Meta:
         table = "download_task"
         ordering = ["-created_at"]
+        indexes = (("state", "created_at"),)
 
     class PydanticMeta:
         exclude = ("downloader", "transfer_lib")

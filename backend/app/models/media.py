@@ -112,6 +112,11 @@ class MediaItem(TortoiseModel):
         table = "media_item"
         ordering = ["-created_at"]
         unique_together = (("lib", "path"),)
+        indexes = (
+            ("path",),
+            ("hash",),
+            ("lib_id", "parent_id", "visible", "created_at"),
+        )
 
 
 class MediaEvent(TortoiseModel):
