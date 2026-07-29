@@ -77,6 +77,7 @@
 
   const DANMAKU_MERGE_WINDOW = 10_000;
   const DANMAKU_MERGE_MIN_COUNT = 2;
+  const DANMAKU_BLOCK_PATTERN_PRESET = '^\\d+$|^\\p{P}+$';
 
   const danmaku = persisted<DanmakuSettings>('danmaku', {
     enabled: true,
@@ -1150,10 +1151,16 @@
           {@render optionLabel($_('media.danmaku.block_pattern'), $_('media.danmaku.block_pattern_tip'))}
           <input
             class="input w-full max-w-xs"
+            list="danmaku-block-pattern-presets"
             bind:value={$danmaku.blockPattern}
-            placeholder={'^\\d+$|^\\p{P}+$'}
+            placeholder={DANMAKU_BLOCK_PATTERN_PRESET}
             oninput={(event) => applyDanmakuSettings({ ...$danmaku, blockPattern: event.currentTarget.value })}
           />
+          <datalist id="danmaku-block-pattern-presets">
+            {#if $danmaku.blockPattern && DANMAKU_BLOCK_PATTERN_PRESET.startsWith($danmaku.blockPattern)}
+              <option value={DANMAKU_BLOCK_PATTERN_PRESET}></option>
+            {/if}
+          </datalist>
         </div>
       {/if}
     </div>
