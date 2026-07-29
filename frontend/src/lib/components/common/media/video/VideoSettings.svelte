@@ -1149,7 +1149,7 @@
         <div>
           {@render optionLabel($_('media.danmaku.block_pattern'), $_('media.danmaku.block_pattern_tip'))}
           <input
-            class="input w-0 grow"
+            class="input w-full max-w-xs"
             bind:value={$danmaku.blockPattern}
             placeholder={'^\\d+$|^\\p{P}+$'}
             oninput={(event) => applyDanmakuSettings({ ...$danmaku, blockPattern: event.currentTarget.value })}
