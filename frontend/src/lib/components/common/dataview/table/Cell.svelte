@@ -95,7 +95,7 @@
       </div>
     {/snippet}
     <ul class="menu gap-1">
-      {#each actions as action, index (index)}
+      {#each actions as action, i (i)}
         <li class={action.disabled ? 'menu-disabled' : ''}>
           <button
             class="px-2 {action.class}"

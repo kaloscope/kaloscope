@@ -328,7 +328,7 @@
     >
       {#if filteredLogs.length > 0}
         <ul class="log-list min-w-176 py-1">
-          {#each filteredLogs as log, index (index)}
+          {#each filteredLogs as log, i (i)}
             <li class="log-row flex items-start">
               <span class="log-process shrink-0 truncate" title={`${log.process_name} [${log.process_id}]`}>
                 {formatProcess(log.process_name)}

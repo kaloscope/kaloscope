@@ -381,7 +381,7 @@
           style:line-height={$settings.lineHeight}
           style:color={colors.text}
         >
-          {#each paragraphs as para, index (index)}
+          {#each paragraphs as para, i (i)}
             <p class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
               {#if para}
                 {para}

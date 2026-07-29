@@ -72,7 +72,7 @@
   </div>
   {#each menus as menu (menu.title)}
     <li class="menu-title">{$_(menu.title)}</li>
-    {#each menu.routes as route, index (index)}
+    {#each menu.routes as route, i (i)}
       <li>
         {#if route.path}
           {@const blank = route.path.toLowerCase().startsWith('http')}
