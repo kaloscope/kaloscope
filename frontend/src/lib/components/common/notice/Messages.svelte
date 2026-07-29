@@ -19,6 +19,8 @@
     advice?: string;
     /** The placeholder text for the prompt input. */
     placeholder?: string;
+    /** The predefined options for the prompt input. */
+    options?: string[];
     /** The icon to display before the title. */
     icon?: string | IconifyIcon;
     /** The message title to display. */
@@ -39,7 +41,7 @@
     show({ ...msg, prompt: true });
   }
 
-  export function confirm(msg: Partial<Omit<Message, 'prompt' | 'advice' | 'placeholder' | 'explicit'>>) {
+  export function confirm(msg: Partial<Omit<Message, 'prompt' | 'advice' | 'placeholder' | 'options' | 'explicit'>>) {
     show({ ...msg, prompt: false, title: msg.title ?? '' });
   }
 
@@ -136,7 +138,26 @@
         {msg.message || $_('message.default.content')}
       </p>
       {#if msg.prompt}
-        <input required type="text" class="input w-full truncate" value={msg.advice} placeholder={msg.placeholder} />
+        {@const promptValue = msg.advice ?? ''}
+        {@const promptOptions = msg.options ?? []}
+        <input
+          required
+          type="text"
+          class="input w-full truncate"
+          list={promptOptions.length > 0 ? `${id}-prompt-options` : undefined}
+          value={promptValue}
+          placeholder={msg.placeholder}
+          oninput={(event) => messages.set(id, { ...msg, advice: event.currentTarget.value })}
+        />
+        {#if promptOptions.length > 0}
+          <datalist id={`${id}-prompt-options`}>
+            {#if promptValue}
+              {#each promptOptions.filter((option) => option.startsWith(promptValue)) as option, i (i)}
+                <option value={option}></option>
+              {/each}
+            {/if}
+          </datalist>
+        {/if}
       {/if}
       {#if msg.hint}
         <div class="flex items-center gap-1 text-xs opacity-50">

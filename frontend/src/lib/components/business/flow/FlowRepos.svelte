@@ -153,6 +153,7 @@
         message: $_('flow.tmpl.confirm_repo'),
         hint: $_('flow.tmpl.risk_warning'),
         placeholder: 'kaloscope/workflows',
+        options: ['kaloscope/workflows'],
         onconfirm: (url) => addRepo(url)
       });
     }}

@@ -13,6 +13,8 @@
     triggers: FlowTrigger[];
     onsave: (result: MediaLib) => void;
   }>;
+
+  const DANMAKU_SERVER_PRESET = 'danmaku.kaloscope.org';
 </script>
 
 <script lang="ts">
@@ -149,11 +151,17 @@
           <Label tip={$_('media.danmaku.server_tip')}>{$_('media.danmaku.server')}</Label>
           <URLWrapper bind:secure bind:this={urlWrapper}>
             <input
-              placeholder="danmaku.kaloscope.org"
               class="grow truncate"
+              list="danmaku-server-presets"
+              placeholder={DANMAKU_SERVER_PRESET}
               bind:value={danmaku_server}
               {...schema.danmaku_server}
             />
+            <datalist id="danmaku-server-presets">
+              {#if danmaku_server && DANMAKU_SERVER_PRESET.startsWith(danmaku_server)}
+                <option value={DANMAKU_SERVER_PRESET}></option>
+              {/if}
+            </datalist>
           </URLWrapper>
         </div>
         <div class="grow space-y-1.5">
