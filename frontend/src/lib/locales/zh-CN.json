@@ -341,7 +341,12 @@
     "downloader": {
       "title": "下载器",
       "preset": "预设",
-      "config": "配置"
+      "custom": "自定义",
+      "config": "配置",
+      "url": "服务地址",
+      "rpc_secret": "RPC 密钥",
+      "advanced_mode": "YAML 高级模式",
+      "custom_yaml_only": "自定义下载器仅支持完整 YAML 配置。"
     },
     "dir": "保存到",
     "start": "立即开始",
