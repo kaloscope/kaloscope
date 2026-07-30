@@ -341,7 +341,12 @@
     "downloader": {
       "title": "Downloader",
       "preset": "Preset",
-      "config": "Configuration"
+      "custom": "Custom",
+      "config": "Configuration",
+      "url": "Service URL",
+      "rpc_secret": "RPC Secret",
+      "advanced_mode": "YAML advanced mode",
+      "custom_yaml_only": "Custom downloaders require a complete YAML configuration."
     },
     "dir": "Save at",
     "start": "Start when added",
