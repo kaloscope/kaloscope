@@ -1,10 +1,10 @@
 # Third-Party License Notices
 
-> This document was automatically generated on July 28, 2026, 09:38 AM UTC
+> This document was automatically generated on July 30, 2026, 12:29 PM UTC
 
 ## Frontend Dependencies
 
-> **85** packages included
+> **86** packages included
 
 | Package                                                                                    | Version | License           | Description                                                                                                                        |
 | ------------------------------------------------------------------------------------------ | ------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
@@ -93,6 +93,7 @@
 | [xgplayer-mp4](https://github.com/bytedance/xgplayer)                                      | 3.0.26  | MIT               | xgplayer plugin for mp4 transform to fmp4                                                                                          |
 | [xgplayer-shaka](https://github.com/bytedance/xgplayer)                                    | 3.0.26  | MIT               | xgplayer plugin for shaka-player                                                                                                   |
 | [xgplayer](https://github.com/bytedance/xgplayer)                                          | 3.0.26  | MIT               | video player                                                                                                                       |
+| [yaml](https://github.com/eemeli/yaml)                                                     | 2.9.0   | ISC               | JavaScript parser and stringifier for YAML                                                                                         |
 
 ## Backend Dependencies
 
