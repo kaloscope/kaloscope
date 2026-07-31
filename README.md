@@ -147,9 +147,9 @@ docker run -d \
 - 支持以[`PWA`](https://web.dev/explore/progressive-web-apps)方式安装到桌面或移动设备
 - PWA 主题颜色可随应用内主题同步切换
 
-## 星标历史
+## 项目统计
 
-[![Star History Chart](https://api.star-history.com/chart?repos=kaloscope/kaloscope&type=date&legend=top-left&sealed_token=S9lenHp-t0Ymo6Ru7vlSuTHg1Ls1ivKCM3gbor1JO0qZvB34kL8KN5DTFBNiBhUTGkekeFHPfsylXwV-YqqbIfbYS0t2GaqwzwcUor3LDrOBEklY_ckecMR-GKAAn59cDJLGASEIULqTOLvMcxO79ZMJOD4qHLGaOk3o5SWVWTsQ8C6QfnZSBbpsHKKq)](https://www.star-history.com/?repos=kaloscope%2Fkaloscope&type=date&legend=top-left)
+![Repobeats](https://repobeats.axiom.co/api/embed/58d741284255abb4aa36853855299d721a2fd376.svg 'Repobeats analytics image')
 
 ## 贡献者
 

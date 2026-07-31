@@ -147,9 +147,9 @@ The parameters used above are described below.
 - Installable on desktop and mobile devices as a [`PWA`](https://web.dev/explore/progressive-web-apps)
 - PWA Theme color stays synchronized with the active application Theme
 
-## Star History
+## Project Activity
 
-[![Star History Chart](https://api.star-history.com/chart?repos=kaloscope/kaloscope&type=date&legend=top-left&sealed_token=S9lenHp-t0Ymo6Ru7vlSuTHg1Ls1ivKCM3gbor1JO0qZvB34kL8KN5DTFBNiBhUTGkekeFHPfsylXwV-YqqbIfbYS0t2GaqwzwcUor3LDrOBEklY_ckecMR-GKAAn59cDJLGASEIULqTOLvMcxO79ZMJOD4qHLGaOk3o5SWVWTsQ8C6QfnZSBbpsHKKq)](https://www.star-history.com/?repos=kaloscope%2Fkaloscope&type=date&legend=top-left)
+![Repobeats](https://repobeats.axiom.co/api/embed/58d741284255abb4aa36853855299d721a2fd376.svg 'Repobeats analytics image')
 
 ## Contributors
 
