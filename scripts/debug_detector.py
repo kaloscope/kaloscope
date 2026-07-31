@@ -23,7 +23,7 @@ def connectable(host: str, port: int) -> bool:
         try:
             sock.connect((host, port))
             return True
-        except socket.error:
+        except OSError:
             return False
 
 
