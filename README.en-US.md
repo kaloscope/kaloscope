@@ -149,7 +149,19 @@ The parameters used above are described below.
 
 ## Project Activity
 
-![Repobeats](https://repobeats.axiom.co/api/embed/58d741284255abb4aa36853855299d721a2fd376.svg 'Repobeats analytics image')
+<p>
+  <img
+    src="https://repobeats.axiom.co/api/embed/58d741284255abb4aa36853855299d721a2fd376.svg"
+    alt="Repobeats"
+    width="100%"
+  />
+</p>
+
+<p>
+  <a href="https://gitstock.org/kaloscope/kaloscope">
+    <img src="https://gitstock.org/kaloscope/kaloscope/stock.svg" alt="GitStock" width="100%" />
+  </a>
+</p>
 
 ## Contributors
 
