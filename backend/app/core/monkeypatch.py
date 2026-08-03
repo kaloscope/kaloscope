@@ -51,7 +51,8 @@ def _patched_get_ssl_context(app: Sanic, ssl: ssl.SSLContext | None) -> ssl.SSLC
 
 def _patch_hishel_headers():
     """Patch hishel's `_httpx_to_internal` and `_internal_to_httpx` to
-    preserve multi-value `Set-Cookie` headers through the cache layer.
+    preserve request timeouts and multi-value `Set-Cookie` headers through the
+    cache layer.
 
     hishel's `Headers.__getitem__` joins values with `, ` which RFC 7230
     explicitly forbids for `Set-Cookie`.
@@ -81,6 +82,14 @@ def _patch_hishel_headers():
     _orig_httpx_to_internal = _async._httpx_to_internal
 
     def _httpx_to_internal(value):
+        if isinstance(value, httpx.Request):
+            request = _orig_httpx_to_internal(value)
+            if "timeout" in value.extensions:
+                request.metadata = {
+                    **request.metadata,
+                    "timeout": value.extensions["timeout"],
+                }
+            return request
         if not isinstance(value, httpx.Response):
             return _orig_httpx_to_internal(value)
 
