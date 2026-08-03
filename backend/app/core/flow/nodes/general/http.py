@@ -14,6 +14,7 @@ from app.core.flow.fields import (
     CodeField,
     DividerField,
     KVPairsField,
+    NumberField,
     SelectField,
     URLField,
 )
@@ -36,7 +37,9 @@ class HTTPNode(Node):
         required=True,
         options={"httpx": "httpx", "curl_cffi": "curl_cffi"},
         default="httpx",
+        span=50,
     )
+    timeout = NumberField("timeout", required=True, min=1, default=30, span=50)
     method = SelectField(
         required=True,
         options={
@@ -68,6 +71,7 @@ class HTTPNode(Node):
     async def execute(cls, *, node_data: dict[str, Any], context: Context, **kwargs):
         method = cast(HttpMethod, str(cls.method.extract(node_data)))
         url = cls.url.extract(node_data, context=context)
+        timeout = cls.timeout.extract(node_data)
 
         # request headers
         headers = cls.headers.extract(node_data, context=context)
@@ -132,6 +136,7 @@ class HTTPNode(Node):
                         binary if binary is not None else form,
                     ),
                     json=cast(dict[str, Any] | list[Any] | None, json),
+                    timeout=timeout,
                     proxy=await resolve_proxy(url),
                     impersonate="chrome",
                 )
@@ -145,6 +150,7 @@ class HTTPNode(Node):
                     content=binary,
                     data=form,
                     json=json,
+                    timeout=timeout,
                     extensions=extensions,
                 )
                 if response.extensions.get("hishel_from_cache"):
