@@ -106,7 +106,7 @@ class BaseService[M: TortoiseModel]:
     @classmethod
     async def dump_list(
         cls,
-        list: list[M] | QuerySet[M],
+        objects: list[M] | QuerySet[M],
         *,
         include: tuple[str, ...] | IncExc = (),
         exclude: tuple[str, ...] | IncExc = (),
@@ -114,7 +114,7 @@ class BaseService[M: TortoiseModel]:
         """Dumps a list of Tortoise ORM model objects to a Python list.
 
         Args:
-            list: The list of Tortoise ORM model objects.
+            objects: The list of Tortoise ORM model objects.
             include: The fields to include in the output.
             exclude: The fields to exclude from the output.
 
@@ -125,18 +125,20 @@ class BaseService[M: TortoiseModel]:
         model_inc, dump_inc = _inc_exc(include)
         model_exc, dump_exc = _inc_exc(exclude)
 
-        if isinstance(list, QuerySet):
+        if isinstance(objects, QuerySet):
             # create the pydantic list model
             list_model = cls._modelcls.pydantic_list(
                 include=model_inc, exclude=model_exc
             )
             # dump the queryset using the pydantic list model
-            return (await list_model.from_queryset(list)).model_dump(
+            return (await list_model.from_queryset(objects)).model_dump(
                 include=dump_inc, exclude=dump_exc
             )
 
-        # if list is not a QuerySet, assume it's a list of objects
-        return [await cls.dump(obj, include=include, exclude=exclude) for obj in list]
+        # if `objects` is not a QuerySet, assume it's a list of objects
+        return [
+            await cls.dump(obj, include=include, exclude=exclude) for obj in objects
+        ]
 
     @classmethod
     async def dump_page(
