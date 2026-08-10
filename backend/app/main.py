@@ -34,6 +34,7 @@ from app.core.middleware import SessionHolder, on_request, on_response
 from app.core.monkeypatch import apply_monkey_patches
 from app.core.network import NetworkTransport
 from app.core.transcode.transcoder import shutdown_monitors
+from app.utils.crypto import load_key
 from app.utils.importer import register_blueprints
 from app.utils.json import dumps, loads
 
@@ -65,6 +66,7 @@ async def main_process_start(app: Sanic):
     """Handle the main process startup event."""
     await init_shared_ctx(app)
     await init_workspace(app)
+    await init_secret_key(app)
     await upgrade_db(app)
     await start_log_collector(app)
 
@@ -73,6 +75,7 @@ async def main_process_start(app: Sanic):
 async def before_server_start(app: Sanic):
     """Handle the worker process startup event."""
     app.loop.set_debug(False)
+    await init_secret_key(app, create=False)
     await attach_log_monitor(app)
     await start_orm(app)
     await start_http_client(app)
@@ -155,6 +158,12 @@ async def init_workspace(app: Sanic):
     for path in app_config.workspace.values():
         Path(path).mkdir(parents=True, exist_ok=True)
     logger.debug(_msg(Colors.BLUE, "Workspace initialized:\n"), app_config.workspace)
+
+
+async def init_secret_key(app: Sanic, *, create: bool = True):
+    """Configure the secret key for the current process."""
+    app.ctx.secret_key = load_key(app_config, create=create)
+    logger.debug(_msg(Colors.BLUE, "Secret key loaded."), _worker(app))
 
 
 async def upgrade_db(app: Sanic):

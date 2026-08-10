@@ -77,6 +77,27 @@ def test_deterministic_output():
     assert encrypted1 == encrypted2
 
 
+def test_legacy_ciphertext_compatible():
+    """Keep ciphertext created with the default key compatible."""
+    encrypted = "JwQLDhAaTwMAKBMJGw=="
+
+    assert xor_encrypt("legacy secret") == encrypted
+    assert xor_decrypt(encrypted) == "legacy secret"
+
+
+def test_custom_key_roundtrip():
+    """Round-trip text with an injected `key`."""
+    encrypted = xor_encrypt("令牌 secret", key="instance-key")
+
+    assert xor_decrypt(encrypted, key="instance-key") == "令牌 secret"
+
+
+def test_empty_custom_key_rejected():
+    """Reject an empty injected `key`."""
+    with pytest.raises(ValueError):
+        xor_encrypt("secret", key=b"")
+
+
 def test_distinct_inputs_distinct_outputs():
     """Test that different inputs produce different encrypted outputs."""
     plain_text1 = "Text 1"

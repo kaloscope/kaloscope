@@ -7,6 +7,9 @@ from typing import Any, Self
 from sanic import Sanic
 from sanic.log import LOGGING_CONFIG_DEFAULTS
 
+_TRUE_VALUES = ("1", "yes", "on", "true")
+_FALSE_VALUES = ("0", "no", "off", "false")
+
 
 class KaloscopeConfig:
     """The configuration class for Kaloscope application."""
@@ -84,6 +87,27 @@ class KaloscopeConfig:
         return logging_config
 
     @cached_property
+    def secret_key_path(self) -> Path:
+        """Get the instance secret key file path.
+
+        Returns:
+            The instance secret key file path.
+        """
+        return Path(self.workspace["DATABASE"]) / "secret.key"
+
+    @cached_property
+    def secret_key_enabled(self) -> bool:
+        """Check if the instance secret key is enabled.
+
+        When enabled, a persistent random key is used for hashing and encryption.
+
+        Returns:
+            True if the instance secret key is enabled, False otherwise.
+        """
+        value = os.environ.get("SECRET_KEY_ENABLED", "").lower()
+        return value in _TRUE_VALUES
+
+    @cached_property
     def script_strict_mode(self) -> bool:
         """Check if script strict mode is enabled.
 
@@ -94,7 +118,7 @@ class KaloscopeConfig:
             True if script strict mode is enabled, False otherwise.
         """
         value = os.environ.get("SCRIPT_STRICT_MODE", "").lower()
-        return value not in ("0", "no", "off", "false")
+        return value not in _FALSE_VALUES
 
     @cached_property
     def filesystem_trash_mode(self) -> bool:
@@ -107,7 +131,7 @@ class KaloscopeConfig:
             True if filesystem trash mode is enabled, False otherwise.
         """
         value = os.environ.get("FILESYSTEM_TRASH_MODE", "").lower()
-        return value not in ("0", "no", "off", "false")
+        return value not in _FALSE_VALUES
 
     @cached_property
     def public_instance_mode(self) -> bool:
@@ -120,7 +144,7 @@ class KaloscopeConfig:
             True if public instance mode is enabled, False otherwise.
         """
         value = os.environ.get("PUBLIC_INSTANCE_MODE", "").lower()
-        return value in ("1", "yes", "on", "true")
+        return value in _TRUE_VALUES
 
     def configure(self, app: Sanic):
         """Update the Sanic application configuration and store it in the context.
