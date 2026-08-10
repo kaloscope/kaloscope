@@ -16,7 +16,7 @@ from sanic.log import logger
 from tortoise import timezone
 from tortoise.expressions import F, Q, RawSQL
 
-from app.core.dl.adapter import Adapter, load_config
+from app.core.dl.adapter import Adapter, decrypt_config, load_config
 from app.core.flow.engine import FlowEngine
 from app.core.notifications import Notifications, NotificationTemplate
 from app.core.renderer import is_template, render
@@ -177,7 +177,7 @@ async def sync_tasks(downloader: Downloader, tasks: list[DownloadTask]):
         downloader: The downloader.
         tasks: The download tasks.
     """
-    adapter = load_config(downloader.config)
+    adapter = load_config(decrypt_config(downloader.config))
     variables = {
         "ids": [t.unique_id for t in tasks if t.unique_id],
         "hashes": [t.info_hash for t in tasks if t.info_hash],
@@ -442,7 +442,7 @@ async def check_download_plans():
     adapters: dict[int, Adapter] = {}
     for downloader_id in {plan.downloader_id for plan in plans}:
         downloader = await Downloader.get(id=downloader_id)
-        adapter = load_config(downloader.config)
+        adapter = load_config(decrypt_config(downloader.config))
         if not adapter.methods.get("version") or (await adapter.version()):
             adapters[downloader_id] = adapter
 
@@ -467,7 +467,7 @@ async def execute_download_plan(plan: DownloadPlan, adapter: Adapter | None = No
     # load the adapter if not provided
     if adapter is None:
         downloader = await Downloader.get(id=plan.downloader_id)
-        adapter = load_config(downloader.config)
+        adapter = load_config(decrypt_config(downloader.config))
 
     # get the flow engine instance
     engine: FlowEngine = Sanic.get_app().ctx.flow_engine

@@ -10,9 +10,11 @@ from pydantic import BaseModel, Field, ValidationError
 from sanic import Sanic
 from sanic.log import Colors, logger
 
+from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.renderer import jsonpath_all, jsonpath_first, render
+from app.utils.crypto import xor_decrypt, xor_encrypt
 from app.utils.json import JSONType, dumps, try_loads
 
 # the supported methods
@@ -410,6 +412,34 @@ def _is_multipart_file(value: Any) -> bool:
     if not isinstance(value[0], str | type(None)):
         return False
     return isinstance(value[1], bytes)
+
+
+def encrypt_config(config: str) -> str:
+    """Encrypt the complete downloader YAML when the secret key is enabled.
+
+    Args:
+        config: The downloader YAML configuration.
+
+    Returns:
+        The encrypted configuration, or the original configuration when disabled.
+    """
+    if not KaloscopeConfig.get().secret_key_enabled:
+        return config
+    return xor_encrypt(config)
+
+
+def decrypt_config(config: str) -> str:
+    """Decrypt the complete downloader YAML when the secret key is enabled.
+
+    Args:
+        config: The stored downloader YAML configuration.
+
+    Returns:
+        The decrypted configuration, or the original configuration when disabled.
+    """
+    if not KaloscopeConfig.get().secret_key_enabled:
+        return config
+    return xor_decrypt(config)
 
 
 def load_config(config: str) -> Adapter:
