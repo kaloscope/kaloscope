@@ -179,9 +179,9 @@ class Adapter(BaseModel):
                 ),
                 retries=retries,
             )
-        except httpx.RequestError as e:
-            logger.error("An error occurred while requesting %s.", url, exc_info=True)
-            raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED) from e
+        except httpx.RequestError:
+            logger.error("An error occurred while requesting the downloader.")
+            raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED) from None
 
     def _request_body(self, api: API, variables: dict) -> tuple:
         """Get the request body for the given API and variables.
@@ -427,23 +427,15 @@ def load_config(config: str) -> Adapter:
     # parse the YAML configuration
     try:
         yaml_config = yaml.load(config, Loader=yaml.SafeLoader)
-    except yaml.YAMLError as e:
-        logger.error(
-            f"Failed to parse the YAML configuration:\n{Colors.RED}%s{Colors.END}",
-            config,
-            exc_info=True,
-        )
-        raise KaloscopeException(ErrorCode.INVALID_YAML_CONFIG) from e
+    except yaml.YAMLError:
+        logger.error("Failed to parse the downloader YAML configuration.")
+        raise KaloscopeException(ErrorCode.INVALID_YAML_CONFIG) from None
 
     # validate the configuration
     try:
         adapter = Adapter.model_validate(yaml_config)
-    except ValidationError as e:
-        logger.error(
-            f"Failed to validate the configuration:\n{Colors.RED}%s{Colors.END}",
-            yaml_config,
-            exc_info=True,
-        )
-        raise KaloscopeException(ErrorCode.INVALID_YAML_CONFIG) from e
+    except ValidationError:
+        logger.error("Failed to validate the downloader configuration.")
+        raise KaloscopeException(ErrorCode.INVALID_YAML_CONFIG) from None
 
     return adapter

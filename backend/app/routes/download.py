@@ -40,12 +40,14 @@ download = Blueprint("download", url_prefix="/download")
 
 
 @download.get("/manager/list")
-async def list_downloaders(_) -> HTTPResponse:
+async def list_downloaders(request: Request) -> HTTPResponse:
     """List the downloaders."""
     downloaders = await DownloaderService.dump_list(Downloader.all())
     for downloader in downloaders:
         # check if the downloader is up or down
         adapter = load_config(downloader["config"])
+        if request.ctx.user.role is not UserRole.ADMIN:
+            downloader.pop("config", None)
         if not adapter.methods.get("version"):
             downloader["status"] = "unknown"
             continue
