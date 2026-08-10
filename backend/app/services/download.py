@@ -6,10 +6,15 @@ import aiofiles
 from tortoise import timezone
 from tortoise.expressions import Q
 from tortoise.functions import Count, Sum
+from tortoise.queryset import QuerySet
 from tortoise.transactions import atomic
 
 from app.core.constants import ENCODING
-from app.core.dl.adapter import load_config
+from app.core.dl.adapter import (
+    decrypt_config,
+    encrypt_config,
+    load_config,
+)
 from app.core.dl.syncer import Unique, execute_download_plan, resolve_details
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.download import (
@@ -34,6 +39,19 @@ class DownloaderService(BaseService[Downloader], model=Downloader):
     """The service class for all downloader related operations."""
 
     PRESETS_PATH = Path(__file__).resolve().parents[2] / "static/downloaders"
+
+    @classmethod
+    async def dump(cls, obj: Downloader, **kwargs) -> dict:
+        data = await super().dump(obj, **kwargs)
+        if "config" in data:
+            data["config"] = decrypt_config(data["config"])
+        return data
+
+    @classmethod
+    async def dump_list(cls, objects, **kwargs) -> list[dict]:
+        if isinstance(objects, QuerySet):
+            objects = await objects
+        return await super().dump_list(objects, **kwargs)
 
     @classmethod
     async def get_presets(cls) -> dict[str, str]:
@@ -89,11 +107,12 @@ class DownloaderService(BaseService[Downloader], model=Downloader):
             filter &= ~Q(id=obj.id)
         if await Downloader.filter(filter).count() > 0:
             raise KaloscopeException(ErrorCode.NAME_ALREADY_EXISTS)
+        stored_config = encrypt_config(obj.config)
 
         if obj.id:
             # update the downloader
             await Downloader.filter(id=obj.id).update(
-                config=obj.config,
+                config=stored_config,
                 name=adapter.name,
                 host=adapter.host,
                 port=adapter.port,
@@ -105,7 +124,7 @@ class DownloaderService(BaseService[Downloader], model=Downloader):
             priorities: list = await Downloader.all().values_list("priority", flat=True)
             downloader = await Downloader.create(
                 preset=obj.preset or None,
-                config=obj.config,
+                config=stored_config,
                 name=adapter.name,
                 host=adapter.host,
                 port=adapter.port,
@@ -169,7 +188,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             The added download task.
         """
         downloader = await Downloader.get(id=add.downloader_id)
-        adapter = load_config(downloader.config)
+        adapter = load_config(decrypt_config(downloader.config))
 
         # call the `add_torrent` or `add_link` method
         info_hash, info_hash_v2, magnet_link, result = None, None, None, None
@@ -220,7 +239,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
-        adapter = load_config(downloader.config)
+        adapter = load_config(decrypt_config(downloader.config))
         await adapter.call("pause", asdict(Unique.from_task(task)))
         await DownloadTask.filter(id=id).update(state=DownloadState.PAUSED)
 
@@ -233,7 +252,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
-        adapter = load_config(downloader.config)
+        adapter = load_config(decrypt_config(downloader.config))
         await adapter.call("start", asdict(Unique.from_task(task)))
         await DownloadTask.filter(id=id).update(state=DownloadState.DOWNLOADING)
 
@@ -247,7 +266,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
-        adapter = load_config(downloader.config)
+        adapter = load_config(decrypt_config(downloader.config))
         unique = asdict(Unique.from_task(task))
 
         # get the local path when using aria2 with `local=True`
