@@ -94,8 +94,7 @@ class TortoiseModel(Model):
     created_at = DatetimeField(null=True, auto_now_add=True)
     updated_at = DatetimeField(null=True, auto_now=True)
 
-    class Meta:
-        abstract = True
+    Meta: type[Any] = type("Meta", (), {"abstract": True})
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
