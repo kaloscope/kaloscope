@@ -219,12 +219,17 @@ class MediaHandler(ABC):
         """
         if event.is_directory:
             return None
-        if self.is_target(base_path, event.src_path, check_exists=True):
-            return event
+        path = Path(self._decode_path(event.src_path))
+        # check if the path exists and is a NFO file
+        if path.exists():
+            mime_type, _ = mimetypes.guess_file_type(path)
+            if mime_type == NFO_MIME_TYPE and self.is_target(
+                base_path, event.src_path, check_exists=True
+            ):
+                return event
+            return None
         # check if the path is a target but does not exist
-        if not Path(self._decode_path(event.src_path)).exists() and self.is_target(
-            base_path, event.src_path, check_exists=False
-        ):
+        if self.is_target(base_path, event.src_path, check_exists=False):
             event.event_type = EVENT_TYPE_DELETED
             event.dest_path = ""
             return event
