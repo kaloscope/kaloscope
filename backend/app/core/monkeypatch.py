@@ -19,6 +19,9 @@ def apply_monkey_patches():
     # allow self-signed TLS in PROD mode
     startup.get_ssl_context = _patched_get_ssl_context  # type: ignore
 
+    # skip SQLite description rebuilds
+    _patch_tortoise_sqlite_descriptions()
+
     # patch hishel cache layer
     _patch_hishel_headers()
     _patch_hishel_force_cache()
@@ -47,6 +50,24 @@ def _patched_get_ssl_context(app: Sanic, ssl: ssl.SSLContext | None) -> ssl.SSLC
     hostname = os.environ.get("TLS_HOSTNAME") or app.config.LOCALHOST
     context = creator.generate_cert(hostname)
     return context
+
+
+def _patch_tortoise_sqlite_descriptions():
+    """Skip SQLite table rebuilds for changes limited to `description`."""
+    from tortoise.migrations.schema_editor.sqlite import SqliteSchemaEditor
+
+    original = SqliteSchemaEditor._alter_field
+
+    async def _alter_field(self, model, old_field, new_field):
+        old_definition = old_field.describe(serializable=True)
+        new_definition = new_field.describe(serializable=True)
+        old_definition.pop("description", None)
+        new_definition.pop("description", None)
+        if old_definition == new_definition:
+            return
+        await original(self, model, old_field, new_field)
+
+    SqliteSchemaEditor._alter_field = _alter_field
 
 
 def _patch_hishel_headers():

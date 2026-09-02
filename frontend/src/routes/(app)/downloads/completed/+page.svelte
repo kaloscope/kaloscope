@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
   import {
     alert,
@@ -105,6 +106,17 @@
   }
 
   /**
+   * Build the deduplicated error tooltip for a download task.
+   *
+   * @param task - The download task.
+   * @returns The localized structured error and optional driver message.
+   */
+  function errorTooltip(task: DownloadTask): string {
+    const kind = task.error_kind ? $_(`download.error.${task.error_kind}`) : '';
+    return [...new Set([kind, task.error_msg].filter(Boolean))].join('\n');
+  }
+
+  /**
    * Copy the magnet link of a download task.
    *
    * @param task - The download task.
@@ -181,8 +193,18 @@
     </Cell>
     <Cell>
       <div class="flex w-full flex-col gap-2 pr-2">
-        <div class="flex items-center">
+        <div class="flex items-start justify-between gap-2">
           <span class="min-w-0 text-sm wrap-break-word">{task.name}</span>
+          <div class="flex shrink-0 items-center gap-1 opacity-80">
+            {#if task.error_kind || task.error_msg}
+              <iconify-icon
+                use:tooltip={{ content: errorTooltip(task), placement: 'left' }}
+                icon={icons.warning}
+                width="1.25rem"
+                class="text-warning"
+              ></iconify-icon>
+            {/if}
+          </div>
         </div>
         <div class="flex justify-between gap-2 text-xs opacity-50">
           <span>{task.ratio.slice(0, -6)}</span>
@@ -199,6 +221,7 @@
           onclick: () => copyMagnetLink(task)
         },
         {
+          condition: task.capabilities.includes('delete'),
           icon: icons.delete,
           text: $_('action.delete', $_('entity.task')),
           onclick: () => deleteConfirm.showModal(task.id)

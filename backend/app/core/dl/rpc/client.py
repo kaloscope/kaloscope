@@ -1,106 +1,33 @@
 import contextlib
 import re
-from functools import cached_property
+from dataclasses import dataclass
 from multiprocessing.managers import DictProxy
-from typing import Any, Literal
+from typing import Any
 
 import httpx
-import yaml
-from pydantic import BaseModel, Field, ValidationError
 from sanic import Sanic
 from sanic.log import Colors, logger
 
-from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
+from app.core.dl.rpc.models import API, Method, RpcConfig
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.renderer import jsonpath_all, jsonpath_first, render
-from app.utils.crypto import xor_decrypt, xor_encrypt
 from app.utils.json import JSONType, dumps, try_loads
 
-# the supported methods
-type Method = Literal[
-    "version",
-    "login",
-    "add_link",
-    "add_torrent",
-    "list",
-    "details",
-    "pause",
-    "start",
-    "delete",
-]
 
+@dataclass(slots=True)
+class RpcClient:
+    config: RpcConfig
 
-class CSRF(BaseModel):
-    header: str
-
-
-class Authentication(BaseModel):
-    secret: str | None = None
-    username: str | None = None
-    password: str | None = None
-
-
-class APIResponse(BaseModel):
-    each: str | None = None
-    mappings: dict[str, str] | None = None
-    expected: dict[str, str] | str | None = None
-    unexpected: dict[str, str] | str | None = None
-
-
-class API(BaseModel):
-    _method: Method | None = None
-    get: str | None = None
-    post: str | None = None
-    headers: dict[str, str] | None = None
-    body: dict[str, Any] | str | None = None
-    form: dict[str, Any] | None = None
-    json_: JSONType = Field(alias="json", default=None)
-    response: APIResponse | None = None
-
-
-class Adapter(BaseModel):
-    name: str
-    protocol: Literal["http", "https"] = "http"
-    host: str
-    port: int
-    path: str = ""
-    csrf: CSRF | None = None
-    auth: Authentication | None = None
-    methods: dict[Method, API]
-    response: APIResponse | None = None
-
-    @cached_property
-    def base_url(self) -> str:
-        return f"{self.protocol}://{self.host}:{self.port}{self.path}".rstrip("/")
-
-    @cached_property
-    def explicit_login(self) -> bool:
-        if not (self.auth and self.auth.username and self.auth.password):
-            return False
-        return "login" in self.methods
-
-    @cached_property
-    def basic_auth(self) -> httpx.BasicAuth | None:
-        if not (self.auth and self.auth.username and self.auth.password):
-            return None
-        return httpx.BasicAuth(username=self.auth.username, password=self.auth.password)
-
-    @cached_property
-    def csrf_header(self) -> str | None:
-        if not self.csrf:
-            return None
-        return self.csrf.header
-
-    @cached_property
+    @property
     def csrf_tokens(self) -> DictProxy[str, str]:
         return Sanic.get_app().shared_ctx.csrf_tokens
 
     async def version(self) -> str | None:
-        """Get the version of the adapter.
+        """Get the version of the RPC endpoint.
 
         Returns:
-            The version of the adapter.
+            The version of the RPC endpoint.
         """
         version = None
         with contextlib.suppress(Exception):
@@ -124,26 +51,31 @@ class Adapter(BaseModel):
         Returns:
             The result of the API call.
         """
-        api = self.methods.get(method)
+        api = self.config.methods.get(method)
         if api is not None:
-            api._method = method
             if variables is None:
                 variables = {}
             # add authentication to the variables
-            if self.auth is not None:
-                variables["secret"] = self.auth.secret or ""
-                variables["username"] = self.auth.username or ""
-                variables["password"] = self.auth.password or ""
-            return await self._request(api, variables)
+            if self.config.auth is not None:
+                variables["secret"] = self.config.auth.secret or ""
+                variables["username"] = self.config.auth.username or ""
+                variables["password"] = self.config.auth.password or ""
+            return await self._request(api, variables, api_method=method)
 
     async def _request(
-        self, api: API, variables: dict, *, retries: int = 0
+        self,
+        api: API,
+        variables: dict,
+        *,
+        api_method: Method,
+        retries: int = 0,
     ) -> JSONType:
         """Make an HTTP request to the given API with the given variables.
 
         Args:
             api: The API schema.
             variables: The variables to render the API with.
+            api_method: The configured RPC method.
             retries: The number of retries.
 
         Returns:
@@ -154,15 +86,16 @@ class Adapter(BaseModel):
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED)
 
         method = "GET" if api.get else "POST" if api.post else "POST"
-        url = _render(f"{self.base_url}{api.get or api.post or ''}", variables)
+        url = _render(f"{self.config.base_url}{api.get or api.post or ''}", variables)
         # request headers
         headers = _render(api.headers or {}, variables)
-        if self.csrf_header and (token := self.csrf_tokens.get(self.base_url)):
-            headers[self.csrf_header] = token
+        csrf_header = self.config.csrf_header
+        if csrf_header and (token := self.csrf_tokens.get(self.config.base_url)):
+            headers[csrf_header] = token
         # request body
         content, data, files, json = self._request_body(api, variables)
         # basic auth
-        auth = self.basic_auth if not self.explicit_login else None
+        auth = self.config.basic_auth if not self.config.explicit_login else None
         # make the request
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
         try:
@@ -179,6 +112,7 @@ class Adapter(BaseModel):
                     json=json,
                     auth=auth,
                 ),
+                api_method=api_method,
                 retries=retries,
             )
         except httpx.RequestError:
@@ -221,7 +155,13 @@ class Adapter(BaseModel):
         return content, data, files, json
 
     async def _response(
-        self, api: API, variables: dict, response: httpx.Response, *, retries
+        self,
+        api: API,
+        variables: dict,
+        response: httpx.Response,
+        *,
+        api_method: Method,
+        retries: int,
     ) -> JSONType:
         """Process the HTTP response with the given API schema.
 
@@ -229,21 +169,33 @@ class Adapter(BaseModel):
             api: The API schema.
             variables: The variables to render the API with.
             response: The HTTP response.
+            api_method: The configured RPC method.
             retries: The number of retries.
 
         Returns:
             The result of the API call.
         """
         # call the login method if the status code is 403
-        if response.status_code == 403 and self.explicit_login:
-            if api._method != "login":
+        if response.status_code == 403 and self.config.explicit_login:
+            if api_method != "login":
                 await self.call("login")
-            return await self._request(api, variables, retries=retries + 1)
+            return await self._request(
+                api,
+                variables,
+                api_method=api_method,
+                retries=retries + 1,
+            )
 
         # update the CSRF token if the status code is 409
-        if response.status_code == 409 and self.csrf_header:
-            self.csrf_tokens[self.base_url] = response.headers.get(self.csrf_header)
-            return await self._request(api, variables, retries=retries + 1)
+        csrf_header = self.config.csrf_header
+        if response.status_code == 409 and csrf_header:
+            self.csrf_tokens[self.config.base_url] = response.headers.get(csrf_header)
+            return await self._request(
+                api,
+                variables,
+                api_method=api_method,
+                retries=retries + 1,
+            )
 
         # raise an exception if the status code is not 2xx
         if not 200 <= response.status_code < 300:
@@ -285,8 +237,8 @@ class Adapter(BaseModel):
         """
         if api.response and api.response.expected:
             return api.response.expected
-        elif self.response and self.response.expected:
-            return self.response.expected
+        elif self.config.response and self.config.response.expected:
+            return self.config.response.expected
         return None
 
     def _unexpected(self, api: API) -> dict[str, str] | str | None:
@@ -300,8 +252,8 @@ class Adapter(BaseModel):
         """
         if api.response and api.response.unexpected:
             return api.response.unexpected
-        elif self.response and self.response.unexpected:
-            return self.response.unexpected
+        elif self.config.response and self.config.response.unexpected:
+            return self.config.response.unexpected
         return None
 
 
@@ -412,60 +364,3 @@ def _is_multipart_file(value: Any) -> bool:
     if not isinstance(value[0], str | type(None)):
         return False
     return isinstance(value[1], bytes)
-
-
-def encrypt_config(config: str) -> str:
-    """Encrypt the complete downloader YAML when the secret key is enabled.
-
-    Args:
-        config: The downloader YAML configuration.
-
-    Returns:
-        The encrypted configuration, or the original configuration when disabled.
-    """
-    if not KaloscopeConfig.get().secret_key_enabled:
-        return config
-    return xor_encrypt(config)
-
-
-def decrypt_config(config: str) -> str:
-    """Decrypt the complete downloader YAML when the secret key is enabled.
-
-    Args:
-        config: The stored downloader YAML configuration.
-
-    Returns:
-        The decrypted configuration, or the original configuration when disabled.
-    """
-    if not KaloscopeConfig.get().secret_key_enabled:
-        return config
-    return xor_decrypt(config)
-
-
-def load_config(config: str) -> Adapter:
-    """Load the adapter configuration from the given YAML string.
-
-    Args:
-        config: The YAML string of the configuration.
-
-    Raises:
-        KaloscopeException: If the YAML configuration is invalid.
-
-    Returns:
-        The adapter configuration.
-    """
-    # parse the YAML configuration
-    try:
-        yaml_config = yaml.load(config, Loader=yaml.SafeLoader)
-    except yaml.YAMLError:
-        logger.error("Failed to parse the downloader YAML configuration.")
-        raise KaloscopeException(ErrorCode.INVALID_YAML_CONFIG) from None
-
-    # validate the configuration
-    try:
-        adapter = Adapter.model_validate(yaml_config)
-    except ValidationError:
-        logger.error("Failed to validate the downloader configuration.")
-        raise KaloscopeException(ErrorCode.INVALID_YAML_CONFIG) from None
-
-    return adapter

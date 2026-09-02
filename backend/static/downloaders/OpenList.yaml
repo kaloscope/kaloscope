@@ -1,0 +1,25 @@
+# Driver
+driver: openlist
+name: OpenList
+
+# URL
+protocol: http
+host: 127.0.0.1
+port: 5244
+path: /api
+
+# Authentication
+auth:
+  token:
+
+# Offline download
+tool:
+remote_root: /Kaloscope
+remote_cleanup: keep
+
+# Polling
+poll_interval: 10
+poll_max_interval: 60
+
+# Local transfer
+pull_concurrency: 2

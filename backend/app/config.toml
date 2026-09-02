@@ -19,6 +19,7 @@ oas_ui_redoc = false
 oas_ui_default = "swagger"
 
 [workspace]
+temp = "{workspace}/temp"
 cache = "{workspace}/cache"
 images = "{workspace}/images"
 database = "{workspace}/database"

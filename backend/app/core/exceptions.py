@@ -10,9 +10,9 @@ ROOT_PATH = Path(__file__).resolve().parents[3]
 
 
 class ErrorCode(StrEnum):
-    """The error codes for Kaloscope application."""
+    """Define stable error codes returned by Kaloscope."""
 
-    # HTTP error codes
+    # protocol error codes
     INTERNAL_SERVER_ERROR = auto()
     UNAUTHORIZED = auto()
     BAD_REQUEST = auto()
@@ -34,8 +34,8 @@ class ErrorCode(StrEnum):
     PERMISSION_DENIED = auto()
     DUPLICATE_DIRECTORY = auto()
     INVALID_YAML_CONFIG = auto()
+    INVALID_DOWNLOAD_SOURCE = auto()
     INFO_HASH_COLLISION = auto()
-    GET_INFO_HASH_FAILED = auto()
     HTTP_REQUEST_FAILED = auto()
     EXPORT_ITEMS_FAILED = auto()
     IMPORT_ITEMS_FAILED = auto()
@@ -43,21 +43,21 @@ class ErrorCode(StrEnum):
 
 
 class KaloscopeException(SanicException):
-    """The base exception class for Kaloscope application."""
+    """Represent the base application exception."""
 
     status_code = 500
     quiet = False
 
 
 class BadRequestException(KaloscopeException):
-    """The exception class for bad requests."""
+    """Represent an invalid client request."""
 
     status_code = 400
     message = ErrorCode.BAD_REQUEST
 
 
 class UnauthorizedException(KaloscopeException):
-    """The exception class for unauthorized access."""
+    """Represent a request without valid authentication."""
 
     status_code = 401
     message = ErrorCode.UNAUTHORIZED
@@ -65,7 +65,7 @@ class UnauthorizedException(KaloscopeException):
 
 
 class ForbiddenException(KaloscopeException):
-    """The exception class for forbidden access."""
+    """Represent an authenticated request without permission."""
 
     status_code = 403
     message = ErrorCode.FORBIDDEN
@@ -73,7 +73,7 @@ class ForbiddenException(KaloscopeException):
 
 
 class NotFoundException(KaloscopeException):
-    """The exception class for not found resources."""
+    """Represent a missing resource."""
 
     status_code = 404
     message = ErrorCode.NOT_FOUND
@@ -93,7 +93,7 @@ async def error_handler(request: Request, exception: Exception):
         KaloscopeException: The wrapped exception.
 
     Returns:
-        The 404.html page for all 404 errors.
+        The `404.html` page for all `404` errors.
     """
     if isinstance(exception, NotFound):
         # return the frontend 404.html for all 404 errors

@@ -53,6 +53,7 @@
     'mobile firefox': resolve('/icons/firefox.svg'),
     safari: resolve('/icons/safari.svg'),
     'mobile safari': resolve('/icons/safari.svg'),
+    openlist: resolve('/icons/OpenList.svg'),
     aria2: resolve('/icons/aria2.png'),
     qbittorrent: resolve('/icons/qbittorrent.ico'),
     transmission: resolve('/icons/transmission.ico')

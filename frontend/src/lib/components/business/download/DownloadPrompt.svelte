@@ -26,13 +26,19 @@
   let files: FileList | null = $state(null);
   let link: string = $state('');
 
+  // the selected downloader and its source capabilities
+  let selectedDownloader = $derived(downloaders.find((downloader) => downloader.id === downloaderId));
+  let isOpenList = $derived(selectedDownloader?.driver === 'openlist');
+  let acceptsTorrent = $derived(selectedDownloader?.source_types.includes('torrent') ?? false);
+  let supportsPausedSubmission = $derived(selectedDownloader?.driver === 'rpc');
+
   // the submittable state
   let submittable = $derived.by(() => {
     if (downloaderId === 0) {
       return false;
     }
     if (files && files.length > 0) {
-      return true;
+      return acceptsTorrent;
     }
     return link.trim() !== '';
   });
@@ -74,7 +80,10 @@
             }
             // check if the text is a valid download link
             return api
-              .post('download/validate', { body: text })
+              .post('download/validate', {
+                body: text,
+                searchParams: downloaderId ? { downloader_id: downloaderId } : undefined
+              })
               .json<Resp<boolean>>()
               .then(({ data }) => (data ? text : null));
           })
@@ -172,8 +181,8 @@
    */
   function addTask(data: FormData) {
     loading.start();
-    // append the pause field based on the start checkbox
-    data.append('pause', (!data.get('start')).toString());
+    // append the `pause` field when the selected downloader supports it
+    data.append('pause', (supportsPausedSubmission && !data.get('start')).toString());
     data.delete('start');
     // delete the transfer fields if no media library is selected
     if (!transferLibId) {
@@ -220,6 +229,12 @@
       supportsHardlink = platform !== 'win32';
       transferMethod = supportsHardlink ? 'hardlink' : 'symlink';
     });
+  });
+
+  $effect(() => {
+    if (!acceptsTorrent) {
+      files = null;
+    }
   });
 </script>
 
@@ -268,16 +283,20 @@
       <Label required class="mt-6">{$_('download.prompt')}</Label>
       <textarea
         rows={5}
-        placeholder={$_('download.supported')}
+        placeholder={isOpenList ? $_('download.downloader.openlist.supported') : $_('download.supported')}
         class="textarea w-full"
         name="link"
         bind:value={link}
         disabled={files && files.length > 0}></textarea>
-      <input type="file" accept=".torrent" class="file-input w-full file-input-sm" name="torrent" bind:files />
-      <label class="mt-2 fieldset-label w-fit">
-        <input type="checkbox" class="checkbox checkbox-sm" checked={true} name="start" />
-        <span class="text-base text-base-content opacity-90">{$_('download.start')}</span>
-      </label>
+      {#if acceptsTorrent}
+        <input type="file" accept=".torrent" class="file-input w-full file-input-sm" name="torrent" bind:files />
+      {/if}
+      {#if supportsPausedSubmission}
+        <label class="mt-2 fieldset-label w-fit">
+          <input type="checkbox" class="checkbox checkbox-sm" checked={true} name="start" />
+          <span class="text-base text-base-content opacity-90">{$_('download.start')}</span>
+        </label>
+      {/if}
       <Label class="mt-6">{$_('download.transfer.title')}</Label>
       <Select
         options={[
