@@ -77,7 +77,7 @@ class MediaLib(TortoiseModel):
 
 
 class MediaItem(TortoiseModel):
-    lib_id: int
+    lib_id: int  # https://tortoise.github.io/models.html#the-db-backing-field
     lib: ForeignKeyRelation[MediaLib] = ForeignKeyField(
         "models.MediaLib", related_name="items", db_index=True
     )

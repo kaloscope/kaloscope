@@ -341,6 +341,40 @@ export type MediaProbe = {
 };
 
 /**
+ * A downloader driver identifier returned by the API.
+ */
+export type DownloaderDriver = 'rpc' | 'openlist';
+
+/**
+ * A source format accepted by a downloader.
+ */
+export type DownloadSource = 'raw' | 'magnet' | 'torrent';
+
+/**
+ * An operation available for a download task.
+ */
+export type DownloadAction = 'pause' | 'resume' | 'cancel' | 'retry' | 'delete';
+
+/**
+ * A structured failure or warning associated with an offline download.
+ */
+export type DownloadErrorKind =
+  | 'submit_unknown'
+  | 'instance_auth'
+  | 'instance_rate_limit'
+  | 'instance_transient'
+  | 'remote_task_missing'
+  | 'remote_failed'
+  | 'transfer_failed'
+  | 'manifest_invalid'
+  | 'direct_link_unavailable'
+  | 'local_path_invalid'
+  | 'local_file_conflict'
+  | 'pull_failed'
+  | 'verify_failed'
+  | 'cleanup_failed';
+
+/**
  * A download service configured in the application.
  */
 export type Downloader = {
@@ -348,7 +382,9 @@ export type Downloader = {
   created_at: string;
   updated_at: string;
   preset: string | null;
-  config: string;
+  config?: string;
+  driver: DownloaderDriver;
+  source_types: DownloadSource[];
   name: string;
   host: string | null;
   port: number | null;
@@ -380,8 +416,10 @@ export type DownloadTask = {
   info_hash_v2: string | null;
   magnet_link: string | null;
   state: keyof typeof DownloadState;
+  capabilities: DownloadAction[];
   raw_state: string | null;
   error_msg: string | null;
+  error_kind: DownloadErrorKind | null;
   up_speed: number | null;
   dl_speed: number | null;
   percentage: number | null;

@@ -69,6 +69,36 @@ export const DownloadState = createEnum({
     icon: icons.download,
     iconColor: null
   },
+  submitting: {
+    label: 'enum.download_state.submitting',
+    icon: icons.cloudArrowUp,
+    iconColor: null
+  },
+  submit_unknown: {
+    label: 'enum.download_state.submit_unknown',
+    icon: icons.questionCircle,
+    iconColor: 'var(--color-warning)'
+  },
+  remote: {
+    label: 'enum.download_state.remote',
+    icon: icons.cloudSync,
+    iconColor: null
+  },
+  settling: {
+    label: 'enum.download_state.settling',
+    icon: icons.arrowSyncCircle,
+    iconColor: null
+  },
+  pulling: {
+    label: 'enum.download_state.pulling',
+    icon: icons.cloudArrowDown,
+    iconColor: null
+  },
+  verifying: {
+    label: 'enum.download_state.verifying',
+    icon: icons.boxSearch,
+    iconColor: null
+  },
   paused: {
     label: 'enum.download_state.paused',
     icon: icons.pauseFilled,

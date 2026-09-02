@@ -13,8 +13,11 @@ from pydantic import (
 )
 from sanic.request.form import File
 from tortoise.fields import (
+    CASCADE,
     SET_NULL,
+    BackwardOneToOneRelation,
     BigIntField,
+    BooleanField,
     CharEnumField,
     CharField,
     DatetimeField,
@@ -24,10 +27,13 @@ from tortoise.fields import (
     ForeignKeyRelation,
     IntField,
     JSONField,
+    OneToOneField,
+    OneToOneRelation,
     ReverseRelation,
     TextField,
 )
 
+from app.core.dl.driver import DownloadState
 from app.core.renderer import duration
 from app.models.base import IDs, Pageable, RequestFilesMixin, TortoiseModel
 from app.models.flow import FlowGraph
@@ -36,18 +42,28 @@ from app.utils.disk import format_bytes
 
 
 # -------------------- Enumerations --------------------
-class DownloadState(StrEnum):
-    DOWNLOADING = auto()
-    PAUSED = auto()
-    COMPLETED = auto()
-    ERROR = auto()
-
-
 class TransferMethod(StrEnum):
     HARDLINK = auto()
     SYMLINK = auto()
     MOVE = auto()
     COPY = auto()
+
+
+class OfflineDownloadErrorKind(StrEnum):
+    SUBMIT_UNKNOWN = auto()
+    INSTANCE_AUTH = auto()
+    INSTANCE_RATE_LIMIT = auto()
+    INSTANCE_TRANSIENT = auto()
+    REMOTE_TASK_MISSING = auto()
+    REMOTE_FAILED = auto()
+    TRANSFER_FAILED = auto()
+    MANIFEST_INVALID = auto()
+    DIRECT_LINK_UNAVAILABLE = auto()
+    LOCAL_PATH_INVALID = auto()
+    LOCAL_FILE_CONFLICT = auto()
+    PULL_FAILED = auto()
+    VERIFY_FAILED = auto()
+    CLEANUP_FAILED = auto()
 
 
 # -------------------- ORM Models --------------------
@@ -114,7 +130,11 @@ class DownloadPlan(TortoiseModel):
     histories: ReverseRelation["DownloadPlanHistory"]
 
     def inactive(self) -> bool:
-        """Check if the plan is currently inactive."""
+        """Check whether the plan is currently inactive.
+
+        Returns:
+            `True` when scheduling limits prevent execution, otherwise `False`.
+        """
         now = datetime.now(UTC)
         if self.interval_start is not None and now < self.interval_start:
             return True
@@ -148,7 +168,6 @@ class DownloadPlanHistory(TortoiseModel):
 
 
 class DownloadTask(TortoiseModel):
-    # https://tortoise.github.io/models.html#the-db-backing-field
     downloader_id: int
     downloader: ForeignKeyRelation[Downloader] = ForeignKeyField(
         "models.Downloader", related_name="tasks", db_index=True
@@ -180,9 +199,14 @@ class DownloadTask(TortoiseModel):
     transfer_method = CharEnumField(max_length=16, enum_type=TransferMethod, null=True)
     sub_pattern = CharField(max_length=4096, null=True)
     sub_repl = CharField(max_length=4096, null=True)
+    offline_job: BackwardOneToOneRelation["OfflineDownloadJob"]
 
     def ratio(self) -> str:
-        """Calculate the ratio of completed size to total size."""
+        """Calculate the ratio of completed size to total size.
+
+        Returns:
+            The formatted byte ratio and optional percentage.
+        """
         size = ""
         if self.completed_size is None or self.total_size is None:
             return size
@@ -193,7 +217,11 @@ class DownloadTask(TortoiseModel):
         return f"{size} ({percentage})"
 
     def estimate(self) -> str:
-        """Estimate the download speed and time remaining."""
+        """Estimate the download speed and time remaining.
+
+        Returns:
+            The formatted speed and optional remaining duration.
+        """
         speed = ""
         if self.dl_speed is None:
             return speed
@@ -211,8 +239,38 @@ class DownloadTask(TortoiseModel):
         indexes = (("state", "created_at"),)
 
     class PydanticMeta:
-        exclude = ("downloader", "transfer_lib")
+        exclude = ("downloader", "transfer_lib", "offline_job")
         computed = ("ratio", "estimate")
+
+
+class OfflineDownloadJob(TortoiseModel):
+    download_id: int
+    download: OneToOneRelation[DownloadTask] = OneToOneField(
+        "models.DownloadTask",
+        related_name="offline_job",
+        on_delete=CASCADE,
+    )
+    job_uuid = CharField(max_length=32, unique=True)
+    source_fingerprint = CharField(max_length=64)
+    remote_dir = CharField(max_length=4096, unique=True)
+    manifest = JSONField[list[dict[str, Any]] | None](null=True)
+    manifest_fingerprint = CharField(max_length=64, null=True)
+    manifest_changed_at = DatetimeField(null=True)
+    next_poll_at = DatetimeField(null=True, db_index=True)
+    completion_due_at = DatetimeField(null=True)
+    delete_due_at = DatetimeField(null=True, db_index=True)
+    delete_local = BooleanField(default=False, db_default=False)
+    unchanged_count = IntField(default=0)
+    retry_count = IntField(default=0)
+    last_error_kind = CharEnumField(
+        max_length=32, enum_type=OfflineDownloadErrorKind, null=True
+    )
+
+    class Meta:
+        table = "offline_download_job"
+
+    class PydanticMeta:
+        exclude = ("download",)
 
 
 # -------------------- Pydantic Models --------------------
@@ -250,7 +308,7 @@ class DownloadAdd(BaseModel, RequestFilesMixin):
     @field_serializer("torrent")
     def serialize_torrent(self, torrent: File | None) -> tuple | None:
         if torrent:
-            # convert to HTTPX multipart file encoding
+            # convert to `HTTPX` multipart file encoding
             # https://www.python-httpx.org/advanced/clients/#multipart-file-encoding
             return (torrent.name, torrent.body, torrent.type)
         return None

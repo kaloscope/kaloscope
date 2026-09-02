@@ -16,12 +16,20 @@
     Select,
     type PaginatorProps
   } from '$lib/components';
+  import { DownloadState } from '$lib/enums';
   import { createLoading, createSortField } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { Downloader, DownloadTask, Page, Resp } from '$lib/types';
+  import type { DownloadAction, Downloader, DownloadTask, Page, Resp } from '$lib/types';
   import { onMount, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
+
+  /** An inline action supported by the active-download table. */
+  type TaskAction = Extract<DownloadAction, 'pause' | 'resume' | 'retry'>;
+
+  /** The non-completed states requested from the download-task API. */
+  const activeStates = (Object.keys(DownloadState) as DownloadTask['state'][]).filter((state) => state !== 'completed');
+  const phaseStates = new Set<DownloadTask['state']>(['remote', 'settling', 'pulling', 'verifying']);
 
   let tasks: DownloadTask[] = $state([]);
   let name: string = $state('');
@@ -57,9 +65,7 @@
           ['ordering', $ordering],
           ['downloader_id', downloader || 0],
           ['name', name],
-          ['states', 'downloading'],
-          ['states', 'paused'],
-          ['states', 'error']
+          ...activeStates.map((state) => ['states', state] as [string, string])
         ]
       })
       .json<Resp<Page<DownloadTask>>>()
@@ -111,20 +117,21 @@
   }
 
   /**
-   * Pause download task by ID.
+   * Perform an action on a download task.
    *
    * @param task - The download task.
+   * @param action - The action to perform.
    */
-  function pause(task: DownloadTask) {
+  function performTaskAction(task: DownloadTask, action: TaskAction) {
     loadingIds.add(task.id);
     const startTime = new Date().getTime();
     api
-      .post('download/pause', { json: { ids: [task.id] } })
+      .post(`download/${action === 'resume' ? 'start' : action}`, { json: { ids: [task.id] } })
       .then(() => {
         const timeout = Math.max(0, 450 - (new Date().getTime() - startTime));
         setTimeout(() => {
-          task.state = 'paused';
           loadingIds.delete(task.id);
+          search(pagination.current, pagination.size, true);
         }, timeout);
       })
       .catch(() => {
@@ -133,25 +140,14 @@
   }
 
   /**
-   * Start download task by ID.
+   * Build the deduplicated error tooltip for a download task.
    *
    * @param task - The download task.
+   * @returns The localized structured error and optional driver message.
    */
-  function start(task: DownloadTask) {
-    loadingIds.add(task.id);
-    const startTime = new Date().getTime();
-    api
-      .post('download/start', { json: { ids: [task.id] } })
-      .then(() => {
-        const timeout = Math.max(0, 450 - (new Date().getTime() - startTime));
-        setTimeout(() => {
-          task.state = 'downloading';
-          loadingIds.delete(task.id);
-        }, timeout);
-      })
-      .catch(() => {
-        loadingIds.delete(task.id);
-      });
+  function errorTooltip(task: DownloadTask): string {
+    const kind = task.error_kind ? $_(`download.error.${task.error_kind}`) : '';
+    return [...new Set([kind, task.error_msg].filter(Boolean))].join('\n');
   }
 
   /**
@@ -226,6 +222,7 @@
     <HCell actions />
   {/snippet}
   {#snippet row(task)}
+    {@const state = DownloadState[task.state]}
     <Cell>
       <Checkbox key={String(task.id)} />
     </Cell>
@@ -237,24 +234,33 @@
     </Cell>
     <Cell>
       <div class="flex w-full flex-col gap-2 pr-2">
-        <div class="flex items-center justify-between gap-1">
+        <div class="flex items-start justify-between gap-2">
           <span class="min-w-0 text-sm wrap-break-word">{task.name}</span>
-          {#if task.state === 'error'}
-            <iconify-icon
-              use:tooltip={{ content: task.error_msg || '', placement: 'left' }}
-              icon={icons.info}
-              width="1rem"
-              class="text-error"
-            ></iconify-icon>
-          {/if}
+          <div class="flex shrink-0 items-center gap-1 opacity-80">
+            {#if task.state === 'error' || task.error_kind || task.error_msg}
+              <iconify-icon
+                use:tooltip={{ content: errorTooltip(task), placement: 'left' }}
+                icon={task.state === 'error' ? icons.info : icons.warning}
+                width="1.25rem"
+                class={task.state === 'error' ? 'text-error' : 'text-warning'}
+              ></iconify-icon>
+            {:else if phaseStates.has(task.state)}
+              <iconify-icon
+                use:tooltip={{ content: $_(state.label), placement: 'left' }}
+                icon={state.icon}
+                width="1.25rem"
+                style:color={state.iconColor}
+              ></iconify-icon>
+            {/if}
+          </div>
         </div>
-        {#if task.state === 'downloading'}
-          <progress class="progress progress-success" value={task.percentage || undefined} max="100"></progress>
+        {#if !['paused', 'error', 'submit_unknown'].includes(task.state)}
+          <progress class="progress progress-success" value={task.percentage ?? 0} max="100"></progress>
         {:else}
-          <progress class="progress opacity-50" value={task.percentage || 0} max="100"></progress>
+          <progress class="progress opacity-50" value={task.percentage ?? 0} max="100"></progress>
         {/if}
         <div class="flex justify-between gap-2 text-xs opacity-50">
-          <span>{task.ratio}</span>
+          <span>{task.ratio || `${Math.round(task.percentage ?? 0)}%`}</span>
           <span>{task.estimate}</span>
         </div>
       </div>
@@ -262,20 +268,27 @@
     <Cell
       actions={[
         {
-          condition: task.state === 'downloading',
+          condition: task.capabilities.includes('pause'),
           loading: loadingIds.has(task.id),
           class: '[&_iconify-icon]:text-surface/80',
           icon: icons.pauseFilled,
           text: $_('action.pause', $_('entity.task')),
-          onclick: () => pause(task)
+          onclick: () => performTaskAction(task, 'pause')
         },
         {
-          condition: task.state === 'paused',
+          condition: task.capabilities.includes('resume'),
           loading: loadingIds.has(task.id),
           class: '[&_iconify-icon]:text-surface/80',
           icon: icons.playFilled,
-          text: $_('action.start', $_('entity.task')),
-          onclick: () => start(task)
+          text: $_('action.resume', $_('entity.task')),
+          onclick: () => performTaskAction(task, 'resume')
+        },
+        {
+          condition: task.capabilities.includes('retry'),
+          loading: loadingIds.has(task.id),
+          icon: icons.arrowRotateClockwise,
+          text: $_('action.retry', $_('entity.task')),
+          onclick: () => performTaskAction(task, 'retry')
         },
         {
           condition: !!task.magnet_link && navigatorClipboard,
@@ -284,6 +297,7 @@
           onclick: () => copyMagnetLink(task)
         },
         {
+          condition: task.capabilities.includes('delete'),
           icon: icons.delete,
           text: $_('action.delete', $_('entity.task')),
           onclick: () => deleteConfirm.showModal(task.id)

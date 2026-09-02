@@ -118,6 +118,7 @@ The parameters used above are described below.
 ### :inbox_tray: Downloads
 
 - Supports Downloaders such as [`aria2`](https://aria2.github.io/), [`qBittorrent`](https://www.qbittorrent.org/), and [`Transmission`](https://transmissionbt.com/)
+- Supports assigning any cloud-storage offline download tool in [OpenList](https://github.com/OpenListTeam/OpenList) to a Downloader and pulling remote results directly to local storage
 - YAML-based Downloader configuration with extensible adapters
 - Download Plans that automatically search and dispatch tasks using Keywords and Filters
 - Manually add magnet links or torrent files

@@ -11,8 +11,11 @@ from tortoise.expressions import Q
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
 from app.core.decorators import authorize
-from app.core.dl.adapter import load_config
+from app.core.dl.config import load_driver
+from app.core.dl.endpoint import Endpoint
+from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.syncer import DLSyncer
+from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.base import IDs
 from app.models.download import (
     DownloadAdd,
@@ -39,19 +42,44 @@ from app.utils.disk import disk_usage
 download = Blueprint("download", url_prefix="/download")
 
 
+def _publish_task_action(
+    request: Request,
+    id: int,
+    command,
+    *,
+    local: bool = False,
+):
+    """Publish a deferred driver action to the synchronizer owner.
+
+    Args:
+        request: The current Sanic request.
+        id: The local `DownloadTask` ID.
+        command: The optional `(action, expected_state)` service result.
+        local: Whether deletion should include local files.
+    """
+    if command is None:
+        return
+    action, state = command
+    syncer: DLSyncer = request.app.ctx.dl_syncer
+    syncer.publish(id, action, state, local=local)
+
+
 @download.get("/manager/list")
 async def list_downloaders(request: Request) -> HTTPResponse:
     """List the downloaders."""
     downloaders = await DownloaderService.dump_list(Downloader.all())
     for downloader in downloaders:
         # check if the downloader is up or down
-        adapter = load_config(downloader["config"])
+        driver = load_driver(downloader["config"])
         if request.ctx.user.role is not UserRole.ADMIN:
             downloader.pop("config", None)
-        if not adapter.methods.get("version"):
-            downloader["status"] = "unknown"
+        if not driver.supports_version:
             continue
-        version = await adapter.version()
+        try:
+            version = await driver.version()
+        except Exception:
+            downloader["status"] = "down"
+            continue
         downloader["status"] = "up" if version else "down"
         if version and downloader["version"] != version:
             downloader["version"] = version
@@ -71,6 +99,20 @@ async def sort_downloaders(_, body: IDs) -> HTTPResponse:
 async def get_downloader_presets(_) -> HTTPResponse:
     """Get the downloader presets."""
     return json(await DownloaderService.get_presets())
+
+
+@download.post("/manager/openlist/tools")
+@authorize(role=UserRole.ADMIN)
+@validate(json=Endpoint)
+async def get_openlist_tools(request: Request, body: Endpoint) -> HTTPResponse:
+    """Get the offline download tools exposed by an OpenList endpoint."""
+    try:
+        tools = await OpenListClient(body, request.app.ctx.httpx).tools(
+            request.args.get("path", "")
+        )
+    except OpenListClientError:
+        raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED) from None
+    return json(tools)
 
 
 @download.post("/manager/upsert")
@@ -183,8 +225,17 @@ async def list_tasks(_, query: DownloadQuery) -> HTTPResponse:
 
 @download.post("/validate")
 async def valid_magnet_link(request: Request) -> HTTPResponse:
-    """Validate a magnet link."""
+    """Validate a download source."""
     link = request.body.decode(ENCODING)
+    downloader_id = request.args.get("downloader_id")
+    if downloader_id is not None:
+        try:
+            id = int(downloader_id)
+        except ValueError:
+            return json(False)
+        if id <= 0:
+            return json(False)
+        return json(await DownloadTaskService.validate_source(id, link))
     return json((await standardize_magnet(link)) is not None)
 
 
@@ -199,11 +250,13 @@ async def add_task(_, body: DownloadAdd) -> HTTPResponse:
 
 @download.post("/pause")
 @validate(json=IDs)
-async def pause_tasks(_, body: IDs) -> HTTPResponse:
+async def pause_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Pause the download tasks."""
     for id in body.ids:
         try:
-            await DownloadTaskService.pause(int(id))
+            task_id = int(id)
+            command = await DownloadTaskService.pause(task_id)
+            _publish_task_action(request, task_id, command)
         except Exception:
             if len(body.ids) == 1:
                 raise
@@ -213,11 +266,13 @@ async def pause_tasks(_, body: IDs) -> HTTPResponse:
 
 @download.post("/start")
 @validate(json=IDs)
-async def start_tasks(_, body: IDs) -> HTTPResponse:
+async def start_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Start the download tasks."""
     for id in body.ids:
         try:
-            await DownloadTaskService.start(int(id))
+            task_id = int(id)
+            command = await DownloadTaskService.start(task_id)
+            _publish_task_action(request, task_id, command)
         except Exception:
             if len(body.ids) == 1:
                 raise
@@ -225,14 +280,32 @@ async def start_tasks(_, body: IDs) -> HTTPResponse:
     return empty()
 
 
+@download.post("/retry")
+@validate(json=IDs)
+async def retry_tasks(request: Request, body: IDs) -> HTTPResponse:
+    """Retry the download tasks."""
+    for id in body.ids:
+        try:
+            task_id = int(id)
+            command = await DownloadTaskService.retry(task_id)
+            _publish_task_action(request, task_id, command)
+        except Exception:
+            if len(body.ids) == 1:
+                raise
+            logger.error("Failed to retry the download task: %s", id, exc_info=True)
+    return empty()
+
+
 @download.post("/delete")
 @authorize(role=UserRole.ADMIN)
 @validate(json=DownloadDel)
-async def delete_tasks(_, body: DownloadDel) -> HTTPResponse:
+async def delete_tasks(request: Request, body: DownloadDel) -> HTTPResponse:
     """Delete the download tasks."""
     for id in body.ids:
         try:
-            await DownloadTaskService.delete(int(id), body.local)
+            task_id = int(id)
+            command = await DownloadTaskService.delete(task_id, body.local)
+            _publish_task_action(request, task_id, command, local=body.local)
         except Exception:
             if len(body.ids) == 1:
                 raise

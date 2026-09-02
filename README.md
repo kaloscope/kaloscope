@@ -118,6 +118,7 @@ docker run -d \
 ### :inbox_tray: 下载管理
 
 - 支持[`aria2`](https://aria2.github.io/)、[`qBittorrent`](https://www.qbittorrent.org/)、[`Transmission`](https://transmissionbt.com/)等下载器
+- 支持将[`OpenList`](https://github.com/OpenListTeam/OpenList)的任意网盘离线下载工具固定为下载器，并把远端结果直拉到本地
 - 下载器配置通过 YAML 定义，可按需扩展适配器
 - 支持下载计划，可按关键词和过滤规则自动抓取并下发下载任务
 - 支持手动添加磁力链接或种子文件

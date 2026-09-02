@@ -366,6 +366,9 @@
 }
 .tippy-box[data-theme~='default'] {
   @apply border glass bg-neutral text-xs text-neutral-content;
+  > .tippy-content {
+    @apply whitespace-pre-line;
+  }
 }
 .tippy-box[data-theme~='plain'] {
   @apply border border-border bg-base-200 text-xs text-base-content;
