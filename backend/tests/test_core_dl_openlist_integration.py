@@ -14,6 +14,7 @@ from tortoise import Tortoise
 from app.core.config import KaloscopeConfig
 from app.core.dl.driver import DownloadIdentity, DownloadRequest, DownloadState
 from app.core.dl.openlist import coordinator as coordinator_module
+from app.core.dl.openlist import driver as driver_module
 from app.core.dl.openlist import puller as puller_module
 from app.core.dl.openlist import runtime as runtime_module
 from app.core.dl.openlist import state as state_module
@@ -33,6 +34,7 @@ from app.core.dl.openlist.models import (
 )
 from app.core.dl.openlist.puller import DataClient
 from app.core.dl.openlist.runtime import OpenListPullRuntime
+from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.download import (
     Downloader,
     DownloadTask,
@@ -452,6 +454,145 @@ def test_cleanup_pending(tmp_path, monkeypatch):
     assert task.state is DownloadState.COMPLETED
     assert job.next_poll_at == datetime(2026, 8, 6, tzinfo=UTC)
     assert job.last_error_kind is None
+
+
+@pytest.mark.parametrize("message", ["failed get object: storage unavailable", ""])
+def test_submission_rejected(tmp_path, monkeypatch, message):
+    class RejectedOpenList(FakeOpenList):
+        def handle(self, request):
+            if request.url.path == "/api/fs/add_offline_download":
+                return httpx.Response(
+                    200, json={"code": 500, "message": message, "data": None}
+                )
+            if request.url.path == "/api/fs/remove":
+                return self._response()
+            return super().handle(request)
+
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        fake = RejectedOpenList()
+        config = OpenListConfig(
+            host="openlist.example.com",
+            port=80,
+            auth={"token": fake.token},
+            tool="115 Open",
+        )
+        stack = await _driver_stack(config, fake, [datetime.now(UTC)], monkeypatch)
+        try:
+            downloader = await Downloader.create(
+                config="unused", name="OpenList", priority=1
+            )
+            with pytest.raises(KaloscopeException) as caught:
+                await DownloadTaskService.add_request(
+                    downloader.id,
+                    stack.driver,
+                    DownloadRequest(
+                        directory=str(tmp_path),
+                        identity=DownloadIdentity(info_hash="a" * 40),
+                        link="magnet:?xt=urn:btih:" + "a" * 40,
+                    ),
+                )
+            assert caught.value.message == (message or ErrorCode.HTTP_REQUEST_FAILED)
+            assert await DownloadTask.all().count() == 0
+            assert await OfflineDownloadJob.all().count() == 0
+            assert not await DownloadTaskService.hash_collision("a" * 40)
+        finally:
+            await stack.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_cleanup_rate_limit(monkeypatch):
+    class LimitedOpenList(FakeOpenList):
+        remove_calls = 0
+
+        def handle(self, request):
+            if request.url.path == "/api/fs/remove":
+                self.remove_calls += 1
+                if self.remove_calls == 1:
+                    return httpx.Response(429, headers={"Retry-After": "600"})
+                return self._response()
+            return super().handle(request)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        fake = LimitedOpenList()
+        config = OpenListConfig(
+            host="openlist.example.com",
+            port=80,
+            auth={"token": fake.token},
+            tool="115 Open",
+            remote_cleanup=RemoteCleanupPolicy.DELETE_ON_SUCCESS,
+        )
+        now = [datetime(2026, 8, 6, tzinfo=UTC)]
+        monkeypatch.setattr(driver_module.timezone, "now", lambda: now[0])
+        stack = await _driver_stack(config, fake, now, monkeypatch)
+        try:
+            downloader = await Downloader.create(
+                config="unused", name="OpenList", priority=1
+            )
+
+            async def completed_job(number):
+                task = await DownloadTask.create(
+                    downloader=downloader,
+                    dir="/downloads",
+                    name="movie.mkv",
+                    state=DownloadState.COMPLETED,
+                )
+                return await OfflineDownloadJob.create(
+                    download=task,
+                    job_uuid=str(number) * 32,
+                    source_fingerprint="a" * 64,
+                    remote_dir="/Kaloscope/" + str(number) * 32,
+                    next_poll_at=now[0],
+                )
+
+            jobs = [await completed_job(1), await completed_job(2)]
+            identities = tuple(DownloadIdentity.from_task(job.download) for job in jobs)
+            await stack.driver.sync(identities)
+            deadline = now[0] + timedelta(seconds=600)
+            for job in jobs:
+                await job.refresh_from_db()
+                assert job.next_poll_at == deadline
+                assert (
+                    job.last_error_kind is OfflineDownloadErrorKind.INSTANCE_RATE_LIMIT
+                )
+            assert fake.remove_calls == 1
+
+            # a new completion must share the persisted limit after driver replacement
+            await stack.close()
+            stack = await _driver_stack(config, fake, now, monkeypatch)
+            now[0] = deadline - timedelta(seconds=1)
+            jobs.append(await completed_job(3))
+            identities = tuple(DownloadIdentity.from_task(job.download) for job in jobs)
+            await stack.driver.sync(identities)
+            await jobs[-1].refresh_from_db()
+            assert jobs[-1].next_poll_at == deadline
+            assert fake.remove_calls == 1
+
+            now[0] = deadline
+            await stack.driver.sync(identities)
+            assert fake.remove_calls == 4
+            for job in jobs:
+                await job.refresh_from_db()
+                await job.download.refresh_from_db()
+                assert job.next_poll_at is None
+                assert job.last_error_kind is None
+                assert job.download.state is DownloadState.COMPLETED
+        finally:
+            await stack.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("new_name", ["movie.mkv", "renamed.mkv"])
@@ -922,9 +1063,17 @@ def test_pull_error(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("status", [429, 503])
-@pytest.mark.parametrize("refresh", [False, True])
-def test_link_backoff_resume(tmp_path, monkeypatch, status, refresh):
+@pytest.mark.parametrize(
+    ("status", "refresh", "data_rate_limit"),
+    [
+        (429, False, False),
+        (429, True, False),
+        (503, False, False),
+        (503, True, False),
+        (429, False, True),
+    ],
+)
+def test_pull_backoff_resume(tmp_path, monkeypatch, status, refresh, data_rate_limit):
     class FlakyOpenList(FakeOpenList):
         link_calls = 0
         expired = False
@@ -932,8 +1081,15 @@ def test_link_backoff_resume(tmp_path, monkeypatch, status, refresh):
         def handle(self, request):
             if request.url.path == "/api/fs/link":
                 self.link_calls += 1
-                if self.link_calls == (2 if refresh else 1):
+                if not data_rate_limit and self.link_calls == (2 if refresh else 1):
                     return httpx.Response(status, headers={"Retry-After": "120"})
+            if (
+                request.url.host == "cdn.example.com"
+                and data_rate_limit
+                and not self.data_requests
+            ):
+                self.data_requests += 1
+                return httpx.Response(429, headers={"Retry-After": "120"})
             if request.url.host == "cdn.example.com" and refresh and not self.expired:
                 self.expired = True
                 return httpx.Response(401)
@@ -960,16 +1116,17 @@ def test_link_backoff_resume(tmp_path, monkeypatch, status, refresh):
             identity = DownloadIdentity.from_task(task)
             requested_at = datetime.now(UTC)
             await stack.driver.sync((identity,))
-            await asyncio.gather(
-                *tuple(stack.driver.coordinator.pull_runtime._tasks.values())
-            )
+            async with asyncio.timeout(5):
+                await asyncio.gather(
+                    *tuple(stack.driver.coordinator.pull_runtime._tasks.values())
+                )
             await task.refresh_from_db()
             await job.refresh_from_db()
             assert task.state is DownloadState.PULLING
             assert job.retry_count == 1
             assert job.next_poll_at is not None
             assert await Notification.all().count() == 0
-            first_calls = fake.link_calls
+            first_calls = (fake.link_calls, fake.data_requests)
             if status == 429:
                 assert (
                     job.last_error_kind is OfflineDownloadErrorKind.INSTANCE_RATE_LIMIT
@@ -983,7 +1140,7 @@ def test_link_backoff_resume(tmp_path, monkeypatch, status, refresh):
             stack = await _driver_stack(config, fake, now, monkeypatch)
             now[0] = job.next_poll_at - timedelta(seconds=1)
             await stack.driver.sync((identity,))
-            assert fake.link_calls == first_calls
+            assert (fake.link_calls, fake.data_requests) == first_calls
             now[0] = job.next_poll_at
             await stack.driver.sync((identity,))
             await _wait_for_state(task, DownloadState.VERIFYING)

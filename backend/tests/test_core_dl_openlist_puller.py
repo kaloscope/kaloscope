@@ -13,9 +13,9 @@ import httpx
 import pytest
 
 from app.core.dl.openlist import puller
-from app.core.dl.openlist.client import OpenListClient
+from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.manifest import RemoteManifestEntry
-from app.core.dl.openlist.models import RemoteLink
+from app.core.dl.openlist.models import OpenListErrorKind, RemoteLink
 from app.models.download import OfflineDownloadErrorKind
 
 BASE_URL = "https://openlist.example.com/root/api"
@@ -648,11 +648,15 @@ def test_rate_limit(tmp_path):
                 entry=_entry(size=3),
             )
 
-    with patch.object(puller.asyncio, "sleep", record_sleep):
-        assert asyncio.run(run()) == 3
-    assert len(requests) == 2
-    assert len(delays) == 1
-    assert delays[0] >= 5
+    with (
+        patch.object(puller.asyncio, "sleep", record_sleep),
+        pytest.raises(OpenListClientError) as caught,
+    ):
+        asyncio.run(run())
+    assert caught.value.kind is OpenListErrorKind.RATE_LIMIT
+    assert caught.value.retry_after == "5"
+    assert len(requests) == 1
+    assert delays == []
 
 
 def test_redirect_headers(tmp_path):
