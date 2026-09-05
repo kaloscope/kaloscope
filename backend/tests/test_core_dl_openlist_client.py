@@ -65,15 +65,6 @@ def _task(task_id: str):
     }
 
 
-def test_request():
-    def handler(request: httpx.Request):
-        assert str(request.url) == "https://openlist.example.com/root/api/test"
-        assert request.headers["Authorization"] == "private-token"
-        return _response(message="success", data={"value": 1})
-
-    assert _call(handler) == {"value": 1}
-
-
 def test_redirect():
     requests = []
 
@@ -173,7 +164,10 @@ def test_submit():
 
     def handler(request: httpx.Request):
         assert request.method == "POST"
-        assert request.url.path == "/root/api/fs/add_offline_download"
+        assert str(request.url) == (
+            "https://openlist.example.com/root/api/fs/add_offline_download"
+        )
+        assert request.headers["Authorization"] == "private-token"
         assert json.loads(request.content) == {
             "urls": [source],
             "path": "/Kaloscope/task-uuid",

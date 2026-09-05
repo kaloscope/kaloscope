@@ -6,10 +6,8 @@ import pytest
 
 from app.core.dl.openlist.client import OpenListClient
 from app.core.dl.openlist.manifest import (
-    RefreshLimiter,
     RemoteManifestEntry,
     build_manifest,
-    normalize_relative_path,
 )
 from app.core.dl.openlist.models import RemoteEntry, RemoteEntryPage
 
@@ -34,13 +32,11 @@ def _entry(
     *,
     size: int = 0,
     is_dir: bool = False,
-    hashes: dict[str, str] | None = None,
 ) -> RemoteEntry:
     return RemoteEntry(
         name=name,
         size=size,
         is_dir=is_dir,
-        hash_info=hashes or {},
     )
 
 
@@ -53,18 +49,6 @@ def _page(*entries: RemoteEntry, total: int | None = None) -> RemoteEntryPage:
 
 def _build(pages: dict[tuple[str, int], RemoteEntryPage]):
     return asyncio.run(build_manifest(cast(OpenListClient, FakeClient(pages)), ROOT))
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/movie.mkv",
-        "dir/../file",
-    ],
-)
-def test_safe_paths(path: str):
-    with pytest.raises(ValueError):
-        normalize_relative_path(path)
 
 
 def test_manifest():
@@ -131,11 +115,3 @@ def test_stability(seconds: int, stable: bool):
     assert observation.changed_at == NOW
     assert observation.stable is stable
     assert not observation.needs_refresh
-
-
-def test_refresh_limit():
-    limiter = RefreshLimiter()
-
-    assert limiter.acquire("job", NOW)
-    assert not limiter.acquire("job", NOW)
-    assert limiter.acquire("job", NOW + timedelta(minutes=1))

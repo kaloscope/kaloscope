@@ -848,64 +848,10 @@ def test_manifest_failure(tmp_path):
     assert job.next_poll_at is None
 
 
-def test_empty_manifest(tmp_path):
-    async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        fake = FakeOpenList(empty_result=True)
-        config = OpenListConfig(
-            protocol="https",
-            host="openlist.example.com",
-            port=443,
-            auth=OpenListAuth(token=SecretStr(fake.token)),
-            tool="Direct Tool",
-        )
-        control = httpx.AsyncClient(transport=httpx.MockTransport(fake.handle))
-        try:
-            task, job, target = await _pulled_job(tmp_path)
-            fake.remote_dir = job.remote_dir
-
-            snapshot = await finalize_job(
-                OpenListClient(config, control),
-                job,
-                datetime(2026, 8, 6, tzinfo=UTC),
-            )
-            client = OpenListClient(config, control)
-            runtime = OpenListPullRuntime(config, client)
-            coordinator = OpenListCoordinator(config, client, runtime)
-            await coordinator._sync_settling(
-                (job,), datetime(2026, 8, 6, 0, 1, tzinfo=UTC)
-            )
-            await task.refresh_from_db()
-            await job.refresh_from_db()
-            total_size = task.total_size
-            manifest = job.manifest
-            exists_after_empty = target.final_path.exists()
-
-            fake.empty_result = False
-            fake.filename = "renamed.mkv"
-            await coordinator._sync_settling(
-                (job,), datetime(2026, 8, 6, 0, 2, tzinfo=UTC)
-            )
-            await runtime.close()
-            return snapshot, target, total_size, manifest, exists_after_empty
-        finally:
-            await control.aclose()
-            await Tortoise.close_connections()
-
-    snapshot, target, total_size, manifest, exists_after_empty = asyncio.run(run())
-
-    assert snapshot.state is DownloadState.SETTLING
-    assert total_size == 3
-    assert manifest
-    assert exists_after_empty
-    assert not target.final_path.exists()
-    assert not target.marker_path.exists()
-
-
-def test_partial_manifest(tmp_path):
+@pytest.mark.parametrize(
+    ("empty", "delay"), [(True, 15), (False, 60)], ids=["empty", "partial"]
+)
+def test_incomplete_manifest(tmp_path, empty, delay):
     now = datetime(2026, 8, 6, tzinfo=UTC)
 
     async def run():
@@ -913,7 +859,7 @@ def test_partial_manifest(tmp_path):
             db_url="sqlite://:memory:", modules={"models": ["app.models"]}
         )
         await Tortoise.generate_schemas()
-        fake = FakeOpenList(content=b"x")
+        fake = FakeOpenList(empty_result=empty, content=b"x")
         config = OpenListConfig(
             protocol="https",
             host="openlist.example.com",
@@ -922,37 +868,51 @@ def test_partial_manifest(tmp_path):
             tool="Direct Tool",
         )
         control = httpx.AsyncClient(transport=httpx.MockTransport(fake.handle))
+        client = OpenListClient(config, control)
+        runtime = OpenListPullRuntime(config, client)
         try:
             task, job, target = await _pulled_job(tmp_path)
             fake.remote_dir = job.remote_dir
-            original_manifest = job.manifest
-            original_fingerprint = job.manifest_fingerprint
-
-            snapshot = await finalize_job(OpenListClient(config, control), job, now)
-            await task.refresh_from_db()
-            await job.refresh_from_db()
-            return (
-                snapshot,
-                task,
-                job,
-                target,
-                original_manifest,
-                original_fingerprint,
+            job.manifest_changed_at = now - timedelta(seconds=15)
+            await job.save(update_fields=["manifest_changed_at"])
+            original = (
+                job.manifest,
+                job.manifest_fingerprint,
+                job.manifest_changed_at,
             )
+
+            snapshot = await finalize_job(client, job, now)
+            assert snapshot.state is DownloadState.SETTLING
+            await job.refresh_from_db()
+            assert job.next_poll_at == now + timedelta(seconds=delay)
+            coordinator = OpenListCoordinator(config, client, runtime)
+            for phase in ("verifying", "settling"):
+                if phase == "settling":
+                    await coordinator._sync_settling((job,), now + timedelta(minutes=1))
+                await task.refresh_from_db()
+                await job.refresh_from_db()
+                assert task.state is DownloadState.SETTLING
+                assert task.total_size == 3
+                assert (
+                    job.manifest,
+                    job.manifest_fingerprint,
+                    job.manifest_changed_at,
+                ) == original
+                assert target.final_path.read_bytes() == b"old"
+                assert target.marker_path.exists()
+
+            fake.empty_result = False
+            fake.filename = "renamed.mkv"
+            fake.content = b"updated"
+            await coordinator._sync_settling((job,), now + timedelta(minutes=2))
+            assert not target.final_path.exists()
+            assert not target.marker_path.exists()
         finally:
+            await runtime.close()
             await control.aclose()
             await Tortoise.close_connections()
 
-    snapshot, task, job, target, manifest, fingerprint = asyncio.run(run())
-
-    assert snapshot.state is DownloadState.SETTLING
-    assert task.total_size == 3
-    assert job.manifest == manifest
-    assert job.manifest_fingerprint == fingerprint
-    assert job.manifest_changed_at is None
-    assert job.next_poll_at == now + timedelta(minutes=1)
-    assert target.final_path.read_bytes() == b"old"
-    assert target.marker_path.exists()
+    asyncio.run(run())
 
 
 def test_restart_resume(tmp_path, tmp_path_factory, monkeypatch):
@@ -1096,9 +1056,21 @@ def test_poll_throttling(monkeypatch):
                 tasks.append(task)
             identities = tuple(DownloadIdentity.from_task(task) for task in tasks)
 
-            for second in range(60):
+            for second, expected_calls in (
+                (0, 1),
+                (9, 1),
+                (10, 2),
+                (39, 2),
+                (40, 3),
+                (99, 3),
+                (100, 4),
+            ):
                 now[0] = started + timedelta(seconds=second)
                 await stack.driver.sync(identities)
+                assert (
+                    fake.control_requests.count("/api/task/offline_download/undone")
+                    == expected_calls
+                )
             return fake.control_requests
         finally:
             await stack.close()
@@ -1106,7 +1078,6 @@ def test_poll_throttling(monkeypatch):
 
     requests = asyncio.run(run())
 
-    assert requests.count("/api/task/offline_download/undone") == 3
     assert "/api/task/offline_download_transfer/undone" not in requests
     assert "/api/fs/list" not in requests
     assert "/api/fs/link" not in requests
