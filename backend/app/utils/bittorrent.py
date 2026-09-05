@@ -166,7 +166,8 @@ def decode_torrent(torrent: bytes) -> Torrent | None:
         The decoded torrent object if successful, None otherwise.
     """
     try:
-        decoded = Bencode.read_string(torrent, byte_keys={"pieces"})
+        # preserve binary piece hashes when re-encoding the `info` dictionary
+        decoded = Bencode.read_string(torrent, byte_keys={"pieces", "pieces root"})
         if isinstance(decoded, dict):
             return Torrent(decoded)
     except Exception:
