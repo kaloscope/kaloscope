@@ -26,7 +26,7 @@ from app.models.download import (
     OfflineDownloadJob,
 )
 
-# map link-client failures to the persisted offline-job error categories
+# map link and file-request failures to the persisted offline-job error categories
 _E = OfflineDownloadErrorKind
 _CLIENT_ERROR_KINDS = {
     OpenListErrorKind.AUTH: _E.INSTANCE_AUTH,
@@ -38,7 +38,7 @@ _CLIENT_ERROR_KINDS = {
 
 
 class _DeferredPullError(PullError):
-    """Carry a retryable direct-link failure into durable pull scheduling."""
+    """Carry a retryable link or file-request failure into durable pull scheduling."""
 
     def __init__(self, error: OpenListClientError):
         super().__init__(_CLIENT_ERROR_KINDS[error.kind], str(error))
@@ -174,10 +174,10 @@ class OpenListPullRuntime:
 
     @staticmethod
     async def _defer_job(job: OfflineDownloadJob, error: _DeferredPullError):
-        """Keep a transient link failure resumable across driver restarts.
+        """Keep a transient pull failure resumable across driver restarts.
 
         Args:
-            job: The persisted job whose direct link could not be obtained.
+            job: The persisted job whose link or file request must be retried.
             error: The retryable failure and optional `Retry-After` value.
         """
         current = timezone.now()
@@ -247,7 +247,8 @@ class OpenListPullRuntime:
     async def _pull_job(self, job: OfflineDownloadJob):
         """Pull every persisted manifest entry into local storage.
 
-        Keep transient link failures in `PULLING` with a persisted retry deadline.
+        Keep transient link failures and file rate limits in `PULLING` with a
+        persisted retry deadline.
         Move terminal failures to `ERROR` and advance successful pulls to
         `VERIFYING`, leaving final checks to `finalize_job`.
 

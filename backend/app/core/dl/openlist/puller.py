@@ -9,7 +9,6 @@ import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from stat import S_ISDIR, S_ISLNK, S_ISREG
 from time import monotonic
@@ -18,10 +17,9 @@ from typing import Literal
 import aiofiles
 import httpx
 
-from app.core.dl.openlist.client import OpenListClient
+from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.manifest import RemoteManifestEntry, normalize_relative_path
-from app.core.dl.openlist.models import RemoteLink
-from app.core.dl.openlist.state import rate_limit_delay
+from app.core.dl.openlist.models import OpenListErrorKind, RemoteLink
 from app.models.download import OfflineDownloadErrorKind
 
 _PROXY_SEGMENTS = frozenset({"p", "d", "ap", "ad", "ae", "sd", "sad"})
@@ -97,9 +95,6 @@ class DirectLinkUnavailableError(PullError):
 
 class _RetryPull(Exception):
     """Signal that the current direct-link request should be retried."""
-
-    def __init__(self, delay: float | None = None):
-        self.delay = delay
 
 
 class _RefreshLink(Exception):
@@ -897,10 +892,11 @@ async def _pull_once(
             if response.status_code in _EXPIRED_LINK_STATUSES:
                 raise _RefreshLink
             if response.status_code == 429:
-                raise _RetryPull(
-                    rate_limit_delay(
-                        response.headers.get("Retry-After"), datetime.now(UTC)
-                    )
+                # let the runtime persist the deadline before releasing this pull
+                raise OpenListClientError(
+                    OpenListErrorKind.RATE_LIMIT,
+                    "Direct file request was rate limited",
+                    retry_after=response.headers.get("Retry-After"),
                 )
             if response.status_code >= 500:
                 raise _RetryPull
@@ -945,6 +941,7 @@ async def pull_file(
 
     Raises:
         PullError: If the link, response, local path, transfer, or verification fails.
+        OpenListClientError: If link acquisition fails or file data is rate limited.
 
     Returns:
         The verified transferred file size in bytes.
@@ -973,10 +970,7 @@ async def pull_file(
                     OfflineDownloadErrorKind.PULL_FAILED,
                     "File download retry limit reached",
                 ) from exc
-            delay = 2 ** (attempts - 1)
-            if isinstance(exc, _RetryPull) and exc.delay is not None:
-                delay = max(delay, exc.delay)
-            await asyncio.sleep(delay)
+            await asyncio.sleep(2 ** (attempts - 1))
 
 
 class DataClient:

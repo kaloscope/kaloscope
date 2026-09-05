@@ -33,7 +33,12 @@ from app.core.dl.openlist.models import (
 )
 from app.core.dl.openlist.puller import delete_local_directory, delete_local_file
 from app.core.dl.openlist.runtime import OpenListPullRuntime
-from app.core.dl.openlist.state import retry_state, state_progress, transient_delay
+from app.core.dl.openlist.state import (
+    rate_limit_delay,
+    retry_state,
+    state_progress,
+    transient_delay,
+)
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.download import OfflineDownloadErrorKind, OfflineDownloadJob
 
@@ -143,7 +148,8 @@ class OpenListDriver:
         try:
             task_ids = await client.submit(source, request.remote_directory)
         except OpenListClientError as exc:
-            if exc.kind not in {
+            # a complete business rejection confirms that this source was not queued
+            if exc.response_message is not None or exc.kind not in {
                 OpenListErrorKind.TRANSIENT,
                 OpenListErrorKind.INVALID_RESPONSE,
             }:
@@ -157,6 +163,10 @@ class OpenListDriver:
                         "Failed to clean up OpenList submission directory",
                         exc_info=True,
                     )
+                if exc.response_message is not None:
+                    raise KaloscopeException(
+                        exc.response_message or ErrorCode.HTTP_REQUEST_FAILED
+                    ) from None
                 raise
             return _unknown_snapshot(identity)
         # multiple returned IDs cannot be matched safely to one local task
@@ -436,7 +446,11 @@ class OpenListDriver:
         task_id = snapshot.identity.task_id
         if state is not DownloadState.COMPLETED or task_id is None:
             return
-        job = await OfflineDownloadJob.get_or_none(download_id=task_id)
+        job = await (
+            OfflineDownloadJob.filter(download_id=task_id)
+            .select_related("download")
+            .first()
+        )
         if job is None:
             return
         await self._cleanup_job(job)
@@ -491,6 +505,23 @@ class OpenListDriver:
                 )
             return
 
+        # share persisted cleanup rate limits with this downloader's other completions
+        limited = await (
+            OfflineDownloadJob.filter(
+                download__downloader_id=job.download.downloader_id,
+                download__state=DownloadState.COMPLETED,
+                last_error_kind=OfflineDownloadErrorKind.INSTANCE_RATE_LIMIT,
+                next_poll_at__gt=timezone.now(),
+            )
+            .order_by("-next_poll_at")
+            .first()
+        )
+        if limited is not None:
+            job.next_poll_at = limited.next_poll_at
+            job.last_error_kind = OfflineDownloadErrorKind.INSTANCE_RATE_LIMIT
+            await job.save(update_fields=["next_poll_at", "last_error_kind"])
+            return
+
         owner_count = await OfflineDownloadJob.filter(remote_dir=job.remote_dir).count()
         try:
             await self._cleanup_remote(
@@ -499,10 +530,18 @@ class OpenListDriver:
                 remote_directory=job.remote_dir,
                 owner_count=owner_count,
             )
-        except Exception:
+        except Exception as exc:
             # preserve local completion when optional remote cleanup fails
-            delay, job.retry_count = transient_delay(job.retry_count)
-            job.last_error_kind = OfflineDownloadErrorKind.CLEANUP_FAILED
+            if (
+                isinstance(exc, OpenListClientError)
+                and exc.kind is OpenListErrorKind.RATE_LIMIT
+            ):
+                delay = rate_limit_delay(exc.retry_after, timezone.now())
+                job.retry_count += 1
+                job.last_error_kind = OfflineDownloadErrorKind.INSTANCE_RATE_LIMIT
+            else:
+                delay, job.retry_count = transient_delay(job.retry_count)
+                job.last_error_kind = OfflineDownloadErrorKind.CLEANUP_FAILED
             job.next_poll_at = timezone.now() + timedelta(seconds=delay)
             await job.save(
                 update_fields=["last_error_kind", "next_poll_at", "retry_count"]

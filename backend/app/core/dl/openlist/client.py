@@ -40,6 +40,7 @@ class OpenListClientError(Exception):
     ):
         self.kind = kind
         self.retry_after = retry_after
+        # even an empty business message confirms a complete rejection response
         self.response_message = response_message
         super().__init__(message)
 
@@ -347,7 +348,7 @@ class OpenListClient:
                 _error_kind(envelope.code),
                 message or "OpenList request failed",
                 retry_after=response.headers.get("Retry-After"),
-                response_message=message or None,
+                response_message=message,
             )
         return envelope.data
 
