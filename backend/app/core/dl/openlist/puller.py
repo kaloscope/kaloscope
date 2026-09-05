@@ -477,20 +477,27 @@ async def verify_local_manifest(
         task_dir: The local task root directory.
         entries: The canonical remote manifest entries.
 
+    Raises:
+        LocalFileConflictError: If distinct entries identify the same local path.
+
     Returns:
         The verified relative file paths, or `None` when any entry fails.
     """
     files = []
+    identities: set[tuple[int, int]] = set()
     for entry in entries:
         try:
             path = _safe_local_path(task_dir, entry.path)
-        except PullError:
+            stat = path.lstat()
+        except (PullError, OSError):
             return None
+        # filesystem identities also detect case and Unicode filename aliases
+        identity = (stat.st_dev, stat.st_ino)
+        if identity in identities:
+            raise LocalFileConflictError
+        identities.add(identity)
         if entry.is_dir:
-            try:
-                if not S_ISDIR(path.lstat().st_mode):
-                    return None
-            except OSError:
+            if not S_ISDIR(stat.st_mode):
                 return None
         elif await verify_local_file(path, entry):
             files.append(entry.path)

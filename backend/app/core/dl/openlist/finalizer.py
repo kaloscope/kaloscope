@@ -125,13 +125,19 @@ async def finalize_job(
                 job.manifest_changed_at = now
                 job.next_poll_at = now + STABILITY_WINDOW
         else:
-            files = await verify_local_manifest(task.dir, entries)
-            if files is None:
+            try:
+                files = await verify_local_manifest(task.dir, entries)
+            except PullError as exc:
                 state = DownloadState.ERROR
-                error = "OpenList local verification failed"
-                error_kind = OfflineDownloadErrorKind.VERIFY_FAILED
+                error = str(exc)
+                error_kind = exc.kind
             else:
-                state = DownloadState.COMPLETED
+                if files is None:
+                    state = DownloadState.ERROR
+                    error = "OpenList local verification failed"
+                    error_kind = OfflineDownloadErrorKind.VERIFY_FAILED
+                else:
+                    state = DownloadState.COMPLETED
             job.next_poll_at = None
 
     percentage = state_progress(state, task.percentage).percentage
