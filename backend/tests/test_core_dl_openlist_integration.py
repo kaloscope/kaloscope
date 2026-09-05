@@ -9,6 +9,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 from pydantic import SecretStr
+from torrentool.bencode import Bencode
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -88,6 +89,7 @@ class FakeOpenList:
     link_status: int = 200
     remote_dir: str | None = field(default=None, init=False)
     control_requests: list[str] = field(default_factory=list, init=False)
+    submitted_sources: list[str] = field(default_factory=list, init=False)
     data_requests: int = field(default=0, init=False)
     completed_transfers: int = field(default=0, init=False)
     range_requests: list[str | None] = field(default_factory=list, init=False)
@@ -118,6 +120,7 @@ class FakeOpenList:
             return self._response()
         if path == "/api/fs/add_offline_download":
             self.remote_dir = body["path"]
+            self.submitted_sources.extend(body["urls"])
             tasks = [{"id": self.remote_id}] if self.remote_id else []
             return self._response({"tasks": tasks})
         if path.endswith("/offline_download/undone"):
@@ -314,6 +317,70 @@ async def _pulled_job(tmp_path, extra_entries: tuple[RemoteManifestEntry, ...] =
         manifest_fingerprint=manifest_fingerprint(entries),
     )
     return task, job, target
+
+
+@pytest.mark.parametrize(
+    ("hybrid", "expected_hash"),
+    [
+        (False, "786af49023fb4e5883d1a2c85f077a70a500dcfa"),
+        (True, "67265d20f7b6f7e3d09162ca2b61432f3d6d3a0b"),
+    ],
+    ids=["v1", "hybrid"],
+)
+def test_torrent_submission(hybrid, expected_hash):
+    payload = b"abc"
+    info = {
+        "length": len(payload),
+        "name": "movie.mkv",
+        "piece length": 16384,
+        "pieces": hashlib.sha1(payload).digest(),
+    }
+    if hybrid:
+        info.update(
+            {
+                "meta version": 2,
+                "file tree": {
+                    "movie.mkv": {
+                        "": {
+                            "length": len(payload),
+                            "pieces root": hashlib.sha256(payload).digest(),
+                        }
+                    }
+                },
+            }
+        )
+    torrent = (
+        "movie.torrent",
+        Bencode.encode({"info": info, "piece layers": {}}),
+        "application/x-bittorrent",
+    )
+    fake = FakeOpenList(remote_id="remote-torrent")
+    config = OpenListConfig(
+        host="openlist.example.com",
+        port=80,
+        auth=OpenListAuth(token=SecretStr(fake.token)),
+        tool="Future Tool",
+    )
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(fake.handle)
+        ) as http:
+            driver = OpenListDriver(config)
+            driver.client = OpenListClient(config, http)
+            request = await DownloadTaskService._normalize_source(
+                driver, DownloadRequest(directory="/downloads", torrent=torrent)
+            )
+            assert request is not None
+            await driver.add(driver.prepare(request).request)
+            return request
+
+    request = asyncio.run(run())
+
+    assert fake.submitted_sources == [f"magnet:?xt=urn:btih:{expected_hash}"]
+    assert request.identity is not None
+    assert request.identity.info_hash == expected_hash
+    assert request.torrent is torrent
 
 
 @pytest.mark.parametrize(
