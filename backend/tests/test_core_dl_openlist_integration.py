@@ -406,6 +406,109 @@ def test_direct_download(
     assert fake.data_requests == 1
 
 
+@pytest.mark.parametrize(
+    ("second_name", "state", "existing"),
+    [
+        ("Movie.mkv", DownloadState.PULLING, False),
+        ("Movie.mkv", DownloadState.PULLING, True),
+        ("Movie.mkv", DownloadState.VERIFYING, True),
+        ("other.mkv", DownloadState.PULLING, False),
+    ],
+)
+def test_local_aliases(tmp_path, monkeypatch, second_name, state, existing):
+    probe = tmp_path / "movie.mkv"
+    probe.write_bytes(b"old")
+    aliases = (tmp_path / second_name).exists()
+    probe.unlink()
+    contents = {"movie.mkv": b"old", second_name: b"new"}
+    removed = []
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        fake = FakeOpenList()
+        original_handle = fake.handle
+
+        def handle(_self, request):
+            path = request.url.path
+            body = json.loads(request.content) if request.content else {}
+            if request.url.host == "cdn.example.com":
+                return httpx.Response(
+                    200, stream=_ByteStream(contents[path.removeprefix("/")])
+                )
+            if path == "/api/fs/list":
+                return fake._response(
+                    {
+                        "content": [
+                            {"name": name, "size": 3, "is_dir": False, "hash_info": {}}
+                            for name in contents
+                        ],
+                        "total": 2,
+                    }
+                )
+            if path == "/api/fs/link":
+                name = body["path"].rsplit("/", 1)[-1]
+                return fake._response({"url": f"https://cdn.example.com/{name}"})
+            if path == "/api/fs/remove":
+                removed.append(body)
+                return fake._response()
+            return original_handle(request)
+
+        monkeypatch.setattr(FakeOpenList, "handle", handle)
+        config = OpenListConfig(
+            host="openlist.example.com",
+            port=80,
+            auth={"token": fake.token},
+            tool="Direct Tool",
+            pull_concurrency=1,
+            remote_cleanup=RemoteCleanupPolicy.DELETE_ON_SUCCESS,
+        )
+        stack = await _driver_stack(config, fake, [datetime.now(UTC)], monkeypatch)
+        try:
+            task, job, target = await _pulled_job(
+                tmp_path,
+                (RemoteManifestEntry(path=second_name, is_dir=False, size=3),),
+            )
+            if not existing:
+                puller_module.delete_local_file(tmp_path, "movie.mkv", job.job_uuid)
+            elif state is DownloadState.VERIFYING and not aliases:
+                (tmp_path / second_name).write_bytes(b"new")
+            task.state = state
+            task.total_size = 6
+            await task.save()
+            identity = DownloadIdentity.from_task(task)
+            await stack.driver.sync((identity,))
+            if state is DownloadState.PULLING:
+                runtime = cast(Any, stack.driver.coordinator).pull_runtime
+                async with asyncio.timeout(5):
+                    await asyncio.gather(*tuple(runtime._tasks.values()))
+                await stack.driver.sync((identity,))
+            await task.refresh_from_db()
+            await job.refresh_from_db()
+            if aliases:
+                assert task.state is DownloadState.ERROR
+                assert (
+                    job.last_error_kind is OfflineDownloadErrorKind.LOCAL_FILE_CONFLICT
+                )
+                assert job.completion_due_at is None
+                assert job.next_poll_at is None
+                assert not removed
+                assert target.final_path.read_bytes() == b"old"
+            else:
+                assert task.state is DownloadState.COMPLETED
+                assert task.completed_size == 6
+                assert len(removed) == 1
+                for name, content in contents.items():
+                    assert (tmp_path / name).read_bytes() == content
+        finally:
+            await stack.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 def test_cleanup_pending(tmp_path, monkeypatch):
     async def run():
         await Tortoise.init(
