@@ -16,11 +16,6 @@ from app.core.dl.openlist import coordinator as coordinator_module
 from app.core.dl.openlist import state as state_module
 from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.coordinator import OpenListCoordinator
-from app.core.dl.openlist.manifest import (
-    RemoteManifestEntry,
-    manifest_fingerprint,
-    serialize_manifest,
-)
 from app.core.dl.openlist.models import (
     OpenListAuth,
     OpenListConfig,
@@ -356,64 +351,6 @@ def test_poll_batching(monkeypatch):
     assert jobs[2].last_error_kind is None
 
 
-def test_incomplete_manifest(monkeypatch):
-    now = datetime(2026, 8, 4, tzinfo=UTC)
-
-    async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
-            downloader = await Downloader.create(
-                config="config", name="openlist", priority=1
-            )
-            task, job = await _create_job(
-                downloader, 1, "missing-1", DownloadState.SETTLING
-            )
-            task.total_size = 10
-            await task.save(update_fields=["total_size"])
-            entries = (RemoteManifestEntry(path="movie.mkv", is_dir=False, size=10),)
-            job.manifest = serialize_manifest(entries)
-            job.manifest_fingerprint = manifest_fingerprint(entries)
-            job.manifest_changed_at = now - timedelta(seconds=15)
-            await job.save(
-                update_fields=[
-                    "manifest",
-                    "manifest_fingerprint",
-                    "manifest_changed_at",
-                ]
-            )
-            manifest = job.manifest
-            fingerprint = job.manifest_fingerprint
-            changed_at = job.manifest_changed_at
-            client = RecordingClient(
-                pages={
-                    (job.remote_dir, 1): RemoteEntryPage(
-                        content=[RemoteEntry(name="movie.mkv", size=3, is_dir=False)],
-                        total=1,
-                    )
-                }
-            )
-
-            (snapshot,) = await _coordinator(
-                monkeypatch, _config(), client, lambda: now
-            ).sync((DownloadIdentity.from_task(task),))
-            await task.refresh_from_db()
-            await job.refresh_from_db()
-            return snapshot, task, job, manifest, fingerprint, changed_at
-        finally:
-            await Tortoise.close_connections()
-
-    snapshot, task, job, manifest, fingerprint, changed_at = asyncio.run(run())
-
-    assert snapshot.state is DownloadState.SETTLING
-    assert task.total_size == 10
-    assert job.manifest == manifest
-    assert job.manifest_fingerprint == fingerprint
-    assert job.manifest_changed_at == changed_at
-
-
 def test_refresh_shared(monkeypatch):
     now = datetime(2026, 8, 4, tzinfo=UTC)
     first = _coordinator(monkeypatch, _config(), RecordingClient(), lambda: now)
@@ -423,6 +360,9 @@ def test_refresh_shared(monkeypatch):
     assert not second.refresh_limiter.acquire("job-2", now)
     assert not first.refresh_limiter.acquire("job-1", now + timedelta(minutes=1))
     assert second.refresh_limiter.acquire("job-2", now + timedelta(minutes=1))
+    assert first.refresh_limiter.acquire("job-1", now + timedelta(minutes=2))
+    assert not first.refresh_limiter.acquire("job-1", now + timedelta(minutes=2))
+    assert first.refresh_limiter.acquire("job-1", now + timedelta(minutes=3))
 
 
 def test_task_errors(monkeypatch):

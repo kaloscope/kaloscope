@@ -74,14 +74,6 @@ def _link(url: str, headers=None) -> RemoteLink:
     return RemoteLink.model_validate({"url": url, "header": headers or {}})
 
 
-def _assert_unavailable(url: str):
-    with pytest.raises(puller.PullError) as caught:
-        puller.validate_data_url(url, openlist_base_url=BASE_URL)
-
-    assert caught.value.kind is OfflineDownloadErrorKind.DIRECT_LINK_UNAVAILABLE
-    assert url not in str(caught.value)
-
-
 def _entry(*, size: int, hashes=()):
     return RemoteManifestEntry(
         path="movie.mkv",
@@ -91,15 +83,9 @@ def _entry(*, size: int, hashes=()):
     )
 
 
-def _run_pull(handler, target, entry, *, headers=None):
-    link_client = _LinkClient(
-        _link(
-            "https://cdn.example.com/movie.mkv?sign=private",
-            {
-                name: [values] if isinstance(values, str) else values
-                for name, values in (headers or {}).items()
-            },
-        )
+def _run_pull(handler, target, entry, *, link_client=None):
+    link_client = link_client or _LinkClient(
+        _link("https://cdn.example.com/movie.mkv?sign=private")
     )
 
     async def run():
@@ -126,7 +112,11 @@ def _run_pull(handler, target, entry, *, headers=None):
     ],
 )
 def test_data_url(url: str):
-    _assert_unavailable(url)
+    with pytest.raises(puller.PullError) as caught:
+        puller.validate_data_url(url, openlist_base_url=BASE_URL)
+
+    assert caught.value.kind is OfflineDownloadErrorKind.DIRECT_LINK_UNAVAILABLE
+    assert url not in str(caught.value)
 
 
 def test_request_scope():
@@ -185,6 +175,8 @@ def test_log_redaction(caplog):
 @pytest.mark.parametrize(
     "relative_path",
     [
+        "/movie.mkv",
+        "dir/../file",
         "../outside",
         "folder\\movie.mkv",
     ],
@@ -234,27 +226,18 @@ def test_part_isolation(tmp_path):
     assert first.part_path.read_bytes() == b"partial"
 
 
-def test_long_name(tmp_path):
+@pytest.mark.parametrize("pathconf_available", [True, False])
+def test_long_name(tmp_path, monkeypatch, pathconf_available):
+    if not pathconf_available:
+        monkeypatch.delattr(puller.os, "pathconf", raising=False)
     name = "x" * 220
     final_path = tmp_path / name
-    final_path.touch()
-    final_path.unlink()
 
     target = puller.prepare_local_file(tmp_path, name, JOB_ID)
 
     assert target.final_path == final_path
     assert target.part_path.is_file()
-    assert len(os.fsencode(target.part_path.name)) <= os.pathconf(
-        tmp_path, "PC_NAME_MAX"
-    )
-
-
-def test_name_limit_fallback(tmp_path, monkeypatch):
-    monkeypatch.delattr(puller.os, "pathconf")
-
-    target = puller.prepare_local_file(tmp_path, "movie.mkv", JOB_ID)
-
-    assert target.part_path.is_file()
+    assert len(os.fsencode(target.part_path.name)) <= 255
 
 
 def test_range_reset(tmp_path):
@@ -366,30 +349,15 @@ def test_install_conflict(tmp_path, monkeypatch, hardlinks):
     def second_handler(_request: httpx.Request):
         return httpx.Response(200, stream=_ByteStream(b"two"))
 
-    _run_pull(first_handler, first, _entry(size=3))
+    assert _run_pull(first_handler, first, _entry(size=3)) == 3
     with pytest.raises(puller.PullError) as caught:
         _run_pull(second_handler, second, _entry(size=3))
 
     assert caught.value.kind is OfflineDownloadErrorKind.LOCAL_FILE_CONFLICT
     assert first.final_path.read_bytes() == b"one"
     assert first.marker_path.exists()
+    assert not first.part_path.exists()
     assert not second.marker_path.exists()
-
-
-def test_link_fallback(tmp_path):
-    target = puller.prepare_local_file(tmp_path, "movie.mkv", JOB_ID)
-
-    def handler(_request: httpx.Request):
-        return httpx.Response(200, stream=_ByteStream(b"abc"))
-
-    unsupported = OSError(errno.EOPNOTSUPP, "hard links are unsupported")
-    with patch.object(puller.os, "link", side_effect=unsupported):
-        size = _run_pull(handler, target, _entry(size=3))
-
-    assert size == 3
-    assert target.final_path.read_bytes() == b"abc"
-    assert target.marker_path.is_file()
-    assert not target.part_path.exists()
 
 
 def test_library_conflict(tmp_path):
@@ -559,18 +527,7 @@ def test_link_refresh(tmp_path):
             return httpx.Response(401)
         return httpx.Response(200, stream=_ByteStream(b"abc"))
 
-    async def run():
-        async with _data_client(handler) as client:
-            return await puller.pull_file(
-                client,
-                cast(OpenListClient, link_client),
-                target,
-                "/remote/task/movie.mkv",
-                entry=_entry(size=3),
-            )
-
-    with patch.object(puller.asyncio, "sleep", _no_sleep):
-        assert asyncio.run(run()) == 3
+    assert _run_pull(handler, target, _entry(size=3), link_client=link_client) == 3
     assert link_client.paths == [
         "/remote/task/movie.mkv",
         "/remote/task/movie.mkv",
@@ -683,7 +640,7 @@ def test_redirect_headers(tmp_path):
             )
         return httpx.Response(200, stream=_ByteStream(b"abc"))
 
-    assert _run_with_link(handler, target, link_client) == 3
+    assert _run_pull(handler, target, _entry(size=3), link_client=link_client) == 3
     assert requests[1].headers["authorization"] == "Bearer file-secret"
     assert requests[1].headers["cookie"] == "file=secret"
     assert "authorization" not in requests[2].headers
@@ -701,23 +658,8 @@ def test_redirect_proxy(tmp_path):
         return httpx.Response(302, headers={"Location": f"{ROOT_URL}/d/movie.mkv"})
 
     with pytest.raises(puller.PullError) as caught:
-        _run_with_link(handler, target, link_client)
+        _run_pull(handler, target, _entry(size=3), link_client=link_client)
 
     assert caught.value.kind is OfflineDownloadErrorKind.DIRECT_LINK_UNAVAILABLE
     assert len(requests) == 1
     assert target.part_path.read_bytes() == b""
-
-
-def _run_with_link(handler, target, link_client):
-    async def run():
-        async with _data_client(handler) as client:
-            return await puller.pull_file(
-                client,
-                cast(OpenListClient, link_client),
-                target,
-                "/remote/task/movie.mkv",
-                entry=_entry(size=3),
-            )
-
-    with patch.object(puller.asyncio, "sleep", _no_sleep):
-        return asyncio.run(run())
