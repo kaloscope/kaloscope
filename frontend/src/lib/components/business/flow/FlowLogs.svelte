@@ -90,7 +90,7 @@
               <span class="w-2 text-base font-thin opacity-50">{j === 0 ? i + 1 : ''}</span>
               <iconify-icon icon={start ? icons.arrowRouting : end ? icons.record : icons.warning}></iconify-icon>
               <span class="max-sm:w-24">{formatDate(log.at)}</span>
-              <span class="list-col-grow flex items-center gap-1 font-medium sm:pl-2">
+              <span class="flex items-center gap-1 font-medium list-col-grow sm:pl-2">
                 {$_(`flow.node.${start || end ? 'group' : 'name'}.${log.type}`)}
                 {#if log.data}
                   <Button

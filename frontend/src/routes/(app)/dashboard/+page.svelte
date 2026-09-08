@@ -457,7 +457,7 @@
     <div class="divider my-0"></div>
     {#if board.resources.length > 0}
       {@const weekMode = !!board.config.board?.calendar?.week && board.resources.length === 7}
-      <div class="tabs-border mb-10 tabs" transition:fade>
+      <div class="tabs tabs-border mb-10" transition:fade>
         {#each board.resources as rsrcs, index (index)}
           {@const week = weekMode ? getWeekMeta(new Date(), index, board.config.board?.calendar?.week_start) : null}
           <label

@@ -40,7 +40,7 @@
       }}
     >
       <iconify-icon icon={active ? nav.iconFilled : nav.icon} width="1.25rem" class:opacity-70={!active}></iconify-icon>
-      <span class="dock-label font-title" class:opacity-70={!active}>
+      <span class="font-title dock-label" class:opacity-70={!active}>
         {$_(nav.title)}
       </span>
     </a>

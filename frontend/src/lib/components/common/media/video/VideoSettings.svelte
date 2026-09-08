@@ -862,7 +862,7 @@
 >
   <div>
     <div class="video-settings-header">
-      <div class="video-settings-tabs tabs-border tabs">
+      <div class="video-settings-tabs tabs tabs-border">
         {@render tabLabel('video', icons.videoFill, $_('media.video.settings'))}
         {#if localMedia}
           {@render tabLabel('subtitle', icons.subtitlesFilled, $_('media.xgplayer.texttrack'))}

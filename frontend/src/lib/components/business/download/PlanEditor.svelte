@@ -330,7 +330,7 @@
       </div>
       <div class="relative mt-2 h-34 overflow-y-auto rounded-box border">
         <Overlay loading={$searching} fixed={false} animation="spinner" />
-        <table class="table-pin-rows table table-fixed table-xs">
+        <table class="table table-pin-rows table-fixed table-xs">
           <thead>
             <tr class="text-xs font-semibold uppercase">
               <th>{$_('field.title')}</th>

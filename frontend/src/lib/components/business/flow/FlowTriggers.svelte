@@ -182,7 +182,7 @@
           />
           <span class="text-lg font-thin {triggerGraphId === trigger.graph_id ? '' : 'opacity-30'}">{index + 1}</span>
         </span>
-        <span class="list-col-grow font-semibold text-surface/80">{trigger.graph_name}</span>
+        <span class="font-semibold text-surface/80 list-col-grow">{trigger.graph_name}</span>
         <Button
           icon={trigger.asynchronous ? icons.arrowNarrowDownDashed : icons.arrowNarrowDown}
           text={trigger.asynchronous ? $_('flow.trigger.async_mode') : $_('flow.trigger.sync_mode')}
@@ -203,7 +203,7 @@
           <input type="radio" class="radio radio-xs" checked={true} />
           <span class="text-lg font-thin">{triggers.length + 1}</span>
         </span>
-        <select class="list-col-grow select appearance-none select-sm" bind:value={graph}>
+        <select class="select appearance-none list-col-grow select-sm" bind:value={graph}>
           {#each unboundGraphs as graph (graph.id)}
             <option value={graph}>{graph.name}</option>
           {/each}

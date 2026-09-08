@@ -211,7 +211,7 @@
     />
   </div>
   {#if !isEmpty}
-    <div class="tabs-border tabs" in:fly={{ y: 100, duration: transition ? 200 : 0 }}>
+    <div class="tabs tabs-border" in:fly={{ y: 100, duration: transition ? 200 : 0 }}>
       {#each Object.values(tabs) as tab (tab.id)}
         <label class="tab gap-1.25">
           <input
