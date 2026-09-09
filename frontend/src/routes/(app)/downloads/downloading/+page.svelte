@@ -286,7 +286,7 @@
         {
           condition: task.capabilities.includes('retry'),
           loading: loadingIds.has(task.id),
-          icon: icons.arrowRotateClockwise,
+          icon: icons.arrowHookUpRight,
           text: $_('action.retry', $_('entity.task')),
           onclick: () => performTaskAction(task, 'retry')
         },
