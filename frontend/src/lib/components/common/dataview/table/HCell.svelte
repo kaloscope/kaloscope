@@ -71,7 +71,8 @@
         {@render children()}
       {:else if cellText}
         {@const sortClass = sort ? 'btn btn-subtle btn-sm' : ''}
-        {@const sortedClass = sort && ($sort === sort.asc || $sort === sort.desc) ? 'text-base-content' : ''}
+        {@const sortedClass =
+          sort && ($sort === sort.asc || $sort === sort.desc) ? 'text-base-content' : 'text-inherit'}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
           tabindex={sort ? 0 : undefined}
