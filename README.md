@@ -70,22 +70,22 @@ docker run -d \
 
 **环境变量（`-e`）**
 
-| 变量名         | 默认值  | 说明                                                                                                        |
-| -------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `PUID`         | `0`     | 进程运行 UID，NAS 环境建议设为媒体目录所有者                                                                |
-| `PGID`         | `0`     | 进程运行 GID，NAS 环境建议设为媒体目录所属用户组                                                            |
-| `UMASK`        | `022`   | 文件创建掩码，影响容器内新建文件的默认权限                                                                  |
-| `TZ`           | 无      | 容器时区，如`Asia/Shanghai`、`UTC`等                                                                        |
-| `AUTO_TLS`     | `false` | 使用[`mkcert`](https://github.com/FiloSottile/mkcert)自动签发本地 TLS 证书，适合需要局域网 HTTPS 访问的用户 |
-| `TLS_HOSTNAME` | 无      | 指定 TLS 证书绑定的主机名或 IP，仅`AUTO_TLS=true`时生效                                                     |
-| `ENABLE_ARIA2` | `false` | 在容器内启动内置的 aria2 服务，适合不想单独部署下载器的用户                                                 |
+| 变量名         | 默认值  | 说明                                                                                                          |
+| -------------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| `PUID`         | `0`     | 进程运行 UID，NAS 环境建议设为媒体目录所有者                                                                  |
+| `PGID`         | `0`     | 进程运行 GID，NAS 环境建议设为媒体目录所属用户组                                                              |
+| `UMASK`        | `022`   | 文件创建掩码，影响容器内新建文件的默认权限                                                                    |
+| `TZ`           | 无      | 容器时区，如 `Asia/Shanghai`、`UTC` 等                                                                        |
+| `AUTO_TLS`     | `false` | 使用 [`mkcert`](https://github.com/FiloSottile/mkcert) 自动签发本地 TLS 证书，适合需要局域网 HTTPS 访问的用户 |
+| `TLS_HOSTNAME` | 无      | 指定 TLS 证书绑定的主机名或 IP，仅 `AUTO_TLS=true` 时生效                                                     |
+| `ENABLE_ARIA2` | `false` | 在容器内启动内置的 aria2 服务，适合不想单独部署下载器的用户                                                   |
 
 **端口映射（`-p`）**
 
-| 端口   | 协议    | 说明                                                        |
-| ------ | ------- | ----------------------------------------------------------- |
-| `8000` | TCP     | Kaloscope Web UI 访问端口                                   |
-| `6888` | TCP/UDP | aria2 DHT 与 BT 监听端口（仅`ENABLE_ARIA2=true`时需要映射） |
+| 端口   | 协议    | 说明                                                          |
+| ------ | ------- | ------------------------------------------------------------- |
+| `8000` | TCP     | Kaloscope Web UI 访问端口                                     |
+| `6888` | TCP/UDP | aria2 DHT 与 BT 监听端口（仅 `ENABLE_ARIA2=true` 时需要映射） |
 
 **数据卷（`-v`）**
 
@@ -117,8 +117,8 @@ docker run -d \
 
 ### :inbox_tray: 下载管理
 
-- 支持[`aria2`](https://aria2.github.io/)、[`qBittorrent`](https://www.qbittorrent.org/)、[`Transmission`](https://transmissionbt.com/)等下载器
-- 支持将[`OpenList`](https://github.com/OpenListTeam/OpenList)的任意网盘离线下载工具固定为下载器，并把远端结果直拉到本地
+- 支持 [`aria2`](https://aria2.github.io/)、[`qBittorrent`](https://www.qbittorrent.org/)、[`Transmission`](https://transmissionbt.com/) 等下载器
+- 支持将 [`OpenList`](https://github.com/OpenListTeam/OpenList) 的网盘离线下载工具固定为下载器，并把远端结果直拉到本地
 - 下载器配置通过 YAML 定义，可按需扩展适配器
 - 支持下载计划，可按关键词和过滤规则自动抓取并下发下载任务
 - 支持手动添加磁力链接或种子文件
@@ -127,7 +127,7 @@ docker run -d \
 
 - 支持电影、电视剧等多种媒体库类型
 - 支持实时监控文件系统，自动识别新加入的媒体文件
-- 支持生成和解析[`NFO`](https://en.wikipedia.org/wiki/.nfo)文件并同步媒体元数据
+- 支持生成和解析 [`NFO`](https://en.wikipedia.org/wiki/.nfo) 文件并同步媒体元数据
 
 ### :arrow_forward: 在线播放
 
@@ -145,7 +145,7 @@ docker run -d \
 
 ### :iphone: PWA 支持
 
-- 支持以[`PWA`](https://web.dev/explore/progressive-web-apps)方式安装到桌面或移动设备
+- 支持以 [`PWA`](https://web.dev/explore/progressive-web-apps) 方式安装到桌面或移动设备
 - PWA 主题颜色可随应用内主题同步切换
 
 ## 项目统计
@@ -174,11 +174,11 @@ docker run -d \
 
 - **弹弹play开放平台**
 
-  感谢[`弹弹play开放平台`](https://doc.dandanplay.com/open/)提供的弹幕服务接口支持。弹幕服务接口的相关代理实现见[`kaloscope/danmaku`](https://github.com/kaloscope/danmaku)仓库。
+  感谢 [`弹弹play开放平台`](https://doc.dandanplay.com/open/) 提供的弹幕服务接口支持。弹幕服务接口的相关代理实现见 [`kaloscope/danmaku`](https://github.com/kaloscope/danmaku) 仓库。
 
 - **第三方依赖与开源社区**
 
-  本项目构建在众多优秀的开源项目之上，感谢所有开发者与贡献者的持续投入。完整的第三方依赖列表及对应开源协议见[`LICENSES`](LICENSES.md)文件。
+  本项目构建在众多优秀的开源项目之上，感谢所有开发者与贡献者的持续投入。完整的第三方依赖列表及对应开源协议见 [`LICENSES`](LICENSES.md) 文件。
 
 ## 免责声明
 
@@ -188,4 +188,4 @@ docker run -d \
 
 ## 开源协议
 
-本项目基于[`GPLv3`](LICENSE)开源协议发布。
+本项目基于 [`GPLv3`](LICENSE) 开源协议发布。

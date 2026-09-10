@@ -105,7 +105,7 @@ The parameters used above are described below.
 
 - Build workflows by dragging and connecting nodes in the visual editor
 - Includes nodes for HTTP requests, Python scripts, conditional branches, loops, and more
-- Import community Templates from GitHub repositories
+- Import community workflow templates from GitHub repositories to quickly reuse existing solutions
 - Use Schedules to run workflows automatically
 
 ### :mag: Search
@@ -118,7 +118,7 @@ The parameters used above are described below.
 ### :inbox_tray: Downloads
 
 - Supports Downloaders such as [`aria2`](https://aria2.github.io/), [`qBittorrent`](https://www.qbittorrent.org/), and [`Transmission`](https://transmissionbt.com/)
-- Supports assigning any cloud-storage offline download tool in [OpenList](https://github.com/OpenListTeam/OpenList) to a Downloader and pulling remote results directly to local storage
+- Supports assigning a cloud-storage offline download tool in [OpenList](https://github.com/OpenListTeam/OpenList) to a Downloader and pulling remote results directly to local storage
 - YAML-based Downloader configuration with extensible adapters
 - Download Plans that automatically search and dispatch tasks using Keywords and Filters
 - Manually add magnet links or torrent files
@@ -132,8 +132,8 @@ The parameters used above are described below.
 ### :arrow_forward: Playback
 
 - Built-in video player with support for FLV, HLS, and MP4
-- Server Transcode to HLS with configurable Transcode Quality and resolution limits
-- Hardware Acceleration with NVENC, VAAPI, VideoToolBox, and more
+- Real-time transcoding for playback, converting videos to HLS streams on demand with output quality limits
+- Hardware-accelerated encoding with NVENC, VAAPI, VideoToolbox, and more
 - Danmaku display and a mobile-friendly styled Full Screen mode
 - Playback progress tracking and Resume support
 
@@ -184,7 +184,7 @@ Thank you to everyone who has contributed code, documentation, feedback, and ide
 
 - This project is intended solely for personal learning and technical exchange. Commercial use and the distribution of illegal content are prohibited
 - Community or third-party workflows may contain arbitrary code or network requests; users are responsible for reviewing and verifying their security and legality
-- The developers assume no joint or consequential liability for legal responsibilities, risks, or losses arising from the use of this project
+- Users bear all legal liabilities, risks, and losses arising from the use of this project; the developers assume no joint and several liability
 
 ## License
 
