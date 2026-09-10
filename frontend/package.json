@@ -47,7 +47,6 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@eslint/compat": "^2.1.1",
     "@eslint/js": "^10.0.1",
     "@lezer/generator": "^1.8.0",
     "@sveltejs/adapter-static": "^3.0.10",
