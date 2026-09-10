@@ -24,7 +24,7 @@ export const subroutes = persisted<Record<string, string>>('subroutes');
  * @param value - The initial value.
  * @returns A writable store.
  */
-export function persisted<T>(key: string, value?: T | null): Writable<T | null> {
+export function persisted<T>(key: string, value: T | null = null): Writable<T | null> {
   const initial = browser && localStorage.getItem(key);
   const store = writable<T | null>(initial ? JSON.parse(initial) : value);
 
