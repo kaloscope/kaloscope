@@ -22,7 +22,7 @@ async def list_configs(_, query: ConfigQuery) -> HTTPResponse:
     return json(
         {
             "total": page.total,
-            "items": [ConfigService.dump(c) for c in page.items],
+            "items": [ConfigService.serialize(c) for c in page.items],
         }
     )
 
@@ -40,7 +40,7 @@ async def get_config(_, key: str) -> HTTPResponse:
 async def upsert_config(_, body: ConfigUpsert) -> HTTPResponse:
     """Create or update a global config."""
     config = await ConfigService.upsert(body)
-    return json(ConfigService.dump(config))
+    return json(ConfigService.serialize(config))
 
 
 @config.post("/delete")

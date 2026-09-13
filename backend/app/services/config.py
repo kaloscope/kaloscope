@@ -22,7 +22,7 @@ class ConfigService(BaseService[GlobalConfig], model=GlobalConfig):
         return config
 
     @classmethod
-    def dump(cls, config: GlobalConfig) -> dict:
+    def serialize(cls, config: GlobalConfig) -> dict:
         """Serialize a GlobalConfig ORM object to a plain dict.
 
         Tortoise's JSONField Pydantic model rejects scalar values

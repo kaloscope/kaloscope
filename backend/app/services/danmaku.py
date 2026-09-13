@@ -188,8 +188,8 @@ class DanmakuService:
             The matched metadata, or `None` if not found.
         """
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        url = f"{cls._base_url(server)}/match"
         try:
-            url = f"{cls._base_url(server)}/match"
             response = await client.post(
                 url,
                 json={
@@ -273,8 +273,8 @@ class DanmakuService:
             A list of danmakus loaded from the server.
         """
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        url = f"{cls._base_url(server)}/comment/{episode_id}"
         try:
-            url = f"{cls._base_url(server)}/comment/{episode_id}"
             params = {"withRelated": "true"}
             if language == Language.ZH_CN:
                 # request the converted simplified Chinese comments
@@ -400,8 +400,8 @@ class DanmakuService:
             episode = str(media.episode)
 
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        url = f"{cls._base_url(server)}/search/episodes"
         try:
-            url = f"{cls._base_url(server)}/search/episodes"
             params = {"anime": title}
             if episode:
                 params["episode"] = episode
@@ -507,8 +507,8 @@ class DanmakuService:
 
         # get bangumi info from the danmaku server to find the corresponding episode IDs
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        url = f"{cls._base_url(server)}/bangumi/{anime_id}"
         try:
-            url = f"{cls._base_url(server)}/bangumi/{anime_id}"
             response = await client.get(url)
             if response.status_code != 200:
                 logger.error(

@@ -68,8 +68,8 @@ class FlowRepositoryService(BaseService[FlowRepository], model=FlowRepository):
         # call the GitHub API to get the repository information
         # https://docs.github.com/en/rest?apiVersion=2022-11-28
         client: httpx.AsyncClient = cls.app_ctx().httpx
+        url = f"https://api.github.com/repos/{repo_name}"
         try:
-            url = f"https://api.github.com/repos/{repo_name}"
             headers = {
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
