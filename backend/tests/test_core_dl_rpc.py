@@ -1,3 +1,5 @@
+"""Unit tests for RPC downloads."""
+
 import asyncio
 from typing import cast
 

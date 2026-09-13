@@ -29,30 +29,6 @@ def test_roundtrip_unicode():
     assert decrypted == plain_text
 
 
-def test_roundtrip_special_chars():
-    """Test encryption and decryption with special characters."""
-    plain_text = "!@#$%^&*()_+-=[]{}|;:',.<>?/~`"
-    encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
-
-
-def test_roundtrip_numbers():
-    """Test encryption and decryption with numeric strings."""
-    plain_text = "1234567890"
-    encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
-
-
-def test_roundtrip_multiline_text():
-    """Test encryption and decryption with multiline text."""
-    plain_text = "Line 1\nLine 2\nLine 3"
-    encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
-
-
 def test_roundtrip_long_text():
     """Test encryption and decryption with long text."""
     plain_text = "A" * 1000

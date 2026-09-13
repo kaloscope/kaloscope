@@ -1,3 +1,5 @@
+"""Unit tests for downloader configuration."""
+
 from pathlib import Path
 
 import pytest

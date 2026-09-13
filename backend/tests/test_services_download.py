@@ -1,3 +1,5 @@
+"""Unit tests for the download service."""
+
 import asyncio
 import hashlib
 from dataclasses import replace
@@ -250,7 +252,7 @@ def test_concurrent_rpc_add(monkeypatch):
                 name="RPC", host="localhost", port=80, methods={"add_link": API()}
             )
         )
-        driver.client = Client()
+        monkeypatch.setattr(driver, "client", Client())
         monkeypatch.setattr(download_service, "load_driver", lambda _: driver)
         try:
             downloaders = [

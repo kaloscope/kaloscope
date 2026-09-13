@@ -1,3 +1,5 @@
+"""Unit tests for the OpenList file puller."""
+
 import asyncio
 import errno
 import logging
@@ -384,6 +386,7 @@ def test_unmarked_hardlink(tmp_path):
     completed = asyncio.run(
         puller.find_completed_file(tmp_path, _entry(size=3), JOB_ID)
     )
+    assert completed is not None
     assert completed == target.final_path
     assert completed.read_bytes() == b"abc"
     assert target.marker_path.exists()
@@ -475,6 +478,7 @@ puller._install_local_file_sync(target)
     completed = asyncio.run(
         puller.find_completed_file(tmp_path, _entry(size=3), JOB_ID)
     )
+    assert completed is not None
     assert completed == tmp_path / "movie.mkv"
     assert completed.read_bytes() == b"abc"
     assert not (tmp_path / f".movie.mkv.{JOB_ID}.part").exists()

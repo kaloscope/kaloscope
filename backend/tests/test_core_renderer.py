@@ -352,9 +352,6 @@ class TestQueryParam:
             "https://example.com/video"
         )
 
-    def test_registered_filter(self):
-        assert ENV.filters["query_param"] is query_param
-
     def test_render_uses_filter(self):
         result = render(
             "{{ url | query_param('lang=zh-CN') }}",

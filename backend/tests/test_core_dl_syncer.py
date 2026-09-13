@@ -1,3 +1,5 @@
+"""Unit tests for download synchronization."""
+
 import asyncio
 import errno
 import json
@@ -15,6 +17,7 @@ from app.core.config import KaloscopeConfig
 from app.core.dl import syncer
 from app.core.dl.driver import (
     DownloadAction,
+    DownloaderDriver,
     DownloadIdentity,
     DownloadRequest,
     DownloadSnapshot,
@@ -89,11 +92,14 @@ def test_completion_recovery(tmp_path, monkeypatch, restart):
                 return pages[path]
 
         config = OpenListConfig(
-            host="localhost", port=80, auth={"token": "test"}, tool="115 Open"
+            host="localhost",
+            port=80,
+            auth=OpenListAuth(token=SecretStr("test")),
+            tool="115 Open",
         )
         driver = OpenListDriver(config)
         client = Client()
-        driver.client = client
+        driver.client = cast(OpenListClient, client)
         try:
             downloader = await Downloader.create(
                 config="config", name="OpenList", priority=1
@@ -137,7 +143,7 @@ def test_completion_recovery(tmp_path, monkeypatch, restart):
             completed = await DownloadTask.get(state=DownloadState.COMPLETED)
             await driver.close()
             driver = OpenListDriver(config)
-            driver.client = client
+            driver.client = cast(OpenListClient, client)
             runner = _openlist_runner(downloader, driver)
             await runner.interval()
             assert (library_dir / completed.name).read_bytes() == b"abc"
@@ -159,10 +165,13 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
         await Tortoise.generate_schemas()
         driver = OpenListDriver(
             OpenListConfig(
-                host="localhost", port=80, auth={"token": "test"}, tool="115 Open"
+                host="localhost",
+                port=80,
+                auth=OpenListAuth(token=SecretStr("test")),
+                tool="115 Open",
             )
         )
-        driver.client = SimpleNamespace()
+        driver.client = cast(OpenListClient, SimpleNamespace())
         try:
             downloader = await Downloader.create(
                 config="config", name="OpenList", priority=1
@@ -221,7 +230,7 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
 
             await driver.close()
             driver = OpenListDriver(driver.config)
-            driver.client = SimpleNamespace()
+            driver.client = cast(OpenListClient, SimpleNamespace())
             await syncer.sync_tasks([task], driver)
             assert await Notification.all().count() == 0
             await OfflineDownloadJob.filter(id=job.id).update(
@@ -286,11 +295,14 @@ def test_delete_during_submission(tmp_path, monkeypatch, interrupted, cancel_fai
 
         driver = OpenListDriver(
             OpenListConfig(
-                host="localhost", port=80, auth={"token": "test"}, tool="115 Open"
+                host="localhost",
+                port=80,
+                auth=OpenListAuth(token=SecretStr("test")),
+                tool="115 Open",
             )
         )
         client = Client()
-        driver.client = client
+        driver.client = cast(OpenListClient, client)
         monkeypatch.setattr(download_service, "load_driver", lambda _config: driver)
         adding = None
         try:
@@ -310,9 +322,11 @@ def test_delete_during_submission(tmp_path, monkeypatch, interrupted, cancel_fai
             )
             await asyncio.wait_for(entered.wait(), timeout=5)
             task = await DownloadTask.get()
-            action, state = await download_service.DownloadTaskService.delete(
+            result = await download_service.DownloadTaskService.delete(
                 task.id, local=True
             )
+            assert result is not None
+            action, state = result
             runner = _openlist_runner(downloader, driver)
             runner.publish(task.id, action, state, local=True)
             await runner._consume_actions()
@@ -521,7 +535,7 @@ def test_driver_sync():
         ),
     )
 
-    asyncio.run(syncer.sync_tasks([task], driver))
+    asyncio.run(syncer.sync_tasks([task], cast(DownloaderDriver, driver)))
 
     driver.sync.assert_awaited_once_with((DownloadIdentity.from_task(task),))
 
@@ -554,7 +568,7 @@ def test_driver_error():
                 )
             )
 
-            await syncer.sync_tasks([task], driver)
+            await syncer.sync_tasks([task], cast(DownloaderDriver, driver))
             return await Notification.get()
         finally:
             await Tortoise.close_connections()

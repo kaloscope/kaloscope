@@ -1,3 +1,5 @@
+"""Integration tests for OpenList downloads."""
+
 import asyncio
 import hashlib
 import json
@@ -527,7 +529,7 @@ def test_local_aliases(tmp_path, monkeypatch, second_name, state, existing):
         config = OpenListConfig(
             host="openlist.example.com",
             port=80,
-            auth={"token": fake.token},
+            auth=OpenListAuth(token=SecretStr(fake.token)),
             tool="Direct Tool",
             pull_concurrency=1,
             remote_cleanup=RemoteCleanupPolicy.DELETE_ON_SUCCESS,
@@ -649,7 +651,7 @@ def test_submission_rejected(tmp_path, monkeypatch, message):
         config = OpenListConfig(
             host="openlist.example.com",
             port=80,
-            auth={"token": fake.token},
+            auth=OpenListAuth(token=SecretStr(fake.token)),
             tool="115 Open",
         )
         stack = await _driver_stack(config, fake, [datetime.now(UTC)], monkeypatch)
@@ -699,7 +701,7 @@ def test_cleanup_rate_limit(monkeypatch):
         config = OpenListConfig(
             host="openlist.example.com",
             port=80,
-            auth={"token": fake.token},
+            auth=OpenListAuth(token=SecretStr(fake.token)),
             tool="115 Open",
             remote_cleanup=RemoteCleanupPolicy.DELETE_ON_SUCCESS,
         )
@@ -961,6 +963,7 @@ def test_restart_resume(tmp_path, tmp_path_factory, monkeypatch):
             assert task.state is DownloadState.SETTLING
 
             job = await OfflineDownloadJob.get(download_id=task.id)
+            assert job.next_poll_at is not None
             now[0] = job.next_poll_at
             await stack.driver.sync((identity,))
             fake.finish_transfer()
@@ -968,6 +971,7 @@ def test_restart_resume(tmp_path, tmp_path_factory, monkeypatch):
 
             await stack.close()
             stack = await _driver_stack(config, fake, now, monkeypatch)
+            assert job.next_poll_at is not None
             now[0] = job.next_poll_at
             await stack.driver.sync((identity,))
             assert "/api/fs/list" not in fake.control_requests
@@ -975,6 +979,7 @@ def test_restart_resume(tmp_path, tmp_path_factory, monkeypatch):
             fake.finish_transfer()
 
             await job.refresh_from_db()
+            assert job.next_poll_at is not None
             now[0] = job.next_poll_at
             await stack.driver.sync((identity,))
             await job.refresh_from_db()
@@ -1245,7 +1250,7 @@ def test_pull_backoff_resume(tmp_path, monkeypatch, status, refresh, data_rate_l
         config = OpenListConfig(
             host="openlist.example.com",
             port=80,
-            auth={"token": fake.token},
+            auth=OpenListAuth(token=SecretStr(fake.token)),
             tool="115 Open",
         )
         now = [datetime(2026, 8, 6, tzinfo=UTC)]
@@ -1257,6 +1262,7 @@ def test_pull_backoff_resume(tmp_path, monkeypatch, status, refresh, data_rate_l
             identity = DownloadIdentity.from_task(task)
             requested_at = datetime.now(UTC)
             await stack.driver.sync((identity,))
+            assert stack.driver.coordinator is not None
             async with asyncio.timeout(5):
                 await asyncio.gather(
                     *tuple(stack.driver.coordinator.pull_runtime._tasks.values())
