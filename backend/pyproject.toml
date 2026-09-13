@@ -48,6 +48,9 @@ pip-licenses = "^5.5.5"
 [tool.tortoise]
 tortoise_orm = "app.main.tortoise_config"
 
+[tool.pyright]
+ignore = ["app/migrations"]
+
 [tool.ruff]
 line-length = 88
 indent-width = 4

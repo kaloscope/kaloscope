@@ -2,6 +2,9 @@
 
 from collections.abc import Callable
 from multiprocessing.managers import DictProxy
+from typing import Any, overload
+
+_MISSING = object()
 
 
 def entries[K, V](
@@ -124,12 +127,32 @@ class TrackableDict[K, V](dict[K, V]):
         self._modified = True
         super().update(*args, **kwargs)
 
-    def setdefault(self, key: K, default: V):
+    @overload
+    def setdefault[T](
+        self: "TrackableDict[K, T | None]", key: K, default: None = None
+    ) -> T | None: ...
+
+    @overload
+    def setdefault(self, key: K, default: V) -> V: ...
+
+    def setdefault(self: "TrackableDict[K, Any]", key: K, default: Any = None):
         self._modified = True
         return super().setdefault(key, default)
 
-    def pop(self, key: K, default: V | None = None):
+    @overload
+    def pop(self, key: K) -> V: ...
+
+    @overload
+    def pop(self, key: K, default: V) -> V: ...
+
+    @overload
+    def pop[T](self, key: K, default: T) -> V | T: ...
+
+    def pop(self, key: K, default=_MISSING):
         self._modified = True
+        # preserve KeyError when no default was provided
+        if default is _MISSING:
+            return super().pop(key)
         return super().pop(key, default)
 
     def popitem(self):
