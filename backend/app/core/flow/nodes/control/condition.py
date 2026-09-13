@@ -1,5 +1,7 @@
 from typing import Any
 
+from lxml import etree
+
 from app.core.flow.context import Context
 from app.core.flow.fields import TextField
 from app.core.flow.handles import InputHandle, OutputHandle
@@ -20,6 +22,9 @@ class ConditionNode(Node):
         cls, *, node_data: dict[str, Any], context: Context, **kwargs
     ) -> OutputHandle | None:
         var = cls.expression.extract(node_data, context=context, raw=True)
+        # an XPath element indicates a match even when it has no children
+        if isinstance(var, etree._Element):
+            var = True
         if var and str(var).lower() not in ("false", "0", "none", "null"):
             return cls.Handles.is_true
         else:

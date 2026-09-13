@@ -1,19 +1,21 @@
 import base64
 import datetime
 import re
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import jinja2
 import opencc
+from jinja2 import nodes
 from jinja2.defaults import (
     BLOCK_END_STRING,
     BLOCK_START_STRING,
     VARIABLE_END_STRING,
     VARIABLE_START_STRING,
 )
+from jinja2.environment import TemplateExpression
 from jsonpath_ng.ext import parse
 from lxml import etree
 
@@ -34,6 +36,17 @@ ENV = jinja2.Environment(
     finalize=lambda x: x if x is not None else "",
 )
 ENV.policies["json.dumps_kwargs"] = {"ensure_ascii": False, "default": json.default}
+
+# create a strict environment that rejects undefined values
+STRICT_ENV = ENV.overlay(
+    undefined=jinja2.StrictUndefined,
+    finalize=lambda value: "" if value is None else _check_undefined(value),
+)
+STRICT_ENV.policies = ENV.policies.copy()
+STRICT_ENV.policies["json.dumps_kwargs"] = {
+    **ENV.policies["json.dumps_kwargs"],
+    "default": lambda value: json.default(_check_undefined(value)),
+}
 
 # cache for compiled expressions
 JSONPATH_CACHE = {}
@@ -642,16 +655,19 @@ ENV.filters["regex"] = partial(_find, expr_type="regex")
 ENV.filters["size"] = lambda x: format_bytes(int(float(x))) if x else ""
 ENV.filters["s2t"] = s2t
 ENV.filters["t2s"] = t2s
+ENV.filters["year"] = year
+ENV.filters["strftime"] = strftime
 ENV.filters["duration"] = duration
 ENV.filters["b64decode"] = b64decode
 ENV.filters["b64encode"] = b64encode
-ENV.filters["parent_path"] = parent_path
-ENV.filters["strftime"] = strftime
-ENV.filters["year"] = year
 ENV.filters["prefix"] = prefix
 ENV.filters["suffix"] = suffix
-ENV.filters["query_param"] = query_param
 ENV.filters["quote"] = quote
+ENV.filters["query_param"] = query_param
+# resolve paths at render time so symlink changes remain visible
+ENV.filters["parent_path"] = jinja2.pass_context(
+    lambda _, path, levels=1, resolve=False: parent_path(path, levels, resolve)
+)
 
 
 def is_file(path: Any) -> bool:
@@ -688,30 +704,98 @@ def is_dir(path: Any) -> bool:
 
 # register custom tests
 # https://jinja.palletsprojects.com/en/stable/api/#custom-tests
-ENV.tests["file"] = is_file
-ENV.tests["dir"] = is_dir
+ENV.tests["file"] = jinja2.pass_context(lambda _, path: is_file(path))
+ENV.tests["dir"] = jinja2.pass_context(lambda _, path: is_dir(path))
 
 
-def render(value: json.JSONType, context: dict, *, raw: bool = False) -> Any:
+def _check_undefined(value: Any) -> Any:
+    """Check rendered values for undefined variables.
+
+    Args:
+        value: The rendered value to check.
+
+    Raises:
+        jinja2.UndefinedError: If the value contains an undefined variable.
+
+    Returns:
+        The original value without modifying its contents.
+    """
+    if isinstance(value, jinja2.Undefined):
+        raise jinja2.UndefinedError(value._undefined_message)
+    if isinstance(value, dict):
+        for item in value.items():
+            _check_undefined(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _check_undefined(item)
+    return value
+
+
+@lru_cache(maxsize=512)
+def _compile_template(
+    value: str, raw: bool, strict: bool
+) -> jinja2.Template | TemplateExpression:
+    """Compile and cache a Jinja template or a single expression.
+
+    Args:
+        value: The template string to compile.
+        raw: Whether to preserve native expression types.
+        strict: Whether to raise an error for undefined variables.
+
+    Returns:
+        The compiled template or single expression.
+    """
+    env = STRICT_ENV if strict else ENV
+    if raw:
+        tree = env.parse(value)
+        if (
+            len(tree.body) == 1
+            and isinstance(tree.body[0], nodes.Output)
+            and len(tree.body[0].nodes) == 1
+            and not isinstance(tree.body[0].nodes[0], nodes.TemplateData)
+            and value.strip().startswith(VARIABLE_START_STRING)
+            and value.strip().endswith(VARIABLE_END_STRING)
+        ):
+            # reuse the parsed expression to preserve whitespace control syntax
+            tree.body = [
+                nodes.Assign(nodes.Name("result", "store"), tree.body[0].nodes[0])
+            ]
+            return TemplateExpression(env.from_string(tree), undefined_to_none=False)
+    return env.from_string(value)
+
+
+def render(
+    value: json.JSONType, context: dict, *, raw: bool = False, strict: bool = False
+) -> Any:
     """Render a JSON value with a context.
 
     Args:
         value: The value to render.
         context: The context to render with.
-        raw: Whether to render the value as raw object.
+        raw: Whether to preserve native types in single expressions.
+        strict: Whether to raise an error for undefined variables.
 
     Returns:
         The rendered value.
     """
     if isinstance(value, str) and is_template(value):
         if raw and (key := raw_key(context, value)) is not None:
-            return get_raw(context, key)
-        template = ENV.from_string(value)
-        return template.render(context)
+            result = get_raw(context, key)
+        else:
+            template = _compile_template(value, raw, strict)
+            result = (
+                template.render(context)
+                if isinstance(template, jinja2.Template)
+                else template(**context)
+            )
+        if raw and strict:
+            _check_undefined(result)
+        # undefined values render as empty text or raise in strict mode
+        return str(result) if isinstance(result, jinja2.Undefined) else result
     elif isinstance(value, list):
-        return [render(v, context, raw=raw) for v in value]
+        return [render(v, context, raw=raw, strict=strict) for v in value]
     elif isinstance(value, dict):
-        return {k: render(v, context, raw=raw) for k, v in value.items()}
+        return {k: render(v, context, raw=raw, strict=strict) for k, v in value.items()}
     else:
         return value
 
@@ -728,7 +812,10 @@ def raw_key(dictionary: dict, string: str) -> str | None:
     """
     key = string.strip()
     if key.startswith(VARIABLE_START_STRING) and key.endswith(VARIABLE_END_STRING):
-        key = key[2:-2].strip()
+        key = key[2:-2]
+        if key.startswith(("-", "+")):
+            key = key[1:]
+        key = key.removesuffix("-").strip()
     # check nested keys
     keys = key.split(".")
     data = dictionary
