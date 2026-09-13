@@ -541,9 +541,18 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
             None,
         )
 
-        # try to get the details if the details method is supported
-        if item is None and "details" in driver.config.methods:
-            item = await resolve_details(client, identity.rpc_variables)
+        # fall back to `details` if the task is absent from `list`
+        from_list = item is not None
+        if not from_list and "details" in driver.config.methods:
+            try:
+                item = await resolve_details(client, identity.rpc_variables)
+            except Exception:
+                logger.error(
+                    "Failed to resolve download task details: %s",
+                    task.id,
+                    exc_info=True,
+                )
+                continue
 
         # continue the loop if the task is not matched
         if not item:
@@ -553,18 +562,38 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
             )
             continue
 
-        # update the state to `DOWNLOADING` if the download speed is greater than 0
+        # prefer an explicit state over download speed
         state = task.state
+        remote_state = item.get("state")
+        explicit_state = remote_state in {
+            DownloadState.DOWNLOADING,
+            DownloadState.PAUSED,
+            DownloadState.COMPLETED,
+            DownloadState.ERROR,
+        }
+        if explicit_state:
+            state = DownloadState(remote_state)
         up_speed = int(item.get("up_speed", task.up_speed) or 0)
         dl_speed = int(item.get("dl_speed", task.dl_speed) or 0)
-        if state == DownloadState.PAUSED and task.dl_speed == 0 and dl_speed > 0:
+        if explicit_state and state in {DownloadState.PAUSED, DownloadState.ERROR}:
+            up_speed = dl_speed = 0
+        if (
+            not explicit_state
+            and state == DownloadState.PAUSED
+            and task.dl_speed == 0
+            and dl_speed > 0
+        ):
             state = DownloadState.DOWNLOADING
 
-        # update the state to `ERROR` if the raw state indicates an error
+        # update the state to `ERROR` when the state or message reports a failure
         name = str(item.get("name") or task.name)
         raw_state = str(item.get("raw_state") or task.raw_state)
         error_msg = str(item.get("error_msg") or "")
-        if error_msg or raw_state.lower() == "error":
+        if (
+            error_msg
+            or raw_state.lower() == "error"
+            or (explicit_state and state == DownloadState.ERROR)
+        ):
             state = DownloadState.ERROR
             up_speed = 0
             dl_speed = 0
@@ -572,27 +601,40 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
                 NotificationTemplate.DOWNLOAD_FAILED, name=name, error=error_msg
             )
 
-        # update the state to `COMPLETED` if the percentage has reached 100
+        # infer completion from progress only when no explicit state is available
         percentage = float(item.get("percentage", 0.0))
         total_size = int(item.get("total_size", task.total_size) or 0)
         completed_size = int(item.get("completed_size", task.completed_size) or 0)
         completed_at = None
         if not percentage:
             percentage = completed_size / total_size * 100 if total_size else 0.0
-        if percentage >= 100:
+        if (explicit_state and state == DownloadState.COMPLETED) or (
+            not explicit_state and percentage >= 100
+        ):
+            percentage = 100.0
             dl_speed = 0
             completed_at = timezone.now()
             state = DownloadState.COMPLETED
-            await Notifications.send(NotificationTemplate.DOWNLOAD_COMPLETED, name=name)
 
-        # get the files if the details method is supported
+        # fetch missing files only for tasks returned by `list`
         files = item.get("files")
-        if files is None and "details" in driver.config.methods:
-            result = await client.call("details", identity.rpc_variables)
-            if isinstance(result, dict):
-                files = result.get("files")
-        if isinstance(files, list):
-            files = [str(f).removeprefix(f"{task.dir}/") for f in files if f]
+        try:
+            if from_list and files is None and "details" in driver.config.methods:
+                result = await client.call("details", identity.rpc_variables)
+                if isinstance(result, dict):
+                    files = result.get("files")
+            if isinstance(files, list):
+                files = [str(file) for file in files if file]
+                if files:
+                    files = await asyncio.to_thread(_relative_files, task.dir, files)
+        except Exception:
+            logger.error(
+                "Failed to collect download task files: %s", task.id, exc_info=True
+            )
+            continue
+
+        if completed_at is not None:
+            await Notifications.send(NotificationTemplate.DOWNLOAD_COMPLETED, name=name)
 
         # update the download task
         unique_id = str(item.get("unique_id") or task.unique_id or "")
@@ -623,6 +665,39 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
                     task.id,
                     exc_info=True,
                 )
+
+
+def _relative_files(directory: str, files: list[str]) -> list[str]:
+    """Convert absolute RPC file paths to download-relative paths.
+
+    Resolve symbolic links when the original directory prefix does not match.
+
+    Args:
+        directory: The configured download directory.
+        files: The relative or absolute file paths returned by the downloader.
+
+    Raises:
+        ValueError: If an absolute file path is outside the download directory.
+
+    Returns:
+        The file paths relative to the configured download directory.
+    """
+    root = Path(directory)
+    resolved_root = None
+    relative = []
+    for file in files:
+        if not file:
+            continue
+        path = Path(str(file))
+        if path.is_absolute():
+            try:
+                path = path.relative_to(root)
+            except ValueError:
+                if resolved_root is None:
+                    resolved_root = root.resolve()
+                path = path.resolve().relative_to(resolved_root)
+        relative.append(str(path))
+    return relative
 
 
 async def resolve_details(client: RpcClient, unique: dict) -> dict | None:
