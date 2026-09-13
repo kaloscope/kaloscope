@@ -726,8 +726,11 @@ def test_probe_media_chapters(monkeypatch):
                 b'{"chapters":['
                 b'{"id":9012216534194587836,"start_time":"202.994000",'
                 b'"end_time":"587.045000","tags":{"title":"Episode"}},'
-                b'{"id":1734728195631322526,"start_time":"0.000000",'
-                b'"end_time":"113.030000","tags":{"title":"Opening"}}],'
+                b'{"id":1734728195631322526,"start_time":0,'
+                b'"end_time":113.03,"tags":{"title":"Opening"}},'
+                b'{"end_time":10},{"start_time":0},'
+                b'{"start_time":null,"end_time":10},'
+                b'{"start_time":"bad","end_time":10}],'
                 b'"format":{"duration":"587.045000"}}',
                 b"",
             )

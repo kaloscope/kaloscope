@@ -138,7 +138,7 @@ class TVShowMediaHandler(MediaHandler):
                 if not info.nfo_path.exists():
                     info.nfo_type = NFOType.EPISODE
             info.language = lib.language
-            info.title = parent.title
+            info.title = parent.title or parent_info.title
             info.year = parent.year
             info.season = parent.season
             info.episode = extract_episode(info.item_name)
@@ -170,7 +170,6 @@ class TVShowMediaHandler(MediaHandler):
         parent_item = await MediaItemService.create(lib.id, path_info=parent_info)
         result.append(parent_info)
         # create child item for the file
-        parent_item.title = parent_item.title or parent_info.title
         child_info = _child(path, parent=parent_item)
         await MediaItemService.create(
             lib.id,

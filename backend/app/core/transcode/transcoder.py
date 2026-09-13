@@ -361,9 +361,9 @@ async def probe_media(media_path: str) -> MediaProbe:
             if not isinstance(chapter, dict):
                 continue
             try:
-                start = float(chapter.get("start_time"))
-                end = float(chapter.get("end_time"))
-            except (TypeError, ValueError):
+                start = float(chapter["start_time"])
+                end = float(chapter["end_time"])
+            except (KeyError, TypeError, ValueError):
                 continue
             if not math.isfinite(start) or not math.isfinite(end) or start < 0:
                 continue
