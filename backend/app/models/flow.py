@@ -138,12 +138,15 @@ class FlowGraph(TortoiseModel):
     def average_time(self) -> float | None:
         """Calculate the average time taken for executions."""
         if hasattr(self, "logs") and self.logs:
-            logs = [log for log in self.logs if log.ended_at]
-            if not logs:
+            durations = [
+                (ended_at - log.started_at).total_seconds()
+                for log in self.logs
+                if (ended_at := log.ended_at) is not None
+            ]
+            if not durations:
                 return None
             # calculate the average execution time (in milliseconds)
-            total = sum((log.ended_at - log.started_at).total_seconds() for log in logs)
-            return total * 1000 / len(logs)
+            return sum(durations) * 1000 / len(durations)
         return None
 
     def last_exec(self) -> datetime | None:

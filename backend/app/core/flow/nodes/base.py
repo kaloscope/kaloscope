@@ -42,7 +42,7 @@ class NodeGroup(StrEnum):
     END = auto()
 
     @property
-    def index(self) -> int:
+    def order(self) -> int:
         return list(NodeGroup).index(self)
 
 

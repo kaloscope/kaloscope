@@ -278,7 +278,7 @@ async def get_node_schemas(_, query: GraphQuery) -> HTTPResponse:
         )
     # sort and group the schemas
     schemas = groupby(
-        sorted(schemas, key=lambda s: (s.group.index, s.order)),
+        sorted(schemas, key=lambda s: (s.group.order, s.order)),
         key=lambda s: s.group,
     )
     return json({k.name.lower(): list(v) for k, v in schemas})

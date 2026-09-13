@@ -251,6 +251,7 @@ class FlowEngine:
                                 )
                             )
                     elif event.job_id is not None:
+                        trigger = None
                         if event.policy == "date" and event.run_date is not None:
                             trigger = DateTrigger(
                                 run_date=event.run_date, timezone=pytz.utc
@@ -705,6 +706,9 @@ class FlowTask(ABC):
         Yields:
             The context for the node execution.
         """
+        ctx = None
+        loop_id = None
+        started_at = None
         try:
             # deep copy the context for each node execution
             ctx = self._context.copy()
@@ -718,20 +722,21 @@ class FlowTask(ABC):
                 await self.log_error(node, traceback.format_exc())
             raise
         finally:
-            # update the context with the changes from the node execution
-            if ctx.is_modified():
-                async with self._merge_lock:
-                    self._context.update(ctx)
-            # get the output handle from the node data
-            output = node.node_data.get(OUTPUT_KEY)
-            if output is not None:
-                if output.get("from_snapshot") is True:
-                    # remove the output handle if it is a snapshot
-                    node.node_data.pop(OUTPUT_KEY)
-                else:
-                    # call the footprint method implemented by the subclass
-                    ended_at = timezone.now()
-                    await self.footprint(node, started_at, ended_at, ctx, loop_id)
+            if ctx is not None and started_at is not None:
+                # update the context with the changes from the node execution
+                if ctx.is_modified():
+                    async with self._merge_lock:
+                        self._context.update(ctx)
+                # get the output handle from the node data
+                output = node.node_data.get(OUTPUT_KEY)
+                if output is not None:
+                    if output.get("from_snapshot") is True:
+                        # remove the output handle if it is a snapshot
+                        node.node_data.pop(OUTPUT_KEY)
+                    else:
+                        # call the footprint method implemented by the subclass
+                        ended_at = timezone.now()
+                        await self.footprint(node, started_at, ended_at, ctx, loop_id)
 
     @abstractmethod
     async def footprint(
@@ -922,7 +927,7 @@ class TransientTask(FlowTask):
     async def cleanup(self):
         pass
 
-    async def footprint(self, node: NodeWrapper, *args):
+    async def footprint(self, node: NodeWrapper, *args, **kwargs):
         # remove the output handle
         node.node_data.pop(OUTPUT_KEY, None)
 
