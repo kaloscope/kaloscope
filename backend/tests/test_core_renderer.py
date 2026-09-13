@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from jinja2 import UndefinedError
+
 from app.core.renderer import (
     ENV,
     b64decode,
@@ -27,6 +30,7 @@ from app.core.renderer import (
     xpath_first,
     year,
 )
+from app.utils.json import JSONType
 
 
 class TestTrim:
@@ -357,6 +361,137 @@ class TestQueryParam:
             {"url": "https://example.com/video?page=1"},
         )
         assert result == "https://example.com/video?page=1&lang=zh-CN"
+
+
+class TestRender:
+    def test_raw(self):
+        values = {"ids": ["one", "two"], "paused": False}
+        result = render(
+            {
+                "ids": "{{ ids }}",
+                "paused": "{{ paused }}",
+                "count": "{{ ids|length }}",
+                "nested": ["{{ ids[0] }}", "{{ none }}"],
+            },
+            values,
+            raw=True,
+        )
+        assert result == {
+            "ids": ["one", "two"],
+            "paused": False,
+            "count": 2,
+            "nested": ["one", None],
+        }
+
+    def test_text(self):
+        assert render("001", {}, raw=True) == "001"
+        assert render("{{ none }}", {}) == ""
+        assert (
+            render("{% for id in ids %}{{ id }}{% endfor %}", {"ids": [1, 2]}, raw=True)
+            == "12"
+        )
+        for name, id in (("task", 1), ("other", 2)):
+            assert (
+                render("{{name}}/{{id}}", {"name": name, "id": id}, raw=True)
+                == f"{name}/{id}"
+            )
+
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_strict(self, raw):
+        template: JSONType = {"items": ["{{ calendar }}"]}
+        assert render(template, {}, raw=raw) == {"items": [""]}
+        with pytest.raises(UndefinedError):
+            render(template, {}, raw=raw, strict=True)
+        assert render(template, {}, raw=raw) == {"items": [""]}
+        assert render("{{ calendar|default([]) }}", {}, raw=raw, strict=True) == (
+            [] if raw else "[]"
+        )
+        assert render("{{ calendar }}", {"calendar": None}, raw=raw, strict=True) == (
+            None if raw else ""
+        )
+
+    def test_cache(self):
+        for count in (1, 2):
+            context = {"count": count}
+            assert render("{{ count + 1 }}", context) == str(count + 1)
+            assert render("{{ count + 1 }}", context, raw=True) == count + 1
+
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize(
+        "template, expected",
+        [
+            ("{{- count + 1 }}", 3),
+            ("{{ count + 1 -}}", 3),
+            ("{{- -count -}}", -2),
+            ("{{- data.items -}}", ["one"]),
+            ("{{+ data.items }}", ["one"]),
+            ("{{+-count}}", -2),
+        ],
+    )
+    def test_whitespace(self, strict, template, expected):
+        context = {"count": 2, "data": {"items": ["one"]}}
+        assert render(template, context, raw=True, strict=strict) == expected
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("kind", ["file", "dir"])
+    def test_file_state(self, tmp_path, raw, kind):
+        path = tmp_path / "entry"
+        template = "{{ " + repr(str(path)) + " is " + kind + " }}"
+        for strict in (False, True):
+            assert render(template, {}, raw=raw, strict=strict) == (
+                False if raw else "False"
+            )
+        path.touch() if kind == "file" else path.mkdir()
+        for strict in (False, True):
+            assert render(template, {}, raw=raw, strict=strict) == (
+                True if raw else "True"
+            )
+        path.unlink() if kind == "file" else path.rmdir()
+        for strict in (False, True):
+            assert render(template, {}, raw=raw, strict=strict) == (
+                False if raw else "False"
+            )
+
+    def test_resolved_path(self, tmp_path):
+        first, second = tmp_path / "first" / "child", tmp_path / "second" / "child"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        link = tmp_path / "link"
+        template = "{{ " + repr(str(link)) + "|parent_path(resolve=true) }}"
+        for target in (first, second):
+            link.symlink_to(target)
+            assert render(template, {}) == str(target.resolve().parent)
+            link.unlink()
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "{{ [missing] }}",
+            '{{ {"id": missing} }}',
+            '{{ {"items": [1, {"id": missing}]} }}',
+            "{{ (missing,) }}",
+        ],
+    )
+    def test_nested_undefined(self, raw, template):
+        with pytest.raises(UndefinedError, match="missing"):
+            render(template, {}, raw=raw, strict=True)
+
+    def test_nested_values(self):
+        value = {"items": [None, False, 0, "{{ missing }}"], "file": ("name", b"data")}
+        assert render("{{ data }}", {"data": value}, raw=True, strict=True) is value
+
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_json_undefined(self, raw):
+        template = '{{ {"id": missing}|tojson }}'
+        with pytest.raises(UndefinedError, match="missing"):
+            render(template, {}, raw=raw, strict=True)
+        assert render(template, {}, raw=raw) == '{"id": null}'
+
+    def test_json_values(self, tmp_path):
+        template = "{{ data|tojson }}"
+        context = {"data": {"path": tmp_path, "items": [None, False, 0, "中文"]}}
+        assert render(template, context, strict=True) == render(template, context)
 
 
 class TestRenderFilters:
