@@ -517,6 +517,8 @@ def test_auth_block(monkeypatch):
                 config="config", name="openlist", priority=1
             )
             task, job = await _create_job(downloader, 1, "remote-1")
+            job.next_poll_at = now
+            await job.save(update_fields=["next_poll_at"])
             client = RecoveringClient(
                 [OpenListClientError(OpenListErrorKind.AUTH)],
                 undone=(_remote("remote-1", RemoteTaskState.RUNNING, progress=20),),
@@ -525,6 +527,9 @@ def test_auth_block(monkeypatch):
             identity = DownloadIdentity.from_task(task)
 
             failed = await coordinator.sync((identity,))
+            await job.refresh_from_db()
+            assert job.last_error_kind is OfflineDownloadErrorKind.INSTANCE_AUTH
+            assert job.next_poll_at is None
             blocked = await coordinator.sync((identity,))
             replacement = _coordinator(
                 monkeypatch, _config("updated-token"), client, lambda: now
@@ -562,6 +567,8 @@ def test_rate_limit(monkeypatch):
             )
             task1, job1 = await _create_job(downloader, 1, "remote-1")
             task2, job2 = await _create_job(downloader, 2, "remote-2")
+            job2.next_poll_at = now + timedelta(seconds=180)
+            await job2.save(update_fields=["next_poll_at"])
             client = RecoveringClient(
                 [OpenListClientError(OpenListErrorKind.RATE_LIMIT, retry_after="120")]
             )
@@ -592,7 +599,8 @@ def test_rate_limit(monkeypatch):
     assert job1.last_error_kind is job2.last_error_kind
     assert job1.last_error_kind is OfflineDownloadErrorKind.INSTANCE_RATE_LIMIT
     assert job1.retry_count == job2.retry_count == 1
-    assert job1.next_poll_at == job2.next_poll_at == now + timedelta(seconds=120)
+    assert job1.next_poll_at == now + timedelta(seconds=120)
+    assert job2.next_poll_at == now + timedelta(seconds=180)
 
 
 def test_transient_backoff(monkeypatch):

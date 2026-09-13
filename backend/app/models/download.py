@@ -180,7 +180,7 @@ class DownloadTask(TortoiseModel):
     magnet_link = TextField(null=True)
     state = CharEnumField(max_length=16, enum_type=DownloadState)
     raw_state = CharField(max_length=32, null=True)
-    error_msg = TextField(null=True)
+    error_msg: str | None = TextField(null=True)
     up_speed = BigIntField(null=True)
     dl_speed = BigIntField(null=True)
     percentage = FloatField(null=True)
@@ -262,7 +262,7 @@ class OfflineDownloadJob(TortoiseModel):
     delete_local = BooleanField(default=False, db_default=False)
     unchanged_count = IntField(default=0)
     retry_count = IntField(default=0)
-    last_error_kind = CharEnumField(
+    last_error_kind: OfflineDownloadErrorKind | None = CharEnumField(
         max_length=32, enum_type=OfflineDownloadErrorKind, null=True
     )
 

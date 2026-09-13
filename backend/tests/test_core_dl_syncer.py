@@ -560,6 +560,11 @@ def test_driver_error():
                 sync=AsyncMock(
                     return_value=(
                         DownloadSnapshot(
+                            identity=DownloadIdentity(),
+                            state=DownloadState.ERROR,
+                            error="unmatched task",
+                        ),
+                        DownloadSnapshot(
                             identity=DownloadIdentity.from_task(task),
                             state=DownloadState.ERROR,
                             error="remote transfer failed",

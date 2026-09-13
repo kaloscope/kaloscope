@@ -9,7 +9,7 @@ from functools import cached_property
 from multiprocessing.managers import DictProxy
 from multiprocessing.synchronize import Event, Lock
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from filelock import FileLock
 from sanic import Sanic
@@ -425,6 +425,8 @@ async def sync_tasks(
         snapshots = await driver.sync(identities)
         indexed = {task.id: task for task in tasks}
         for snapshot in snapshots:
+            if snapshot.identity.task_id is None:
+                continue
             task = indexed.get(snapshot.identity.task_id)
             if task is None:
                 continue
@@ -835,7 +837,7 @@ async def execute_download_plan(
 
     async def _record_history(magnet: MagnetLink):
         """Record the magnet link in the download plan history."""
-        filter = {"plan_id": plan.id}
+        filter: dict[str, Any] = {"plan_id": plan.id}
         if magnet.info_hash is not None:
             filter["info_hash"] = magnet.info_hash
         if magnet.info_hash_v2 is not None:

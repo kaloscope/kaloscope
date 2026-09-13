@@ -680,7 +680,7 @@ class OpenListCoordinator:
 
         for job in jobs:
             job.last_error_kind = error_kind
-            if error.kind is OpenListErrorKind.AUTH:
+            if next_poll_at is None:
                 job.retry_count = retry_count
                 job.next_poll_at = None
             else:
