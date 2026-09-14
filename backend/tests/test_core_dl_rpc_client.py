@@ -52,7 +52,7 @@ def _session_config():
 
 
 def _xunlei_config():
-    path = Path(__file__).parents[2] / "scripts/xunlei_rpc.yaml"
+    path = Path(__file__).parents[1] / "static/downloaders/Xunlei.yaml"
     return RpcConfig.model_validate(yaml.safe_load(path.read_text()))
 
 

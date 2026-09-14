@@ -1,12 +1,11 @@
-# Synology NAS Xunlei: direct HTTP over its Unix socket.
-name: NAS 迅雷
+# NAS Xunlei: direct HTTP over its Unix socket.
+name: NAS Xunlei
 driver: rpc
 
 # URL
 protocol: http
 host: localhost
 port: 80
-# Mount the package's var directory at /run/xunlei (see scripts/xunlei_rpc.md).
 unix_socket: /run/xunlei/pan-xunlei-com.sock
 
 # Authentication
@@ -96,7 +95,7 @@ methods:
                   name: '{{loop_item}}'
                 response:
                   check: '{{response.body.get("file", {}).get("id") is string}}'
-              # Refresh the parent listing before using a newly created folder ID.
+              # refresh the parent listing before using a newly created folder ID
               - *find_folder
             response:
               check: '{{response.body.get("id") is string}}'
@@ -126,7 +125,6 @@ methods:
           check: '{{response.body.get("task", {}).get("id") is string}}'
           mappings:
             unique_id: $.task.id
-  # Kaloscope already derives a magnet link from uploaded torrent metadata.
   add_torrent: *add
 
   list:
@@ -193,7 +191,6 @@ methods:
       set_params:
         spec: '{"phase":"running"}'
   delete:
-    # The task endpoint retains downloaded files.
     require: '{{not (local | default(false))}}'
     delete: /drive/v1/tasks
     params:

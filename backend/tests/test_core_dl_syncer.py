@@ -1187,7 +1187,7 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
         late_params.clear()
         late_file.write_bytes(b"late")
     library_dir = tmp_path / "library"
-    config = (Path(__file__).parents[2] / "scripts/xunlei_rpc.yaml").read_text()
+    config = (Path(__file__).parents[1] / "static/downloaders/Xunlei.yaml").read_text()
     app = SimpleNamespace(ctx=SimpleNamespace())
     monkeypatch.setattr(Sanic, "get_app", lambda: app)
 
@@ -1305,7 +1305,7 @@ def test_xunlei_file_paths(tmp_path, monkeypatch, directory, paths):
     source.write_bytes(b"done")
     root = remote_dir / "torrent" if directory else source
     library_dir = tmp_path / "library"
-    config = (Path(__file__).parents[2] / "scripts/xunlei_rpc.yaml").read_text()
+    config = (Path(__file__).parents[1] / "static/downloaders/Xunlei.yaml").read_text()
     app = SimpleNamespace(ctx=SimpleNamespace())
     monkeypatch.setattr(Sanic, "get_app", lambda: app)
 
