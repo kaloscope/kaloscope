@@ -338,6 +338,30 @@ def test_xunlei_tasks(app):
     )
 
 
+@pytest.mark.parametrize("local", [False, True])
+def test_xunlei_delete(app, local):
+    def handler(request):
+        if response := _xunlei_auth(request):
+            return response
+        if local:
+            assert (request.method, request.url.path) == ("PATCH", "/drive/v1/task")
+            assert json.loads(request.content) == {
+                "id": "one",
+                "space": "device#test",
+                "type": "user#download-url",
+                "set_params": {"spec": '{"phase":"delete"}'},
+            }
+        else:
+            assert (request.method, request.url.path) == ("DELETE", "/drive/v1/tasks")
+            assert dict(request.url.params) == {
+                "space": "device#test",
+                "task_ids": "one",
+            }
+        return httpx.Response(200, json={"HttpStatus": 200} if local else {})
+
+    _call(_xunlei_config(), handler, "delete", {"id": "one", "local": local})
+
+
 @pytest.mark.parametrize(
     ("directory", "root_path", "parent_id", "created_directories"),
     [

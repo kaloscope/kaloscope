@@ -191,8 +191,17 @@ methods:
       set_params:
         spec: '{"phase":"running"}'
   delete:
-    require: '{{not (local | default(false))}}'
-    delete: /drive/v1/tasks
-    params:
-      space: '{{session.device}}'
-      task_ids: '{{id}}'
+    steps:
+      - when: '{{local | default(false)}}'
+        patch: /drive/v1/task
+        json:
+          id: '{{id}}'
+          space: '{{session.device}}'
+          type: user#download-url
+          set_params:
+            spec: '{"phase":"delete"}'
+      - when: '{{not (local | default(false))}}'
+        delete: /drive/v1/tasks
+        params:
+          space: '{{session.device}}'
+          task_ids: '{{id}}'
