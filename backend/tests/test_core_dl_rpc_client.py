@@ -298,11 +298,16 @@ def test_unix_socket(app):
         asyncio.run(run(str(Path(directory) / "rpc.sock")))
 
 
-def test_xunlei_tasks(app):
+@pytest.mark.parametrize("variables", [{}, {"ids": []}, {"ids": ["one", "two"]}])
+def test_xunlei_tasks(app, variables):
     def handler(request):
         if response := _xunlei_auth(request):
             return response
         assert request.url.params["space"] == "device#test"
+        filters = {"type": {"in": "user#download-url,user#download"}}
+        if variables.get("ids"):
+            filters["id"] = {"in": "one,two"}
+        assert json.loads(request.url.params["filters"]) == filters
         return httpx.Response(
             200,
             json={
@@ -327,7 +332,7 @@ def test_xunlei_tasks(app):
             },
         )
 
-    first, second = _call(_xunlei_config(), handler, variables={"ids": ["one", "two"]})
+    first, second = _call(_xunlei_config(), handler, variables=variables)
     assert (first["state"], first["dl_speed"], first["error_msg"]) == ("paused", 0, "")
     assert first["files"] == []
     assert second["files"] is None
@@ -336,6 +341,51 @@ def test_xunlei_tasks(app):
         100,
         200,
     )
+
+
+@pytest.mark.parametrize(
+    ("phase", "params", "message"),
+    [
+        ("PHASE_TYPE_COMPLETE", {"error": "partial download"}, "partial download"),
+        (
+            "PHASE_TYPE_COMPLETE",
+            {"error": '{"error_description":"disk full"}'},
+            "disk full",
+        ),
+        (
+            "PHASE_TYPE_COMPLETE",
+            {"is_deleted": "true"},
+            "Local files have been deleted",
+        ),
+        ("PHASE_TYPE_ERROR", {}, "Xunlei task failed"),
+    ],
+)
+def test_xunlei_errors(app, phase, params, message):
+    def handler(request):
+        if response := _xunlei_auth(request):
+            return response
+        return httpx.Response(
+            200,
+            json={
+                "tasks": [
+                    {
+                        "id": "failed",
+                        "phase": phase,
+                        "progress": 37,
+                        "file_size": "100",
+                        "params": params | {"checked_size": "37"},
+                    }
+                ]
+            },
+        )
+
+    cfg = _xunlei_config()
+    task = _call(cfg, handler)[0]
+    assert task["state"] == "error"
+    assert task["error_msg"] == message
+    assert task["percentage"] == task["completed_size"] == 37
+    assert task["files"] == []
+    assert _call(cfg, handler, "details", {"id": "failed"}) == task
 
 
 @pytest.mark.parametrize("local", [False, True])
@@ -363,39 +413,57 @@ def test_xunlei_delete(app, local):
 
 
 @pytest.mark.parametrize(
-    ("directory", "root_path", "parent_id", "created_directories"),
+    ("directory", "root_path", "parent_id", "created_directories", "torrent"),
     [
         (
             "/volume2/kaloscope/downloads/new/nested/",
             "/volume2/",
             "nested-id",
             ["new", "nested"],
+            False,
         ),
-        ("/volume2/kaloscope/downloads", "/volume2/", "downloads", []),
-        ("/volume1", "/volume1/", "volume", []),
+        ("/volume2/kaloscope/downloads", "/volume2/", "downloads", [], False),
+        ("/volume1", "/volume1/", "volume", [], False),
+        ("/volume1", "/volume1/", "volume", [], True),
         (
             "/var/packages/pan-xunlei-com/shares/迅雷/下载/kaloscope/downloads/new",
             "/var/packages/pan-xunlei-com/shares/迅雷/下载/",
             "new-id",
             ["new"],
+            False,
         ),
         (
             "/tmp/SynologyAuthService/kaloscope/downloads/new",
             "/tmp/SynologyAuthService",
             "new-id",
             ["new"],
+            False,
         ),
     ],
 )
-def test_xunlei_add(app, directory, root_path, parent_id, created_directories):
+def test_xunlei_add(app, directory, root_path, parent_id, created_directories, torrent):
     submitted = []
     created = []
     listed_folders = {""}
+    torrent_file = (
+        "movie.torrent",
+        b"torrent metadata\x00\xff",
+        "application/x-bittorrent",
+    )
+    url = "magnet:?xt=uploaded&dn=movie" if torrent else "magnet:?xt=test"
 
     def handler(request):
         if response := _xunlei_auth(request):
             return response
         path = request.url.path
+        if path == "/device/btinfo":
+            assert torrent
+            assert request.method == "POST"
+            assert request.headers["content-type"].startswith("multipart/form-data;")
+            assert b'name="file"; filename="movie.torrent"' in request.content
+            assert torrent_file[1] in request.content
+            assert b'name="pan-auth"\r\n\r\nprivate-token' in request.content
+            return httpx.Response(200, json={"error": "ok", "url": url})
         if path == "/drive/v1/files":
             if request.method == "POST":
                 body = json.loads(request.content)
@@ -441,6 +509,7 @@ def test_xunlei_add(app, directory, root_path, parent_id, created_directories):
             listed_folders.update(child["id"] for child in children[parent])
             return httpx.Response(200, json={"files": children[parent]})
         if path == "/drive/v1/resource/list":
+            assert json.loads(request.content) == {"urls": url}
             return httpx.Response(
                 200,
                 json={
@@ -457,6 +526,8 @@ def test_xunlei_add(app, directory, root_path, parent_id, created_directories):
         assert body["params"]["parent_folder_path"] == f"{directory.rstrip('/')}/"
         assert json.loads(body["params"]["spec"]) == {"phase": "pause"}
         assert body["file_size"] == "100"
+        assert body["params"]["url"] == url
+        assert "file_id" not in body["params"]
         assert "sub_file_index" not in body["params"]
         submitted.append(body)
         return httpx.Response(200, json={"task": {"id": "created"}})
@@ -464,8 +535,13 @@ def test_xunlei_add(app, directory, root_path, parent_id, created_directories):
     result = _call(
         _xunlei_config(),
         handler,
-        "add_link",
-        {"dir": directory, "link": "magnet:?xt=test", "pause": True},
+        "add_torrent" if torrent else "add_link",
+        {
+            "dir": directory,
+            "link": "magnet:?xt=test",
+            "torrent": torrent_file if torrent else None,
+            "pause": True,
+        },
     )
     assert result == {"unique_id": "created"}
     assert len(submitted) == 1

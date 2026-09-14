@@ -32,8 +32,9 @@ session:
 
 # API methods
 response:
+  # btinfo returns "ok" as its success error code
   check: >-
-    {{response.body is mapping and not response.body.get('error')
+    {{response.body is mapping and (not response.body.get('error') or response.body.error == 'ok')
       and response.body.get('HttpStatus', 0) in [0, 200]}}
 
 methods:
@@ -99,9 +100,17 @@ methods:
               - *find_folder
             response:
               check: '{{response.body.get("id") is string}}'
+      - when: '{{torrent is defined and torrent is not none}}'
+        post: /device/btinfo
+        form:
+          file: '{{torrent}}'
+          pan-auth: '{{session.token}}'
+        response:
+          check: '{{response.body.get("url") is string and response.body.url | length > 0}}'
+        save_as: source
       - post: /drive/v1/resource/list
         json:
-          urls: '{{link}}'
+          urls: '{{steps.source.url if steps.source is defined else link}}'
         response:
           check: '{{response.body.get("list", {}).get("resources", []) | length > 0}}'
           transform: '{{response.body.list.resources[0]}}'
@@ -115,11 +124,10 @@ methods:
           space: '{{session.device}}'
           params:
             target: '{{session.device}}'
-            url: '{{link}}'
+            url: '{{steps.source.url if steps.source is defined else link}}'
             total_file_count: '{{steps.resource.get("file_count", 0) | string}}'
             parent_folder_id: '{{steps.folder.id}}'
             parent_folder_path: '{{dir.rstrip("/")}}/'
-            file_id: ''
             spec: '{{{"phase": "pause" if pause else "running"} | tojson}}'
         response:
           check: '{{response.body.get("task", {}).get("id") is string}}'
@@ -133,8 +141,8 @@ methods:
       space: '{{session.device}}'
       limit: 100
       filters: >-
-        {{{'type': {'in': 'user#download-url,user#download'},
-           'id': {'in': ids | default([]) | join(',')}} | tojson}}
+        {{dict(type={'in': 'user#download-url,user#download'},
+          **({'id': {'in': ids | join(',')}} if ids | default([]) else {})) | tojson}}
     pagination: *pages
     response:
       each: $.tasks[*]
@@ -144,18 +152,33 @@ methods:
         info_hash: '{{item.get("params", {}).get("info_hash", "") | lower}}'
         raw_state: '{{item.phase}}'
         state: >-
-          {{{'PHASE_TYPE_PAUSED': 'paused', 'PHASE_TYPE_COMPLETE': 'completed',
+          {{'error' if item.get('params', {}).get('error')
+            or item.get('params', {}).get('is_deleted') == 'true'
+            else {'PHASE_TYPE_PAUSED': 'paused', 'PHASE_TYPE_COMPLETE': 'completed',
              'PHASE_TYPE_ERROR': 'error'}.get(item.phase, 'downloading')}}
-        error_msg: '{{(item.get("message") or "Xunlei task failed") if item.phase == "PHASE_TYPE_ERROR" else ""}}'
+        error_msg: >-
+          {{'Local files have been deleted' if item.get('params', {}).get('is_deleted') == 'true'
+            else (item.params.error | jsonpath_first('$.error_description')) or item.params.error
+            if item.get('params', {}).get('error')
+            else (item.get('message') or 'Xunlei task failed') if item.phase == 'PHASE_TYPE_ERROR' else ''}}
         dl_speed: '{{item.get("params", {}).get("speed", 0) | int if item.phase == "PHASE_TYPE_RUNNING" else 0}}'
         up_speed: 0
-        percentage: '{{100 if item.phase == "PHASE_TYPE_COMPLETE" else item.get("progress", 0) | float}}'
+        percentage: >-
+          {{100 if item.phase == 'PHASE_TYPE_COMPLETE'
+            and not item.get('params', {}).get('error')
+            and item.get('params', {}).get('is_deleted') != 'true'
+            else item.get('progress', 0) | float}}
         total_size: '{{item.get("file_size", 0) | int}}'
         completed_size: >-
           {{item.get('file_size', 0) | int if item.phase == 'PHASE_TYPE_COMPLETE'
+            and not item.get('params', {}).get('error')
+            and item.get('params', {}).get('is_deleted') != 'true'
             else item.get('params', {}).get('checked_size', 0) | int}}
         file_path: '{{item.get("params", {}).get("real_path", "")}}'
-        files: '{{none if item.phase == "PHASE_TYPE_COMPLETE" else []}}'
+        files: >-
+          {{none if item.phase == 'PHASE_TYPE_COMPLETE'
+            and not item.get('params', {}).get('error')
+            and item.get('params', {}).get('is_deleted') != 'true' else []}}
 
   details:
     steps:
