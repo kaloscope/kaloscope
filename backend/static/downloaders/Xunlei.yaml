@@ -1,12 +1,12 @@
 # NAS Xunlei: direct HTTP over its Unix socket.
-name: NAS Xunlei
+name: Xunlei
 driver: rpc
 
 # URL
 protocol: http
-host: localhost
+host: 127.0.0.1
 port: 80
-unix_socket: /run/xunlei/pan-xunlei-com.sock
+unix_socket:
 
 # Authentication
 headers:

@@ -351,6 +351,8 @@
       "custom": "Custom",
       "config": "Configuration",
       "url": "Service URL",
+      "unix_socket": "Unix Socket Path",
+      "unix_socket_tip": "Enter the absolute socket file path, using the mounted path inside the container for Docker deployments.",
       "rpc_secret": "RPC Secret",
       "advanced_mode": "YAML advanced mode",
       "custom_yaml_only": "Custom downloaders require a complete YAML configuration.",

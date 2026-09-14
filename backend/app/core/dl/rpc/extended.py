@@ -382,34 +382,34 @@ def _body(response: httpx.Response) -> Any:
 
 
 def local_files(path: str, exclude: list[str]) -> list[str]:
-    """List downloaded files as absolute paths.
-
-    Require a nonempty path and at least one file after filtering. Symbolic links
-    inside the result directory are skipped.
+    """List downloaded files, excluding symlinks.
 
     Args:
-        path: The downloaded file or directory to list.
-        exclude: The glob patterns for files to skip.
+        path: Root file or directory.
+        exclude: Glob patterns to skip.
 
     Raises:
-        ValueError: If the root is unspecified, missing or a symbolic link, no
-            files remain after filtering, or the file limit is exceeded.
+        ValueError: Invalid root, incomplete or empty scan, or over 100000 files.
 
     Returns:
-        The sorted absolute file paths with the supplied parent path preserved.
+        Sorted absolute paths with parent aliases preserved.
     """
-    if not path:
-        raise ValueError("RPC file root is missing")
-    # preserve the parent path for the shared relative-path conversion
-    root = Path(path).absolute()
-    if root.is_symlink():
-        raise ValueError("RPC file root cannot be a symlink")
-    if not root.exists():
-        raise ValueError("RPC file root does not exist")
-    resolved = root.resolve()
-    is_dir = root.is_dir()
-    boundary = resolved if is_dir else resolved.parent
-    candidates = root.rglob("*") if is_dir else [root]
+    if not path or (root := Path(path).absolute()).is_symlink() or not root.exists():
+        raise ValueError("RPC file root must be an existing non-symlink path")
+
+    def scan_error(error: OSError):
+        raise ValueError("RPC file root cannot be fully scanned") from error
+
+    boundary = root.resolve()
+    candidates = [root]
+    if root.is_dir():
+        candidates = (
+            directory / name
+            for directory, _, names in root.walk(on_error=scan_error)
+            for name in names
+        )
+    else:
+        boundary = boundary.parent
     files = []
     for item in candidates:
         if (
@@ -420,7 +420,7 @@ def local_files(path: str, exclude: list[str]) -> list[str]:
         ):
             files.append(str(item))
             if len(files) > 100_000:
-                raise ValueError("RPC file list exceeds 100000 entries")
-    if not files:
-        raise ValueError("RPC file root contains no downloaded files")
+                break
+    if not 0 < len(files) <= 100_000:
+        raise ValueError("RPC file list must contain 1 to 100000 entries")
     return sorted(files)

@@ -56,7 +56,8 @@
     openlist: resolve('/icons/OpenList.svg'),
     aria2: resolve('/icons/aria2.png'),
     qbittorrent: resolve('/icons/qbittorrent.ico'),
-    transmission: resolve('/icons/transmission.ico')
+    transmission: resolve('/icons/transmission.ico'),
+    xunlei: resolve('/icons/xunlei.png')
   };
 
   /**

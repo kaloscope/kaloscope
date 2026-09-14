@@ -3,6 +3,7 @@
 import asyncio
 import errno
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1167,16 +1168,31 @@ def test_rpc_failure_notifies_before_file_lookup():
 @pytest.mark.parametrize("listed", [False, True])
 @pytest.mark.parametrize(
     "availability",
-    ["missing_file", "empty_directory", "temporary_files", "missing_path"],
+    [
+        "missing_file",
+        "empty_directory",
+        "temporary_files",
+        "missing_path",
+        "unreadable_root",
+        "unreadable_subdirectory",
+    ],
 )
 def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availability):
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     (downloads / "ready.mkv").write_bytes(b"done")
-    directory = availability in {"empty_directory", "temporary_files"}
+    directory = availability in {
+        "empty_directory",
+        "temporary_files",
+        "unreadable_root",
+        "unreadable_subdirectory",
+    }
     late_path = downloads / ("late" if directory else "late.mkv")
     late_file = late_path / "movie.mkv" if directory else late_path
-    relative_file = "late/movie.mkv" if directory else "late.mkv"
+    if availability == "unreadable_subdirectory":
+        late_file = late_path / "nested/movie.mkv"
+    relative_file = str(late_file.relative_to(downloads))
+    expected_files = [relative_file]
     late_params = {"real_path": str(late_path)}
     if directory:
         late_path.mkdir()
@@ -1186,6 +1202,24 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
     if availability == "missing_path":
         late_params.clear()
         late_file.write_bytes(b"late")
+    unreadable = None
+    if availability in {"unreadable_root", "unreadable_subdirectory"}:
+        late_file.parent.mkdir(parents=True, exist_ok=True)
+        late_file.write_bytes(b"late")
+        unreadable = late_file.parent
+        if availability == "unreadable_subdirectory":
+            # A readable sibling must not make the incomplete scan successful.
+            (late_path / "visible.mkv").write_bytes(b"late")
+            expected_files.append("late/visible.mkv")
+        scandir = os.scandir
+
+        def scan(path):
+            # Simulate denied access even when the tests run as root.
+            if unreadable is not None and Path(path) == unreadable:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return scandir(path)
+
+        monkeypatch.setattr(os, "scandir", scan)
     library_dir = tmp_path / "library"
     config = (Path(__file__).parents[1] / "static/downloaders/Xunlei.yaml").read_text()
     app = SimpleNamespace(ctx=SimpleNamespace())
@@ -1208,7 +1242,9 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
                         "id": name,
                         "name": f"{name}.mkv",
                         "phase": "PHASE_TYPE_COMPLETE",
-                        "file_size": "4",
+                        "file_size": str(4 * len(expected_files))
+                        if name == "late"
+                        else "4",
                         "params": late_params
                         if name == "late"
                         else {"real_path": str(downloads / "ready.mkv")},
@@ -1220,6 +1256,7 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
         )
 
     async def run():
+        nonlocal unreadable
         await Tortoise.init(
             db_url="sqlite://:memory:", modules={"models": ["app.models"]}
         )
@@ -1264,8 +1301,11 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
                     assert notification.title == "DOWNLOAD_COMPLETED"
                     assert json.loads(notification.content) == {"name": "ready.mkv"}
                     assert (library_dir / "ready.mkv").read_bytes() == b"done"
-                    assert not (library_dir / relative_file).exists()
+                    assert all(
+                        not (library_dir / file).exists() for file in expected_files
+                    )
 
+                unreadable = None
                 late_file.write_bytes(b"late")
                 late_params["real_path"] = str(late_path)
                 pending = await DownloadTask.filter(state=DownloadState.DOWNLOADING)
@@ -1274,8 +1314,9 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
                 assert late.state == DownloadState.COMPLETED
                 assert late.completed_at is not None
                 assert late.percentage == 100
-                assert late.files == [relative_file]
-                assert (library_dir / relative_file).read_bytes() == b"late"
+                assert late.files == sorted(expected_files)
+                for file in expected_files:
+                    assert (library_dir / file).read_bytes() == b"late"
                 assert (
                     await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 2
                 )

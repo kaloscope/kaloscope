@@ -15,6 +15,7 @@
     | 'name'
     | 'host'
     | 'port'
+    | 'unix_socket'
     | 'username'
     | 'password'
     | 'secret'
@@ -41,6 +42,7 @@
     host: string;
     port: number;
     path: string;
+    unix_socket: string;
     username: string;
     password: string;
     secret: string;
@@ -150,7 +152,8 @@
       secure: stringValue(document.get('protocol')).toLowerCase() === 'https',
       host: stringValue(document.get('host')),
       port: numberValue(document.get('port')),
-      path: stringValue(document.get('path'))
+      path: stringValue(document.get('path')),
+      unix_socket: stringValue(document.get('unix_socket'))
     };
 
     if (document.get('driver') === 'openlist') {
@@ -182,6 +185,7 @@
       };
     }
 
+    document.has('unix_socket') && fields.push('unix_socket');
     document.hasIn(['auth', 'username']) && fields.push('username');
     document.hasIn(['auth', 'password']) && fields.push('password');
     document.hasIn(['auth', 'secret']) && fields.push('secret');
@@ -233,6 +237,7 @@
       return document.toString({ lineWidth: 0 });
     }
 
+    document.has('unix_socket') && document.set('unix_socket', values.unix_socket.trim());
     document.hasIn(['auth', 'username']) && document.setIn(['auth', 'username'], authenticationValue(values.username));
     document.hasIn(['auth', 'password']) && document.setIn(['auth', 'password'], authenticationValue(values.password));
     document.hasIn(['auth', 'secret']) && document.setIn(['auth', 'secret'], authenticationValue(values.secret));
@@ -663,6 +668,22 @@ methods:
             </div>
           {/if}
         </div>
+
+        {#if hasSimpleField('unix_socket')}
+          <Label required tip={$_('download.downloader.unix_socket_tip')}>
+            {$_('download.downloader.unix_socket')}
+          </Label>
+          <input
+            required
+            class="input w-full"
+            autocomplete="off"
+            aria-label={$_('download.downloader.unix_socket')}
+            pattern="/.*"
+            title={$_('download.downloader.unix_socket_tip')}
+            value={simple.values.unix_socket}
+            oninput={(event) => updateSimpleValue('unix_socket', event.currentTarget.value)}
+          />
+        {/if}
 
         {#if hasSimpleField('username') || hasSimpleField('password')}
           <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
