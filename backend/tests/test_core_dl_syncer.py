@@ -1165,10 +1165,27 @@ def test_rpc_failure_notifies_before_file_lookup():
 
 
 @pytest.mark.parametrize("listed", [False, True])
-def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed):
+@pytest.mark.parametrize(
+    "availability",
+    ["missing_file", "empty_directory", "temporary_files", "missing_path"],
+)
+def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availability):
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     (downloads / "ready.mkv").write_bytes(b"done")
+    directory = availability in {"empty_directory", "temporary_files"}
+    late_path = downloads / ("late" if directory else "late.mkv")
+    late_file = late_path / "movie.mkv" if directory else late_path
+    relative_file = "late/movie.mkv" if directory else "late.mkv"
+    late_params = {"real_path": str(late_path)}
+    if directory:
+        late_path.mkdir()
+    if availability == "temporary_files":
+        (late_path / "movie.mkv.xltd").write_bytes(b"partial")
+        (late_path / "movie.mkv.xltd.cfg").write_bytes(b"config")
+    if availability == "missing_path":
+        late_params.clear()
+        late_file.write_bytes(b"late")
     library_dir = tmp_path / "library"
     config = (Path(__file__).parents[2] / "scripts/xunlei_rpc.yaml").read_text()
     app = SimpleNamespace(ctx=SimpleNamespace())
@@ -1192,7 +1209,9 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed):
                         "name": f"{name}.mkv",
                         "phase": "PHASE_TYPE_COMPLETE",
                         "file_size": "4",
-                        "params": {"real_path": str(downloads / f"{name}.mkv")},
+                        "params": late_params
+                        if name == "late"
+                        else {"real_path": str(downloads / "ready.mkv")},
                     }
                     for name in ids
                     if listed or name != "late" or request.url.params["limit"] == "1"
@@ -1245,17 +1264,18 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed):
                     assert notification.title == "DOWNLOAD_COMPLETED"
                     assert json.loads(notification.content) == {"name": "ready.mkv"}
                     assert (library_dir / "ready.mkv").read_bytes() == b"done"
-                    assert not (library_dir / "late.mkv").exists()
+                    assert not (library_dir / relative_file).exists()
 
-                (downloads / "late.mkv").write_bytes(b"late")
+                late_file.write_bytes(b"late")
+                late_params["real_path"] = str(late_path)
                 pending = await DownloadTask.filter(state=DownloadState.DOWNLOADING)
                 await syncer.sync_tasks(pending, driver)
                 await late.refresh_from_db()
                 assert late.state == DownloadState.COMPLETED
                 assert late.completed_at is not None
                 assert late.percentage == 100
-                assert late.files == ["late.mkv"]
-                assert (library_dir / "late.mkv").read_bytes() == b"late"
+                assert late.files == [relative_file]
+                assert (library_dir / relative_file).read_bytes() == b"late"
                 assert (
                     await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 2
                 )

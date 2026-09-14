@@ -384,19 +384,22 @@ def _body(response: httpx.Response) -> Any:
 def local_files(path: str, exclude: list[str]) -> list[str]:
     """List downloaded files as absolute paths.
 
-    Symbolic links inside the result directory are skipped.
+    Require a nonempty path and at least one file after filtering. Symbolic links
+    inside the result directory are skipped.
 
     Args:
         path: The downloaded file or directory to list.
         exclude: The glob patterns for files to skip.
 
     Raises:
-        ValueError: If the root is missing or a symbolic link, or the file limit
-            is exceeded.
+        ValueError: If the root is unspecified, missing or a symbolic link, no
+            files remain after filtering, or the file limit is exceeded.
 
     Returns:
         The sorted absolute file paths with the supplied parent path preserved.
     """
+    if not path:
+        raise ValueError("RPC file root is missing")
     # preserve the parent path for the shared relative-path conversion
     root = Path(path).absolute()
     if root.is_symlink():
@@ -418,4 +421,6 @@ def local_files(path: str, exclude: list[str]) -> list[str]:
             files.append(str(item))
             if len(files) > 100_000:
                 raise ValueError("RPC file list exceeds 100000 entries")
+    if not files:
+        raise ValueError("RPC file root contains no downloaded files")
     return sorted(files)

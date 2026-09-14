@@ -517,10 +517,30 @@ def test_xunlei_details(app, tmp_path):
         _call(cfg, handler, "details", {"id": "link"})
 
 
-@pytest.mark.parametrize("directory", [False, True])
-def test_xunlei_missing_files_recover(app, tmp_path, directory):
+@pytest.mark.parametrize(
+    "availability",
+    [
+        "missing_file",
+        "missing_directory",
+        "empty_directory",
+        "temporary_files",
+        "missing_path",
+    ],
+)
+def test_xunlei_missing_files_recover(app, tmp_path, monkeypatch, availability):
+    directory = availability not in {"missing_file", "missing_path"}
     path = tmp_path / ("torrent" if directory else "movie.mkv")
     cfg = _xunlei_config()
+    params = {"real_path": str(path)}
+    if availability in {"empty_directory", "temporary_files"}:
+        path.mkdir()
+    if availability == "temporary_files":
+        (path / "movie.mkv.xltd").write_bytes(b"partial")
+        (path / "movie.mkv.xltd.cfg").write_bytes(b"config")
+    if availability == "missing_path":
+        params.clear()
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "unrelated.mkv").write_bytes(b"unrelated")
 
     def handler(request):
         if response := _xunlei_auth(request):
@@ -534,7 +554,7 @@ def test_xunlei_missing_files_recover(app, tmp_path, directory):
                         "id": "done",
                         "phase": "PHASE_TYPE_COMPLETE",
                         "file_size": "4",
-                        "params": {"real_path": str(path)},
+                        "params": params,
                     }
                 ]
             },
@@ -544,7 +564,8 @@ def test_xunlei_missing_files_recover(app, tmp_path, directory):
         _call(cfg, handler, "details", {"id": "done"})
 
     if directory:
-        path.mkdir()
+        path.mkdir(exist_ok=True)
     file = path / "movie.mkv" if directory else path
     file.write_bytes(b"done")
+    params["real_path"] = str(path)
     assert _call(cfg, handler, "details", {"id": "done"})["files"] == [str(file)]

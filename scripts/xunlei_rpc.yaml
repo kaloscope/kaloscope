@@ -172,7 +172,7 @@ methods:
     response:
       transform: '{{item | first | default({})}}'
       local_files:
-        when: '{{item | length > 0 and item[0].state == "completed" and (item[0].file_path | length > 0)}}'
+        when: '{{item | length > 0 and item[0].state == "completed"}}'
         path: '{{item[0].file_path}}'
         exclude: ['*.xltd', '*.xltd.cfg']
 
