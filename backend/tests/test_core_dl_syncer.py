@@ -2,19 +2,25 @@
 
 import asyncio
 import errno
+import hashlib
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from pydantic import SecretStr
+from sanic import Sanic
+from torrentool.bencode import Bencode
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.dl import syncer
+from app.core.dl.config import load_driver
 from app.core.dl.driver import (
     DownloadAction,
     DownloaderDriver,
@@ -437,8 +443,8 @@ class FailingPlanOpenListClient(PlanOpenListClient):
         raise RuntimeError("submission failed")
 
 
-async def _run_download_plan(monkeypatch, driver):
-    magnet = f"magnet:?xt=urn:btih:{'a' * 40}"
+async def _run_download_plan(monkeypatch, driver, *, source=None, http=None):
+    magnet = source or f"magnet:?xt=urn:btih:{'a' * 40}"
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     await Tortoise.generate_schemas()
     try:
@@ -463,7 +469,9 @@ async def _run_download_plan(monkeypatch, driver):
         monkeypatch.setattr(
             syncer.Sanic,
             "get_app",
-            lambda: SimpleNamespace(ctx=SimpleNamespace(flow_engine=engine)),
+            lambda: SimpleNamespace(
+                ctx=SimpleNamespace(flow_engine=engine, httpx=http)
+            ),
         )
 
         await syncer.execute_download_plan(plan, driver)
@@ -501,6 +509,59 @@ def test_download_plan(monkeypatch):
     assert client.submissions == [(magnet, job.remote_dir)]
     assert plan.total_count == 1
     assert history_count == 1
+
+
+@pytest.mark.parametrize("upload", [False, True])
+def test_plan_torrent(monkeypatch, upload):
+    info = {
+        "name": "sample.bin",
+        "length": 4,
+        "piece length": 16384,
+        "pieces": hashlib.sha1(b"data").digest(),
+    }
+    torrent = Bencode.encode(
+        {"info": info, "announce": "https://tracker.example/announce"}
+    )
+    hash = hashlib.sha1(Bencode.encode(info)).hexdigest()
+    requests = []
+    client = SimpleNamespace(call=AsyncMock(return_value={"unique_id": "remote"}))
+    methods = {"add_link": API()}
+    if upload:
+        methods["add_torrent"] = API()
+    driver = RpcDriver(
+        RpcConfig(name="RPC", host="localhost", port=80, methods=methods)
+    )
+    monkeypatch.setattr(driver, "client", client)
+
+    def handler(request):
+        assert str(request.url) == "https://example.com/sample.torrent"
+        requests.append(request.method)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/x-bittorrent"},
+            content=torrent if request.method == "GET" else b"",
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await _run_download_plan(
+                monkeypatch,
+                driver,
+                source="https://example.com/sample.torrent",
+                http=http,
+            )
+
+    _, plan, task, job, history_count = asyncio.run(run())
+    assert task is not None and task.info_hash == hash and task.unique_id == "remote"
+    assert task.magnet_link == f"magnet:?xt=urn:btih:{hash}"
+    assert job is None
+    assert plan.total_count == history_count == 1
+    method, variables = client.call.await_args.args
+    assert method == ("add_torrent" if upload else "add_link")
+    assert variables["torrent"] == (
+        (f"{hash}.torrent", torrent, "application/x-bittorrent") if upload else None
+    )
+    assert requests == ["HEAD", "GET"]
 
 
 def test_plan_log(monkeypatch, caplog):
@@ -654,6 +715,47 @@ def test_identity_match(monkeypatch, task_identity, remote_identity):
 
     assert query.values is not None
     assert query.values["name"] == "Matched"
+
+
+@pytest.mark.parametrize(
+    ("directory", "path"),
+    [
+        ("/downloads", "/downloads/torrent/nested/one.mkv"),
+        ("/downloads/", "/downloads/torrent/nested/one.mkv"),
+        ("/downloads/", "torrent/nested/one.mkv"),
+    ],
+)
+def test_relative_files(monkeypatch, directory, path):
+    task = cast(
+        DownloadTask,
+        SimpleNamespace(
+            id=1,
+            unique_id="task-id",
+            info_hash=None,
+            info_hash_v2=None,
+            dir=directory,
+            name="torrent",
+            state=DownloadState.PAUSED,
+            raw_state="paused",
+            up_speed=0,
+            dl_speed=0,
+            total_size=100,
+            completed_size=0,
+        ),
+    )
+    query = RecordingQuery()
+    driver = RpcDriver(_rpc_config())
+    driver.client = cast(
+        RpcClient, RecordingClient({"unique_id": "task-id", "files": [path]})
+    )
+    monkeypatch.setattr(
+        syncer, "DownloadTask", SimpleNamespace(filter=lambda **_filters: query)
+    )
+
+    asyncio.run(syncer.sync_tasks([task], driver))
+
+    assert query.values is not None
+    assert query.values["files"] == ["torrent/nested/one.mkv"]
 
 
 def test_fast_sync(monkeypatch):
@@ -926,3 +1028,452 @@ def test_slow_sync(monkeypatch):
 
     runner._consume_actions.assert_awaited_once()
     assert waits == [1]
+
+
+@pytest.mark.parametrize(
+    ("previous", "remote", "speed", "progress"),
+    [
+        (DownloadState.DOWNLOADING, DownloadState.PAUSED, 999, 100),
+        (DownloadState.PAUSED, DownloadState.DOWNLOADING, 0, 10),
+        (DownloadState.DOWNLOADING, DownloadState.ERROR, 999, 100),
+    ],
+)
+def test_remote_state(monkeypatch, previous, remote, speed, progress):
+    # remote state overrides stale speed and progress reported by an RPC API
+    task = cast(
+        DownloadTask,
+        SimpleNamespace(
+            id=1,
+            downloader_id=2,
+            dir="/downloads",
+            name="Task",
+            state=previous,
+            raw_state="",
+            up_speed=0,
+            dl_speed=0,
+            total_size=100,
+            completed_size=10,
+            files=[],
+            unique_id="remote",
+            info_hash="",
+            info_hash_v2="",
+        ),
+    )
+    item = {
+        "unique_id": "remote",
+        "state": remote,
+        "dl_speed": speed,
+        "up_speed": speed,
+        "percentage": progress,
+        "files": [],
+    }
+    query = RecordingQuery()
+    driver = RpcDriver(_rpc_config())
+    driver.client = cast(RpcClient, RecordingClient(item))
+    monkeypatch.setattr(
+        syncer, "DownloadTask", SimpleNamespace(filter=lambda **_: query)
+    )
+    monkeypatch.setattr(syncer.Notifications, "send", AsyncMock())
+    asyncio.run(syncer.sync_tasks([task], driver))
+    assert query.values["state"] == remote
+    assert query.values["dl_speed"] == 0
+    assert query.values["up_speed"] == 0
+
+
+@pytest.mark.parametrize(
+    ("source", "files", "paths"),
+    [
+        ("list", None, ["/tasks", "/tasks/remote"]),
+        ("list", [], ["/tasks"]),
+        ("details", None, ["/tasks", "/tasks/remote"]),
+        ("details", [], ["/tasks", "/tasks/remote"]),
+        ("followed", None, ["/tasks", "/tasks/remote", "/tasks/child"]),
+    ],
+)
+def test_rpc_files_lookup(source, files, paths):
+    requests = []
+    remote_id = "child" if source == "followed" else "remote"
+    item = {
+        "unique_id": remote_id,
+        "state": "paused",
+        "files": files,
+        "percentage": 25,
+    }
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path == "/tasks":
+            return httpx.Response(200, json=[item] if source == "list" else [])
+        if source == "followed" and request.url.path == "/tasks/remote":
+            return httpx.Response(
+                200, json={"files": ["[METADATA]"], "followed_by": ["child"]}
+            )
+        return httpx.Response(200, json=item)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config="config", name="RPC", priority=1
+            )
+            task = await DownloadTask.create(
+                downloader=downloader,
+                unique_id="remote",
+                dir="/downloads",
+                name="movie.mkv",
+                state=DownloadState.DOWNLOADING,
+            )
+            driver = RpcDriver(
+                RpcConfig(
+                    name="RPC",
+                    host="localhost",
+                    port=80,
+                    methods={
+                        "list": API(get="/tasks"),
+                        "details": API(get="/tasks/{{id}}"),
+                    },
+                )
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http:
+                driver.client = RpcClient(driver.config, http)
+                await syncer.sync_tasks([task], driver)
+            await task.refresh_from_db()
+            assert task.state == DownloadState.PAUSED
+            assert task.unique_id == remote_id
+            assert task.files == files
+            assert requests == paths
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_rpc_failure_notifies_before_file_lookup():
+    notifications_at_lookup = []
+
+    async def handler(request):
+        if request.url.path == "/tasks":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "unique_id": "remote",
+                        "error_msg": "Disk full",
+                        "raw_state": "error",
+                    }
+                ],
+            )
+        assert request.url.path == "/tasks/remote"
+        notifications_at_lookup.append(
+            await Notification.filter(title="DOWNLOAD_FAILED").count()
+        )
+        return httpx.Response(503)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config="config", name="RPC", priority=1
+            )
+            task = await DownloadTask.create(
+                downloader=downloader,
+                unique_id="remote",
+                dir="/downloads",
+                name="movie.mkv",
+                state=DownloadState.DOWNLOADING,
+            )
+            driver = RpcDriver(
+                RpcConfig(
+                    name="RPC",
+                    host="localhost",
+                    port=80,
+                    methods={
+                        "list": API(get="/tasks"),
+                        "details": API(get="/tasks/{{id}}"),
+                    },
+                )
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http:
+                driver.client = RpcClient(driver.config, http)
+                await syncer.sync_tasks([task], driver)
+            assert notifications_at_lookup == [1]
+            notification = await Notification.get()
+            assert notification.title == "DOWNLOAD_FAILED"
+            assert json.loads(notification.content) == {
+                "name": "movie.mkv",
+                "error": "Disk full",
+            }
+            await task.refresh_from_db()
+            assert task.state == DownloadState.DOWNLOADING
+            assert task.completed_at is None
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("listed", [False, True])
+@pytest.mark.parametrize(
+    "availability",
+    [
+        "missing_file",
+        "empty_directory",
+        "temporary_files",
+        "missing_path",
+        "unreadable_root",
+        "unreadable_subdirectory",
+    ],
+)
+def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availability):
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    (downloads / "ready.mkv").write_bytes(b"done")
+    directory = availability in {
+        "empty_directory",
+        "temporary_files",
+        "unreadable_root",
+        "unreadable_subdirectory",
+    }
+    late_path = downloads / ("late" if directory else "late.mkv")
+    late_file = late_path / "movie.mkv" if directory else late_path
+    if availability == "unreadable_subdirectory":
+        late_file = late_path / "nested/movie.mkv"
+    relative_file = str(late_file.relative_to(downloads))
+    expected_files = [relative_file]
+    late_params = {"real_path": str(late_path)}
+    if directory:
+        late_path.mkdir()
+    if availability == "temporary_files":
+        (late_path / "movie.mkv.xltd").write_bytes(b"partial")
+        (late_path / "movie.mkv.xltd.cfg").write_bytes(b"config")
+    if availability == "missing_path":
+        late_params.clear()
+        late_file.write_bytes(b"late")
+    unreadable = None
+    if availability in {"unreadable_root", "unreadable_subdirectory"}:
+        late_file.parent.mkdir(parents=True, exist_ok=True)
+        late_file.write_bytes(b"late")
+        unreadable = late_file.parent
+        if availability == "unreadable_subdirectory":
+            # A readable sibling must not make the incomplete scan successful.
+            (late_path / "visible.mkv").write_bytes(b"late")
+            expected_files.append("late/visible.mkv")
+        scandir = os.scandir
+
+        def scan(path):
+            # Simulate denied access even when the tests run as root.
+            if unreadable is not None and Path(path) == unreadable:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return scandir(path)
+
+        monkeypatch.setattr(os, "scandir", scan)
+    library_dir = tmp_path / "library"
+    config = (Path(__file__).parents[1] / "static/downloaders/Xunlei.yaml").read_text()
+    app = SimpleNamespace(ctx=SimpleNamespace())
+    monkeypatch.setattr(Sanic, "get_app", lambda: app)
+
+    def handler(request):
+        if request.url.path == "/":
+            return httpx.Response(
+                200, text='function uiauth(value) { return "test-token" }'
+            )
+        if request.url.path == "/device/info/watch":
+            return httpx.Response(200, json={"is_login": True, "target": "device#test"})
+        assert request.url.path == "/drive/v1/tasks"
+        ids = json.loads(request.url.params["filters"])["id"]["in"].split(",")
+        return httpx.Response(
+            200,
+            json={
+                "tasks": [
+                    {
+                        "id": name,
+                        "name": f"{name}.mkv",
+                        "phase": "PHASE_TYPE_COMPLETE",
+                        "file_size": str(4 * len(expected_files))
+                        if name == "late"
+                        else "4",
+                        "params": late_params
+                        if name == "late"
+                        else {"real_path": str(downloads / "ready.mkv")},
+                    }
+                    for name in ids
+                    if listed or name != "late" or request.url.params["limit"] == "1"
+                ]
+            },
+        )
+
+    async def run():
+        nonlocal unreadable
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config=config, name="NAS Xunlei", priority=1
+            )
+            library = await MediaLib.create(
+                dir=str(library_dir), name="library", priority=1, lib_type=LibType.MOVIE
+            )
+            for name in ("late", "ready"):
+                await DownloadTask.create(
+                    downloader=downloader,
+                    unique_id=name,
+                    dir=str(downloads),
+                    name=f"{name}.mkv",
+                    state=DownloadState.DOWNLOADING,
+                    files=[],
+                    percentage=25,
+                    completed_size=1,
+                    total_size=4,
+                    transfer_lib=library,
+                    transfer_method=TransferMethod.COPY,
+                )
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http:
+                driver = cast(RpcDriver, load_driver(config))
+                driver.client = RpcClient(driver.config, http)
+                for _ in range(2):
+                    pending = await DownloadTask.filter(
+                        state=DownloadState.DOWNLOADING
+                    ).order_by("id")
+                    await syncer.sync_tasks(pending, driver)
+                    late = await DownloadTask.get(unique_id="late")
+                    assert late.state == DownloadState.DOWNLOADING
+                    assert late.completed_at is None
+                    assert late.percentage == 25
+                    assert late.files == []
+                    notification = await Notification.get()
+                    assert notification.title == "DOWNLOAD_COMPLETED"
+                    assert json.loads(notification.content) == {"name": "ready.mkv"}
+                    assert (library_dir / "ready.mkv").read_bytes() == b"done"
+                    assert all(
+                        not (library_dir / file).exists() for file in expected_files
+                    )
+
+                unreadable = None
+                late_file.write_bytes(b"late")
+                late_params["real_path"] = str(late_path)
+                pending = await DownloadTask.filter(state=DownloadState.DOWNLOADING)
+                await syncer.sync_tasks(pending, driver)
+                await late.refresh_from_db()
+                assert late.state == DownloadState.COMPLETED
+                assert late.completed_at is not None
+                assert late.percentage == 100
+                assert late.files == sorted(expected_files)
+                for file in expected_files:
+                    assert (library_dir / file).read_bytes() == b"late"
+                assert (
+                    await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 2
+                )
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("paths", ["task_alias", "remote_alias", "both", "outside"])
+def test_xunlei_file_paths(tmp_path, monkeypatch, directory, paths):
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    task_alias = tmp_path / "share"
+    task_alias.symlink_to(downloads, target_is_directory=True)
+    remote_alias = tmp_path / "package-share"
+    remote_alias.symlink_to(downloads, target_is_directory=True)
+    task_dir = task_alias if paths in {"task_alias", "both", "outside"} else downloads
+    remote_dir = remote_alias if paths in {"remote_alias", "both"} else downloads
+    if paths == "outside":
+        remote_dir = tmp_path / "downloads-other"
+        remote_dir.mkdir()
+    relative_file = "torrent/nested/movie.mkv" if directory else "movie.mkv"
+    source = remote_dir / relative_file
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"done")
+    root = remote_dir / "torrent" if directory else source
+    library_dir = tmp_path / "library"
+    config = (Path(__file__).parents[1] / "static/downloaders/Xunlei.yaml").read_text()
+    app = SimpleNamespace(ctx=SimpleNamespace())
+    monkeypatch.setattr(Sanic, "get_app", lambda: app)
+
+    def handler(request):
+        if request.url.path == "/":
+            return httpx.Response(
+                200, text='function uiauth(value) { return "test-token" }'
+            )
+        if request.url.path == "/device/info/watch":
+            return httpx.Response(200, json={"is_login": True, "target": "device#test"})
+        assert request.url.path == "/drive/v1/tasks"
+        return httpx.Response(
+            200,
+            json={
+                "tasks": [
+                    {
+                        "id": "remote",
+                        "name": root.name,
+                        "phase": "PHASE_TYPE_COMPLETE",
+                        "file_size": "4",
+                        "params": {"real_path": str(root)},
+                    }
+                ]
+            },
+        )
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config=config, name="NAS Xunlei", priority=1
+            )
+            library = await MediaLib.create(
+                dir=str(library_dir), name="library", priority=1, lib_type=LibType.MOVIE
+            )
+            task = await DownloadTask.create(
+                downloader=downloader,
+                unique_id="remote",
+                dir=f"{task_dir}/",
+                name=root.name,
+                state=DownloadState.DOWNLOADING,
+                files=[],
+                transfer_lib=library,
+                transfer_method=TransferMethod.COPY,
+            )
+            driver = cast(RpcDriver, load_driver(config))
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http:
+                driver.client = RpcClient(driver.config, http)
+                await syncer.sync_tasks([task], driver)
+            await task.refresh_from_db()
+            if paths == "outside":
+                assert task.state == DownloadState.DOWNLOADING
+                assert task.completed_at is None
+                assert task.files == []
+                assert await Notification.all().count() == 0
+                assert not library_dir.exists()
+            else:
+                assert task.state == DownloadState.COMPLETED
+                assert task.files == [relative_file]
+                assert (library_dir / relative_file).read_bytes() == b"done"
+                assert (
+                    await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 1
+                )
+            assert source.read_bytes() == b"done"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())

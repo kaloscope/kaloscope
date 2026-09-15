@@ -1,5 +1,6 @@
 import contextlib
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from multiprocessing.managers import DictProxy
 from typing import Any
@@ -18,6 +19,7 @@ from app.utils.json import JSONType, dumps, try_loads
 @dataclass(slots=True)
 class RpcClient:
     config: RpcConfig
+    http: httpx.AsyncClient | None = None
 
     @property
     def csrf_tokens(self) -> DictProxy[str, str]:
@@ -51,10 +53,17 @@ class RpcClient:
         Returns:
             The result of the API call.
         """
+        if self.config.extended:
+            from app.core.dl.rpc.extended import ExtendedRpcClient
+
+            return await ExtendedRpcClient(self.config, self.http).call(
+                method, variables
+            )
         api = self.config.methods.get(method)
         if api is not None:
-            if variables is None:
-                variables = {}
+            variables = dict(variables or {})
+            if self.config.variables:
+                variables["variables"] = self.config.variables
             # add authentication to the variables
             if self.config.auth is not None:
                 variables["secret"] = self.config.auth.secret or ""
@@ -69,7 +78,9 @@ class RpcClient:
         *,
         api_method: Method,
         retries: int = 0,
-    ) -> JSONType:
+        raw_response: bool = False,
+        refresh: Callable[[httpx.Response], Awaitable[bool]] | None = None,
+    ) -> JSONType | httpx.Response:
         """Make an HTTP request to the given API with the given variables.
 
         Args:
@@ -77,18 +88,24 @@ class RpcClient:
             variables: The variables to render the API with.
             api_method: The configured RPC method.
             retries: The number of retries.
+            raw_response: Whether to return the HTTP response before mapping it.
+            refresh: The callback that refreshes the session and allows one retry.
 
         Returns:
-            The result of the API call.
+            The HTTP response if `raw_response` is set, otherwise the API result.
         """
         if retries >= 2:
             logger.error("The request has been retried %d times.", retries)
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED)
 
-        method = "GET" if api.get else "POST" if api.post else "POST"
-        url = _render(f"{self.config.base_url}{api.get or api.post or ''}", variables)
+        method, path = api.http_method
+        url = _render(f"{self.config.base_url}{path}", variables)
+        if api.params is not None:
+            url = httpx.URL(url).copy_merge_params(
+                _render(api.params, variables, raw=True)
+            )
         # request headers
-        headers = _render(api.headers or {}, variables)
+        headers = _render(self.config.headers | (api.headers or {}), variables)
         csrf_header = self.config.csrf_header
         if csrf_header and (token := self.csrf_tokens.get(self.config.base_url)):
             headers[csrf_header] = token
@@ -97,7 +114,7 @@ class RpcClient:
         # basic auth
         auth = self.config.basic_auth if not self.config.explicit_login else None
         # make the request
-        client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        client: httpx.AsyncClient = self.http or Sanic.get_app().ctx.httpx
         try:
             return await self._response(
                 api,
@@ -111,9 +128,17 @@ class RpcClient:
                     files=files,
                     json=json,
                     auth=auth,
+                    timeout=(
+                        self.config.timeout
+                        if raw_response or "timeout" in self.config.model_fields_set
+                        else client.timeout
+                    ),
+                    follow_redirects=False if raw_response else client.follow_redirects,
                 ),
                 api_method=api_method,
                 retries=retries,
+                raw_response=raw_response,
+                refresh=refresh,
             )
         except httpx.RequestError:
             logger.error("An error occurred while requesting the downloader.")
@@ -162,7 +187,9 @@ class RpcClient:
         *,
         api_method: Method,
         retries: int,
-    ) -> JSONType:
+        raw_response: bool = False,
+        refresh: Callable[[httpx.Response], Awaitable[bool]] | None = None,
+    ) -> JSONType | httpx.Response:
         """Process the HTTP response with the given API schema.
 
         Args:
@@ -171,10 +198,23 @@ class RpcClient:
             response: The HTTP response.
             api_method: The configured RPC method.
             retries: The number of retries.
+            raw_response: Whether to return the HTTP response before mapping it.
+            refresh: The callback that refreshes the session and allows one retry.
 
         Returns:
-            The result of the API call.
+            The HTTP response if `raw_response` is set, otherwise the API result.
         """
+        # refresh the session once and retry only the rejected request
+        if retries == 0 and refresh and await refresh(response):
+            return await self._request(
+                api,
+                variables,
+                api_method=api_method,
+                retries=retries + 1,
+                raw_response=raw_response,
+                refresh=refresh,
+            )
+
         # call the login method if the status code is 403
         if response.status_code == 403 and self.config.explicit_login:
             if api_method != "login":
@@ -184,6 +224,8 @@ class RpcClient:
                 variables,
                 api_method=api_method,
                 retries=retries + 1,
+                raw_response=raw_response,
+                refresh=refresh,
             )
 
         # update the CSRF token if the status code is 409
@@ -195,6 +237,8 @@ class RpcClient:
                 variables,
                 api_method=api_method,
                 retries=retries + 1,
+                raw_response=raw_response,
+                refresh=refresh,
             )
 
         # raise an exception if the status code is not 2xx
@@ -203,9 +247,12 @@ class RpcClient:
                 "The request failed with status code %d.", response.status_code
             )
             extra = {"responded": True, "status_code": response.status_code}
-            if error_msg := _error_msg(response):
+            if not raw_response and (error_msg := _error_msg(response)):
                 raise KaloscopeException(error_msg, extra=extra)
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED, extra=extra)
+
+        if raw_response:
+            return response
 
         # raise an exception if the response is not successful
         if _failed(self._unexpected(api), response.text) or (
@@ -215,7 +262,10 @@ class RpcClient:
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED)
 
         # process the response based on the API schema
-        if response.text and (json := try_loads(response.text)):
+        if response.text and (
+            (json := try_loads(response.text)) is not None
+            or response.text.strip() == "null"
+        ):
             logger.debug(f"HTTP Response: {Colors.GREEN}%s{Colors.END}", json)
             if api.response and api.response.mappings:
                 if api.response.each:
@@ -320,14 +370,16 @@ def _render[T: dict | list | str](value: T, variables: dict, *, raw: bool = Fals
     Args:
         value: The value to render.
         variables: The variables to render the value with.
-        raw: Whether to render the value as raw object.
+        raw: Whether to preserve native types in rendered expressions.
 
     Returns:
         The rendered value.
     """
+    if raw:
+        return render(value, variables, raw=True, strict=True)
     if not variables:
         return value
-    return render(value, variables, raw=raw)
+    return render(value, variables)
 
 
 def _mapping(json: Any, mappings: dict[str, str]) -> dict[str, Any]:

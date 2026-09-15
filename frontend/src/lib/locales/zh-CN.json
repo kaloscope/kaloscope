@@ -351,6 +351,8 @@
       "custom": "自定义",
       "config": "配置",
       "url": "服务地址",
+      "unix_socket": "Unix Socket 路径",
+      "unix_socket_tip": "填写 Socket 文件的绝对路径，Docker 部署时使用挂载后的容器内路径。",
       "rpc_secret": "RPC 密钥",
       "advanced_mode": "YAML 高级模式",
       "custom_yaml_only": "自定义下载器仅支持完整 YAML 配置。",

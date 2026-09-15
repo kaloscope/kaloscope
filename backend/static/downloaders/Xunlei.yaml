@@ -1,0 +1,230 @@
+# NAS Xunlei: direct HTTP over its Unix socket.
+name: Xunlei
+driver: rpc
+
+# URL
+protocol: http
+host: 127.0.0.1
+port: 80
+unix_socket:
+
+# Authentication
+headers:
+  pan-auth: '{{session.token}}'
+session:
+  ttl: 600
+  request:
+    steps:
+      - get: /
+        response:
+          transform:
+            token: >-
+              {{response.text | regex_first('function uiauth\\(value\\)\\s*\\{\\s*return\\s+"([^"]+)"')}}
+        save_as: auth
+      - post: /device/info/watch
+        headers:
+          pan-auth: '{{steps.auth.token}}'
+        response:
+          check: '{{response.body.is_login and (response.body.target | default("") | length > 0)}}'
+          transform:
+            token: '{{steps.auth.token}}'
+            device: '{{response.body.target}}'
+
+# API methods
+response:
+  # btinfo returns "ok" as its success error code
+  check: >-
+    {{response.body is mapping and (not response.body.get('error') or response.body.error == 'ok')
+      and response.body.get('HttpStatus', 0) in [0, 200]}}
+
+methods:
+  version:
+    get: /launcher/status
+    response:
+      mappings:
+        version: $.running_version
+
+  add_link: &add
+    require: '{{dir.startswith("/") and ".." not in dir.split("/")}}'
+    steps:
+      - steps:
+          - get: /drive/v1/files
+            params: &folders
+              space: '{{session.device}}'
+              parent_id: ''
+              limit: 200
+              filters: '{"kind":{"eq":"drive#folder"}}'
+              with: [withCategoryDiskMountPath, withCategoryDownloadPath]
+            pagination: &pages
+              next: $.next_page_token
+            response:
+              each: $.files[*]
+              transform: >-
+                {{item if item.get('params', {}).get('RealPath')
+                  and (dir.rstrip('/') ~ '/').startswith(item.params.RealPath.rstrip('/') ~ '/')
+                  else none}}
+        response:
+          transform: >-
+            {{item | select | sort(attribute='params.RealPath', reverse=true)
+              | first | default({})}}
+        save_as: folder
+      - require: '{{steps.folder.get("id") is string}}'
+        foreach: >-
+          {{dir[(steps.folder.params.RealPath.rstrip('/') | length):].split('/')
+            | select | list}}
+        save_as: folder
+        steps:
+          - &find_folder
+            steps:
+              - get: /drive/v1/files
+                params:
+                  <<: *folders
+                  parent_id: '{{steps.folder.id}}'
+                pagination: *pages
+                response:
+                  each: $.files[*]
+            response:
+              transform: '{{item | selectattr("name", "equalto", loop_item) | first | default({})}}'
+            save_as: child
+          - when: '{{not steps.child}}'
+            steps:
+              - post: /drive/v1/files
+                json:
+                  space: '{{session.device}}'
+                  parent_id: '{{steps.folder.id}}'
+                  kind: drive#folder
+                  name: '{{loop_item}}'
+                response:
+                  check: '{{response.body.get("file", {}).get("id") is string}}'
+              # refresh the parent listing before using a newly created folder ID
+              - *find_folder
+            response:
+              check: '{{response.body.get("id") is string}}'
+      - when: '{{torrent is defined and torrent is not none}}'
+        post: /device/btinfo
+        form:
+          file: '{{torrent}}'
+          pan-auth: '{{session.token}}'
+        response:
+          check: '{{response.body.get("url") is string and response.body.url | length > 0}}'
+        save_as: source
+      - post: /drive/v1/resource/list
+        json:
+          urls: '{{steps.source.url if steps.source is defined else link}}'
+        response:
+          check: '{{response.body.get("list", {}).get("resources", []) | length > 0}}'
+          transform: '{{response.body.list.resources[0]}}'
+        save_as: resource
+      - post: /drive/v1/task
+        json:
+          type: user#download-url
+          name: '{{steps.resource.name}}'
+          file_name: '{{steps.resource.name}}'
+          file_size: '{{steps.resource.get("file_size", 0) | string}}'
+          space: '{{session.device}}'
+          params:
+            target: '{{session.device}}'
+            url: '{{steps.source.url if steps.source is defined else link}}'
+            total_file_count: '{{steps.resource.get("file_count", 0) | string}}'
+            parent_folder_id: '{{steps.folder.id}}'
+            parent_folder_path: '{{dir.rstrip("/")}}/'
+            spec: '{{{"phase": "pause" if pause else "running"} | tojson}}'
+        response:
+          check: '{{response.body.get("task", {}).get("id") is string}}'
+          mappings:
+            unique_id: $.task.id
+  add_torrent: *add
+
+  list:
+    get: /drive/v1/tasks
+    params:
+      space: '{{session.device}}'
+      limit: 100
+      filters: >-
+        {{dict(type={'in': 'user#download-url,user#download'},
+          **({'id': {'in': ids | join(',')}} if ids | default([]) else {})) | tojson}}
+    pagination: *pages
+    response:
+      each: $.tasks[*]
+      transform: &task
+        unique_id: '{{item.id}}'
+        name: '{{item.get("name") or item.id}}'
+        info_hash: '{{item.get("params", {}).get("info_hash", "") | lower}}'
+        raw_state: '{{item.phase}}'
+        state: >-
+          {{'error' if item.get('params', {}).get('error')
+            or item.get('params', {}).get('is_deleted') == 'true'
+            else {'PHASE_TYPE_PAUSED': 'paused', 'PHASE_TYPE_COMPLETE': 'completed',
+             'PHASE_TYPE_ERROR': 'error'}.get(item.phase, 'downloading')}}
+        error_msg: >-
+          {{'Local files have been deleted' if item.get('params', {}).get('is_deleted') == 'true'
+            else (item.params.error | jsonpath_first('$.error_description')) or item.params.error
+            if item.get('params', {}).get('error')
+            else (item.get('message') or 'Xunlei task failed') if item.phase == 'PHASE_TYPE_ERROR' else ''}}
+        dl_speed: '{{item.get("params", {}).get("speed", 0) | int if item.phase == "PHASE_TYPE_RUNNING" else 0}}'
+        up_speed: 0
+        percentage: >-
+          {{100 if item.phase == 'PHASE_TYPE_COMPLETE'
+            and not item.get('params', {}).get('error')
+            and item.get('params', {}).get('is_deleted') != 'true'
+            else item.get('progress', 0) | float}}
+        total_size: '{{item.get("file_size", 0) | int}}'
+        completed_size: >-
+          {{item.get('file_size', 0) | int if item.phase == 'PHASE_TYPE_COMPLETE'
+            and not item.get('params', {}).get('error')
+            and item.get('params', {}).get('is_deleted') != 'true'
+            else item.get('params', {}).get('checked_size', 0) | int}}
+        file_path: '{{item.get("params", {}).get("real_path", "")}}'
+        files: >-
+          {{none if item.phase == 'PHASE_TYPE_COMPLETE'
+            and not item.get('params', {}).get('error')
+            and item.get('params', {}).get('is_deleted') != 'true' else []}}
+
+  details:
+    steps:
+      - get: /drive/v1/tasks
+        params:
+          space: '{{session.device}}'
+          limit: 1
+          filters: '{{{"id": {"in": id}, "type": {"in": "user#download-url,user#download"}} | tojson}}'
+        response:
+          each: $.tasks[*]
+          transform: *task
+    response:
+      transform: '{{item | first | default({})}}'
+      local_files:
+        when: '{{item | length > 0 and item[0].state == "completed"}}'
+        path: '{{item[0].file_path}}'
+        exclude: ['*.xltd', '*.xltd.cfg']
+
+  pause:
+    patch: /drive/v1/task
+    json:
+      id: '{{id}}'
+      space: '{{session.device}}'
+      type: user#download-url
+      set_params:
+        spec: '{"phase":"pause"}'
+  start:
+    patch: /drive/v1/task
+    json:
+      id: '{{id}}'
+      space: '{{session.device}}'
+      type: user#download-url
+      set_params:
+        spec: '{"phase":"running"}'
+  delete:
+    steps:
+      - when: '{{local | default(false)}}'
+        patch: /drive/v1/task
+        json:
+          id: '{{id}}'
+          space: '{{session.device}}'
+          type: user#download-url
+          set_params:
+            spec: '{"phase":"delete"}'
+      - when: '{{not (local | default(false))}}'
+        delete: /drive/v1/tasks
+        params:
+          space: '{{session.device}}'
+          task_ids: '{{id}}'
