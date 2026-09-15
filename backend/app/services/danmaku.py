@@ -577,14 +577,6 @@ class DanmakuService:
             return False
 
         anime_id = meta.anime_id
-        if (
-            item.parent_id
-            and item.danmaku_meta
-            and str(item.danmaku_meta.get("anime_id")) == anime_id
-        ):
-            # skip if the anime ID hasn't changed
-            return True
-
         # include all files for a library match, or siblings for a player match
         query = MediaItem.filter(parent_id=item.parent_id or item.id, id__not=item.id)
         movie = item.lib.lib_type == LibType.MOVIE

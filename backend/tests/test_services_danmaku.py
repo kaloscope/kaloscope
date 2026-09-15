@@ -420,6 +420,75 @@ def test_single_episode_confirmation_still_refreshes_siblings(
     assert not (tmp_path / ".2.mkv.json").exists()
 
 
+def test_retries_sibling_refresh_after_bangumi_failure(library, tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path == "/api/v2/comment/new-1":
+            return httpx.Response(
+                200, json={"comments": [{"cid": 1, "p": "1,1,16777215,1", "m": "Hi"}]}
+            )
+        assert request.url.path == "/api/v2/bangumi/new"
+        if requests.count("/api/v2/bangumi/new") == 1:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "bangumi": {
+                    "episodes": [
+                        {"episodeNumber": 2, "episodeId": "new-2"},
+                        {"episodeNumber": 3, "episodeId": "new-3"},
+                    ]
+                },
+            },
+        )
+
+    async def run():
+        async with library(handler) as lib:
+            parent = await media(lib, "Series")
+            first = await media(lib, "1.mkv", parent=parent, episode=1)
+            second = await media(lib, "2.mkv", parent=parent, episode=2)
+            third = await media(lib, "3.mkv", parent=parent, episode=3, anime_id="new")
+            cache = tmp_path / ".2.mkv.json"
+            cache.write_text('[{"text": "Old comments"}]')
+            await MediaItem.filter(id=second.id).update(danmaku_path=str(cache))
+            manual_cache = tmp_path / ".3.mkv.json"
+            manual_cache.write_text('[{"text": "Manual comments"}]')
+            third.danmaku_meta["episode_id"] = "manual-3"
+            await MediaItem.filter(id=third.id).update(
+                danmaku_meta=third.danmaku_meta, danmaku_path=str(manual_cache)
+            )
+            meta = danmaku.DanmakuMeta(
+                anime_id="new", episode_id="new-1", type="tvseries"
+            )
+
+            await danmaku.DanmakuService.confirm_episode(first.path, meta)
+            await first.refresh_from_db()
+            await second.refresh_from_db()
+            assert first.danmaku_meta["episode_id"] == "new-1"
+            assert second.danmaku_meta["episode_id"] == "old-2"
+            assert second.danmaku_path == str(cache)
+            assert cache.exists()
+
+            await danmaku.DanmakuService.confirm_episode(first.path, meta)
+            await second.refresh_from_db()
+            assert second.danmaku_meta["episode_id"] == "new-2"
+            assert second.danmaku_path is None
+            assert not cache.exists()
+
+            await danmaku.DanmakuService.confirm_episode(first.path, meta)
+            await third.refresh_from_db()
+            assert third.danmaku_meta["episode_id"] == "manual-3"
+            assert third.danmaku_path == str(manual_cache)
+            assert manual_cache.read_text() == '[{"text": "Manual comments"}]'
+
+    asyncio.run(run())
+
+    assert requests.count("/api/v2/bangumi/new") == 2
+
+
 @pytest.mark.parametrize("status", [200, 503])
 def test_keeps_single_episode_override_without_comments(library, tmp_path, status):
     requests = []
