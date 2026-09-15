@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: build the frontend
 # ============================================================
-FROM node:24-slim AS frontend
+FROM --platform=$BUILDPLATFORM node:24-slim AS frontend
 
 # install pnpm via npm
 RUN npm install -g pnpm@latest-11
