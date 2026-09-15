@@ -325,7 +325,7 @@
         },
         {
           condition: !!graph.last_exec,
-          icon: icons.slideSearch,
+          icon: icons.documentSearch,
           text: $_('action.view', $_('entity.logs')),
           onclick: () => flowLogs.showModal(graph.id)
         }

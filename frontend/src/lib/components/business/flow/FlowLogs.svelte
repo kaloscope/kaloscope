@@ -75,7 +75,7 @@
   }
 </script>
 
-<Modal icon={icons.slideSearch} title={$_('action.view', $_('entity.logs'))} bind:this={modal}>
+<Modal icon={icons.documentSearch} title={$_('action.view', $_('entity.logs'))} bind:this={modal}>
   <div class="relative min-h-[50vh] overflow-y-auto rounded-box border">
     <Overlay loading={$loading} />
     {#if groups.length > 0}

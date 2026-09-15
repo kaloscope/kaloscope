@@ -58,7 +58,7 @@ docker run -d \
   -e ENABLE_ARIA2=true \
   -v /volume1/kaloscope/workspace:/workspace \
   -v /volume1/kaloscope/downloads:/downloads \
-  -v /volume1/kaloscope/animes:/animes \
+  -v /volume1/kaloscope/anime:/anime \
   -p 8000:8000 \
   -p 6888:6888 \
   -p 6888:6888/udp \

@@ -183,6 +183,7 @@
         >
           <MediaActions
             {item}
+            danmaku
             class="dropdown-left dropdown-end"
             triggerClass={btnClass}
             onscrape={() => search()}

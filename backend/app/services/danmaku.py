@@ -33,20 +33,25 @@ class Danmaku(BaseModel):
     start: int | None = None
 
 
-class DanmakuMeta(BaseModel):
-    """The metadata for a danmaku collection."""
+class DanmakuAnime(BaseModel):
+    """Describe an anime returned by the danmaku server."""
 
     anime_id: str
     anime_title: str | None = None
-    episode_id: str
-    episode_title: str | None = None
     type: str
     type_description: str | None = None
 
-    @field_validator("anime_id", "episode_id", mode="before")
+    @field_validator("anime_id", "episode_id", mode="before", check_fields=False)
     @classmethod
     def normalize_id(cls, value: object) -> str:
         return "" if value is None else str(value)
+
+
+class DanmakuMeta(DanmakuAnime):
+    """The metadata for a danmaku collection."""
+
+    episode_id: str
+    episode_title: str | None = None
 
 
 class DanmakuWrapper(BaseModel):
@@ -56,10 +61,16 @@ class DanmakuWrapper(BaseModel):
     comments: list[Danmaku]
 
 
-class EpisodeQuery(MediaResource):
-    """The query model for searching episodes from the danmaku server."""
+class DanmakuQuery(MediaResource):
+    """Query anime or episodes from the danmaku server."""
 
     title: str
+
+
+class AnimeConfirm(MediaResource):
+    """Confirm an anime match for a media item."""
+
+    metadata: DanmakuAnime
 
 
 class EpisodeConfirm(MediaResource):
@@ -378,6 +389,73 @@ class DanmakuService:
         await MediaItem.filter(id=media.id).update(danmaku_path=None)
 
     @classmethod
+    async def search_anime(cls, path: str, title: str) -> list[DanmakuAnime]:
+        """Search anime by title using the media library's danmaku server.
+
+        Args:
+            path: The media resource path.
+            title: The search title.
+
+        Returns:
+            A list of `DanmakuAnime` items from the search results.
+        """
+        media = await MediaItem.filter(path=path).first().select_related("lib")
+        if not media or not (server := media.lib.danmaku_server):
+            return []
+
+        client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
+        url = f"{cls._base_url(server)}/search/anime"
+        try:
+            response = await client.get(cls._append_query(url, {"keyword": title}))
+            if response.status_code != 200:
+                logger.error(
+                    'Failed to search anime for "%s": HTTP %s',
+                    title,
+                    response.status_code,
+                )
+                return []
+
+            data = response.json()
+            if not data.get("success"):
+                logger.error(
+                    'Failed to search anime for "%s": %s',
+                    title,
+                    data.get("errorMessage"),
+                )
+                return []
+            return [
+                DanmakuAnime(
+                    anime_id=a.get("animeId", 0),
+                    anime_title=a.get("animeTitle"),
+                    type=a.get("type", ""),
+                    type_description=a.get("typeDescription"),
+                )
+                for a in data.get("animes") or []
+            ]
+        except httpx.RequestError:
+            logger.error("An error occurred while requesting %s.", url, exc_info=True)
+
+        return []
+
+    @classmethod
+    async def confirm_anime(cls, path: str, meta: DanmakuAnime) -> bool:
+        """Apply an anime match to all files under a top-level media item.
+
+        Args:
+            path: The media resource path.
+            meta: The confirmed danmaku metadata.
+
+        Returns:
+            Whether the match was applied or already up to date.
+        """
+        item = (
+            await MediaItem.filter(path=path, parent_id__isnull=True)
+            .first()
+            .select_related("lib")
+        )
+        return await cls.refresh_episodes(item, meta) if item else False
+
+    @classmethod
     async def search_episodes(cls, path: str, title: str) -> list[DanmakuMeta]:
         """Search for episodes matching the given title from the danmaku server.
 
@@ -386,7 +464,7 @@ class DanmakuService:
             title: The search title.
 
         Returns:
-            A flat list of DanmakuMeta items from the search results.
+            A flat list of `DanmakuMeta` items from the search results.
         """
         media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media or not (server := media.lib.danmaku_server):
@@ -425,8 +503,8 @@ class DanmakuService:
                 return []
 
             results: list[DanmakuMeta] = []
-            for a in data.get("animes", []):
-                for e in a.get("episodes", []):
+            for a in data.get("animes") or []:
+                for e in a.get("episodes") or []:
                     results.append(
                         DanmakuMeta(
                             anime_id=a.get("animeId", 0),
@@ -463,18 +541,20 @@ class DanmakuService:
         danmakus = await cls.load_from_server(
             server, meta.episode_id, media.lib.language
         )
+        danmaku_path = cls._cache_path(media)
         if danmakus:
             result.comments = danmakus
             # save to local cache file
-            danmaku_path = cls._cache_path(media)
             async with aiofiles.open(danmaku_path, "wb") as f:
                 await f.write(json.dumps([d.model_dump() for d in danmakus]))
+        elif danmaku_path.is_file():
+            danmaku_path.unlink()
 
-            # update the media item with the danmaku info
-            await MediaItem.filter(id=media.id).update(
-                danmaku_meta=meta,
-                danmaku_path=str(danmaku_path),
-            )
+        # retain the confirmed match and retry empty results on the next playback
+        await MediaItem.filter(id=media.id).update(
+            danmaku_meta=meta,
+            danmaku_path=str(danmaku_path) if danmakus else None,
+        )
 
         # also refresh the danmaku metadata of sibling episodes if it's a TV show
         if media.lib.lib_type == LibType.TV_SHOW:
@@ -483,27 +563,46 @@ class DanmakuService:
         return result
 
     @classmethod
-    async def refresh_episodes(cls, item: MediaItem, meta: DanmakuMeta):
+    async def refresh_episodes(cls, item: MediaItem, meta: DanmakuAnime) -> bool:
         """Refresh the danmaku metadata of the episodes under an anime.
 
         Args:
-            item: The episode media item.
+            item: The media item or a confirmed episode.
             meta: The confirmed danmaku metadata.
+
+        Returns:
+            Whether the match was applied or already up to date.
         """
-        if not item.parent_id or not (server := item.lib.danmaku_server):
-            return
+        if not (server := item.lib.danmaku_server):
+            return False
 
         anime_id = meta.anime_id
-        if item.danmaku_meta and str(item.danmaku_meta.get("anime_id")) == anime_id:
+        if (
+            item.parent_id
+            and item.danmaku_meta
+            and str(item.danmaku_meta.get("anime_id")) == anime_id
+        ):
             # skip if the anime ID hasn't changed
-            return
+            return True
 
-        # get sibling episodes under the same parent item
-        db_episodes = await MediaItem.filter(
-            parent_id=item.parent_id, id__not=item.id, episode__not_isnull=True
-        ).all()
+        # include all files for a library match, or siblings for a player match
+        query = MediaItem.filter(parent_id=item.parent_id or item.id, id__not=item.id)
+        movie = item.lib.lib_type == LibType.MOVIE
+        if not movie:
+            query = query.filter(episode__not_isnull=True)
+        db_episodes = await query.all()
+        if movie and not db_episodes:
+            db_episodes = [item]
         if not db_episodes:
-            return
+            return False
+        db_episodes = [
+            episode
+            for episode in db_episodes
+            if not episode.danmaku_meta
+            or str(episode.danmaku_meta.get("anime_id")) != anime_id
+        ]
+        if not db_episodes:
+            return True
 
         # get bangumi info from the danmaku server to find the corresponding episode IDs
         client: httpx.AsyncClient = Sanic.get_app().ctx.httpx
@@ -516,7 +615,7 @@ class DanmakuService:
                     anime_id,
                     response.status_code,
                 )
-                return
+                return False
 
             data = response.json()
             if not data.get("success"):
@@ -525,44 +624,61 @@ class DanmakuService:
                     anime_id,
                     data.get("errorMessage"),
                 )
-                return
+                return False
 
-            api_episodes = data.get("bangumi", {}).get("episodes", [])
+            api_episodes = (data.get("bangumi") or {}).get("episodes")
             if not api_episodes:
-                return
+                return False
 
-            # build a map from episodeNumber -> episode data
-            ep_data: dict[str, dict] = {
-                str(num): e
-                for e in api_episodes
-                if (num := e.get("episodeNumber")) is not None
-            }
-
-            # match each sibling episode by its episode number and update danmaku_meta
-            for db_episode in db_episodes:
-                ep = ep_data.get(str(db_episode.episode))
-                if not ep:
+            # map `episodeNumber` without overwriting matches from another season
+            ep_data: dict[str, dict] = {}
+            for ep in api_episodes:
+                if (num := ep.get("episodeNumber")) is None:
                     continue
+                number = str(num)
+                previous = ep_data.get(number)
+                if previous and str(previous.get("episodeId")) != str(
+                    ep.get("episodeId")
+                ):
+                    return False
+                ep_data[number] = ep
 
-                # delete the old cached danmaku file if exists
-                if db_episode.danmaku_path:
-                    danmaku_path = Path(db_episode.danmaku_path)
-                    if danmaku_path.is_file():
-                        danmaku_path.unlink()
+            matches = [
+                (
+                    episode,
+                    api_episodes[0]
+                    if movie and len(api_episodes) == 1
+                    else ep_data.get(str(episode.episode)),
+                )
+                for episode in db_episodes
+            ]
+            if not any(ep for _, ep in matches):
+                return False
 
-                # update the danmaku_meta with the new episode ID and title
-                danmaku_meta = DanmakuMeta(
-                    anime_id=meta.anime_id,
-                    anime_title=meta.anime_title,
-                    episode_id=ep.get("episodeId", 0),
-                    episode_title=ep.get("episodeTitle"),
-                    type=meta.type,
-                    type_description=meta.type_description,
+            for db_episode, ep in matches:
+                # discard stale caches even when no new episode matches
+                danmaku_path = cls._cache_path(db_episode)
+                if danmaku_path.is_file():
+                    danmaku_path.unlink()
+
+                danmaku_meta = (
+                    DanmakuMeta(
+                        anime_id=meta.anime_id,
+                        anime_title=meta.anime_title,
+                        episode_id=ep.get("episodeId", 0),
+                        episode_title=ep.get("episodeTitle"),
+                        type=meta.type,
+                        type_description=meta.type_description,
+                    )
+                    if ep
+                    else None
                 )
 
                 await MediaItem.filter(id=db_episode.id).update(
                     danmaku_path=None, danmaku_meta=danmaku_meta
                 )
+            return True
 
         except httpx.RequestError:
             logger.error("An error occurred while requesting %s.", url, exc_info=True)
+            return False
