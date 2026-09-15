@@ -657,6 +657,16 @@ export type Danmaku = {
 };
 
 /**
+ * An anime returned by the danmaku server.
+ */
+export type DanmakuAnime = {
+  anime_id: string;
+  anime_title: string | null;
+  type: string;
+  type_description: string | null;
+};
+
+/**
  * An external or embedded subtitle track.
  */
 export type Subtitle = {

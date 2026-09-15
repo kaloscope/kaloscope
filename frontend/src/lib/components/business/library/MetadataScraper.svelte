@@ -165,12 +165,7 @@
   }
 </script>
 
-<Modal
-  icon={icons.boxMultipleSearch}
-  title={$_('action.scrape', $_('entity.metadata'))}
-  maxWidth="36rem"
-  bind:this={modal}
->
+<Modal icon={icons.imageSearch} title={$_('action.scrape', $_('entity.metadata'))} maxWidth="36rem" bind:this={modal}>
   <div class="fieldset">
     <Label required>{$_('field.graph')}</Label>
     <Select options={graphOptions} bind:value={graphId} class="w-full" />

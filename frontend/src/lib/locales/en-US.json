@@ -838,6 +838,8 @@
     "invalid_download_source": "The selected downloader does not support this source!",
     "info_hash_collision": "Download already exists!",
     "http_request_failed": "HTTP request failed!",
+    "danmaku_server_required": "Configure the library's danmaku server first.",
+    "danmaku_match_failed": "Danmaku matching failed. Retry or select another result.",
     "magnet_link_copied": "Magnet link copied!",
     "select_export_items": "Please select at least one item to export.",
     "select_delete_items": "Please select at least one item to delete.",

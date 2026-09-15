@@ -27,8 +27,6 @@ const fluentUISystemIcons = {
   bookGlobe: 'fluent:book-globe-24-regular',
   bookQuestionMark: 'fluent:book-question-mark-24-regular',
   boxArrowUp: 'fluent:box-arrow-up-24-regular',
-  boxMultipleSearch: 'fluent:box-multiple-search-24-regular',
-  boxMultipleSearchFilled: 'fluent:box-multiple-search-24-filled',
   boxSearch: 'fluent:box-search-24-regular',
   bracesVariable: 'fluent:braces-variable-24-regular',
   calendar: 'fluent:calendar-24-regular',
@@ -56,6 +54,7 @@ const fluentUISystemIcons = {
   documentCopy: 'fluent:document-copy-24-regular',
   documentEdit: 'fluent:document-edit-24-regular',
   documentFlowchart: 'fluent:document-flowchart-24-regular',
+  documentSearch: 'fluent:document-search-24-regular',
   documentSignature: 'fluent:document-signature-24-regular',
   eye: 'fluent:eye-24-regular',
   flowchart: 'fluent:flowchart-24-regular',
@@ -70,6 +69,8 @@ const fluentUISystemIcons = {
   globeSearchFilled: 'fluent:globe-search-24-filled',
   grid: 'fluent:grid-24-regular',
   image: 'fluent:image-24-regular',
+  imageSearch: 'fluent:image-search-24-regular',
+  imageSearchFilled: 'fluent:image-search-24-filled',
   info: 'fluent:info-24-regular',
   key: 'fluent:key-24-regular',
   keyFilled: 'fluent:key-24-filled',
@@ -108,6 +109,7 @@ const fluentUISystemIcons = {
   settingsFilled: 'fluent:settings-24-filled',
   signOut: 'fluent:sign-out-24-regular',
   slideSearch: 'fluent:slide-search-24-regular',
+  slideSearchFilled: 'fluent:slide-search-24-filled',
   speaker1Filled: 'fluent:speaker-1-24-filled',
   speaker2Filled: 'fluent:speaker-2-24-filled',
   speakerMuteFilled: 'fluent:speaker-mute-24-filled',
@@ -204,6 +206,7 @@ const iconPark = {
  * {@link https://icon-sets.iconify.design/mingcute/ }
  */
 const mingCuteIcon = {
+  danmaku: 'mingcute:danmaku-line',
   danmakuFill: 'mingcute:danmaku-fill',
   listCheck: 'mingcute:list-check-line',
   loading: 'mingcute:loading-line',

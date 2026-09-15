@@ -10,16 +10,18 @@
     onclick?: () => void;
     onscrape?: () => void;
     ondelete?: () => void;
+    danmaku?: boolean;
   };
 </script>
 
 <script lang="ts">
-  import { Dropdown, MediaDelConfirm, MetadataScraper } from '$lib/components';
+  import { DanmakuMatcher, Dropdown, MediaDelConfirm, MetadataScraper } from '$lib/components';
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
-  let { item, class: _class, triggerClass, onclick, onscrape, ondelete }: MediaActionsProps = $props();
+  let { item, class: _class, triggerClass, onclick, onscrape, ondelete, danmaku = false }: MediaActionsProps = $props();
+  let matcher: DanmakuMatcher | null = $state(null);
   let scraper: MetadataScraper | null = $state(null);
   let deleter: MediaDelConfirm | null = $state(null);
 </script>
@@ -56,20 +58,27 @@
     </div>
   {/snippet}
   <ul class="menu gap-1">
+    {#if danmaku}
+      {@render action(icons.slideSearch, $_('media.danmaku.settings'), () => {
+        matcher?.showModal();
+      })}
+    {/if}
     {#if onscrape}
-      {@render action(icons.boxMultipleSearch, $_('action.scrape'), () => {
-        // scrape metadata for the media item
+      {@render action(icons.imageSearch, $_('action.scrape'), () => {
         scraper?.showModal();
       })}
     {/if}
     {#if ondelete}
       {@render action(icons.delete, $_('action.delete'), () => {
-        // show delete confirm dialog
         deleter?.showModal(item);
       })}
     {/if}
   </ul>
 </Dropdown>
+
+{#if danmaku}
+  <DanmakuMatcher bind:this={matcher} {item} />
+{/if}
 
 {#if onscrape}
   <MetadataScraper bind:this={scraper} {item} {onscrape} />

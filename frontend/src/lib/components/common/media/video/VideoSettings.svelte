@@ -1,6 +1,6 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores';
-  import type { Danmaku, Definition, MediaProbe, Resp, Subtitle } from '$lib/types';
+  import type { Danmaku, DanmakuAnime, Definition, MediaProbe, Resp, Subtitle } from '$lib/types';
   import { isWhite } from '$lib/utils';
   import type { IconifyIcon } from 'iconify-icon';
   import { get } from 'svelte/store';
@@ -90,13 +90,9 @@
     blockPattern: ''
   });
 
-  type DanmakuMeta = {
-    anime_id: string;
-    anime_title: string | null;
+  type DanmakuMeta = DanmakuAnime & {
     episode_id: string;
     episode_title: string | null;
-    type: string;
-    type_description: string | null;
   };
 
   type DanmakuWrapper = {
@@ -869,7 +865,7 @@
         {/if}
         {@render tabLabel('danmaku', icons.danmakuFill, $_('media.danmaku.settings'))}
         {#if localMedia}
-          {@render tabLabel('match', icons.boxMultipleSearchFilled, $_('media.danmaku.match'))}
+          {@render tabLabel('match', icons.slideSearchFilled, $_('media.danmaku.match'))}
         {/if}
       </div>
 

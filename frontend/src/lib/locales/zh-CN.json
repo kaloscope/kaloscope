@@ -838,6 +838,8 @@
     "invalid_download_source": "所选下载器不支持该来源！",
     "info_hash_collision": "下载任务已存在！",
     "http_request_failed": "发送 HTTP 请求失败！",
+    "danmaku_server_required": "请先配置媒体库的弹幕服务器。",
+    "danmaku_match_failed": "弹幕匹配失败，请重试或选择其他结果。",
     "magnet_link_copied": "磁力链接已复制！",
     "select_export_items": "请先选择要导出的数据。",
     "select_delete_items": "请先选择要删除的数据。",
