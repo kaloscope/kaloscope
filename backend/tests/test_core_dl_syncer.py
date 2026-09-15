@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from sanic import Sanic
+from torrentool.bencode import Bencode
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -441,8 +443,8 @@ class FailingPlanOpenListClient(PlanOpenListClient):
         raise RuntimeError("submission failed")
 
 
-async def _run_download_plan(monkeypatch, driver):
-    magnet = f"magnet:?xt=urn:btih:{'a' * 40}"
+async def _run_download_plan(monkeypatch, driver, *, source=None, http=None):
+    magnet = source or f"magnet:?xt=urn:btih:{'a' * 40}"
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     await Tortoise.generate_schemas()
     try:
@@ -467,7 +469,9 @@ async def _run_download_plan(monkeypatch, driver):
         monkeypatch.setattr(
             syncer.Sanic,
             "get_app",
-            lambda: SimpleNamespace(ctx=SimpleNamespace(flow_engine=engine)),
+            lambda: SimpleNamespace(
+                ctx=SimpleNamespace(flow_engine=engine, httpx=http)
+            ),
         )
 
         await syncer.execute_download_plan(plan, driver)
@@ -505,6 +509,59 @@ def test_download_plan(monkeypatch):
     assert client.submissions == [(magnet, job.remote_dir)]
     assert plan.total_count == 1
     assert history_count == 1
+
+
+@pytest.mark.parametrize("upload", [False, True])
+def test_plan_torrent(monkeypatch, upload):
+    info = {
+        "name": "sample.bin",
+        "length": 4,
+        "piece length": 16384,
+        "pieces": hashlib.sha1(b"data").digest(),
+    }
+    torrent = Bencode.encode(
+        {"info": info, "announce": "https://tracker.example/announce"}
+    )
+    hash = hashlib.sha1(Bencode.encode(info)).hexdigest()
+    requests = []
+    client = SimpleNamespace(call=AsyncMock(return_value={"unique_id": "remote"}))
+    methods = {"add_link": API()}
+    if upload:
+        methods["add_torrent"] = API()
+    driver = RpcDriver(
+        RpcConfig(name="RPC", host="localhost", port=80, methods=methods)
+    )
+    monkeypatch.setattr(driver, "client", client)
+
+    def handler(request):
+        assert str(request.url) == "https://example.com/sample.torrent"
+        requests.append(request.method)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/x-bittorrent"},
+            content=torrent if request.method == "GET" else b"",
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await _run_download_plan(
+                monkeypatch,
+                driver,
+                source="https://example.com/sample.torrent",
+                http=http,
+            )
+
+    _, plan, task, job, history_count = asyncio.run(run())
+    assert task is not None and task.info_hash == hash and task.unique_id == "remote"
+    assert task.magnet_link == f"magnet:?xt=urn:btih:{hash}"
+    assert job is None
+    assert plan.total_count == history_count == 1
+    method, variables = client.call.await_args.args
+    assert method == ("add_torrent" if upload else "add_link")
+    assert variables["torrent"] == (
+        (f"{hash}.torrent", torrent, "application/x-bittorrent") if upload else None
+    )
+    assert requests == ["HEAD", "GET"]
 
 
 def test_plan_log(monkeypatch, caplog):

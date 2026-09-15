@@ -3,7 +3,7 @@
 import base64
 import contextlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from sanic import Sanic
@@ -14,11 +14,12 @@ from torrentool.bencode import Bencode
 
 @dataclass
 class MagnetLink:
-    """The magnet link information."""
+    """The magnet link information and optional source torrent."""
 
     link: str
     info_hash: str | None = None
     info_hash_v2: str | None = None
+    torrent: tuple[str, bytes, str] | None = field(default=None, repr=False)
 
 
 async def standardize_magnet(link: str) -> MagnetLink | None:
@@ -82,6 +83,11 @@ async def _http_to_magnet(url: str) -> MagnetLink | None:
         return MagnetLink(
             link=torrent.magnet_link,
             info_hash=torrent.info_hash,
+            torrent=(
+                f"{torrent.info_hash}.torrent",
+                torrent_bytes,
+                "application/x-bittorrent",
+            ),
         )
     except Exception:
         logger.error("Failed to convert HTTP link to magnet: %s", url, exc_info=True)

@@ -6,7 +6,10 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from sanic import Sanic
+from torrentool.bencode import Bencode
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -14,6 +17,7 @@ from app.core.dl.driver import (
     DownloadAction,
     DownloadDraft,
     DownloadIdentity,
+    DownloadRequest,
     DownloadSnapshot,
     DownloadState,
     OfflineJobDraft,
@@ -231,6 +235,86 @@ def test_add_rollback(monkeypatch):
             await Tortoise.close_connections()
 
     assert asyncio.run(run()) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("methods", "http_source", "expected"),
+    [
+        (["add_link", "add_torrent"], True, "add_torrent"),
+        (["add_link"], True, "add_link"),
+        (["add_torrent"], True, "add_torrent"),
+        (["add_link", "add_torrent"], False, "add_link"),
+        (["add_torrent"], False, None),
+    ],
+)
+def test_rpc_source(monkeypatch, methods, http_source, expected):
+    info = {
+        "name": "sample.bin",
+        "length": 4,
+        "piece length": 16384,
+        "pieces": hashlib.sha1(b"data").digest(),
+        "private": 1,
+    }
+    torrent = Bencode.encode(
+        {
+            "info": info,
+            "announce": "https://tracker.example/announce",
+            "url-list": ["https://seed.example/sample.bin"],
+        }
+    )
+    hash = hashlib.sha1(Bencode.encode(info)).hexdigest()
+    link = f"magnet:?xt=urn:btih:{hash}"
+    requests = []
+    client = SimpleNamespace(call=AsyncMock(return_value={"unique_id": "remote"}))
+    driver = RpcDriver(
+        RpcConfig(
+            name="RPC", host="localhost", port=80, methods={m: API() for m in methods}
+        )
+    )
+    monkeypatch.setattr(driver, "client", client)
+
+    def handler(request):
+        assert str(request.url) == "https://example.com/sample.torrent"
+        requests.append(request.method)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/x-bittorrent"},
+            content=torrent if request.method == "GET" else b"",
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            monkeypatch.setattr(
+                Sanic,
+                "get_app",
+                lambda: SimpleNamespace(ctx=SimpleNamespace(httpx=http)),
+            )
+            request = await download_service.DownloadTaskService._normalize_source(
+                driver,
+                DownloadRequest(
+                    directory="/downloads",
+                    link="https://example.com/sample.torrent" if http_source else link,
+                ),
+            )
+            if expected is None:
+                assert request is None
+                client.call.assert_not_awaited()
+                return
+            assert request is not None
+            assert request.identity is not None
+            assert request.identity.info_hash == hash
+            await driver.add(request)
+            method, variables = client.call.await_args.args
+            assert method == expected
+            assert variables["link"] == link
+            assert variables["torrent"] == (
+                (f"{hash}.torrent", torrent, "application/x-bittorrent")
+                if expected == "add_torrent"
+                else None
+            )
+
+    asyncio.run(run())
+    assert requests == (["HEAD", "GET"] if http_source else [])
 
 
 def test_concurrent_rpc_add(monkeypatch):

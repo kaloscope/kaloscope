@@ -358,7 +358,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         )
         magnet = await standardize_magnet(link) if probe_magnet else None
         if magnet is not None:
-            if DownloadSource.MAGNET not in source_types:
+            torrent = magnet.torrent if DownloadSource.TORRENT in source_types else None
+            if torrent is None and DownloadSource.MAGNET not in source_types:
                 return None
             return replace(
                 request,
@@ -367,6 +368,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                     info_hash_v2=magnet.info_hash_v2,
                 ),
                 link=magnet.link,
+                torrent=torrent,
             )
         if DownloadSource.RAW not in source_types:
             return None

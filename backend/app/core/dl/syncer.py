@@ -25,6 +25,7 @@ from app.core.dl.driver import (
     DownloaderDriver,
     DownloadIdentity,
     DownloadRequest,
+    DownloadSource,
 )
 from app.core.dl.openlist import OpenListDriver
 from app.core.dl.openlist.puller import transfer_local_file
@@ -1096,6 +1097,11 @@ async def execute_download_plan(
                     info_hash_v2=magnet.info_hash_v2,
                 ),
                 link=magnet.link,
+                torrent=(
+                    magnet.torrent
+                    if DownloadSource.TORRENT in driver.source_types
+                    else None
+                ),
                 transfer_library_id=plan.transfer_lib_id,
                 transfer_method=plan.transfer_method,
                 sub_pattern=plan.sub_pattern,
