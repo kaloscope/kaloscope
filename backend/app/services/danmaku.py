@@ -629,6 +629,13 @@ class DanmakuService:
             api_episodes = (data.get("bangumi") or {}).get("episodes")
             if not api_episodes:
                 return False
+            if movie and len(api_episodes) > 1:
+                # exclude movie extras such as `S1` and `C1`
+                api_episodes = [
+                    ep
+                    for ep in api_episodes
+                    if str(ep.get("episodeNumber", "")).isdigit()
+                ]
 
             # map `episodeNumber` without overwriting matches from another season
             ep_data: dict[str, dict] = {}
@@ -652,7 +659,7 @@ class DanmakuService:
                 )
                 for episode in db_episodes
             ]
-            if not any(ep for _, ep in matches):
+            if not item.parent_id and not any(ep for _, ep in matches):
                 return False
 
             for db_episode, ep in matches:

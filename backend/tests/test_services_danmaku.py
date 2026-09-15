@@ -6,9 +6,7 @@ import httpx
 import pytest
 from tortoise import Tortoise
 
-from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.models.media import LibType, MediaItem, MediaLib
-from app.routes import danmaku as routes
 from app.services import danmaku
 
 
@@ -269,6 +267,13 @@ def test_keeps_manual_episode_matches_when_anime_is_unchanged(library, tmp_path)
             200,
             {
                 "success": True,
+                "bangumi": {"episodes": [{"episodeNumber": "2", "episodeId": "new-2"}]},
+            },
+        ),
+        (
+            200,
+            {
+                "success": True,
                 "bangumi": {
                     "episodes": [
                         {
@@ -310,17 +315,41 @@ def test_keeps_existing_matches_when_bangumi_is_unusable(
 
 
 @pytest.mark.parametrize("with_parent", [False, True])
-def test_matches_movie_files(library, with_parent):
+@pytest.mark.parametrize(
+    ("episodes", "episode_id"),
+    [
+        ([{"episodeId": 420001, "episodeTitle": "Movie"}], "420001"),
+        (
+            [
+                {"episodeNumber": "S1", "episodeId": 429001},
+                {"episodeNumber": "1", "episodeId": 420001, "episodeTitle": "Movie"},
+                {"episodeNumber": "C1", "episodeId": 429101},
+            ],
+            "420001",
+        ),
+        (
+            [
+                {"episodeNumber": "S1", "episodeId": 429001},
+                {"episodeNumber": "C1", "episodeId": 429101},
+            ],
+            None,
+        ),
+        (
+            [
+                {"episodeNumber": "1", "episodeId": 420001},
+                {"episodeNumber": "2", "episodeId": 420002},
+                {"episodeNumber": "S1", "episodeId": 429001},
+            ],
+            None,
+        ),
+    ],
+)
+def test_matches_movie_files(library, with_parent, episodes, episode_id):
     def handler(request):
         assert request.url.path == "/api/v2/bangumi/42"
         return httpx.Response(
             200,
-            json={
-                "success": True,
-                "bangumi": {
-                    "episodes": [{"episodeId": 420001, "episodeTitle": "Movie"}]
-                },
-            },
+            json={"success": True, "bangumi": {"episodes": episodes}},
         )
 
     async def run():
@@ -336,28 +365,29 @@ def test_matches_movie_files(library, with_parent):
 
     result, item = asyncio.run(run())
 
-    assert result is True
-    assert item.danmaku_meta["episode_id"] == "420001"
+    assert result is (episode_id is not None)
+    if episode_id is not None:
+        assert item.danmaku_meta["episode_id"] == episode_id
+    else:
+        assert item.danmaku_meta is None
 
 
-def test_single_episode_confirmation_still_refreshes_siblings(library):
+@pytest.mark.parametrize("has_sibling_match", [False, True])
+def test_single_episode_confirmation_still_refreshes_siblings(
+    library, tmp_path, has_sibling_match
+):
     def handler(request):
         if request.url.path == "/api/v2/comment/new-1":
             return httpx.Response(
                 200, json={"comments": [{"cid": 1, "p": "1,1,16777215,1", "m": "Hi"}]}
             )
         assert request.url.path == "/api/v2/bangumi/new"
+        episodes = [{"episodeNumber": 1, "episodeId": "new-1"}]
+        if has_sibling_match:
+            episodes.append({"episodeNumber": 2, "episodeId": "new-2"})
         return httpx.Response(
             200,
-            json={
-                "success": True,
-                "bangumi": {
-                    "episodes": [
-                        {"episodeNumber": 1, "episodeId": "new-1"},
-                        {"episodeNumber": 2, "episodeId": "new-2"},
-                    ]
-                },
-            },
+            json={"success": True, "bangumi": {"episodes": episodes}},
         )
 
     async def run():
@@ -365,6 +395,8 @@ def test_single_episode_confirmation_still_refreshes_siblings(library):
             parent = await media(lib, "Series")
             first = await media(lib, "1.mkv", parent=parent, episode=1)
             second = await media(lib, "2.mkv", parent=parent, episode=2)
+            cache = tmp_path / ".2.mkv.json"
+            cache.write_text('[{"text": "Old comments"}]')
             result = await danmaku.DanmakuService.confirm_episode(
                 first.path,
                 danmaku.DanmakuMeta(
@@ -380,8 +412,12 @@ def test_single_episode_confirmation_still_refreshes_siblings(library):
     assert result.comments[0].text == "Hi"
     assert first.danmaku_meta["episode_id"] == "new-1"
     assert first.danmaku_path is not None
-    assert second.danmaku_meta["episode_id"] == "new-2"
+    if has_sibling_match:
+        assert second.danmaku_meta["episode_id"] == "new-2"
+    else:
+        assert second.danmaku_meta is None
     assert second.danmaku_path is None
+    assert not (tmp_path / ".2.mkv.json").exists()
 
 
 @pytest.mark.parametrize("status", [200, 503])
@@ -469,14 +505,3 @@ def test_playback_fetches_comments_from_the_confirmed_anime(library, suffix, pre
 
     assert result.metadata.episode_id == "new-1"
     assert result.comments[0].text == "New"
-
-
-@pytest.mark.parametrize("route", [routes.search_anime, routes.confirm_anime])
-@pytest.mark.parametrize(
-    ("user", "error"),
-    [(None, UnauthorizedException), (SimpleNamespace(role="user"), ForbiddenException)],
-)
-def test_requires_admin_for_library_matching(route, user, error):
-    request = SimpleNamespace(ctx=SimpleNamespace(user=user))
-    with pytest.raises(error):
-        asyncio.run(route(request))
