@@ -4,7 +4,7 @@ from app.utils.subtitle import ass_to_vtt, srt_to_vtt
 
 
 class TestAssToVtt:
-    def test_ass_dialogues_to_webvtt(self):
+    def test_dialogues(self):
         content = """
 [Script Info]
 Title: Example
@@ -31,7 +31,7 @@ Dialogue: 0,0:00:04.20,0:00:05.00,Default,,0,0,0,,Comma, stays
             "Comma, stays\n"
         )
 
-    def test_ssa_dialogues_to_webvtt(self):
+    def test_ssa_dialogues(self):
         content = """
 [Events]
 Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -42,7 +42,7 @@ Dialogue: Marked=0,0:00:06.10,0:00:08.00,Default,,0,0,0,,SSA text
             "WEBVTT\n\n1\n00:00:06.100 --> 00:00:08.000\nSSA text\n"
         )
 
-    def test_same_time_dialogues_stay_separate(self):
+    def test_simultaneous_cues(self):
         content = """
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -62,7 +62,7 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Deputy subtitle
             "Deputy subtitle\n"
         )
 
-    def test_ass_sort_by_start_time(self):
+    def test_sort_by_start_time(self):
         content = """
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -92,7 +92,7 @@ Dialogue: 0,0:01:53.55,0:02:05.32,OP,,0,0,0,,Opening song
 
 
 class TestSrtToVtt:
-    def test_srt_cues_to_webvtt(self):
+    def test_cues(self):
         content = (
             "\ufeff1\r\n"
             "00:00:01,000 --> 00:00:03,500\r\n"
@@ -117,7 +117,7 @@ class TestSrtToVtt:
             "Comma, stays\n"
         )
 
-    def test_srt_cue_without_index(self):
+    def test_missing_index(self):
         content = "00:00:06,100 --> 00:00:08,000\nSRT text\n"
 
         assert srt_to_vtt(content) == (

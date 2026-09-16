@@ -69,7 +69,9 @@ class RpcClient:
                 variables["secret"] = self.config.auth.secret or ""
                 variables["username"] = self.config.auth.username or ""
                 variables["password"] = self.config.auth.password or ""
-            return await self._request(api, variables, api_method=method)
+            result = await self._request(api, variables, api_method=method)
+            assert not isinstance(result, httpx.Response)
+            return result
 
     async def _request(
         self,

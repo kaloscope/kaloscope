@@ -1,72 +1,37 @@
 """Unit tests for the flow cache node."""
 
 import asyncio
-from types import SimpleNamespace
-from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
 
 from app.core.flow.context import Context
 from app.core.flow.nodes.general import cache
 
 
-def _context(values: dict[str, Any] | None = None) -> Context:
+@pytest.mark.parametrize(
+    ("value", "ttl", "values", "expected", "expires"),
+    [
+        ('{"count": 1}', 10, {}, '{"count": 1}', 110),
+        ("{{ payload | tojson }}", 0, {"payload": "123"}, '"123"', None),
+    ],
+    ids=["json", "template"],
+)
+def test_value(monkeypatch, value, ttl, values, expected, expires):
     context = Context.__new__(Context)
-    context._context = values or {}
-    return context
-
-
-def test_json_value(monkeypatch):
-    calls = {}
-
-    class FakeFlowVariable:
-        @classmethod
-        async def update_or_create(cls, *, defaults, **filters):
-            calls["defaults"] = defaults
-            calls["filters"] = filters
-            return SimpleNamespace(id=7), True
-
-    monkeypatch.setattr(cache, "FlowVariable", FakeFlowVariable)
+    context._context = values
+    update = AsyncMock()
+    monkeypatch.setattr(cache.FlowVariable, "update_or_create", update)
     monkeypatch.setattr(cache.time, "time", lambda: 100)
 
     asyncio.run(
         cache.CacheNode.execute(
             graph_id=2,
-            node_data={"key": "item", "ttl": 10, "value": '{"count": 1}'},
-            context=_context(),
+            node_data={"key": "item", "ttl": ttl, "value": value},
+            context=context,
         )
     )
 
-    assert calls == {
-        "defaults": {"value": '{"count": 1}', "expires": 110},
-        "filters": {"graph_id": 2, "key": "item"},
-    }
-
-
-def test_template_value(monkeypatch):
-    calls = {}
-
-    class FakeFlowVariable:
-        @classmethod
-        async def update_or_create(cls, *, defaults, **filters):
-            calls["defaults"] = defaults
-            calls["filters"] = filters
-            return SimpleNamespace(id=7), False
-
-    monkeypatch.setattr(cache, "FlowVariable", FakeFlowVariable)
-    monkeypatch.setattr(cache.time, "time", lambda: 100)
-
-    asyncio.run(
-        cache.CacheNode.execute(
-            graph_id=2,
-            node_data={
-                "key": "item",
-                "ttl": 0,
-                "value": "{{ payload | tojson }}",
-            },
-            context=_context({"payload": "123"}),
-        )
+    update.assert_awaited_once_with(
+        graph_id=2, key="item", defaults={"value": expected, "expires": expires}
     )
-
-    assert calls == {
-        "defaults": {"value": '"123"', "expires": None},
-        "filters": {"graph_id": 2, "key": "item"},
-    }

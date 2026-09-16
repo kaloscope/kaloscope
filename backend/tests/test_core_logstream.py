@@ -328,24 +328,25 @@ def test_clear_keeps_pause():
 
 
 def test_collector_lifecycle(capsys):
-    """The background collector must publish detached snapshots and stop."""
+    """Verify snapshot publication, revision advancement, and shutdown."""
     source = queue.Queue()
     actions = queue.Queue()
     shared = {"value": EMPTY_LOG_SNAPSHOT}
+    revision = multiprocessing.Value("Q", 0)
     collector = LogCollector(
         source,
         actions,
         shared,
-        multiprocessing.Value("Q", 0),
+        revision,
         publish_interval=0.01,
     )
 
     collector.start()
-    source.put({"message": "one"})
-    deadline = time.monotonic() + 1
-    while shared["value"].last_id == 0 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    collector.stop()
+    try:
+        source.put({"message": "one"})
+        _wait_for(lambda: revision.value == 1)
+    finally:
+        collector.stop()
 
     snapshot = shared["value"]
     assert snapshot.last_id == 1
@@ -353,27 +354,6 @@ def test_collector_lifecycle(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
-
-
-def test_publish_advances_revision():
-    """A successful snapshot publication must advance its revision."""
-    source = queue.Queue()
-    shared = {"value": EMPTY_LOG_SNAPSHOT}
-    revision = multiprocessing.Value("Q", 0)
-    collector = LogCollector(
-        source,
-        queue.Queue(),
-        shared,
-        revision,
-        publish_interval=0.01,
-    )
-
-    collector.start()
-    source.put({"message": "one"})
-    _wait_for(lambda: revision.value == 1)
-    collector.stop()
-
-    assert shared["value"].records == ({"id": 1, "message": "one"},)
 
 
 def test_failed_publish_keeps_revision():
@@ -527,30 +507,38 @@ def test_worker_lifecycle(monkeypatch):
 
 def test_lifecycle_failure(monkeypatch, capsys):
     """Monitor lifecycle failures must not escape or write diagnostics."""
+    calls = []
 
     class BrokenCollector:
         def __init__(self, *_):
+            calls.append("collector")
             raise RuntimeError("collector unavailable")
+
+    def fail_registration(_):
+        calls.append("monitor")
+        raise RuntimeError("handler unavailable")
 
     app = cast(
         Sanic,
         SimpleNamespace(
             ctx=SimpleNamespace(),
-            shared_ctx=SimpleNamespace(log_queue=object(), log_snapshot={}),
+            shared_ctx=SimpleNamespace(
+                log_queue=object(),
+                log_actions=object(),
+                log_snapshot={},
+                log_snapshot_revision=object(),
+            ),
         ),
     )
     monkeypatch.setattr(main, "LogCollector", BrokenCollector)
-    monkeypatch.setattr(
-        main,
-        "register_log_monitor",
-        lambda _: (_ for _ in ()).throw(RuntimeError("handler unavailable")),
-    )
+    monkeypatch.setattr(main, "register_log_monitor", fail_registration)
 
     asyncio.run(main.start_log_collector(app))
     asyncio.run(main.stop_log_collector(app))
     asyncio.run(main.attach_log_monitor(app))
     asyncio.run(main.detach_log_monitor(app))
 
+    assert calls == ["collector", "monitor"]
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""

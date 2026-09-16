@@ -1,3 +1,5 @@
+"""Test danmaku matching, cache updates, and server error recovery."""
+
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -38,7 +40,7 @@ def library(monkeypatch, tmp_path):
     return create
 
 
-async def media(lib, name, *, parent=None, episode=None, anime_id="old"):
+async def media(lib, name, *, parent=None, episode=None, anime_id: str | int = "old"):
     return await MediaItem.create(
         lib=lib,
         parent=parent,
@@ -59,7 +61,7 @@ async def media(lib, name, *, parent=None, episode=None, anime_id="old"):
 
 
 @pytest.mark.parametrize("suffix", ["", "/api/v2/", "/token/v2"])
-def test_searches_anime_without_episode_filter(library, suffix):
+def test_anime_search(library, suffix):
     requests = []
 
     def handler(request):
@@ -110,7 +112,7 @@ def test_searches_anime_without_episode_filter(library, suffix):
         (200, {"success": True, "animes": None}),
     ],
 )
-def test_search_handles_empty_results_and_server_errors(library, search, status, data):
+def test_search_failures(library, search, status, data):
     async def run():
         async with library(lambda _: httpx.Response(status, json=data)) as lib:
             item = await media(lib, "Series")
@@ -119,7 +121,7 @@ def test_search_handles_empty_results_and_server_errors(library, search, status,
     assert asyncio.run(run()) == []
 
 
-def test_episode_search_handles_empty_episode_lists(library):
+def test_empty_episode_lists(library):
     async def run():
         async with library(
             lambda _: httpx.Response(
@@ -133,7 +135,7 @@ def test_episode_search_handles_empty_episode_lists(library):
     assert asyncio.run(run()) == []
 
 
-def test_skips_unconfigured_servers(library):
+def test_unconfigured_server(library):
     def handler(request):
         pytest.fail(f"unconfigured library should not request {request.url}")
 
@@ -149,7 +151,7 @@ def test_skips_unconfigured_servers(library):
     assert asyncio.run(run()) == ([], False)
 
 
-def test_search_preserves_proxy_query_encoding(library):
+def test_proxy_query_encoding(library):
     requests = []
 
     def handler(request):
@@ -169,7 +171,7 @@ def test_search_preserves_proxy_query_encoding(library):
     }
 
 
-def test_updates_all_episodes_and_discards_stale_caches(library, tmp_path):
+def test_replaces_matches_and_caches(library, tmp_path):
     def handler(request):
         assert request.url.path == "/api/v2/bangumi/new"
         return httpx.Response(
@@ -221,18 +223,18 @@ def test_updates_all_episodes_and_discards_stale_caches(library, tmp_path):
     result, episodes, other = asyncio.run(run())
 
     assert result is True
-    assert [item.danmaku_meta["episode_id"] for item in episodes[:2]] == [
-        "new-1",
-        "new-2",
-    ]
-    assert episodes[0].danmaku_meta["anime_title"] == "New Anime"
+    for item, episode_id in zip(episodes[:2], ["new-1", "new-2"], strict=True):
+        assert item.danmaku_meta is not None
+        assert item.danmaku_meta["episode_id"] == episode_id
+        assert item.danmaku_meta["anime_title"] == "New Anime"
     assert episodes[2].danmaku_meta is None
     assert all(item.danmaku_path is None for item in episodes)
     assert not list(tmp_path.glob(".*.json"))
+    assert other.danmaku_meta is not None
     assert other.danmaku_meta["anime_id"] == "old"
 
 
-def test_keeps_manual_episode_matches_when_anime_is_unchanged(library, tmp_path):
+def test_preserves_manual_matches(library, tmp_path):
     def handler(request):
         pytest.fail(f"unchanged anime should not request {request.url}")
 
@@ -251,6 +253,7 @@ def test_keeps_manual_episode_matches_when_anime_is_unchanged(library, tmp_path)
     result, item, cache = asyncio.run(run())
 
     assert result is True
+    assert item.danmaku_meta is not None
     assert item.danmaku_meta["episode_id"] == "old-1"
     assert cache.exists()
 
@@ -292,9 +295,7 @@ def test_keeps_manual_episode_matches_when_anime_is_unchanged(library, tmp_path)
         ),
     ],
 )
-def test_keeps_existing_matches_when_bangumi_is_unusable(
-    library, tmp_path, status, data
-):
+def test_unusable_bangumi(library, tmp_path, status, data):
     async def run():
         async with library(lambda _: httpx.Response(status, json=data)) as lib:
             parent = await media(lib, "Series")
@@ -310,6 +311,7 @@ def test_keeps_existing_matches_when_bangumi_is_unusable(
     result, item, cache = asyncio.run(run())
 
     assert result is False
+    assert item.danmaku_meta is not None
     assert item.danmaku_meta["anime_id"] == "old"
     assert cache.exists()
 
@@ -344,7 +346,7 @@ def test_keeps_existing_matches_when_bangumi_is_unusable(
         ),
     ],
 )
-def test_matches_movie_files(library, with_parent, episodes, episode_id):
+def test_movie_matches(library, with_parent, episodes, episode_id):
     def handler(request):
         assert request.url.path == "/api/v2/bangumi/42"
         return httpx.Response(
@@ -358,7 +360,7 @@ def test_matches_movie_files(library, with_parent, episodes, episode_id):
             item = await media(lib, "movie.mkv", parent=parent)
             result = await danmaku.DanmakuService.confirm_anime(
                 (parent or item).path,
-                danmaku.DanmakuAnime(anime_id=42, type="movie"),
+                danmaku.DanmakuAnime.model_validate({"anime_id": 42, "type": "movie"}),
             )
             await item.refresh_from_db()
             return result, item
@@ -367,15 +369,14 @@ def test_matches_movie_files(library, with_parent, episodes, episode_id):
 
     assert result is (episode_id is not None)
     if episode_id is not None:
+        assert item.danmaku_meta is not None
         assert item.danmaku_meta["episode_id"] == episode_id
     else:
         assert item.danmaku_meta is None
 
 
 @pytest.mark.parametrize("has_sibling_match", [False, True])
-def test_single_episode_confirmation_still_refreshes_siblings(
-    library, tmp_path, has_sibling_match
-):
+def test_episode_refreshes_siblings(library, tmp_path, has_sibling_match):
     def handler(request):
         if request.url.path == "/api/v2/comment/new-1":
             return httpx.Response(
@@ -410,9 +411,11 @@ def test_single_episode_confirmation_still_refreshes_siblings(
     result, first, second = asyncio.run(run())
 
     assert result.comments[0].text == "Hi"
+    assert first.danmaku_meta is not None
     assert first.danmaku_meta["episode_id"] == "new-1"
     assert first.danmaku_path is not None
     if has_sibling_match:
+        assert second.danmaku_meta is not None
         assert second.danmaku_meta["episode_id"] == "new-2"
     else:
         assert second.danmaku_meta is None
@@ -420,7 +423,7 @@ def test_single_episode_confirmation_still_refreshes_siblings(
     assert not (tmp_path / ".2.mkv.json").exists()
 
 
-def test_retries_sibling_refresh_after_bangumi_failure(library, tmp_path):
+def test_sibling_refresh_retry(library, tmp_path):
     requests = []
 
     def handler(request):
@@ -456,6 +459,7 @@ def test_retries_sibling_refresh_after_bangumi_failure(library, tmp_path):
             await MediaItem.filter(id=second.id).update(danmaku_path=str(cache))
             manual_cache = tmp_path / ".3.mkv.json"
             manual_cache.write_text('[{"text": "Manual comments"}]')
+            assert third.danmaku_meta is not None
             third.danmaku_meta["episode_id"] = "manual-3"
             await MediaItem.filter(id=third.id).update(
                 danmaku_meta=third.danmaku_meta, danmaku_path=str(manual_cache)
@@ -467,19 +471,23 @@ def test_retries_sibling_refresh_after_bangumi_failure(library, tmp_path):
             await danmaku.DanmakuService.confirm_episode(first.path, meta)
             await first.refresh_from_db()
             await second.refresh_from_db()
+            assert first.danmaku_meta is not None
             assert first.danmaku_meta["episode_id"] == "new-1"
+            assert second.danmaku_meta is not None
             assert second.danmaku_meta["episode_id"] == "old-2"
             assert second.danmaku_path == str(cache)
             assert cache.exists()
 
             await danmaku.DanmakuService.confirm_episode(first.path, meta)
             await second.refresh_from_db()
+            assert second.danmaku_meta is not None
             assert second.danmaku_meta["episode_id"] == "new-2"
             assert second.danmaku_path is None
             assert not cache.exists()
 
             await danmaku.DanmakuService.confirm_episode(first.path, meta)
             await third.refresh_from_db()
+            assert third.danmaku_meta is not None
             assert third.danmaku_meta["episode_id"] == "manual-3"
             assert third.danmaku_path == str(manual_cache)
             assert manual_cache.read_text() == '[{"text": "Manual comments"}]'
@@ -490,7 +498,7 @@ def test_retries_sibling_refresh_after_bangumi_failure(library, tmp_path):
 
 
 @pytest.mark.parametrize("status", [200, 503])
-def test_keeps_single_episode_override_without_comments(library, tmp_path, status):
+def test_override_without_comments(library, tmp_path, status):
     requests = []
 
     def handler(request):
@@ -511,11 +519,13 @@ def test_keeps_single_episode_override_without_comments(library, tmp_path, statu
                 ),
             )
             await item.refresh_from_db()
+            assert item.danmaku_meta is not None
             assert item.danmaku_meta["episode_id"] == "manual-1"
             assert item.danmaku_path is None
             assert not cache.exists()
             assert result.comments == []
             playback = await danmaku.DanmakuService.match_danmakus(item.path)
+            assert playback.metadata is not None
             assert playback.metadata.episode_id == "manual-1"
             assert playback.comments == []
 
@@ -532,7 +542,7 @@ def test_keeps_single_episode_override_without_comments(library, tmp_path, statu
         ("/api/v1/token", "/api/v1/token/api/v2"),
     ],
 )
-def test_playback_fetches_comments_from_the_confirmed_anime(library, suffix, prefix):
+def test_confirmed_anime_playback(library, suffix, prefix):
     def handler(request):
         assert request.method == "GET"
         if request.url.path == f"{prefix}/search/anime":
@@ -572,5 +582,6 @@ def test_playback_fetches_comments_from_the_confirmed_anime(library, suffix, pre
 
     result = asyncio.run(run())
 
+    assert result.metadata is not None
     assert result.metadata.episode_id == "new-1"
     assert result.comments[0].text == "New"

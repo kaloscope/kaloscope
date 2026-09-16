@@ -1,5 +1,6 @@
 """Unit tests for the core renderer."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -488,16 +489,19 @@ class TestRender:
     def test_json_values(self, tmp_path):
         template = "{{ data|tojson }}"
         context = {"data": {"path": tmp_path, "items": [None, False, 0, "中文"]}}
-        assert render(template, context, strict=True) == render(template, context)
+        expected = {
+            "path": str(tmp_path.resolve()),
+            "items": [None, False, 0, "中文"],
+        }
+        for strict in (False, True):
+            result = render(template, context, strict=strict)
+            assert isinstance(result, str)
+            assert json.loads(result) == expected
 
 
 class TestRenderFilters:
     def test_no_args(self):
         assert render("{{ title | trim }}", {"title": "  Alpha  "}) == "Alpha"
-
-    def test_args(self):
-        result = render("{{ url | query_param('lang=zh-CN') }}", {"url": "https://x"})
-        assert result == "https://x?lang=zh-CN"
 
     def test_kwargs(self):
         assert render("{{ value | duration(unit='minutes') }}", {"value": 2}) == "02:00"

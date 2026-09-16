@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from app.core.config import KaloscopeConfig
 from app.core.dl import config as config_module
 from app.core.dl.config import load_config
 from app.core.dl.openlist.driver import OpenListDriver
@@ -13,12 +12,6 @@ from app.core.dl.openlist.models import OpenListAuth, OpenListConfig
 from app.core.dl.rpc import RpcConfig, RpcDriver
 
 PRESET_DIR = Path(__file__).parents[1] / "static" / "downloaders"
-CONFIG_PATH = Path(__file__).parents[1] / "app" / "config.toml"
-
-
-@pytest.fixture(autouse=True)
-def reset_config(monkeypatch):
-    monkeypatch.setattr(KaloscopeConfig, "_config", KaloscopeConfig(CONFIG_PATH))
 
 
 @pytest.mark.parametrize(

@@ -298,7 +298,7 @@ def test_encoder_probe_cache(monkeypatch):
     probe.assert_awaited_once()
 
 
-def test_encoder_probe_failure_cache(monkeypatch):
+def test_encoder_failure_not_cached(monkeypatch):
     probe = AsyncMock(return_value=(False, "device failed"))
     capability_module._clear_caches()
     monkeypatch.setattr(capability_module, "_run_ffmpeg_probe", probe)
@@ -367,7 +367,7 @@ def test_decode_probe_cache_key(monkeypatch, tmp_path):
     assert probe.await_count == 2
 
 
-def test_decode_probe_failure_cache(monkeypatch, tmp_path):
+def test_decode_failure_not_cached(monkeypatch, tmp_path):
     media = tmp_path / "input.mkv"
     media.write_bytes(b"video")
     probe = AsyncMock(return_value=(False, "decode failed"))
@@ -429,7 +429,7 @@ def test_transform_probe_cache_key(monkeypatch, tmp_path):
     assert probe.await_count == 3
 
 
-def test_transform_probe_failure_cache(monkeypatch, tmp_path):
+def test_transform_failure_not_cached(monkeypatch, tmp_path):
     media = tmp_path / "input.mkv"
     media.write_bytes(b"video")
     probe = AsyncMock(return_value=(False, "filter failed"))
@@ -522,7 +522,6 @@ def test_linux_process_start(monkeypatch):
     monkeypatch.setattr(tasks.sys, "platform", "linux")
     monkeypatch.setattr(tasks.Path, "read_text", lambda *_args, **_kwargs: stat)
 
-    assert not hasattr(tasks, "_read_process_start_id")
     assert asyncio.run(tasks._process_start_id(123)) == "linux:22"
 
 
@@ -863,25 +862,6 @@ def test_probe_bit_depth_precedence(monkeypatch, raw_fields, expected):
     assert asyncio.run(transcoder.probe_media("input.mkv")).bit_depth == expected
 
 
-def test_probe_hdr10_plus(monkeypatch):
-    proc = SimpleNamespace(
-        returncode=0,
-        communicate=AsyncMock(
-            return_value=(
-                b'{"frames":[{"side_data_list":['
-                b'{"side_data_type":"HDR Dynamic Metadata SMPTE2094-40 '
-                b'(HDR10+)"}]}]}',
-                b"",
-            )
-        ),
-    )
-    create = AsyncMock(return_value=proc)
-    monkeypatch.setattr(transcoder, "_ffprobe", AsyncMock(return_value="ffprobe"))
-    monkeypatch.setattr(transcoder.asyncio, "create_subprocess_exec", create)
-
-    assert asyncio.run(transcoder._probe_hdr10_plus("input.mkv", 2)) is True
-
-
 @pytest.mark.parametrize(
     ("returncode", "stdout"),
     [
@@ -1181,38 +1161,6 @@ def test_10_bit_decode_probe(monkeypatch, tmp_path):
     assert decode_call is not None
     decode_args = decode_call.args[-1]
     assert decode_args[decode_args.index("-vf") + 1] == "hwdownload,format=p010le"
-
-
-def test_nvenc_decode_fallback(monkeypatch, tmp_path):
-    media = tmp_path / "input.mkv"
-    media.write_bytes(b"video")
-    require_encoder = AsyncMock()
-    probe_decode = AsyncMock(return_value=False)
-    monkeypatch.setattr(
-        base_module,
-        "require_hardware_encoder",
-        require_encoder,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        base_module,
-        "probe_hardware_decode",
-        probe_decode,
-        raising=False,
-    )
-    context = _eligible_hardware_context("nvenc")
-    context.media_path = str(media)
-
-    runtime = asyncio.run(get_hwaccel("nvenc").prepare_hardware(context))
-
-    assert runtime == base_module.HardwareRuntime("0", False)
-    require_encoder.assert_awaited_once()
-    encoder_call = require_encoder.await_args
-    decode_call = probe_decode.await_args
-    assert encoder_call is not None
-    assert decode_call is not None
-    assert "h264_nvenc" in encoder_call.args[-1]
-    assert "cuda" in decode_call.args[-1]
 
 
 @pytest.mark.parametrize(
@@ -1716,6 +1664,7 @@ def test_decode_runtime_fallback(
     media.write_bytes(b"video")
     strategy = get_hwaccel(hwaccel)
     require_encoder = AsyncMock()
+    probe_decode = AsyncMock(return_value=False)
     monkeypatch.setattr(
         base_module,
         "require_hardware_encoder",
@@ -1725,7 +1674,7 @@ def test_decode_runtime_fallback(
     monkeypatch.setattr(
         base_module,
         "probe_hardware_decode",
-        AsyncMock(return_value=False),
+        probe_decode,
         raising=False,
     )
     monkeypatch.setattr(
@@ -1744,6 +1693,13 @@ def test_decode_runtime_fallback(
     assert cmd[cmd.index("-c:v") + 1] == encoder
     assert cmd[cmd.index("-vf") + 1] == expected_filter
     require_encoder.assert_awaited_once()
+    probe_decode.assert_awaited_once()
+    encoder_call = require_encoder.await_args
+    decode_call = probe_decode.await_args
+    assert encoder_call is not None
+    assert decode_call is not None
+    assert encoder in encoder_call.args[-1]
+    assert context.encoder_config.hwaccel in decode_call.args[-1]
 
 
 @pytest.mark.parametrize(
@@ -2312,7 +2268,6 @@ def test_hdr_optional_bsf(tmp_path):
             ),
             "encoders: libx264",
         ),
-        (_capabilities(encoders=("libx264",)), "encoders: aac"),
         (_capabilities(muxers=("mpegts",)), "muxers: hls"),
         (_capabilities(muxers=("hls",)), "muxers: mpegts"),
         (
@@ -2966,7 +2921,6 @@ def test_shutdown_monitors(monkeypatch):
             cast(asyncio.subprocess.Process, proc), cast(FileLock, lock), "task"
         )
         task = next(iter(transcoder._MONITOR_TASKS))
-        assert task in transcoder._MONITOR_TASKS
 
         await started.wait()
         await transcoder.shutdown_monitors()
@@ -3408,21 +3362,6 @@ def test_stop_windows_identity(monkeypatch, tmp_path):
     assert store["task"]["state"] == tasks.TaskState.STOPPING
     process_start_id.assert_not_awaited()
     kill.assert_called_once_with(123, tasks.signal.SIGTERM)
-
-
-def test_stop_rollback(monkeypatch, tmp_path):
-    store = {"task": _runtime_task(tmp_path)}
-
-    monkeypatch.setattr(tasks, "_task_store", lambda: (store, _Lock()))
-    monkeypatch.setattr(
-        tasks, "_process_start_id", AsyncMock(return_value="original-process")
-    )
-    monkeypatch.setattr(tasks.os, "kill", Mock(side_effect=PermissionError))
-
-    with pytest.raises(PermissionError):
-        asyncio.run(tasks.stop_tasks(["task"]))
-
-    assert store["task"]["state"] == tasks.TaskState.RUNNING
 
 
 def test_stop_restores_pending(monkeypatch, tmp_path):

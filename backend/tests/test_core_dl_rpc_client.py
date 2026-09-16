@@ -1,3 +1,5 @@
+"""Test RPC request handling, authentication, and downloader presets."""
+
 import asyncio
 import json
 import tempfile
@@ -11,7 +13,7 @@ from jinja2 import TemplateError
 from sanic import Sanic
 
 from app.core.dl.rpc import RpcClient, RpcConfig
-from app.core.dl.rpc.models import API
+from app.core.dl.rpc.models import API, Method
 from app.core.exceptions import KaloscopeException
 
 
@@ -28,7 +30,7 @@ def _config(methods, **kwargs):
     return RpcConfig(name="Test", host="localhost", port=80, methods=methods, **kwargs)
 
 
-def _call(cfg, handler, method="list", variables=None):
+def _call(cfg, handler, method: Method = "list", variables=None):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             return await RpcClient(cfg, http).call(method, variables)
@@ -332,7 +334,11 @@ def test_xunlei_tasks(app, variables):
             },
         )
 
-    first, second = _call(_xunlei_config(), handler, variables=variables)
+    tasks = _call(_xunlei_config(), handler, variables=variables)
+    assert isinstance(tasks, list)
+    first, second = tasks
+    assert isinstance(first, dict)
+    assert isinstance(second, dict)
     assert (first["state"], first["dl_speed"], first["error_msg"]) == ("paused", 0, "")
     assert first["files"] == []
     assert second["files"] is None
@@ -380,7 +386,10 @@ def test_xunlei_errors(app, phase, params, message):
         )
 
     cfg = _xunlei_config()
-    task = _call(cfg, handler)[0]
+    tasks = _call(cfg, handler)
+    assert isinstance(tasks, list)
+    (task,) = tasks
+    assert isinstance(task, dict)
     assert task["state"] == "error"
     assert task["error_msg"] == message
     assert task["percentage"] == task["completed_size"] == 37
@@ -608,7 +617,9 @@ def test_xunlei_details(app, tmp_path):
             },
         )
 
-    assert _call(cfg, handler, "details", {"id": "done"})["files"] == [
+    details = _call(cfg, handler, "details", {"id": "done"})
+    assert isinstance(details, dict)
+    assert details["files"] == [
         str(nested / "two.mkv"),
         str(folder / "one.mkv"),
     ]
@@ -668,4 +679,6 @@ def test_xunlei_missing_files_recover(app, tmp_path, monkeypatch, availability):
     file = path / "movie.mkv" if directory else path
     file.write_bytes(b"done")
     params["real_path"] = str(path)
-    assert _call(cfg, handler, "details", {"id": "done"})["files"] == [str(file)]
+    details = _call(cfg, handler, "details", {"id": "done"})
+    assert isinstance(details, dict)
+    assert details["files"] == [str(file)]

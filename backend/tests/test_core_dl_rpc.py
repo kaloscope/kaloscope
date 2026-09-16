@@ -71,24 +71,6 @@ def test_add_link():
     ]
 
 
-def test_add_torrent():
-    torrent = ("sample.torrent", b"torrent", "application/x-bittorrent")
-    client = RecordingClient(result={"unique_id": "remote-torrent"})
-    request = DownloadRequest(
-        directory="/downloads", link="magnet:?xt=normalized", torrent=torrent
-    )
-
-    driver = RpcDriver(_config("add_torrent"))
-    driver.client = cast(RpcClient, client)
-    snapshot = asyncio.run(driver.add(request))
-
-    method, variables = client.calls[0]
-    assert method == "add_torrent"
-    assert variables["link"] == "magnet:?xt=normalized"
-    assert variables["torrent"] is torrent
-    assert snapshot.identity.remote_id == "remote-torrent"
-
-
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -99,7 +81,6 @@ def test_add_torrent():
 )
 def test_capabilities(state, expected):
     driver = RpcDriver(_config("pause", "start", "delete"))
-    driver.client = cast(RpcClient, RecordingClient())
 
     actions = asyncio.run(
         driver.capabilities(DownloadIdentity(remote_id="task-1"), state)

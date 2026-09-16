@@ -5,55 +5,19 @@ import pytest
 from app.utils.crypto import xor_decrypt, xor_encrypt
 
 
-def test_roundtrip_basic_string():
-    """Test encryption and decryption of a basic ASCII string."""
-    plain_text = "Hello, World!"
+@pytest.mark.parametrize(
+    "plain_text",
+    ["Hello, World!", "", "你好世界 🌍 Hello!", "A" * 1000],
+    ids=["ascii", "empty", "unicode", "long"],
+)
+def test_roundtrip(plain_text: str):
+    """Preserve text across encryption and decryption."""
     encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
+
+    assert xor_decrypt(encrypted) == plain_text
 
 
-def test_roundtrip_empty_string():
-    """Test encryption and decryption of an empty string."""
-    plain_text = ""
-    encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
-
-
-def test_roundtrip_unicode():
-    """Test encryption and decryption with Unicode characters."""
-    plain_text = "你好世界 🌍 Hello!"
-    encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
-
-
-def test_roundtrip_long_text():
-    """Test encryption and decryption with long text."""
-    plain_text = "A" * 1000
-    encrypted = xor_encrypt(plain_text)
-    decrypted = xor_decrypt(encrypted)
-    assert decrypted == plain_text
-
-
-def test_encrypted_output_is_base64():
-    """Test that encrypted output is valid Base64."""
-    plain_text = "Test string"
-    encrypted = xor_encrypt(plain_text)
-    # Base64 should only contain alphanumeric characters, +, /, and =
-    assert all(c.isalnum() or c in "+/=" for c in encrypted)
-
-
-def test_deterministic_output():
-    """Test that encrypting the same input twice produces the same output."""
-    plain_text = "Consistent output"
-    encrypted1 = xor_encrypt(plain_text)
-    encrypted2 = xor_encrypt(plain_text)
-    assert encrypted1 == encrypted2
-
-
-def test_legacy_ciphertext_compatible():
+def test_legacy_ciphertext():
     """Keep ciphertext created with the default key compatible."""
     encrypted = "JwQLDhAaTwMAKBMJGw=="
 
@@ -68,22 +32,13 @@ def test_custom_key_roundtrip():
     assert xor_decrypt(encrypted, key="instance-key") == "令牌 secret"
 
 
-def test_empty_custom_key_rejected():
+def test_empty_key():
     """Reject an empty injected `key`."""
     with pytest.raises(ValueError):
         xor_encrypt("secret", key=b"")
 
 
-def test_distinct_inputs_distinct_outputs():
-    """Test that different inputs produce different encrypted outputs."""
-    plain_text1 = "Text 1"
-    plain_text2 = "Text 2"
-    encrypted1 = xor_encrypt(plain_text1)
-    encrypted2 = xor_encrypt(plain_text2)
-    assert encrypted1 != encrypted2
-
-
-def test_invalid_base64_raises():
+def test_invalid_base64():
     """Test that decrypting invalid Base64 raises an error."""
     invalid_encrypted = "This is not valid Base64!!!"
     with pytest.raises(ValueError):

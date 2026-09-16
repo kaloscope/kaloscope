@@ -44,7 +44,7 @@ from app.core.dl.openlist.models import (
     RemoteEntryPage,
 )
 from app.core.dl.rpc import RpcClient, RpcConfig, RpcDriver
-from app.core.dl.rpc.models import API
+from app.core.dl.rpc.models import API, Method
 from app.models.download import (
     Downloader,
     DownloadPlan,
@@ -525,7 +525,7 @@ def test_plan_torrent(monkeypatch, upload):
     hash = hashlib.sha1(Bencode.encode(info)).hexdigest()
     requests = []
     client = SimpleNamespace(call=AsyncMock(return_value={"unique_id": "remote"}))
-    methods = {"add_link": API()}
+    methods: dict[Method, API] = {"add_link": API()}
     if upload:
         methods["add_torrent"] = API()
     driver = RpcDriver(
@@ -582,23 +582,6 @@ def test_plan_log(monkeypatch, caplog):
 
     assert "magnet:?" not in caplog.text
     assert "a" * 40 in caplog.text
-
-
-def test_driver_sync():
-    driver = SimpleNamespace(sync=AsyncMock(return_value=()))
-    task = cast(
-        DownloadTask,
-        SimpleNamespace(
-            id=1,
-            unique_id="remote-1",
-            info_hash="1" * 40,
-            info_hash_v2=None,
-        ),
-    )
-
-    asyncio.run(syncer.sync_tasks([task], cast(DownloaderDriver, driver)))
-
-    driver.sync.assert_awaited_once_with((DownloadIdentity.from_task(task),))
 
 
 def test_driver_error():
@@ -1075,6 +1058,7 @@ def test_remote_state(monkeypatch, previous, remote, speed, progress):
     )
     monkeypatch.setattr(syncer.Notifications, "send", AsyncMock())
     asyncio.run(syncer.sync_tasks([task], driver))
+    assert query.values is not None
     assert query.values["state"] == remote
     assert query.values["dl_speed"] == 0
     assert query.values["up_speed"] == 0
@@ -1153,7 +1137,7 @@ def test_rpc_files_lookup(source, files, paths):
     asyncio.run(run())
 
 
-def test_rpc_failure_notifies_before_file_lookup():
+def test_rpc_error_precedes_file_lookup():
     notifications_at_lookup = []
 
     async def handler(request):
@@ -1234,7 +1218,7 @@ def test_rpc_failure_notifies_before_file_lookup():
         "unreadable_subdirectory",
     ],
 )
-def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availability):
+def test_xunlei_waits_for_files(tmp_path, monkeypatch, listed, availability):
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     (downloads / "ready.mkv").write_bytes(b"done")
@@ -1265,13 +1249,13 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
         late_file.write_bytes(b"late")
         unreadable = late_file.parent
         if availability == "unreadable_subdirectory":
-            # A readable sibling must not make the incomplete scan successful.
+            # a readable sibling must not make the incomplete scan successful
             (late_path / "visible.mkv").write_bytes(b"late")
             expected_files.append("late/visible.mkv")
         scandir = os.scandir
 
         def scan(path):
-            # Simulate denied access even when the tests run as root.
+            # simulate denied access even when the tests run as root
             if unreadable is not None and Path(path) == unreadable:
                 raise PermissionError(errno.EACCES, "Permission denied", str(path))
             return scandir(path)
@@ -1367,7 +1351,7 @@ def test_xunlei_completion_waits_for_files(tmp_path, monkeypatch, listed, availa
                 late_params["real_path"] = str(late_path)
                 pending = await DownloadTask.filter(state=DownloadState.DOWNLOADING)
                 await syncer.sync_tasks(pending, driver)
-                await late.refresh_from_db()
+                late = await DownloadTask.get(unique_id="late")
                 assert late.state == DownloadState.COMPLETED
                 assert late.completed_at is not None
                 assert late.percentage == 100

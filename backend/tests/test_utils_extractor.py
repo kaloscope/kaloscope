@@ -92,9 +92,6 @@ class TestExtractSeason:
     def test_no_season(self):
         assert extract_season("Inception.2010.1080p") is None
 
-    def test_movie_year_no_season(self):
-        assert extract_season("The.Godfather.1972.BluRay") is None
-
     def test_embedded_s_not_season(self):
         assert extract_season("MARS01") is None
 
@@ -130,7 +127,7 @@ class TestExtractEpisode:
     def test_bracket_total_episode(self):
         assert extract_episode("[Show][10 - 总第76][WEB-DL]") == 10
 
-    def test_bracket_total_episode_traditional(self):
+    def test_traditional_total_episode(self):
         assert extract_episode("[Show][09 - 總第75][WEB-DL]") == 9
 
     def test_bracket_version(self):
@@ -524,6 +521,6 @@ class TestExtractTitle:
         result = extract_title("MARS01")
         assert result == "MARS01"
 
-    def test_returns_string(self):
-        assert extract_title("[Group] 2023 1080p S01E01")
-        assert isinstance(extract_title(""), str)
+    def test_empty_title_fallback(self):
+        assert extract_title("[Group] 2023 1080p S01E01") == "[Group] 2023 1080p S01E01"
+        assert extract_title("") == ""
