@@ -275,7 +275,8 @@
         url: buildStreamUrl(media.path),
         back: () => (playing = false),
         title: mediaTitle(media),
-        startTime: w.position
+        startTime: w.position,
+        danmakuServer: media.lib?.danmaku_server
       });
     });
   }

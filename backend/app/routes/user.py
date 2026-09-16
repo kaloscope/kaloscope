@@ -156,9 +156,7 @@ async def list_histories(request: Request, query: HistoryQuery) -> HTTPResponse:
             elif rel_type == HistoryType.VIDEO:
                 media = await MediaItem.get_or_none(id=rel_id)
                 if media is not None:
-                    media = await MediaItemService.dump(
-                        media, exclude={"lib", "children"}
-                    )
+                    media = await MediaItemService.dump(media, exclude={"children"})
                 his["media"] = media
     return json(result)
 
