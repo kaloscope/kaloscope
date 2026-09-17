@@ -6,7 +6,7 @@
 
 <div align="center">
 
-![Kaloscope](https://socialify.git.ci/kaloscope/kaloscope/image?custom_description=%E4%BB%A5%E5%8F%AF%E8%A7%86%E5%8C%96%E5%B7%A5%E4%BD%9C%E6%B5%81%E9%A9%B1%E5%8A%A8%E7%9A%84%E6%9C%AC%E5%9C%B0%E5%AA%92%E4%BD%93%E5%BA%93%E7%AE%A1%E7%90%86%E5%B7%A5%E5%85%B7&description=1&font=Raleway&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkaloscope%2Fkaloscope%2Frefs%2Fheads%2Fmain%2Ffrontend%2Fstatic%2Flogo.png&name=1&owner=1&pattern=Plus&theme=Auto)
+![Kaloscope](banner.png)
 [![GitHub Release](https://img.shields.io/github/v/release/kaloscope/kaloscope?label=Release&color=green&style=flat-square)](https://github.com/kaloscope/kaloscope/releases)
 [![GitHub Stars](https://img.shields.io/github/stars/kaloscope/kaloscope?logo=github&label=Stars&color=yellow&style=flat-square)](https://github.com/kaloscope/kaloscope/stargazers)
 [![Docker Pulls](https://img.shields.io/docker/pulls/kaloscope/kaloscope?logo=docker&label=Docker%20Pulls&color=2496ED&style=flat-square)](https://hub.docker.com/r/kaloscope/kaloscope)
