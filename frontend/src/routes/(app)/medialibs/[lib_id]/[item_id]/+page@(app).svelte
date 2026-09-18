@@ -70,7 +70,8 @@
         url: buildStreamUrl(target.path),
         back: () => (playing = false),
         title: mediaTitle(target),
-        chapters: chapters
+        chapters: chapters,
+        danmakuServer: target.lib?.danmaku_server
       });
     });
   }

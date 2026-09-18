@@ -31,6 +31,8 @@
     videoType: string;
     /** The danmakus (video comments) to be displayed on the video. */
     danmakus: Danmaku[];
+    /** The danmaku server configured for the current media library. */
+    danmakuServer: string;
     /** The video chapters for TV shows or multi-part videos. */
     chapters: Chapter[];
     chapterId: string;
@@ -153,6 +155,8 @@
   let player: Player | null = $state(null);
   // the video settings instance
   let videoSettings: VideoSettings;
+  // the danmaku server URL
+  let danmakuServer: string | null = $state(null);
 
   // the plugins used in the player
   let mobilePlugin: MobilePlugin | null = $derived.by(() => player?.getPlugin('mobile'));
@@ -291,6 +295,7 @@
     }
 
     let url = resolvePlaybackUrl(options.url, options.videoType);
+    danmakuServer = options.danmakuServer ?? null;
 
     // store the raw danmakus for later use
     videoSettings.setDanmakus(options.danmakus);
@@ -597,7 +602,7 @@
 </div>
 
 <!-- The video settings component. -->
-<VideoSettings bind:this={videoSettings} {player} />
+<VideoSettings bind:this={videoSettings} {player} {danmakuServer} />
 
 <style>
   :global {

@@ -248,7 +248,7 @@
 <script lang="ts">
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
-  import { Button, confirm, Modal, Overlay, Range, Select } from '$lib/components';
+  import { alert, Button, confirm, Modal, Overlay, Range, Select } from '$lib/components';
   import { EMPTY_SIGN, MEDIA_STREAM_PREFIX } from '$lib/constants';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
@@ -260,7 +260,7 @@
   import HLS from 'xgplayer-hls';
   import { videoPlugins } from './plugins/preset';
 
-  let { player }: { player: Player | null } = $props();
+  let { player, danmakuServer }: { player: Player | null; danmakuServer: string | null } = $props();
   // whether the current video is a local media file
   let localMedia: boolean = $derived.by(() => {
     const url = player?.config.url;
@@ -299,6 +299,7 @@
   let rawDanmakus: Danmaku[] = [];
 
   // the manual danmaku search states
+  let mediaPath: string = $state('');
   let animeTitle: string = $derived.by(() => danmakuMeta?.anime_title ?? '');
   let results: DanmakuMeta[] = $state([]);
   let index: number = $state(-1);
@@ -718,6 +719,7 @@
     // fetch the danmakus matched with the current video
     const url = player?.config.url as string;
     const path = extractStreamPath(url);
+    mediaPath = path;
     api
       .post('danmaku/match', { json: { path } })
       .json<Resp<DanmakuWrapper>>()
@@ -751,6 +753,10 @@
    */
   function searchEpisodes() {
     if (!localMedia || $searching !== null || !animeTitle.trim()) {
+      return;
+    }
+    if (!danmakuServer) {
+      alert({ level: 'warning', message: 'danmaku_server_required' });
       return;
     }
     searching.start();
@@ -1203,6 +1209,7 @@
               onclick={() => searchEpisodes()}
             />
           </div>
+          <div class="px-1 text-xs text-white/30">{mediaPath}</div>
           <div
             class="relative mt-2 h-40 overflow-y-auto rounded-box border"
             style="border-color: color-mix(in oklab, #fff 10%, transparent) !important;"
