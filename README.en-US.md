@@ -148,21 +148,9 @@ The parameters used above are described below.
 - Installable on desktop and mobile devices as a [`PWA`](https://web.dev/explore/progressive-web-apps)
 - PWA Theme color stays synchronized with the active application Theme
 
-## Project Activity
+## Star History
 
-<p>
-  <img
-    src="https://repobeats.axiom.co/api/embed/58d741284255abb4aa36853855299d721a2fd376.svg"
-    alt="Repobeats"
-    width="100%"
-  />
-</p>
-
-<p>
-  <a href="https://gitstock.org/kaloscope/kaloscope">
-    <img src="https://gitstock.org/kaloscope/kaloscope/stock.svg" alt="GitStock" width="100%" />
-  </a>
-</p>
+[![Star History Chart](https://api.star-history.com/chart?repos=kaloscope/kaloscope&type=date&legend=top-left)](https://www.star-history.com/?repos=kaloscope%2Fkaloscope&type=date&legend=top-left)
 
 ## Contributors
 
