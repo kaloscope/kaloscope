@@ -14,7 +14,6 @@ from tortoise.transactions import in_transaction
 from watchdog.events import (
     EVENT_TYPE_CREATED,
     EVENT_TYPE_DELETED,
-    EVENT_TYPE_MODIFIED,
     EVENT_TYPE_MOVED,
     DirCreatedEvent,
     DirDeletedEvent,
@@ -31,10 +30,16 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
+from app.core.media.organizer import (
+    OrganizePendingError,
+    organize_items,
+    recover_organizing,
+)
 from app.core.media.shelver import is_nfo, update_metadata
 from app.models.flow import GraphCategory
-from app.models.media import MediaEvent, MediaItem, MediaLib
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, UserHistory
 from app.services.flow import FlowTriggerService
 from app.utils.crypto import encrypt
@@ -242,7 +247,20 @@ class LibWatcher:
         """
         events = Queue()
         # load existing events from the database for the library
-        for event in await MediaEvent.filter(lib_id=lib.id):
+        try:
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+        except OrganizePendingError:
+            # keep the application available while this library's consumer and scans
+            # remain blocked until recovery succeeds
+            logger.error(
+                "Media library %s has an organization awaiting recovery",
+                lib.id,
+                exc_info=True,
+            )
+        for event in await MediaEvent.filter(lib_id=lib.id).exclude(
+            event_type="organize"
+        ):
             event.lib = lib
             events.put(event)
         return events
@@ -254,6 +272,7 @@ class LibWatcher:
             events: The queue to store media events.
         """
         while True:
+            event = None
             try:
                 if not events.empty():
                     event: MediaEvent = events.get_nowait()
@@ -264,8 +283,10 @@ class LibWatcher:
             except asyncio.CancelledError:
                 break
             except Exception:
+                if event is not None:
+                    events.put(event)
                 logger.error("Failed to consume the media event!", exc_info=True)
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
 
     async def _delay_scan(self, lib: MediaLib, *, delay: int = 0):
         """Run the initial scan after an optional delay.
@@ -313,9 +334,12 @@ class LibWatcher:
         try:
             if lib is None:
                 lib = await MediaLib.filter(dir=path).get()
-            await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+                await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
         finally:
-            self._scanning_paths.remove(path)
+            if path in self._scanning_paths:
+                self._scanning_paths.remove(path)
 
     async def _enqueue_events(self, lib: MediaLib, *, backfill_nfo_events: bool = True):
         """Scan the directory for existing files and enqueue events.
@@ -413,64 +437,144 @@ class LibWatcher:
         return path in self._scanning_paths
 
 
-async def consume_event(event: MediaEvent):
-    """Consume the media event.
+def _remap_path(path: str, moves: dict[str, str]) -> str:
+    """Apply the most specific path change to a pending workflow parameter.
 
     Args:
-        event: The media event.
+        path: The original file or directory path in the workflow parameters.
+        moves: The mapping from original file or directory paths to their targets.
+
+    Returns:
+        The path with its longest matching prefix replaced, or the original path
+        if no mapping applies.
+    """
+    current = Path(path)
+    for old, new in sorted(moves.items(), key=lambda pair: len(pair[0]), reverse=True):
+        if current.is_relative_to(old):
+            return str(Path(new) / current.relative_to(old))
+    return path
+
+
+async def consume_event(event: MediaEvent):
+    """Consume an event using current library settings, preserving media identity.
+
+    Args:
+        event: The persisted media event to process.
+
+    Raises:
+        OrganizePendingError: If a pending or newly started organization cannot
+            finish safely.
+    """
+    lib = await MediaLib.get_or_none(id=event.lib_id)
+    if lib is None:
+        return
+    async with library_lock(lib.dir):
+        await lib.refresh_from_db()
+        await recover_organizing(lib)
+        if not await MediaEvent.filter(id=event.id).exists():
+            return
+        event.lib = lib
+        pending = await _consume_event(event)
+    # fire workflows after releasing the library lock they also use to write NFOs
+    for params in pending:
+        await FlowTriggerService.fire(
+            GraphCategory.INGEST, event.lib_id, bootparams=params
+        )
+    await event.delete()
+
+
+async def _consume_event(event: MediaEvent):
+    """Update metadata first, then organize outside the metadata transaction.
+
+    The caller must hold the library lock and recover pending organization plans.
+
+    Args:
+        event: The media event with its current library instance attached.
+
+    Returns:
+        The ingest workflow parameter dictionaries using the current media paths.
+
+    Raises:
+        OrganizePendingError: If organization cannot finish safely.
     """
     result: list[MediaPathInfo] | None = None
+    affected: list[int] = []
+    target = Path(event.dest_path or event.src_path)
     async with in_transaction("default"):
-        # delete the consumed event
-        await event.delete()
-        # handle the event based on its type
-        if event.event_type == EVENT_TYPE_MODIFIED:
-            await _handle_modified(event)
-        elif event.event_type == EVENT_TYPE_DELETED:
-            await _handle_deleted(event)
+        if event.event_type == EVENT_TYPE_DELETED:
+            # ignore stale deletion events queued before organization finished
+            if not Path(event.src_path).exists():
+                await _handle_deleted(event)
+        elif is_nfo(target):
+            if event.event_type == EVENT_TYPE_MOVED:
+                await _handle_deleted(event)
+            affected.extend(await update_metadata(event.lib, target))
         elif event.event_type == EVENT_TYPE_MOVED:
-            result = await _handle_moved(event)
+            # skip reindexing when organization already moved the original record
+            known = await MediaItem.filter(
+                lib_id=event.lib_id, path=str(target)
+            ).exists()
+            source = await MediaItem.filter(
+                lib_id=event.lib_id, path=event.src_path
+            ).exists()
+            if not (known and not source):
+                result = await _handle_moved(event)
         elif event.event_type == EVENT_TYPE_CREATED:
             result = await _handle_created(event)
 
-    if result:
-        for path_info in result:
-            # parse the NFO file if it exists
-            nfo_path = path_info.nfo_path
-            if nfo_path is not None:
-                await update_metadata(event.lib, nfo_path)
+        for info in result or []:
+            if info.nfo_path is not None:
+                affected.extend(await update_metadata(event.lib, info.nfo_path))
 
-            # fire the flow triggers
-            await FlowTriggerService.fire(
-                GraphCategory.INGEST,
-                event.lib_id,
-                bootparams={
-                    "item_path": path_info.item_path,
-                    "item_name": path_info.item_name,
-                    "nfo_path": str(nfo_path) if nfo_path else None,
-                    "nfo_type": path_info.nfo_type,
-                    "language": path_info.language,
-                    "title": path_info.title,
-                    "year": path_info.year,
-                    "season": path_info.season,
-                    "episode": path_info.episode,
-                    "series_id": path_info.series_id,
-                    "nfo_source": path_info.nfo_source,
-                    "page_num": 1,
-                    "page_size": 1,
-                },
-            )
+    if affected:
+        moves = await organize_items(event.lib, list(set(affected)))
+        for info in result or []:
+            info.path = Path(_remap_path(str(info.path), moves))
+            if info.nfo_path is not None:
+                info.nfo_path = Path(_remap_path(str(info.nfo_path), moves))
 
-
-async def _handle_modified(event: MediaEvent):
-    """Handle the modification event.
-
-    Args:
-        event: The media event.
-    """
-    src_path = Path(event.src_path)
-    if is_nfo(src_path):
-        await update_metadata(event.lib, src_path)
+    pending = []
+    for info in result or []:
+        # skip removed parents when a movie is flattened into the library root
+        if info.item_id is not None:
+            current = await MediaItem.get_or_none(id=info.item_id)
+            if current is None:
+                continue
+            info.path = Path(current.path)
+            if current.nfo_path:
+                info.nfo_path = Path(current.nfo_path)
+            for field in ("year", "season", "episode"):
+                if (value := getattr(current, field)) is not None:
+                    setattr(info, field, value)
+            if current.parent_id and event.lib.lib_type == LibType.TV_SHOW:
+                parent = await MediaItem.get_or_none(id=current.parent_id)
+                if parent is not None:
+                    info.title = parent.title or info.title
+                    info.series_id = parent.unique_id
+                    info.nfo_source = parent.nfo_source
+                    if parent.year is not None:
+                        info.year = parent.year
+            elif current.title:
+                info.title = current.title
+        pending.append(
+            {
+                "item_id": info.item_id,
+                "item_path": info.item_path,
+                "item_name": info.item_name,
+                "nfo_path": str(info.nfo_path) if info.nfo_path else None,
+                "nfo_type": info.nfo_type,
+                "language": info.language,
+                "title": info.title,
+                "year": info.year,
+                "season": info.season,
+                "episode": info.episode,
+                "series_id": info.series_id,
+                "nfo_source": info.nfo_source,
+                "page_num": 1,
+                "page_size": 1,
+            }
+        )
+    return pending
 
 
 async def _handle_deleted(event: MediaEvent):
@@ -560,6 +664,22 @@ async def _handle_created(event: MediaEvent) -> list[MediaPathInfo] | None:
     if is_nfo(path):
         await update_metadata(event.lib, path)
         return None
+
+    existing = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(path))
+    if existing is not None:
+        nfo_path = existing.nfo_path
+        parent = (
+            await MediaItem.get_or_none(id=existing.parent_id)
+            if existing.parent_id
+            else None
+        )
+        if not nfo_path and event.lib.lib_type == LibType.MOVIE:
+            nfo_path = parent.nfo_path if parent else None
+        parent_ready = event.lib.lib_type != LibType.TV_SHOW or (
+            parent is not None and parent.nfo_path and Path(parent.nfo_path).is_file()
+        )
+        if parent_ready and nfo_path and Path(nfo_path).is_file():
+            return None
 
     # generate media items
     handler = get_handler(event.lib.lib_type)

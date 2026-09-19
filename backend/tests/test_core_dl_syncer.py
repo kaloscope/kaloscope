@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from app.core.dl.driver import (
     DownloadRequest,
     DownloadSnapshot,
 )
+from app.core.dl.openlist import puller
 from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.driver import OpenListDriver
 from app.core.dl.openlist.manifest import (
@@ -220,7 +222,7 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
 
             with monkeypatch.context() as patcher:
                 if scenario == "copy":
-                    patcher.setattr(syncer.shutil, "copy2", interrupted_copy)
+                    patcher.setattr(puller.shutil, "copy2", interrupted_copy)
                 else:
                     patcher.setattr(
                         syncer.Notifications,
@@ -253,6 +255,256 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
             assert await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 1
         finally:
             await driver.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+async def _create_transfer_task(tmp_path, method, files):
+    downloader = await Downloader.create(config="config", name="RPC", priority=1)
+    library = await MediaLib.create(
+        dir=str(tmp_path / "library"),
+        name="library",
+        priority=1,
+        lib_type=LibType.MOVIE,
+    )
+    source = tmp_path / "downloads"
+    source.mkdir()
+    for name in files:
+        (source / name).write_bytes(name.encode())
+    task = await DownloadTask.create(
+        downloader=downloader,
+        dir=str(source),
+        name="movie",
+        files=files,
+        state=DownloadState.COMPLETED,
+        transfer_lib=library,
+        transfer_method=method,
+    )
+    return task, library
+
+
+@pytest.mark.parametrize("method", list(TransferMethod))
+def test_transfer_retry(tmp_path, monkeypatch, method):
+    from app.core.media import organizer
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            await syncer.transfer_files(task, task.files)
+            original = Path(library.dir) / "movie.mkv"
+            organized = Path(library.dir) / "Organized.mkv"
+            assert task.transfer_targets == {"movie.mkv": str(original)}
+            original.rename(organized)
+
+            async def finish_organizing(current_library):
+                assert current_library.id == library.id
+                await DownloadTask.filter(id=task.id).update(
+                    transfer_targets={"movie.mkv": str(organized)}
+                )
+                return {str(original): str(organized)}
+
+            recovery = AsyncMock(side_effect=finish_organizing)
+            monkeypatch.setattr(organizer, "recover_organizing", recovery)
+
+            # keep the stale instance to exercise the locked database refresh
+            await syncer.transfer_files(task, task.files)
+            recovery.assert_awaited_once()
+            await task.refresh_from_db()
+            assert task.transfer_targets == {"movie.mkv": str(organized)}
+            assert task.files == ["movie.mkv"]
+            assert organized.read_bytes() == b"movie.mkv"
+            assert not original.exists()
+            source = Path(task.dir) / "movie.mkv"
+            assert source.exists() is (method is not TransferMethod.MOVE)
+            if method is TransferMethod.HARDLINK:
+                assert os.path.samefile(source, organized)
+            elif method is TransferMethod.SYMLINK:
+                assert organized.is_symlink()
+                assert organized.readlink() == source
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("delete_library", [False, True])
+def test_transfer_detach(tmp_path, monkeypatch, delete_library):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        running = None
+        try:
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.MOVE, ["movie.mkv"]
+            )
+            requested = asyncio.Event()
+            lock = syncer.library_lock
+
+            def waiting_lock(directory):
+                requested.set()
+                return lock(directory)
+
+            monkeypatch.setattr(syncer, "library_lock", waiting_lock)
+            async with lock(library.dir):
+                running = asyncio.create_task(syncer.transfer_files(task, task.files))
+                await asyncio.wait_for(requested.wait(), 2)
+                assert not running.done()
+                if delete_library:
+                    await MediaLib.filter(id=library.id).delete()
+                else:
+                    await DownloadTask.filter(id=task.id).update(transfer_lib_id=None)
+
+            await asyncio.wait_for(running, 2)
+            await task.refresh_from_db()
+            assert task.transfer_lib_id is None
+            assert task.transfer_targets is None
+            assert not (Path(library.dir) / "movie.mkv").exists()
+            assert (Path(task.dir) / "movie.mkv").read_bytes() == b"movie.mkv"
+        finally:
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_transfer_backfill(tmp_path):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["movie.mkv", "missing.mkv", "organized.mkv"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            task.sub_pattern = r"^"
+            task.sub_repl = "legacy/"
+            organized = Path(library.dir) / "Final.mkv"
+            task.transfer_targets = {"organized.mkv": str(organized)}
+            await task.save()
+            destination = Path(library.dir) / "legacy/movie.mkv"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"existing")
+            organized.write_bytes(b"organized")
+
+            async with syncer.library_lock(library.dir):
+                await syncer.backfill_transfer_targets(library)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {
+                "organized.mkv": str(organized),
+                "movie.mkv": str(destination),
+            }
+            assert not (Path(library.dir) / "legacy/missing.mkv").exists()
+            assert (Path(task.dir) / "movie.mkv").read_bytes() == b"movie.mkv"
+
+            # recognize legacy destinations during ordinary transfer
+            await DownloadTask.filter(id=task.id).update(transfer_targets=None)
+            await syncer.transfer_files(task, ["movie.mkv"])
+            await task.refresh_from_db()
+            assert task.transfer_targets == {"movie.mkv": str(destination)}
+            assert destination.read_bytes() == b"existing"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_partial_transfer(tmp_path, monkeypatch):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["first.mkv", "second.mkv"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            copy_file = puller.shutil.copy2
+
+            def interrupted_copy(source, destination):
+                if Path(source).name == "second.mkv":
+                    Path(destination).write_bytes(b"partial")
+                    raise OSError(errno.ENOSPC, "Disk is full")
+                return copy_file(source, destination)
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(puller.shutil, "copy2", interrupted_copy)
+                with pytest.raises(OSError, match="Disk is full"):
+                    await syncer.transfer_files(task, files)
+            await task.refresh_from_db()
+            first = Path(library.dir) / files[0]
+            second = Path(library.dir) / files[1]
+            assert task.transfer_targets == {files[0]: str(first)}
+            assert not second.exists()
+            async with syncer.library_lock(library.dir):
+                await syncer.backfill_transfer_targets(library)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {files[0]: str(first)}
+
+            await syncer.transfer_files(task, files)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {
+                files[0]: str(first),
+                files[1]: str(second),
+            }
+            assert second.read_bytes() == b"second.mkv"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_transfer_cancellation(tmp_path, monkeypatch):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        started = threading.Event()
+        finish = threading.Event()
+        acquired = asyncio.Event()
+        running = contender = None
+        try:
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, ["movie.mkv"]
+            )
+            transfer_file = syncer.transfer_local_file
+
+            def delayed_transfer(*args, **kwargs):
+                started.set()
+                assert finish.wait(5)
+                return transfer_file(*args, **kwargs)
+
+            async def acquire_library():
+                async with syncer.library_lock(library.dir):
+                    acquired.set()
+
+            monkeypatch.setattr(syncer, "transfer_local_file", delayed_transfer)
+            running = asyncio.create_task(syncer.transfer_files(task, task.files))
+            assert await asyncio.to_thread(started.wait, 2)
+            running.cancel()
+            contender = asyncio.create_task(acquire_library())
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(acquired.wait(), 0.2)
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            await asyncio.wait_for(contender, 2)
+            assert (Path(library.dir) / "movie.mkv").is_file()
+        finally:
+            finish.set()
+            pending = [task for task in (running, contender) if task is not None]
+            await asyncio.gather(*pending, return_exceptions=True)
             await Tortoise.close_connections()
 
     asyncio.run(run())

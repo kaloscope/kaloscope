@@ -62,6 +62,7 @@ class MediaLib(TortoiseModel):
     priority = IntField(unique=True)
     danmaku_server = CharField(max_length=255, null=True)
     danmaku_ttl = IntField(default=24)
+    rename_template = CharField(max_length=1024, null=True)
     # relational fields
     items: ReverseRelation["MediaItem"]
     events: ReverseRelation["MediaEvent"]
@@ -128,6 +129,7 @@ class MediaEvent(TortoiseModel):
     dest_path = CharField(max_length=4096, null=True)
     event_type = CharField(max_length=16)
     is_directory = BooleanField(default=False)
+    payload = JSONField[dict[str, Any] | None](null=True)
 
     class Meta:
         table = "media_event"
@@ -143,12 +145,19 @@ class MediaLibUpsert(BaseModel):
     language: str | None = None
     danmaku_server: str | None = Field(max_length=255, default=None)
     danmaku_ttl: int | None = Field(ge=0, le=8760, default=None)
+    rename_template: str | None = Field(max_length=1024, default=None)
     triggers: list[GraphRef] | None = None
 
     @model_validator(mode="after")
     def check_dir(self) -> Self:
         if not self.id and (not self.dir or not is_directory(self.dir)):
             raise ValueError(f"invalid directory: {self.dir}")
+        if self.rename_template is not None:
+            from app.core.media.naming import validate_template
+
+            self.rename_template = validate_template(
+                self.rename_template, self.lib_type
+            )
         return self
 
 

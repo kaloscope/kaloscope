@@ -1,17 +1,24 @@
+import asyncio
 import mimetypes
+import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from uuid import uuid4
 
 import aiofiles
 from lxml import etree
 from sanic.log import Colors, logger
+from tortoise.expressions import Q
 
 from app.core.constants import ENCODING, NFO_MIME_TYPE
 from app.core.flow.context import RETVAL_KEY, Context
+from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaMeta, get_handler
 from app.core.renderer import render
 from app.models.media import LibType, MediaItem, MediaLib, NFOType
+from app.utils.disk import rename_exclusive
 from app.utils.extractor import extract_title
 
 # the path to the NFO templates
@@ -116,7 +123,13 @@ def nfo_context(flow_ctx: Context) -> tuple[str, str, dict]:
 
 
 async def gen_nfo(
-    nfo_type: str, nfo_path: str, data: dict, *, overwrite: bool = False
+    nfo_type: str,
+    nfo_path: str,
+    data: dict,
+    *,
+    overwrite: bool = False,
+    item_id: int | None = None,
+    fallback: dict | None = None,
 ) -> bool:
     """Generate NFO file from the given context.
 
@@ -125,9 +138,58 @@ async def gen_nfo(
         nfo_path: The path to the NFO file to generate.
         data: The data to render the NFO file with.
         overwrite: Whether to overwrite the NFO file if it already exists.
+        item_id: The media item ID used to resolve the current NFO path under the
+            library lock, or None to use nfo_path directly.
+        fallback: The metadata dictionary used to fill missing parsed values after
+            writing when item_id is provided, or None to skip the metadata update.
 
     Returns:
         True if the NFO file is generated successfully, False otherwise.
+    """
+    if item_id is not None:
+        item = await MediaItem.get_or_none(id=item_id).select_related("lib")
+        if item is None:
+            return False
+        async with library_lock(item.lib.dir):
+            from app.core.media.organizer import recover_organizing
+
+            await recover_organizing(item.lib)
+            item = await MediaItem.get_or_none(id=item_id).select_related("lib")
+            if item is None:
+                return False
+            # the workflow may still hold a path from before organization
+            if not Path(item.path).exists():
+                return False
+            current_nfo = item.nfo_path or get_nfo_path(item.path)
+            written = await _write_nfo(
+                nfo_type,
+                current_nfo,
+                data,
+                overwrite=overwrite,
+            )
+            if written and fallback is not None:
+                await update_metadata(item.lib, current_nfo, fallback=fallback)
+            return written
+    return await _write_nfo(nfo_type, nfo_path, data, overwrite=overwrite)
+
+
+async def _write_nfo(
+    nfo_type: str, nfo_path: str, data: dict, *, overwrite: bool
+) -> bool:
+    """Publish a complete NFO without exposing partially written XML.
+
+    Args:
+        nfo_type: The NFO template type, such as "movie", "tvshow", or "episode".
+        nfo_path: The destination path of the NFO file.
+        data: The metadata dictionary used to render the NFO template.
+        overwrite: Whether to replace an existing NFO file.
+
+    Returns:
+        True if the NFO is published, or False if the parameters are invalid or
+        the destination already exists and overwrite is disabled.
+
+    Raises:
+        OSError: If the template cannot be read or the NFO cannot be written.
     """
     # validate the parameters
     if not nfo_type or not nfo_path or not data:
@@ -150,10 +212,28 @@ async def gen_nfo(
     async with aiofiles.open(tmpl_path, encoding=ENCODING) as f:
         template = await f.read()
 
-    # generate NFO file
-    mode = "w" if overwrite else "x"
-    async with aiofiles.open(nfo_path, mode, encoding=ENCODING) as f:
-        await f.write(render(template, context=data))
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        async with aiofiles.open(temporary, "x", encoding=ENCODING) as f:
+            await f.write(render(template, context=data))
+        if overwrite and path.exists() and not path.is_symlink():
+            temporary.chmod(path.stat().st_mode & 0o777)
+        publication = asyncio.create_task(
+            asyncio.to_thread(os.replace, temporary, path)
+            if overwrite
+            else asyncio.to_thread(rename_exclusive, temporary, path)
+        )
+        try:
+            await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            # keep the temporary file and library lock until publication stops
+            await publication
+            raise
+    except FileExistsError:
+        return False
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
     return True
 
 
@@ -192,13 +272,17 @@ def parse_nfo(lib_type: LibType, path: Path | str) -> MediaMeta | None:
 
 async def update_metadata(
     lib: MediaLib, path: Path | str, *, fallback: dict | None = None
-):
+) -> list[int]:
     """Update the metadata of the media item corresponding to the given NFO file.
 
     Args:
         lib: The media library instance.
         path: The path to the NFO file.
         fallback: The fallback metadata dictionary.
+
+    Returns:
+        The IDs of the updated media items, or an empty list if the NFO cannot be
+        parsed or no matching items exist.
     """
     # parse the NFO file to get the metadata
     if not isinstance(path, Path):
@@ -241,8 +325,13 @@ async def update_metadata(
             data["title"] = extract_title(path.stem)
 
         # match the media item by library, directory and name
-        await MediaItem.filter(
+        items = MediaItem.filter(
+            Q(nfo_path=str(path)) | Q(dir=str(path.parent), name=path.stem),
             lib_id=lib.id,
-            dir=str(path.parent),
-            name=path.stem,
-        ).update(**data)
+        )
+        # Tortoise's return annotation does not account for flat=True.
+        ids = cast(list[int], await items.values_list("id", flat=True))
+        if ids:
+            await MediaItem.filter(id__in=ids).update(**data)
+        return ids
+    return []

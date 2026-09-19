@@ -5,7 +5,6 @@ from app.core.flow.fields import ToggleField
 from app.core.flow.fields.code import CodeField
 from app.core.flow.handles import InputHandle
 from app.core.flow.nodes.base import CancellationSignal, Node, end_node
-from app.core.media.shelver import gen_nfo, nfo_context
 from app.models.flow import GraphCategory
 from app.utils import json
 
@@ -33,12 +32,14 @@ class MovieNode(Node):
 
     @classmethod
     async def execute(cls, *, node_data: dict[str, Any], context: Context, **kwargs):
+        from app.core.media.shelver import gen_nfo, nfo_context
+
         # extract the response
         context[RETVAL_KEY] = json.try_loads(
             cls.response.extract(node_data, context=context), with_comments=True
         )
         # generate NFO file
-        await gen_nfo(*nfo_context(context))
+        await gen_nfo(*nfo_context(context), item_id=context.bootparams.get("item_id"))
         # force end the flow if required
         if cls.force_end.extract(node_data):
             raise CancellationSignal

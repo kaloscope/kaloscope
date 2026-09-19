@@ -1,21 +1,25 @@
 import asyncio
 import hashlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiofiles
 from sanic import Sanic
 from sanic.log import logger
 from tortoise.expressions import Q
-from tortoise.transactions import atomic
+from tortoise.transactions import atomic, in_transaction
 
-from app.core.exceptions import ErrorCode, KaloscopeException
-from app.core.media.handlers.base import MediaPathInfo
+from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
+from app.core.media.coordination import library_lock
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata, NFOType
 from app.models.user import PermType, UserPermission
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
 from app.utils.disk import delete_path
+
+if TYPE_CHECKING:
+    from app.core.media.handlers.base import MediaPathInfo
 
 
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
@@ -68,12 +72,24 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                     raise KaloscopeException(ErrorCode.DUPLICATE_DIRECTORY)
 
         if obj.id:
+            from app.core.media.naming import validate_template
+
+            lib = await MediaLib.get(id=obj.id)
+            extra = {}
+            if "rename_template" in obj.model_fields_set:
+                try:
+                    extra["rename_template"] = validate_template(
+                        obj.rename_template or "", lib.lib_type
+                    )
+                except ValueError as exc:
+                    raise BadRequestException() from exc
             # update the media library
             await MediaLib.filter(id=obj.id).update(
                 name=obj.name,
                 language=obj.language or None,
                 danmaku_server=obj.danmaku_server,
                 danmaku_ttl=obj.danmaku_ttl,
+                **extra,
             )
             lib = await MediaLib.get(id=obj.id)
         else:
@@ -86,6 +102,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                 language=obj.language or None,
                 danmaku_server=obj.danmaku_server,
                 danmaku_ttl=obj.danmaku_ttl,
+                rename_template=obj.rename_template,
                 priority=(max(priorities) + 1 if priorities else 1),
             )
             # add the observer
@@ -100,7 +117,6 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         return lib
 
     @classmethod
-    @atomic()
     async def delete(cls, id: int):
         """Delete a media library.
 
@@ -108,10 +124,12 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             id: The media library ID.
         """
         lib = await MediaLib.get(id=id)
-        await MediaLib.filter(id=id).delete()
-        await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=id).delete()
-        await UserPermission.filter(rel_type=PermType.MEDIA_LIB, rel_id=id).delete()
-        # remove the observer
+        # wait for active filesystem writers before discarding their journals
+        async with library_lock(lib.dir), in_transaction("default"):
+            await MediaLib.filter(id=id).delete()
+            await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=id).delete()
+            await UserPermission.filter(rel_type=PermType.MEDIA_LIB, rel_id=id).delete()
+        # release the DB and library locks before waiting for consumer cancellation
         watcher = cls.app_ctx().lib_watcher
         await watcher.remove_observer(lib.dir)
 
@@ -129,21 +147,41 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             id: The media item ID.
             local: Whether to delete the local files.
         """
+        from app.core.media.organizer import recover_organizing
+
         if local:
-            item = await MediaItem.get(id=id)
-            path = Path(item.path)
-            if path.exists():
-                delete_path(path)
-            await item.delete()
+            item = await MediaItem.get(id=id).select_related("lib")
+            child_ids = await MediaItem.filter(parent_id=id).values_list(
+                "id", flat=True
+            )
+            async with library_lock(item.lib.dir):
+                await recover_organizing(item.lib)
+                current = await MediaItem.get_or_none(id=id)
+                # the parent may have been removed by organization while deletion waited
+                items = (
+                    [current]
+                    if current is not None
+                    else await MediaItem.filter(id__in=child_ids, lib_id=item.lib_id)
+                )
+                for current in items:
+                    path = Path(current.path)
+                    if path.exists():
+                        delete_path(path)
+                    await current.delete()
         else:
-            await MediaItem.filter(id=id).update(visible=False)
+            item = await MediaItem.get_or_none(id=id).select_related("lib")
+            if item is None:
+                return
+            async with library_lock(item.lib.dir):
+                await recover_organizing(item.lib)
+                await MediaItem.filter(id=id).update(visible=False)
 
     @classmethod
     async def create(
         cls,
         lib_id: int,
         *,
-        path_info: MediaPathInfo,
+        path_info: "MediaPathInfo",
         parent_id: int | None = None,
         default_title: str | None = None,
     ) -> MediaItem:
@@ -173,29 +211,36 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 "visible": True,
             },
         )
+        path_info.item_id = item.id
 
         # calculate hash and size for the newly created item
         if created:
-            asyncio.create_task(cls._hash_and_size(item.id, item_path))
+            asyncio.create_task(cls._hash_and_size(item.id))
 
         return item
 
     @classmethod
-    async def _hash_and_size(cls, item_id: int, item_path: str):
+    async def _hash_and_size(cls, item_id: int):
         """Calculate and persist the hash and size of a media file.
 
         Args:
             item_id: The media item ID.
-            item_path: The file path of the media item.
         """
-        path = Path(item_path)
-        if not path.is_file():
+        item = await MediaItem.get_or_none(id=item_id).select_related("lib")
+        if item is None:
             return
-        size = path.stat().st_size
-        md5 = hashlib.md5()
-        async with aiofiles.open(path, "rb") as f:
-            md5.update(await f.read(cls.HASH_READ_SIZE))
-        await MediaItem.filter(id=item_id).update(hash=md5.hexdigest(), size=size)
+        async with library_lock(item.lib.dir):
+            current = await MediaItem.get_or_none(id=item_id)
+            if current is None or not Path(current.path).is_file():
+                return
+            md5 = hashlib.md5()
+            try:
+                async with aiofiles.open(current.path, "rb") as f:
+                    md5.update(await f.read(cls.HASH_READ_SIZE))
+                size = Path(current.path).stat().st_size
+            except FileNotFoundError:
+                return
+            await MediaItem.filter(id=item_id).update(hash=md5.hexdigest(), size=size)
 
     @classmethod
     async def resolve_media_hash(cls, item_path: str) -> str:
@@ -226,12 +271,21 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         return md5.hexdigest()
 
     @classmethod
-    async def refresh_episodes(cls, item: MediaItem, meta: MediaMetadata):
+    async def refresh_episodes(
+        cls,
+        item: MediaItem,
+        meta: MediaMetadata,
+        *,
+        episode_ids: list[int] | None = None,
+    ):
         """Refresh the metadata of the episodes under a season.
 
         Args:
             item: The season media item.
             meta: The season metadata object.
+            episode_ids: The IDs of the episodes to refresh, or None to select the
+                current children of item. Explicit IDs preserve the requested scope
+                if organization merges or removes the parent.
         """
         from app.core.media.shelver import gen_nfo, get_nfo_path
 
@@ -249,7 +303,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         engine = Sanic.get_app().ctx.flow_engine
 
         # get the episodes under the season
-        episodes = await MediaItem.filter(parent_id=item.id)
+        episodes = await MediaItem.filter(
+            Q(id__in=episode_ids) if episode_ids is not None else Q(parent_id=item.id),
+            lib_id=item.lib_id,
+        )
         for e in episodes:
             episode = e.episode
             nfo_path = e.nfo_path
@@ -287,4 +344,6 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     result["season"] = _s if (_s := result.get("season")) else season
                     result["episode"] = _e if (_e := result.get("episode")) else episode
                     nfo_path = nfo_path or get_nfo_path(e.path)
-                    await gen_nfo(NFOType.EPISODE, nfo_path, result, overwrite=True)
+                    await gen_nfo(
+                        NFOType.EPISODE, nfo_path, result, overwrite=True, item_id=e.id
+                    )

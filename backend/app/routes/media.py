@@ -23,7 +23,6 @@ from app.core.media.shelver import (
     get_nfo_path,
     get_nfo_type,
     parse_nfo,
-    update_metadata,
 )
 from app.core.media.watcher import LibWatcher
 from app.core.transcode import (
@@ -185,13 +184,24 @@ async def generate_nfo(_, body: MediaMetadata, id: int) -> HTTPResponse:
         raise BadRequestException
     # overwrite the NFO file and update the metadata immediately
     lib = item.lib
+    episode_ids = (
+        await MediaItem.filter(parent_id=item.id).values_list("id", flat=True)
+        if lib.lib_type == LibType.TV_SHOW
+        else None
+    )
     nfo_type = get_nfo_type(lib.lib_type)
     nfo_path = item.nfo_path or get_nfo_path(item.path)
-    if await gen_nfo(nfo_type, nfo_path, body.metadata, overwrite=True):
-        await update_metadata(lib, nfo_path, fallback=body.metadata)
+    await gen_nfo(
+        nfo_type,
+        nfo_path,
+        body.metadata,
+        overwrite=True,
+        item_id=item.id,
+        fallback=body.metadata,
+    )
     # also update the metadata of the child episodes if it's a TV show
     if lib.lib_type == LibType.TV_SHOW:
-        await MediaItemService.refresh_episodes(item, body)
+        await MediaItemService.refresh_episodes(item, body, episode_ids=episode_ids)
     return empty()
 
 

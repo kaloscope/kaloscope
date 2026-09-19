@@ -3,7 +3,6 @@ import errno
 import hashlib
 import os
 import re
-import shutil
 from datetime import datetime, timedelta
 from functools import cached_property
 from multiprocessing.managers import DictProxy
@@ -31,6 +30,7 @@ from app.core.dl.openlist import OpenListDriver
 from app.core.dl.openlist.puller import transfer_local_file
 from app.core.dl.rpc import RpcClient, RpcDriver
 from app.core.flow.engine import FlowEngine
+from app.core.media.coordination import library_lock
 from app.core.notifications import Notifications, NotificationTemplate
 from app.core.renderer import is_template, render
 from app.models.base import TortoiseModel
@@ -765,29 +765,17 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
     return (metadata, gid)
 
 
-async def transfer_files(
-    task: DownloadTask, files: list[str] | None, *, job_id: str | None = None
-):
-    """Transfer completed download files to the media library directory.
+def _transfer_names(task: DownloadTask, files: list[str]) -> list[str]:
+    """Apply the download task's destination-name substitution.
 
     Args:
-        task: The download task.
+        task: The download task containing the substitution pattern and replacement.
         files: The relative file paths within the download directory.
-        job_id: The offline job UUID enabling recoverable copy publication.
+
+    Returns:
+        The destination paths in input order, or the original paths if substitution
+        is disabled or produces duplicate names.
     """
-    if not task.transfer_lib_id or not files:
-        return
-    lib = await MediaLib.get_or_none(id=task.transfer_lib_id)
-    if not lib:
-        return
-
-    src_dir = Path(task.dir)
-    dst_dir = Path(lib.dir)
-    if src_dir == dst_dir and not task.sub_pattern:
-        # no need to transfer if the source and destination are the same
-        # and no file name substitution is needed
-        return
-
     # apply file name substitution if sub_pattern is specified
     new_files = files
     if task.sub_pattern:
@@ -810,41 +798,105 @@ async def transfer_files(
         # discard replacement if duplicate file names arise
         if len(set(replaced)) == len(replaced):
             new_files = replaced
+    return new_files
 
-    for name, new_name in zip(files, new_files, strict=True):
-        src = src_dir / name
-        dst = dst_dir / new_name
-        if job_id is not None and task.transfer_method in {
-            TransferMethod.COPY,
-            TransferMethod.MOVE,
-        }:
-            transfer_local_file(
-                src, dst, job_id, move=task.transfer_method is TransferMethod.MOVE
-            )
-            continue
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue
 
-        # create parent directory if it doesn't exist
-        dst.parent.mkdir(parents=True, exist_ok=True)
+async def backfill_transfer_targets(lib: MediaLib):
+    """Record existing library destinations while the caller holds its library lock.
 
-        if task.transfer_method == TransferMethod.HARDLINK:
-            try:
-                os.link(src, dst)
-            except OSError as e:
-                # fallback to symlink if hard link fails due to cross-device link error
-                if e.errno == errno.EXDEV:
-                    os.symlink(src, dst)
-                else:
+    This lets metadata organization update legacy transfers before changing their
+    paths, without touching download sources or performing another transfer.
+
+    Args:
+        lib: The media library whose existing transfer destinations are recorded.
+    """
+    destination_dir = Path(lib.dir).absolute()
+    for task in await DownloadTask.filter(transfer_lib_id=lib.id):
+        if not task.files:
+            continue
+        targets = dict(task.transfer_targets or {})
+        for name, new_name in zip(
+            task.files, _transfer_names(task, task.files), strict=True
+        ):
+            destination = destination_dir / new_name
+            if name not in targets and destination.is_file():
+                targets[name] = str(destination)
+        if targets != (task.transfer_targets or {}):
+            await DownloadTask.filter(id=task.id).update(transfer_targets=targets)
+
+
+async def transfer_files(
+    task: DownloadTask, files: list[str] | None, *, job_id: str | None = None
+):
+    """Transfer completed files and remember their current library destinations.
+
+    Args:
+        task: The download task.
+        files: The relative file paths within the download directory.
+        job_id: The offline job UUID for recoverable copy publication, or None to
+            derive a stable identifier from the download task ID.
+    """
+    if not task.transfer_lib_id or not files:
+        return
+    lib = await MediaLib.get_or_none(id=task.transfer_lib_id)
+    if not lib:
+        return
+
+    src_dir = Path(task.dir)
+    dst_dir = Path(lib.dir).absolute()
+    transfer_id = (
+        job_id or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
+    )
+    async with library_lock(lib.dir):
+        # recheck the library association after waiting for its lock
+        if not await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).exists():
+            return
+        from app.core.media.organizer import recover_organizing
+
+        await recover_organizing(lib)
+        # refresh paths that may have changed since the task was loaded
+        await task.refresh_from_db(fields=["transfer_targets"])
+        targets = dict(task.transfer_targets or {})
+        for name, new_name in zip(files, _transfer_names(task, files), strict=True):
+            src = src_dir / name
+            dst = Path(targets.get(name) or dst_dir / new_name)
+            if task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
+                if not src.exists() and not dst.exists():
+                    continue
+                transfer = asyncio.create_task(
+                    asyncio.to_thread(
+                        transfer_local_file,
+                        src,
+                        dst,
+                        transfer_id,
+                        move=task.transfer_method is TransferMethod.MOVE,
+                    )
+                )
+                try:
+                    await asyncio.shield(transfer)
+                except asyncio.CancelledError:
+                    # wait for the worker thread before releasing the library lock
+                    await transfer
                     raise
-        elif task.transfer_method == TransferMethod.SYMLINK:
-            os.symlink(src, dst)
-        elif task.transfer_method == TransferMethod.MOVE:
-            shutil.move(src, dst)
-        elif task.transfer_method == TransferMethod.COPY:
-            shutil.copy2(src, dst)
+            elif not dst.exists():
+                if not src.exists():
+                    continue
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if task.transfer_method == TransferMethod.HARDLINK:
+                    try:
+                        os.link(src, dst)
+                    except OSError as e:
+                        if e.errno != errno.EXDEV:
+                            raise
+                        os.symlink(src, dst)
+                elif task.transfer_method == TransferMethod.SYMLINK:
+                    os.symlink(src, dst)
+
+            if dst.is_file() and targets.get(name) != str(dst):
+                targets[name] = str(dst)
+                # persist each successful file, including partial multi-file runs
+                await DownloadTask.filter(id=task.id).update(transfer_targets=targets)
+                task.transfer_targets = dict(targets)
 
 
 async def check_download_plans():

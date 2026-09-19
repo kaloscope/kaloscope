@@ -199,6 +199,7 @@ class DownloadTask(TortoiseModel):
     transfer_method = CharEnumField(max_length=16, enum_type=TransferMethod, null=True)
     sub_pattern = CharField(max_length=4096, null=True)
     sub_repl = CharField(max_length=4096, null=True)
+    transfer_targets = JSONField[dict[str, str] | None](null=True)
     offline_job: BackwardOneToOneRelation["OfflineDownloadJob"]
 
     def ratio(self) -> str:
@@ -239,7 +240,7 @@ class DownloadTask(TortoiseModel):
         indexes = (("state", "created_at"),)
 
     class PydanticMeta:
-        exclude = ("downloader", "transfer_lib", "offline_job")
+        exclude = ("downloader", "transfer_lib", "offline_job", "transfer_targets")
         computed = ("ratio", "estimate")
 
 

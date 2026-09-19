@@ -402,6 +402,17 @@
     }
   },
   "media": {
+    "rename": {
+      "template": "自动重命名模板",
+      "tip": "留空关闭。下次成功解析 NFO 时应用，不会立即批量重命名已有文件。",
+      "help": "模板用法与可用字段",
+      "path_tip": "路径相对于媒体库根目录，用 / 分隔；最后一段为文件名，无需填写扩展名，自动保留原扩展名。不能使用绝对路径或 ..，仅支持简单字段占位符。",
+      "movie_path_tip": "电影支持“文件名”或“电影目录/文件名”。",
+      "tv_path_tip": "剧集支持“剧集目录/文件名”或“剧集目录/季目录/文件名”。目录只允许 show_title、show_year、year、season、unique_id、nfo_source，取父 NFO 信息；title 表示当前集标题，仅用于文件名。",
+      "episode_tip": "season 和 episode 为两位数字（如 01），episode_code 为季集编号（如 S01E02）。",
+      "example": "示例",
+      "fields": "可用字段"
+    },
     "director": "导演",
     "writer": "编剧",
     "cast": "演员阵容",

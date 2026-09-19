@@ -8,6 +8,7 @@
     dir: string;
     name: string;
     language: string | null;
+    rename_template: string | null;
     danmaku_server: string | null;
     danmaku_ttl: number;
     triggers: FlowTrigger[];
@@ -15,6 +16,12 @@
   }>;
 
   const DANMAKU_SERVER_PRESET = 'danmaku.kaloscope.org';
+  const RENAME_EXAMPLES = {
+    movie: '{{title}} ({{year}})/{{title}}',
+    tv_show: '{{show_title}}/{{episode_code}} - {{title}}'
+  };
+  const RENAME_FIELDS = '{{title}}, {{originaltitle}}, {{year}}, {{unique_id}}, {{nfo_source}}';
+  const TV_RENAME_FIELDS = '{{show_title}}, {{show_year}}, {{season}}, {{episode}}, {{episode_code}}';
 </script>
 
 <script lang="ts">
@@ -31,6 +38,7 @@
     dir,
     name,
     language = '',
+    rename_template = null,
     danmaku_server,
     danmaku_ttl = 24,
     triggers,
@@ -53,6 +61,7 @@
   const schema = createFormSchema(({ text, number }) => ({
     dir: text().maxlength(4096),
     name: text().maxlength(64),
+    rename_template: text().maxlength(1024).required(false),
     danmaku_server: text().maxlength(245).required(false),
     danmaku_ttl: number().min(0).max(8760).required(false)
   }));
@@ -67,6 +76,7 @@
     loading.start();
     const json: Record<string, unknown> = Object.fromEntries(data);
     json.id = id;
+    json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
     json.danmaku_server = urlWrapper?.full(danmaku_server);
     json.triggers = triggers;
     api
@@ -146,6 +156,34 @@
         />
         <input type="text" class="hidden" name="dir" value={dir} />
       </button>
+      <Label>{$_('media.rename.template')}</Label>
+      <input
+        aria-label={$_('media.rename.template')}
+        placeholder={RENAME_EXAMPLES[lib_type ?? 'movie']}
+        class="input w-full font-mono text-sm"
+        bind:value={rename_template}
+        {...schema.rename_template}
+      />
+      <p class="px-1 text-xs text-base-content/60">{$_('media.rename.tip')}</p>
+      <details class="px-1 text-xs text-base-content/60">
+        <summary class="cursor-pointer">{$_('media.rename.help')}</summary>
+        <div class="mt-2 space-y-2">
+          <p>{$_('media.rename.path_tip')}</p>
+          <p>{$_(lib_type === 'tv_show' ? 'media.rename.tv_path_tip' : 'media.rename.movie_path_tip')}</p>
+          <p class="break-words">
+            {$_('media.rename.example')}: <code>{RENAME_EXAMPLES[lib_type ?? 'movie']}</code>
+          </p>
+          <p class="break-words">
+            {$_('media.rename.fields')}: <code>{RENAME_FIELDS}</code>
+            {#if lib_type === 'tv_show'}
+              <code>, {TV_RENAME_FIELDS}</code>
+            {/if}
+          </p>
+          {#if lib_type === 'tv_show'}
+            <p>{$_('media.rename.episode_tip')}</p>
+          {/if}
+        </div>
+      </details>
       <div class="flex flex-wrap gap-2">
         <div class="flex-3/5 space-y-1.5">
           <Label tip={$_('media.danmaku.server_tip')}>{$_('media.danmaku.server')}</Label>
