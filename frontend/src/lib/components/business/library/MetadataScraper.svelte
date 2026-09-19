@@ -65,6 +65,7 @@
   let index: number = $state(-1);
   const searching = createLoading();
   const confirming = createLoading();
+  const busy = $derived($searching !== null || $confirming !== null);
 
   // the modal dialog instance
   let modal: Modal;
@@ -109,7 +110,7 @@
    * Search metadata candidates with the selected ingest workflow.
    */
   function preview() {
-    if ($searching !== null || !item || !graphId || !title.trim()) {
+    if (busy || !item || !graphId || !title.trim()) {
       return;
     }
     searching.start();
@@ -143,7 +144,7 @@
    * Confirm the selected metadata result.
    */
   function confirm() {
-    if ($confirming !== null || index < 0) {
+    if (busy || index < 0) {
       return;
     }
     const result = results[index];
@@ -214,16 +215,16 @@
         icon={icons.search}
         text={$_('action.search')}
         class="btn-submit"
-        disabled={$searching || !item || !graphId || !title.trim()}
+        disabled={busy || !item || !graphId || !title.trim()}
         onclick={preview}
       />
     </div>
-    <div class="relative mt-2 h-40 overflow-y-auto rounded-box border">
+    <div class="relative mt-2 h-40 w-full overflow-y-auto rounded-box border">
       <Overlay loading={$searching} fixed={false} animation="spinner" />
       <table class="table table-pin-rows table-fixed table-xs">
         <thead>
-          <tr class="text-xs font-semibold uppercase">
-            <th class="w-8"></th>
+          <tr class="text-xs font-semibold text-base-content/40 uppercase">
+            <th class="w-6 sm:w-8"></th>
             <th class="w-1/4">{$_('field.title')}</th>
             <th class="w-16">{$_('field.year')}</th>
             <th class="w-16">{$_('field.rating')}</th>
@@ -239,13 +240,15 @@
                 onclick={() => (index = index === i ? -1 : i)}
               >
                 <td><input type="radio" class="pointer-events-none radio radio-xs" checked={index === i} /></td>
-                <td class="truncate font-semibold" title={result.title}>{result.title ?? EMPTY_SIGN}</td>
-                <td class="truncate opacity-70">{result.year ?? EMPTY_SIGN}</td>
-                <td class="truncate opacity-70">{rating ?? EMPTY_SIGN}</td>
-                <td class="truncate opacity-70" title={result.plot}>{result.plot || EMPTY_SIGN}</td>
+                <td class="truncate font-medium text-base-content/80" title={result.title}>
+                  {result.title || EMPTY_SIGN}
+                </td>
+                <td class="truncate text-base-content/60">{result.year ?? EMPTY_SIGN}</td>
+                <td class="truncate text-base-content/60">{rating ?? EMPTY_SIGN}</td>
+                <td class="truncate text-base-content/60" title={result.plot}>{result.plot || EMPTY_SIGN}</td>
               </tr>
             {/each}
-          {:else if !$searching}
+          {:else if $searching === null}
             <tr>
               <td colspan="5" class="h-32 text-center text-sm opacity-20">
                 {$_('data.nodata')}
@@ -260,7 +263,7 @@
     <button type="button" class="btn" onclick={() => modal.close()}>
       {$_('message.cancel')}
     </button>
-    <button type="button" class="btn btn-submit" disabled={$confirming !== null || index < 0} onclick={confirm}>
+    <button type="button" class="btn btn-submit" disabled={busy || index < 0} onclick={confirm}>
       {$_('message.confirm')}
       {#if $confirming}
         <span class="loading loading-xs loading-dots"></span>

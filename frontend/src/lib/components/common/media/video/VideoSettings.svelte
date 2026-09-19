@@ -305,6 +305,7 @@
   let index: number = $state(-1);
   const searching = createLoading();
   const confirming = createLoading();
+  const busy = $derived($searching !== null || $confirming !== null);
 
   /**
    * Show the settings modal.
@@ -752,7 +753,7 @@
    * Search for episodes matching the given title.
    */
   function searchEpisodes() {
-    if (!localMedia || $searching !== null || !animeTitle.trim()) {
+    if (!localMedia || busy || !animeTitle.trim()) {
       return;
     }
     if (!danmakuServer) {
@@ -781,7 +782,7 @@
    * Confirm the selected episode match result.
    */
   function confirmEpisode() {
-    if (!localMedia || danmakuPlugin === null || $confirming !== null || index < 0) {
+    if (!localMedia || danmakuPlugin === null || busy || index < 0) {
       return;
     }
     const result = results[index];
@@ -1205,22 +1206,22 @@
               icon={icons.search}
               text={$_('action.search')}
               class="min-w-18 {btnClass} {btnDisabledClass}"
-              disabled={$searching || !animeTitle.trim()}
+              disabled={busy || !animeTitle.trim()}
               onclick={() => searchEpisodes()}
             />
           </div>
           <div class="px-1 text-xs text-white/30">{mediaPath}</div>
           <div
-            class="relative mt-2 h-40 overflow-y-auto rounded-box border"
+            class="relative mt-2 h-40 w-full overflow-y-auto rounded-box border"
             style="border-color: color-mix(in oklab, #fff 10%, transparent) !important;"
           >
             <Overlay loading={$searching} fixed={false} animation="spinner" />
-            <table class="table table-fixed table-xs">
+            <table class="table table-pin-rows table-fixed table-xs">
               <thead>
-                <tr class="text-xs font-semibold text-white/40 uppercase">
-                  <th class="w-6"></th>
-                  <th class="w-16">{$_('field.type')}</th>
-                  <th class="w-1/3">{$_('field.title')}</th>
+                <tr class="bg-[#1e1e1e]/95 text-xs font-semibold text-white/40 uppercase">
+                  <th class="w-6 sm:w-8"></th>
+                  <th class="w-16 sm:w-20">{$_('field.type')}</th>
+                  <th class="w-1/4">{$_('field.title')}</th>
                   <th>{$_('field.episode_title')}</th>
                 </tr>
               </thead>
@@ -1238,8 +1239,8 @@
                           checked={index === i}
                         />
                       </td>
-                      <td class="truncate text-white/40" title={result.type_description}>
-                        {result.type_description || EMPTY_SIGN}
+                      <td class="truncate text-white/40" title={result.type_description || result.type}>
+                        {result.type_description || result.type || EMPTY_SIGN}
                       </td>
                       <td class="truncate font-medium text-white/80" title={result.anime_title}>
                         {result.anime_title || EMPTY_SIGN}
@@ -1249,7 +1250,7 @@
                       </td>
                     </tr>
                   {/each}
-                {:else}
+                {:else if $searching === null}
                   <tr>
                     <td colspan="4" class="h-32 text-center text-sm text-white/20">
                       {$_('data.nodata')}
@@ -1266,7 +1267,7 @@
               text={$_('message.confirm')}
               class="min-w-18 {btnClass} {btnDisabledClass}"
               loading={$confirming}
-              disabled={$confirming !== null || index < 0}
+              disabled={busy || index < 0}
               onclick={() => confirmEpisode()}
             />
           </div>

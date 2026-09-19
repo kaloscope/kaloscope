@@ -332,7 +332,7 @@
         <Overlay loading={$searching} fixed={false} animation="spinner" />
         <table class="table table-pin-rows table-fixed table-xs">
           <thead>
-            <tr class="text-xs font-semibold uppercase">
+            <tr class="text-xs font-semibold text-base-content/40 uppercase">
               <th>{$_('field.title')}</th>
               <th class="w-20 text-right">{$_('field.size')}</th>
             </tr>
@@ -341,11 +341,13 @@
             {#if resources.length > 0}
               {#each resources as rsrc, i (i)}
                 <tr>
-                  <td class="truncate" title={rsrc.title}>{rsrc.title ?? EMPTY_SIGN}</td>
-                  <td class="text-right opacity-70">{rsrc.size ?? EMPTY_SIGN}</td>
+                  <td class="truncate font-medium text-base-content/80" title={rsrc.title}>
+                    {rsrc.title || EMPTY_SIGN}
+                  </td>
+                  <td class="text-right text-base-content/60">{rsrc.size ?? EMPTY_SIGN}</td>
                 </tr>
               {/each}
-            {:else if !$searching}
+            {:else if $searching === null}
               <tr>
                 <td colspan="2" class="h-26 text-center text-sm opacity-20">
                   {$_('data.nodata')}

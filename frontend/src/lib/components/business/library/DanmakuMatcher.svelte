@@ -21,9 +21,6 @@
    * Open the matcher with the media item's title and library configuration.
    */
   export async function showModal() {
-    if (busy) {
-      return;
-    }
     results = [];
     index = -1;
     item = _item.lib ? _item : (await api.get(`media/${_item.id}`).json<Resp<MediaItem>>()).data;
@@ -90,7 +87,6 @@
       placeholder={$_('field.title')}
       class="input w-full"
       bind:value={title}
-      disabled={busy}
       onkeydown={(event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -110,45 +106,43 @@
         onclick={search}
       />
     </div>
-    <div class="relative mt-2 h-40 overflow-y-auto rounded-box border">
+    <div class="relative mt-2 h-40 w-full overflow-y-auto rounded-box border">
       <Overlay loading={$searching} fixed={false} animation="spinner" />
       <table class="table table-pin-rows table-fixed table-xs">
         <thead>
-          <tr class="text-xs font-semibold uppercase">
-            <th class="w-8"></th>
+          <tr class="text-xs font-semibold text-base-content/40 uppercase">
+            <th class="w-6 sm:w-8"></th>
+            <th class="w-16 sm:w-20">{$_('field.type')}</th>
             <th>{$_('field.title')}</th>
-            <th class="w-28">{$_('field.type')}</th>
           </tr>
         </thead>
         <tbody>
-          {#each results as result, i (i)}
-            <tr
-              class="cursor-pointer hover:bg-base-300 {index === i ? 'bg-primary/15' : ''}"
-              onclick={() => {
-                if (!busy) {
-                  index = index === i ? -1 : i;
-                }
-              }}
-            >
-              <td><input type="radio" class="pointer-events-none radio radio-xs" checked={index === i} /></td>
-              <td class="truncate font-semibold" title={result.anime_title}>{result.anime_title ?? EMPTY_SIGN}</td>
-              <td class="truncate opacity-70" title={result.type_description}>
-                {result.type_description || result.type || EMPTY_SIGN}
-              </td>
-            </tr>
-          {:else}
-            {#if !$searching}
-              <tr>
-                <td colspan="3" class="h-32 text-center text-sm opacity-20">{$_('data.nodata')}</td>
+          {#if results.length > 0}
+            {#each results as result, i (i)}
+              <tr
+                class="cursor-pointer hover:bg-base-300 {index === i ? 'bg-primary/15' : ''}"
+                onclick={() => (index = index === i ? -1 : i)}
+              >
+                <td><input type="radio" class="pointer-events-none radio radio-xs" checked={index === i} /></td>
+                <td class="truncate text-base-content/40" title={result.type_description || result.type}>
+                  {result.type_description || result.type || EMPTY_SIGN}
+                </td>
+                <td class="truncate font-medium text-base-content/80" title={result.anime_title}>
+                  {result.anime_title || EMPTY_SIGN}
+                </td>
               </tr>
-            {/if}
-          {/each}
+            {/each}
+          {:else if $searching === null}
+            <tr>
+              <td colspan="3" class="h-32 text-center text-sm opacity-20">{$_('data.nodata')}</td>
+            </tr>
+          {/if}
         </tbody>
       </table>
     </div>
   </div>
   <div class="modal-action">
-    <button type="button" class="btn" disabled={$confirming !== null} onclick={() => modal.close()}>
+    <button type="button" class="btn" onclick={() => modal.close()}>
       {$_('message.cancel')}
     </button>
     <button type="button" class="btn btn-submit" disabled={busy || index < 0} onclick={confirm}>
