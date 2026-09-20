@@ -77,7 +77,7 @@
         if (chapterId !== null) {
           refreshKey = new Date().getTime();
         }
-        tick().then(() => onload(data));
+        return onload(data);
       })
       .finally(() => {
         loading.end();
@@ -89,13 +89,15 @@
    *
    * @param rsrc - The resource object.
    */
-  function onload(rsrc: Resource | null) {
+  async function onload(rsrc: Resource | null) {
     if (!rsrc) {
       return;
     }
     resource = rsrc;
     const chapters = rsrc.chapters ?? [];
     activeChapterId ??= chapters[0]?.id ?? null;
+    // wait for the selected viewer to mount before loading its content
+    await tick();
     // load the viewer/player based on the media type
     if (mediaType === 'text' && textViewer) {
       if (rsrc.text === null || rsrc.text === undefined) {
