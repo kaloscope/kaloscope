@@ -162,6 +162,16 @@ export default class DefaultPreset {
     }
     // select the media pipeline after device plugins are known
     this.plugins.push(...videoPlugins(options.videoType || guessVideoType(options.url), options.url));
+    if (sniffer.isIos()) {
+      // pass an explicit `<source type>` so Safari does not treat MP4 URLs ending in `.mp3` as audio
+      options.preProcessUrl = (url) => {
+        const videoType = options.videoType || guessVideoType(url);
+        const nativeMP4 = videoType?.toLowerCase() === 'mp4' && !isTranscodedStream(url);
+        return {
+          url: nativeMP4 && typeof url === 'string' ? [{ src: url, type: 'video/mp4' }] : url
+        };
+      };
+    }
     // prefer `ManagedMediaSource` when the browser supports it
     options.mp4Plugin = {
       preferMMS: true
