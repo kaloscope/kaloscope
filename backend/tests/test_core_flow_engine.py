@@ -111,3 +111,65 @@ def test_context_cleanup(monkeypatch, error: BaseException | None, logged: bool)
     assert task._context["count"] == 1
     assert OUTPUT_KEY not in node.node_data
     assert log_error.await_count == int(logged)
+
+
+def test_auth_event_log():
+    params = {
+        "$start": "auth_start",
+        "username": "viewer",
+        "password": "private-password",
+        "token": "private-token",
+    }
+    event = EventWrapper("immediate", 1, params)
+
+    message = str(event)
+
+    assert "viewer" in message
+    assert "private-password" not in message
+    assert "private-token" not in message
+    assert event.bootparams == params
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_auth_log(monkeypatch, failed):
+    from app.core.flow import engine
+
+    task = _task()
+    task.bootparams = {
+        "$start": "auth_start",
+        "username": "viewer",
+        "password": "private-password",
+    }
+    result = {"name": "Viewer", "token": "private-token"}
+    create = AsyncMock()
+    monkeypatch.setattr(engine.FlowLog, "create", create)
+    monkeypatch.setattr(TransientTask, "clear_logs", AsyncMock())
+
+    if failed:
+        node = NodeWrapper("auth", node_type="http", node_data={})
+        asyncio.run(task.log_error(node, "HTTP request failed"))
+    else:
+        asyncio.run(task.log_success(result))
+
+    logged = create.call_args.kwargs
+    assert logged["bootparams"] == {"$start": "auth_start", "username": "viewer"}
+    if not failed:
+        assert logged["retval"] == {"name": "Viewer"}
+    assert task.bootparams["password"] == "private-password"
+    assert result["token"] == "private-token"
+
+
+def test_search_log(monkeypatch):
+    from app.core.flow import engine
+
+    task = _task()
+    task.bootparams = {"$start": "search_start", "keyword": "anime", "page_num": 2}
+    result = {"items": [{"id": "episode"}]}
+    create = AsyncMock()
+    monkeypatch.setattr(engine.FlowLog, "create", create)
+    monkeypatch.setattr(TransientTask, "clear_logs", AsyncMock())
+
+    asyncio.run(task.log_success(result))
+
+    assert create.call_args.kwargs["bootparams"] == task.bootparams
+    assert create.call_args.kwargs["retval"] == result

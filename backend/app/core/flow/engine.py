@@ -74,7 +74,8 @@ class EventWrapper:
     interval_end: datetime | None = None
 
     def __str__(self):
-        return f"Event(graph_id={self.graph_id}, bootparams={self.bootparams})"
+        bootparams = _log_bootparams(self.bootparams)
+        return f"Event(graph_id={self.graph_id}, bootparams={bootparams})"
 
     @classmethod
     def from_inst(cls, inst: FlowInstance) -> Self:
@@ -868,9 +869,11 @@ class FlowTask(ABC):
         Args:
             retval: The return value of the flow task.
         """
+        if self.bootparams.get(START_KEY) == "auth_start":
+            retval = {"name": retval.get("name")} if isinstance(retval, dict) else None
         await FlowLog.create(
             graph_id=self.graph_id,
-            bootparams=self.bootparams,
+            bootparams=_log_bootparams(self.bootparams),
             started_at=self.started_at,
             ended_at=timezone.now(),
             retval=retval,
@@ -887,7 +890,7 @@ class FlowTask(ABC):
         input_id = node.input_handle.id if node.input_handle else None
         await FlowLog.create(
             graph_id=self.graph_id,
-            bootparams=self.bootparams,
+            bootparams=_log_bootparams(self.bootparams),
             started_at=self.started_at,
             node_id=node.node_id,
             node_type=node.node_type,
@@ -1012,3 +1015,19 @@ class PersistentTask(FlowTask):
             )
         # remove the output handle
         node.node_data.pop(OUTPUT_KEY, None)
+
+
+def _log_bootparams(bootparams: Mapping[str, Any] | None):
+    """Exclude credentials from authentication flow logs.
+
+    Args:
+        bootparams: The boot parameters for the flow execution.
+
+    Returns:
+        The authentication parameters without credentials.
+    """
+    if bootparams and bootparams.get(START_KEY) == "auth_start":
+        return {
+            key: bootparams[key] for key in (START_KEY, "username") if key in bootparams
+        }
+    return bootparams
