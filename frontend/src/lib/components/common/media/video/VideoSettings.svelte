@@ -403,12 +403,7 @@
       });
     }
     // definition
-    definitions = ((player?.config.definitions as { list?: Definition[] } | undefined)?.list ?? []).filter(
-      (d) => d.url && d.definition
-    );
-    if (definitions.length > 0 && typeof player?.config.url === 'string') {
-      definition = player.config.url;
-    }
+    updateDefinitions();
     // subtitle
     applySubtitleSettings();
     loadLocalSubtitles();
@@ -426,6 +421,16 @@
       }
     }
     loadLocalDanmakus();
+  }
+
+  /**
+   * Refresh the definition options for the current video.
+   */
+  export function updateDefinitions() {
+    definitions = ((player?.config.definitions as { list?: Definition[] } | undefined)?.list ?? []).filter(
+      (d) => d.url && d.definition
+    );
+    definition = definitions.length > 0 && typeof player?.config.url === 'string' ? player.config.url : '';
   }
 
   /**
