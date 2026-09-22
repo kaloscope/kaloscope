@@ -1,5 +1,4 @@
 import asyncio
-import ctypes
 import errno
 import hashlib
 import logging
@@ -21,6 +20,7 @@ from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.manifest import RemoteManifestEntry, normalize_relative_path
 from app.core.dl.openlist.models import OpenListErrorKind, RemoteLink
 from app.models.download import OfflineDownloadErrorKind
+from app.utils.disk import rename_exclusive
 
 _PROXY_SEGMENTS = frozenset({"p", "d", "ap", "ad", "ae", "sd", "sad"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -317,7 +317,7 @@ def _ownership_value(path: Path) -> bytes:
     """Build the filesystem identity stored in an ownership marker.
 
     Args:
-        path: The regular file whose identity is being recorded.
+        path: The file or symbolic link whose identity is being recorded.
 
     Returns:
         The encoded device, inode, size, and modification-time identity.
@@ -651,50 +651,15 @@ def prepare_local_directory(task_dir: str | Path, relative_path: str) -> Path:
     return path
 
 
-def _rename_exclusive(source: Path, destination: Path):
-    """Publish a file atomically on filesystems without hard links.
-
-    Args:
-        source: The file to rename.
-        destination: The final path, which must not already exist.
-
-    Raises:
-        OSError: If exclusive renaming is unavailable or fails.
-    """
-    if sys.platform == "win32":
-        os.rename(source, destination)
-        return
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
-        rename = libc.renamex_np
-        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        # request `RENAME_EXCL`
-        arguments = (os.fsencode(source), os.fsencode(destination), 0x4)
-    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
-        rename = libc.renameat2
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        # use `AT_FDCWD` and `RENAME_NOREPLACE`
-        arguments = (-100, os.fsencode(source), -100, os.fsencode(destination), 1)
-    else:
-        raise OSError(errno.ENOSYS, "Exclusive renaming is unavailable")
-    rename.restype = ctypes.c_int
-    if rename(*arguments) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination)
-
-
-def _install_local_file_sync(target: LocalFileTarget):
+def _install_local_file_sync(
+    target: LocalFileTarget, *, source_identity: bytes | None = None
+):
     """Install one completed file without overwriting another job.
 
     Args:
         target: The verified partial file and its job-scoped paths.
+        source_identity: The original source identity for a copied library move,
+            or `None` for ordinary file publication.
 
     Raises:
         PullError: If the final path conflicts or installation fails.
@@ -704,6 +669,8 @@ def _install_local_file_sync(target: LocalFileTarget):
     try:
         # persist ownership before the final name becomes visible
         ownership = _ownership_value(target.part_path)
+        if source_identity is not None:
+            ownership += b"\nsource:" + source_identity
         with target.marker_path.open("xb") as marker:
             marked = True
             marker.write(ownership)
@@ -722,7 +689,7 @@ def _install_local_file_sync(target: LocalFileTarget):
         except OSError as exc:
             if exc.errno not in _HARDLINK_UNAVAILABLE:
                 raise
-            _rename_exclusive(target.part_path, target.final_path)
+            rename_exclusive(target.part_path, target.final_path)
         installed = True
         target.part_path.unlink(missing_ok=True)
     except FileExistsError as exc:
@@ -744,49 +711,149 @@ async def _install_local_file(target: LocalFileTarget):
     await asyncio.to_thread(_install_local_file_sync, target)
 
 
-def transfer_local_file(
+def owns_local_transfer(destination: Path, job_id: str) -> bool:
+    """Check ownership of a published library transfer without removing evidence.
+
+    Args:
+        destination: The current path of the published media-library file.
+        job_id: The transfer identifier used to locate its ownership marker.
+
+    Raises:
+        PullError: If the transfer sidecar path is invalid.
+
+    Returns:
+        `True` if the destination still matches this transfer's ownership marker.
+    """
+    copy_id = hashlib.sha256(f"library:{job_id}".encode()).hexdigest()[:32]
+    marker_path = _job_path(destination, copy_id, "done")
+    try:
+        # same-filesystem moves may publish a symbolic link itself
+        destination_stat = destination.lstat()
+        marker_stat = marker_path.lstat()
+        return (
+            (S_ISREG(destination_stat.st_mode) or S_ISLNK(destination_stat.st_mode))
+            and S_ISREG(marker_stat.st_mode)
+            and 0 < marker_stat.st_size <= 256
+            and marker_path.read_bytes()
+            .partition(b"\nsource:")[0]
+            .removeprefix(b"moved:")
+            == _ownership_value(destination)
+        )
+    except OSError:
+        return False
+
+
+def recover_local_transfer(
     source: Path, destination: Path, job_id: str, *, move: bool = False
-):
+) -> bool:
+    """Finish cleanup for an owned, already published library transfer.
+
+    Missing destinations and files without this job's ownership marker are left
+    untouched. Recovery never copies or publishes a new destination. Markers for
+    atomic moves skip source cleanup because the original source was renamed.
+    Copied moves with a recorded source identity retain replaced or changed sources.
+
+    Args:
+        source: The original download file to remove when completing a move.
+        destination: The current path of the published media-library file.
+        job_id: The transfer identifier used to locate its ownership marker.
+        move: Whether to finish removing the source of the published transfer.
+
+    Raises:
+        OSError: If removing the source or transfer sidecars fails.
+        PullError: If the transfer sidecar paths are invalid.
+
+    Returns:
+        `True` if this job owned the destination and cleanup completed, or `False`
+        if no owned transfer was found.
+    """
+    if not destination.exists() or source.resolve() == destination.resolve():
+        return False
+    copy_id = hashlib.sha256(f"library:{job_id}".encode()).hexdigest()[:32]
+    marker_path = _job_path(destination, copy_id, "done")
+    if owns_local_transfer(destination, job_id):
+        _remove_installed_part(destination, copy_id)
+        # finish a move interrupted between publication and source removal
+        ownership, separator, source_identity = marker_path.read_bytes().partition(
+            b"\nsource:"
+        )
+        if move and not ownership.startswith(b"moved:"):
+            if not separator:
+                source.unlink(missing_ok=True)
+            else:
+                with suppress(FileNotFoundError):
+                    if _ownership_value(source) == source_identity:
+                        source.unlink()
+        marker_path.unlink()
+        return True
+    return False
+
+
+def transfer_local_file(
+    source: Path,
+    destination: Path,
+    job_id: str,
+    *,
+    move: bool = False,
+    defer_cleanup: bool = False,
+) -> bool:
     """Transfer a completed file without exposing an unfinished library copy.
 
     Args:
         source: The verified local download file.
         destination: The final media-library file path.
-        job_id: The offline job UUID owning any staged copy.
+        job_id: The offline job UUID or stable RPC transfer identifier owning any
+            staged copy.
         move: Whether to remove the source after publishing the destination.
+        defer_cleanup: Whether to retain ownership markers and copied move sources
+            until the caller records the destination and calls
+            `recover_local_transfer`. Same-filesystem moves still rename the source
+            atomically but retain their ownership marker.
 
     Raises:
         OSError: If copying, moving, or removing a local file fails.
         PullError: If staging or publishing the copy fails.
+
+    Returns:
+        `True` if the file was published, an owned transfer was recovered, or both
+        paths resolve to the same existing file. `False` if an unrelated
+        destination already exists or the shared source path is unavailable.
     """
     if source.resolve() == destination.resolve():
-        return
+        return destination.is_file()
+    if destination.exists():
+        if defer_cleanup:
+            return owns_local_transfer(destination, job_id)
+        return recover_local_transfer(source, destination, job_id, move=move)
+
     # distinguish library staging from this job's original download sidecars
     copy_id = hashlib.sha256(f"library:{job_id}".encode()).hexdigest()[:32]
-    marker_path = _job_path(destination, copy_id, "done")
-    if destination.exists():
-        if _owns_local_file(destination, marker_path):
-            _remove_installed_part(destination, copy_id)
-            # finish a move interrupted between publication and source removal
-            if move:
-                source.unlink(missing_ok=True)
-            marker_path.unlink()
-        return
-
     destination.parent.mkdir(parents=True, exist_ok=True)
+    source_identity = None
     if move:
+        source_identity = _ownership_value(source)
+        target = prepare_local_file(destination.parent, destination.name, copy_id)
+        target.part_path.unlink()
+        with target.marker_path.open("xb") as marker:
+            marker.write(b"moved:" + source_identity)
+            marker.flush()
+            os.fsync(marker.fileno())
         try:
-            _rename_exclusive(source, destination)
-            return
+            rename_exclusive(source, destination)
         except OSError as exc:
+            target.marker_path.unlink()
             if exc.errno != errno.EXDEV:
                 raise
+        else:
+            if not defer_cleanup:
+                target.marker_path.unlink()
+            return True
     target = prepare_local_file(destination.parent, destination.name, copy_id)
     shutil.copy2(source, target.part_path)
-    _install_local_file_sync(target)
-    if move:
-        source.unlink()
-    target.marker_path.unlink()
+    _install_local_file_sync(target, source_identity=source_identity)
+    if not defer_cleanup:
+        recover_local_transfer(source, destination, job_id, move=move)
+    return True
 
 
 async def _complete_local_file(target: LocalFileTarget, entry: RemoteManifestEntry):

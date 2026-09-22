@@ -209,7 +209,7 @@ function guessVideoType(url?: IUrl): string | null {
 }
 
 /**
- * Gets the video plugins based on the video type.
+ * Select video plugins for the source type and browser capabilities.
  *
  * @param videoType - The video type, either from options or guessed from the URL.
  * @param url - The media URL, used to check if it's a transcoded stream.
@@ -237,9 +237,10 @@ export function videoPlugins(videoType: string | null | undefined, url: IUrl | u
     }
   } else if (videoType === 'hls') {
     // https://h5player.bytedance.com/plugins/extension/xgplayer-hls.html
-    // prefer native HLS when the browser exposes it
+    // prefer native HLS on Safari and iOS when available
     const native = document.createElement('video').canPlayType('application/vnd.apple.mpegurl');
-    if (!native && HLS.isSupported()) {
+    const preferNative = native && (sniffer.isSafari() || sniffer.isIos());
+    if (!preferNative && HLS.isSupported()) {
       return [HLS];
     }
   } else if (videoType === 'dash') {

@@ -3,7 +3,6 @@ import errno
 import hashlib
 import os
 import re
-import shutil
 from datetime import datetime, timedelta
 from functools import cached_property
 from multiprocessing.managers import DictProxy
@@ -28,9 +27,14 @@ from app.core.dl.driver import (
     DownloadSource,
 )
 from app.core.dl.openlist import OpenListDriver
-from app.core.dl.openlist.puller import transfer_local_file
+from app.core.dl.openlist.puller import (
+    owns_local_transfer,
+    recover_local_transfer,
+    transfer_local_file,
+)
 from app.core.dl.rpc import RpcClient, RpcDriver
 from app.core.flow.engine import FlowEngine
+from app.core.media.coordination import library_lock
 from app.core.notifications import Notifications, NotificationTemplate
 from app.core.renderer import is_template, render
 from app.models.base import TortoiseModel
@@ -348,6 +352,9 @@ class DLSyncer:
                     await asyncio.sleep(1)
                     continue
 
+                # resume local transfers without requiring a remote task or driver
+                await _resume_transfers()
+
                 # synchronize the download tasks in batch by downloader
                 active_states = [
                     DownloadState.PAUSED,
@@ -459,6 +466,8 @@ async def sync_tasks(
 async def _complete_openlist_tasks(task_ids: list[int]):
     """Consume durable local completion work independently of remote snapshots.
 
+    Retry incomplete transfers before acknowledging completion or notifying users.
+
     Args:
         task_ids: The tasks selected for this synchronization cycle.
     """
@@ -471,7 +480,8 @@ async def _complete_openlist_tasks(task_ids: list[int]):
     for job in jobs:
         task = job.download
         try:
-            await transfer_files(task, task.files, job_id=job.job_uuid)
+            if not await transfer_files(task, task.files, job_id=job.job_uuid):
+                raise RuntimeError("Media library transfer is incomplete")
             # commit the notification and acknowledgement together after file transfer
             async with in_transaction() as connection:
                 updated = await (
@@ -505,8 +515,30 @@ async def _complete_openlist_tasks(task_ids: list[int]):
             logger.error("Failed to complete OpenList task: %s", task.id, exc_info=True)
 
 
+async def _resume_transfers():
+    """Resume durable RPC transfers independently of remote download snapshots.
+
+    Keep incomplete, failed, or cancelled transfers pending for the next cycle.
+    Reuse persisted file destinations without repeating completion notifications.
+    """
+    tasks = await DownloadTask.filter(
+        state=DownloadState.COMPLETED, transfer_pending=True
+    )
+    for task in tasks:
+        try:
+            if await transfer_files(task, task.files):
+                await DownloadTask.filter(id=task.id).update(transfer_pending=False)
+        except Exception:
+            logger.error(
+                "Failed to resume transfer for task: %s", task.id, exc_info=True
+            )
+
+
 async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
     """Synchronize tasks through a local HTTP/RPC downloader.
+
+    Persist completion and pending local transfer work together so interrupted
+    or incomplete transfers can resume even after the remote task disappears.
 
     Args:
         driver: The configured RPC downloader driver.
@@ -634,6 +666,13 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
             )
             continue
 
+        # retain the same file list for immediate transfer and restart recovery
+        files = files if isinstance(files, list) else task.files
+        transfer_pending = (
+            state == DownloadState.COMPLETED
+            and task.transfer_lib_id is not None
+            and bool(files)
+        )
         if completed_at is not None:
             await Notifications.send(NotificationTemplate.DOWNLOAD_COMPLETED, name=name)
 
@@ -652,14 +691,15 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
             total_size=total_size,
             completed_size=completed_size,
             completed_at=completed_at,
+            transfer_pending=transfer_pending,
         )
 
         # transfer files to media library after completion
         if state == DownloadState.COMPLETED:
             try:
-                await transfer_files(
-                    task, files if isinstance(files, list) else task.files
-                )
+                transferred = await transfer_files(task, files)
+                if transfer_pending and transferred:
+                    await DownloadTask.filter(id=task.id).update(transfer_pending=False)
             except Exception:
                 logger.error(
                     "Failed to transfer files for task: %s",
@@ -765,29 +805,17 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
     return (metadata, gid)
 
 
-async def transfer_files(
-    task: DownloadTask, files: list[str] | None, *, job_id: str | None = None
-):
-    """Transfer completed download files to the media library directory.
+def _transfer_names(task: DownloadTask, files: list[str]) -> list[str]:
+    """Apply the download task's destination-name substitution.
 
     Args:
-        task: The download task.
+        task: The download task containing the substitution pattern and replacement.
         files: The relative file paths within the download directory.
-        job_id: The offline job UUID enabling recoverable copy publication.
+
+    Returns:
+        The destination paths in input order, or the original paths if substitution
+        is disabled or produces duplicate names.
     """
-    if not task.transfer_lib_id or not files:
-        return
-    lib = await MediaLib.get_or_none(id=task.transfer_lib_id)
-    if not lib:
-        return
-
-    src_dir = Path(task.dir)
-    dst_dir = Path(lib.dir)
-    if src_dir == dst_dir and not task.sub_pattern:
-        # no need to transfer if the source and destination are the same
-        # and no file name substitution is needed
-        return
-
     # apply file name substitution if sub_pattern is specified
     new_files = files
     if task.sub_pattern:
@@ -810,41 +838,211 @@ async def transfer_files(
         # discard replacement if duplicate file names arise
         if len(set(replaced)) == len(replaced):
             new_files = replaced
+    return new_files
 
-    for name, new_name in zip(files, new_files, strict=True):
-        src = src_dir / name
-        dst = dst_dir / new_name
-        if job_id is not None and task.transfer_method in {
-            TransferMethod.COPY,
-            TransferMethod.MOVE,
-        }:
-            transfer_local_file(
-                src, dst, job_id, move=task.transfer_method is TransferMethod.MOVE
-            )
-            continue
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue
 
-        # create parent directory if it doesn't exist
-        dst.parent.mkdir(parents=True, exist_ok=True)
+def _same_transfer_file(source: Path, destination: Path) -> bool:
+    """Check whether two transfer paths identify the same filesystem object.
 
-        if task.transfer_method == TransferMethod.HARDLINK:
+    Args:
+        source: The original download file.
+        destination: The candidate library file or link.
+
+    Returns:
+        `True` if both paths identify the same file, or `False` if their identities
+        differ or either path cannot be inspected.
+    """
+    try:
+        return source.samefile(destination)
+    except OSError:
+        return False
+
+
+async def backfill_transfer_targets(lib: MediaLib):
+    """Recover published transfers and record destinations under the library lock.
+
+    Persist destinations before pending source and sidecar cleanup, and finish
+    cleanup before organization changes the published paths. Existing files
+    without ownership markers remain untouched;
+    missing destinations are never copied or moved during this backfill. Skip
+    invalid legacy substitutions while retaining recorded destinations. Record
+    untracked destinations only with an ownership marker or matching filesystem
+    identity; matching names alone do not establish a completed transfer.
+
+    Args:
+        lib: The media library whose existing transfer destinations are recorded.
+
+    Raises:
+        OSError: If cleanup for an interrupted transfer fails.
+    """
+    destination_dir = Path(lib.dir).absolute()
+    tasks = await DownloadTask.filter(transfer_lib_id=lib.id)
+    job_ids = dict(
+        await OfflineDownloadJob.filter(
+            download_id__in=[task.id for task in tasks]
+        ).values_list("download_id", "job_uuid")
+    )
+    for task in tasks:
+        if not task.files:
+            continue
+        targets = dict(task.transfer_targets or {})
+        destinations = {name: Path(path) for name, path in targets.items() if path}
+        if any(name not in destinations for name in task.files):
             try:
-                os.link(src, dst)
-            except OSError as e:
-                # fallback to symlink if hard link fails due to cross-device link error
-                if e.errno == errno.EXDEV:
-                    os.symlink(src, dst)
-                else:
-                    raise
-        elif task.transfer_method == TransferMethod.SYMLINK:
-            os.symlink(src, dst)
-        elif task.transfer_method == TransferMethod.MOVE:
-            shutil.move(src, dst)
-        elif task.transfer_method == TransferMethod.COPY:
-            shutil.copy2(src, dst)
+                new_files = _transfer_names(task, task.files)
+            except Exception as error:
+                logger.warning(
+                    "Skipping transfer target backfill for task %s: %s",
+                    task.id,
+                    error,
+                )
+            else:
+                for name, new_name in zip(task.files, new_files, strict=True):
+                    destinations.setdefault(name, destination_dir / new_name)
+        transfer_id = (
+            job_ids.get(task.id)
+            or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
+        )
+        owned = []
+        for name in task.files:
+            destination = destinations.get(name)
+            if destination is None or not destination.is_file():
+                continue
+            source = Path(task.dir) / name
+            recovered = False
+            if task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
+                recovered = owns_local_transfer(destination, transfer_id)
+                if recovered:
+                    owned.append((source, destination))
+            if (
+                targets.get(name)
+                or recovered
+                or _same_transfer_file(source, destination)
+            ):
+                targets[name] = str(destination)
+        if targets != (task.transfer_targets or {}):
+            await DownloadTask.filter(id=task.id).update(transfer_targets=targets)
+        for source, destination in owned:
+            recover_local_transfer(
+                source,
+                destination,
+                transfer_id,
+                move=task.transfer_method is TransferMethod.MOVE,
+            )
+
+
+async def transfer_files(
+    task: DownloadTask, files: list[str] | None, *, job_id: str | None = None
+) -> bool:
+    """Transfer completed files and remember their current library destinations.
+
+    Leave unrelated existing destinations untouched without recording them as
+    completed transfers, so a later retry can use the path once it becomes free.
+    Retain ownership markers until each destination is persisted, then finish
+    cleanup before propagating cancellation or releasing the library lock.
+
+    Args:
+        task: The download task.
+        files: The relative file paths within the download directory.
+        job_id: The offline job UUID for recoverable copy publication, or None to
+            derive a stable identifier from the download task ID.
+
+    Raises:
+        asyncio.CancelledError: If cancelled, after the worker stops and completed
+            transfers are recorded when possible, even if recovery fails.
+
+    Returns:
+        `True` if every requested file has a recorded, available destination or
+        no transfer is required. `False` if any file remains unavailable or its
+        destination conflicts with an unrelated file.
+    """
+    if not task.transfer_lib_id or not task.transfer_method or not files:
+        return True
+    lib = await MediaLib.get_or_none(id=task.transfer_lib_id)
+    if not lib:
+        return True
+
+    src_dir = Path(task.dir)
+    dst_dir = Path(lib.dir).absolute()
+    transfer_id = (
+        job_id or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
+    )
+    async with library_lock(lib.dir):
+        # recheck the library association after waiting for its lock
+        if not await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).exists():
+            return True
+        from app.core.media.organizer import recover_organizing
+
+        await recover_organizing(lib)
+        # refresh paths that may have changed since the task was loaded
+        await task.refresh_from_db(fields=["transfer_targets"])
+        targets = dict(task.transfer_targets or {})
+        for name, new_name in zip(files, _transfer_names(task, files), strict=True):
+            src = src_dir / name
+            dst = Path(targets.get(name) or dst_dir / new_name)
+            published = False
+            cancelled = False
+            try:
+                if task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
+                    if not src.exists() and not dst.exists():
+                        continue
+                    transfer = asyncio.create_task(
+                        asyncio.to_thread(
+                            transfer_local_file,
+                            src,
+                            dst,
+                            transfer_id,
+                            move=task.transfer_method is TransferMethod.MOVE,
+                            defer_cleanup=True,
+                        )
+                    )
+                    try:
+                        published = await asyncio.shield(transfer)
+                    except asyncio.CancelledError:
+                        # retain the lock and record the file before cancelling
+                        cancelled = True
+                        published = await transfer
+                elif not dst.exists():
+                    if not src.exists():
+                        continue
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if task.transfer_method == TransferMethod.HARDLINK:
+                        try:
+                            os.link(src, dst)
+                        except OSError as e:
+                            if e.errno != errno.EXDEV:
+                                raise
+                            os.symlink(src, dst)
+                    elif task.transfer_method == TransferMethod.SYMLINK:
+                        os.symlink(src, dst)
+
+                if (
+                    dst.is_file()
+                    and targets.get(name) != str(dst)
+                    and (published or _same_transfer_file(src, dst))
+                ):
+                    targets[name] = str(dst)
+                    # persist each successful file, including partial multi-file runs
+                    await DownloadTask.filter(id=task.id).update(
+                        transfer_targets=targets
+                    )
+                    task.transfer_targets = dict(targets)
+                if published:
+                    recover_local_transfer(
+                        src,
+                        dst,
+                        transfer_id,
+                        move=task.transfer_method is TransferMethod.MOVE,
+                    )
+            except Exception as error:
+                if cancelled:
+                    raise asyncio.CancelledError from error
+                raise
+            if cancelled:
+                raise asyncio.CancelledError
+        return all(
+            targets.get(name) and Path(targets[name]).is_file() for name in files
+        )
 
 
 async def check_download_plans():

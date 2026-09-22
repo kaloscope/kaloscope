@@ -362,16 +362,154 @@ def test_install_conflict(tmp_path, monkeypatch, hardlinks):
     assert not second.marker_path.exists()
 
 
-def test_library_conflict(tmp_path):
+@pytest.mark.parametrize(
+    ("move", "cross_device"), [(False, False), (True, False), (True, True)]
+)
+def test_library_transfer(tmp_path, monkeypatch, move, cross_device):
+    source = tmp_path / "movie.mkv"
+    source.write_bytes(b"source")
+    destination = tmp_path / "library" / "movie.mkv"
+    if cross_device:
+        rename = puller.rename_exclusive
+
+        def cross_device_rename(old, new):
+            if old == source:
+                raise OSError(errno.EXDEV, "Different filesystem")
+            return rename(old, new)
+
+        monkeypatch.setattr(puller, "rename_exclusive", cross_device_rename)
+
+    transferred = puller.transfer_local_file(source, destination, JOB_ID, move=move)
+
+    assert transferred is True
+    assert destination.read_bytes() == b"source"
+    assert source.exists() is not move
+    assert list(destination.parent.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize(
+    ("move", "cross_device", "symlink"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
+def test_library_deferred(tmp_path, monkeypatch, move, cross_device, symlink):
+    source = tmp_path / "movie.mkv"
+    if symlink:
+        original = tmp_path / "original.mkv"
+        original.write_bytes(b"source")
+        source.symlink_to(original)
+    else:
+        source.write_bytes(b"source")
+    destination = tmp_path / "library" / "movie.mkv"
+    if cross_device:
+        rename = puller.rename_exclusive
+
+        def cross_device_rename(old, new):
+            if old == source:
+                raise OSError(errno.EXDEV, "Different filesystem")
+            return rename(old, new)
+
+        monkeypatch.setattr(puller, "rename_exclusive", cross_device_rename)
+
+    transferred = puller.transfer_local_file(
+        source, destination, JOB_ID, move=move, defer_cleanup=True
+    )
+
+    assert transferred is True
+    assert destination.read_bytes() == b"source"
+    assert destination.is_symlink() is symlink
+    assert source.exists() is (not move or cross_device)
+    assert puller.owns_local_transfer(destination, JOB_ID)
+    assert not puller.owns_local_transfer(destination, OTHER_JOB_ID)
+    assert puller.transfer_local_file(
+        source, destination, JOB_ID, move=move, defer_cleanup=True
+    )
+    assert puller.owns_local_transfer(destination, JOB_ID)
+
+    assert puller.recover_local_transfer(source, destination, JOB_ID, move=move)
+    assert source.exists() is not move
+    assert destination.read_bytes() == b"source"
+    assert list(destination.parent.iterdir()) == [destination]
+
+
+def test_library_move_replacement(tmp_path):
+    source = tmp_path / "movie.mkv"
+    source.write_bytes(b"original")
+    destination = tmp_path / "library" / "movie.mkv"
+
+    assert puller.transfer_local_file(
+        source, destination, JOB_ID, move=True, defer_cleanup=True
+    )
+    source.write_bytes(b"replacement")
+    assert puller.recover_local_transfer(source, destination, JOB_ID, move=True)
+
+    assert source.read_bytes() == b"replacement"
+    assert destination.read_bytes() == b"original"
+    assert list(destination.parent.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("change", ["replace", "modify", "remove"])
+def test_library_copied_move_source(tmp_path, monkeypatch, change):
+    source = tmp_path / "movie.mkv"
+    source.write_bytes(b"original")
+    destination = tmp_path / "library" / "movie.mkv"
+    rename = puller.rename_exclusive
+
+    def cross_device_rename(old, new):
+        if old == source:
+            raise OSError(errno.EXDEV, "Different filesystem")
+        return rename(old, new)
+
+    monkeypatch.setattr(puller, "rename_exclusive", cross_device_rename)
+
+    assert puller.transfer_local_file(
+        source, destination, JOB_ID, move=True, defer_cleanup=True
+    )
+    if change != "modify":
+        source.unlink()
+    if change != "remove":
+        source.write_bytes(b"replacement")
+    assert puller.recover_local_transfer(source, destination, JOB_ID, move=True)
+
+    assert source.exists() is (change != "remove")
+    if change != "remove":
+        assert source.read_bytes() == b"replacement"
+    assert destination.read_bytes() == b"original"
+    assert list(destination.parent.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("move", [False, True])
+@pytest.mark.parametrize("exists", [False, True])
+def test_library_same_path(tmp_path, move, exists):
+    source = tmp_path / "movie.mkv"
+    if exists:
+        source.write_bytes(b"source")
+
+    transferred = puller.transfer_local_file(source, source, JOB_ID, move=move)
+
+    assert transferred is exists
+    assert source.exists() is exists
+    if exists:
+        assert source.read_bytes() == b"source"
+
+
+@pytest.mark.parametrize("move", [False, True])
+def test_library_conflict(tmp_path, move):
     source = puller.prepare_local_file(tmp_path, "first.mkv", JOB_ID)
     destination = puller.prepare_local_file(tmp_path, "second.mkv", JOB_ID)
     for target, content in ((source, b"one"), (destination, b"two")):
         target.part_path.write_bytes(content)
         puller._install_local_file_sync(target)
 
-    puller.transfer_local_file(
-        source.final_path, destination.final_path, JOB_ID, move=True
+    transferred = puller.transfer_local_file(
+        source.final_path, destination.final_path, JOB_ID, move=move
     )
+
+    assert transferred is False
     assert source.final_path.read_bytes() == b"one"
     assert destination.final_path.read_bytes() == b"two"
     assert source.marker_path.exists()
@@ -394,7 +532,10 @@ def test_unmarked_hardlink(tmp_path):
 
 
 @pytest.mark.parametrize("move", [False, True])
-def test_library_recovery(tmp_path, move):
+@pytest.mark.parametrize(
+    "recover", [puller.recover_local_transfer, puller.transfer_local_file]
+)
+def test_library_recovery(tmp_path, move, recover):
     program = """
 import errno
 import os
@@ -405,7 +546,7 @@ from app.core.dl.openlist import puller
 source = Path(sys.argv[1]) / 'movie.mkv'
 destination = Path(sys.argv[1]) / 'library' / 'movie.mkv'
 source.write_bytes(b'abc')
-rename = puller._rename_exclusive
+rename = puller.rename_exclusive
 
 def cross_device(old, new):
     if old == source:
@@ -421,7 +562,7 @@ def crash_after_publication(frame, event, _arg):
         os._exit(73)
     return crash_after_publication
 
-puller._rename_exclusive = cross_device
+puller.rename_exclusive = cross_device
 sys.settrace(crash_after_publication)
 puller.transfer_local_file(source, destination, '1' * 32, move=sys.argv[2] == 'True')
 """
@@ -434,10 +575,40 @@ puller.transfer_local_file(source, destination, '1' * 32, move=sys.argv[2] == 'T
     assert result.returncode == 73
     source = tmp_path / "movie.mkv"
     destination = tmp_path / "library" / "movie.mkv"
-    puller.transfer_local_file(source, destination, JOB_ID, move=move)
+
+    recovered = recover(source, destination, JOB_ID, move=move)
+
+    assert recovered is True
     assert destination.read_bytes() == b"abc"
     assert source.exists() is not move
     assert list(destination.parent.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("destination_state", ["missing", "unowned", "other_job"])
+def test_library_cleanup_safety(tmp_path, monkeypatch, destination_state):
+    source = tmp_path / "movie.mkv"
+    source.write_bytes(b"source")
+    destination = tmp_path / "library" / "movie.mkv"
+    if destination_state == "unowned":
+        destination.parent.mkdir()
+        destination.write_bytes(b"existing library file")
+    elif destination_state == "other_job":
+        install = puller._install_local_file_sync
+
+        def interrupted_install(target, **kwargs):
+            install(target, **kwargs)
+            raise OSError("Interrupted after publication")
+
+        monkeypatch.setattr(puller, "_install_local_file_sync", interrupted_install)
+        with pytest.raises(OSError, match="Interrupted after publication"):
+            puller.transfer_local_file(source, destination, OTHER_JOB_ID)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    recovered = puller.recover_local_transfer(source, destination, JOB_ID, move=True)
+
+    after = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert recovered is False
+    assert after == before
 
 
 @pytest.mark.parametrize("hardlinks", [True, False])

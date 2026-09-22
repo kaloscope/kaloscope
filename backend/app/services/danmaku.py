@@ -1,4 +1,6 @@
+import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -11,6 +13,7 @@ from sanic import Sanic
 from sanic.log import logger
 
 from app.core.constants import ENCODING
+from app.core.media.coordination import library_lock
 from app.models.media import Language, LibType, MediaItem, MediaResource
 from app.utils import json
 
@@ -130,30 +133,77 @@ class DanmakuService:
         return Path(media.dir) / f".{media.name}.json"
 
     @classmethod
+    @contextlib.asynccontextmanager
+    async def _locked_media(cls, media: MediaItem) -> AsyncIterator[MediaItem | None]:
+        """Resolve current media paths while excluding library filesystem writers.
+
+        Args:
+            media: The media identity with its library already loaded.
+
+        Yields:
+            The current media item, or `None` if it was deleted while waiting.
+        """
+        from app.core.media.organizer import recover_organizing
+
+        async with library_lock(media.lib.dir):
+            await recover_organizing(media.lib)
+            yield await MediaItem.get_or_none(id=media.id).select_related("lib")
+
+    @classmethod
+    async def _write_cache(cls, media: MediaItem, comments: list[Danmaku]) -> Path:
+        """Write comments without releasing the caller's lock on cancellation.
+
+        Args:
+            media: The current media item whose library lock the caller holds.
+            comments: The comments to store at the current cache path.
+
+        Returns:
+            The path of the written cache.
+
+        Raises:
+            asyncio.CancelledError: If cancelled, after the writer has stopped.
+            OSError: If the cache cannot be written.
+        """
+        path = cls._cache_path(media)
+        content = json.dumps([comment.model_dump() for comment in comments])
+        write = asyncio.create_task(asyncio.to_thread(path.write_bytes, content))
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            await write
+            raise
+        return path
+
+    @classmethod
     async def match_danmakus(cls, path: str) -> DanmakuWrapper:
         """Match danmakus for the given media resource.
+
+        Fetch comments outside the library lock and resolve current paths before
+        reading or writing the cache. Discard fetched comments if the stored file
+        hash or size changes while the request is in flight.
 
         Args:
             path: The media resource path.
 
         Returns:
-            The wrapped danmakus with metadata if available.
+            The wrapped danmakus with metadata if available, or an empty wrapper
+            if the media was removed or replaced during the request.
         """
         # get the media item by the path
         media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media:
             return DanmakuWrapper(comments=[])
 
-        # check if the local cache file exists
-        danmaku_path = cls._cache_path(media)
-        cached = danmaku_path.exists()
-
-        # check if the local cache file is expired
-        expired = False
-        if cached and (ttl := media.lib.danmaku_ttl) is not None:
-            mtime = danmaku_path.stat().st_mtime
-            if mtime + ttl * 3600 < datetime.now().timestamp():
-                expired = True
+        async with cls._locked_media(media) as current:
+            if current is None:
+                return DanmakuWrapper(comments=[])
+            media = current
+            danmaku_path = cls._cache_path(media)
+            cached = danmaku_path.exists()
+            expired = False
+            if cached and (ttl := media.lib.danmaku_ttl) is not None:
+                mtime = danmaku_path.stat().st_mtime
+                expired = mtime + ttl * 3600 < datetime.now().timestamp()
 
         if (not cached or expired) and (server := media.lib.danmaku_server):
             meta = media.danmaku_meta
@@ -168,24 +218,28 @@ class DanmakuService:
                     server, meta.episode_id, media.lib.language
                 )
                 if danmakus:
-                    # save to local cache file
-                    async with aiofiles.open(danmaku_path, "wb") as f:
-                        await f.write(json.dumps([d.model_dump() for d in danmakus]))
-
-                    # update the media item with the danmaku info
-                    await MediaItem.filter(id=media.id).update(
-                        danmaku_meta=meta,
-                        danmaku_path=str(danmaku_path),
-                    )
+                    async with cls._locked_media(media) as current:
+                        if current is None:
+                            return DanmakuWrapper(comments=[])
+                        if (current.hash, current.size) != (media.hash, media.size):
+                            return DanmakuWrapper(comments=[])
+                        danmaku_path = await cls._write_cache(current, danmakus)
+                        await MediaItem.filter(id=current.id).update(
+                            danmaku_meta=meta,
+                            danmaku_path=str(danmaku_path),
+                        )
 
                     return DanmakuWrapper(metadata=meta, comments=danmakus)
 
         # load danmakus from the local cache file
-        meta = media.danmaku_meta
-        return DanmakuWrapper(
-            metadata=DanmakuMeta.model_validate(meta) if meta else None,
-            comments=await cls.load_from_cache(danmaku_path),
-        )
+        async with cls._locked_media(media) as current:
+            if current is None:
+                return DanmakuWrapper(comments=[])
+            meta = current.danmaku_meta
+            return DanmakuWrapper(
+                metadata=DanmakuMeta.model_validate(meta) if meta else None,
+                comments=await cls.load_from_cache(cls._cache_path(current)),
+            )
 
     @classmethod
     async def match_metadata(cls, server: str, media: MediaItem) -> DanmakuMeta | None:
@@ -374,15 +428,26 @@ class DanmakuService:
 
     @classmethod
     async def delete_danmakus(cls, path: str):
-        """Delete the locally cached danmakus for the given media resource.
+        """Delete the cache at the media's current path under its library lock.
 
         Args:
             path: The media resource path.
         """
         # get the media item by the path
-        media = await MediaItem.filter(path=path).first()
+        media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media:
             return
+        async with cls._locked_media(media) as current:
+            if current is not None:
+                await cls._delete_cache(current)
+
+    @classmethod
+    async def _delete_cache(cls, media: MediaItem):
+        """Delete cached comments while the caller holds the library lock.
+
+        Args:
+            media: The current media item whose cached comments are deleted.
+        """
         danmaku_path = cls._cache_path(media)
         if danmaku_path.is_file():
             danmaku_path.unlink()
@@ -525,50 +590,82 @@ class DanmakuService:
     async def confirm_episode(cls, path: str, meta: DanmakuMeta) -> DanmakuWrapper:
         """Confirm the episode match result for the given media resource.
 
+        Fetch comments outside the library lock, then update the current cache.
+        Discard the confirmation without updating caches or sibling episodes if
+        the stored file hash or size changes while the request is in flight.
+
         Args:
             path: The media resource path.
             meta: The confirmed metadata.
 
         Returns:
-            The wrapped danmakus with the confirmed metadata.
+            The wrapped danmakus with the confirmed metadata, or an empty wrapper
+            if the media content changed during the request.
         """
         result = DanmakuWrapper(metadata=meta, comments=[])
         media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media or not (server := media.lib.danmaku_server):
             return result
 
+        episode_ids = None
+        async with cls._locked_media(media) as current:
+            if current is None:
+                return result
+            media = current
+            if media.lib.lib_type == LibType.TV_SHOW:
+                episode_ids = await MediaItem.filter(
+                    lib_id=media.lib_id,
+                    parent_id=media.parent_id or media.id,
+                    id__not=media.id,
+                    episode__not_isnull=True,
+                ).values_list("id", flat=True)
+
         # load danmakus from the danmaku server
         danmakus = await cls.load_from_server(
             server, meta.episode_id, media.lib.language
         )
-        danmaku_path = cls._cache_path(media)
-        if danmakus:
-            result.comments = danmakus
-            # save to local cache file
-            async with aiofiles.open(danmaku_path, "wb") as f:
-                await f.write(json.dumps([d.model_dump() for d in danmakus]))
-        elif danmaku_path.is_file():
-            danmaku_path.unlink()
+        async with cls._locked_media(media) as current:
+            if current is None:
+                return result
+            if (current.hash, current.size) != (media.hash, media.size):
+                return DanmakuWrapper(comments=[])
+            media = current
+            if danmakus:
+                result.comments = danmakus
+                danmaku_path = await cls._write_cache(media, danmakus)
+            else:
+                await cls._delete_cache(media)
 
-        # retain the confirmed match and retry empty results on the next playback
-        await MediaItem.filter(id=media.id).update(
-            danmaku_meta=meta,
-            danmaku_path=str(danmaku_path) if danmakus else None,
-        )
+            # retain the confirmed match and retry empty results on the next playback
+            await MediaItem.filter(id=media.id).update(
+                danmaku_meta=meta,
+                danmaku_path=str(danmaku_path) if danmakus else None,
+            )
 
         # also refresh the danmaku metadata of sibling episodes if it's a TV show
         if media.lib.lib_type == LibType.TV_SHOW:
-            await cls.refresh_episodes(media, meta)
+            await cls.refresh_episodes(media, meta, episode_ids=episode_ids)
 
         return result
 
     @classmethod
-    async def refresh_episodes(cls, item: MediaItem, meta: DanmakuAnime) -> bool:
+    async def refresh_episodes(
+        cls,
+        item: MediaItem,
+        meta: DanmakuAnime,
+        *,
+        episode_ids: list[int] | None = None,
+    ) -> bool:
         """Refresh the danmaku metadata of the episodes under an anime.
+
+        Retain episode identities across organization and lock cache deletion
+        after fetching remote metadata.
 
         Args:
             item: The media item or a confirmed episode.
             meta: The confirmed danmaku metadata.
+            episode_ids: The original sibling IDs captured before fetching comments,
+                or `None` to select the current siblings or children.
 
         Returns:
             Whether the match was applied or already up to date.
@@ -578,7 +675,11 @@ class DanmakuService:
 
         anime_id = meta.anime_id
         # include all files for a library match, or siblings for a player match
-        query = MediaItem.filter(parent_id=item.parent_id or item.id, id__not=item.id)
+        query = MediaItem.filter(lib_id=item.lib_id, id__not=item.id)
+        if episode_ids is None:
+            query = query.filter(parent_id=item.parent_id or item.id)
+        else:
+            query = query.filter(id__in=episode_ids)
         movie = item.lib.lib_type == LibType.MOVIE
         if not movie:
             query = query.filter(episode__not_isnull=True)
@@ -642,40 +743,47 @@ class DanmakuService:
                     return False
                 ep_data[number] = ep
 
-            matches = [
-                (
-                    episode,
-                    api_episodes[0]
-                    if movie and len(api_episodes) == 1
-                    else ep_data.get(str(episode.episode)),
+            from app.core.media.organizer import recover_organizing
+
+            async with library_lock(item.lib.dir):
+                await recover_organizing(item.lib)
+                # retain the original scope if organization split or merged a parent
+                current_episodes = await MediaItem.filter(
+                    id__in=[episode.id for episode in db_episodes], lib_id=item.lib_id
                 )
-                for episode in db_episodes
-            ]
-            if not item.parent_id and not any(ep for _, ep in matches):
-                return False
-
-            for db_episode, ep in matches:
-                # discard stale caches even when no new episode matches
-                danmaku_path = cls._cache_path(db_episode)
-                if danmaku_path.is_file():
-                    danmaku_path.unlink()
-
-                danmaku_meta = (
-                    DanmakuMeta(
-                        anime_id=meta.anime_id,
-                        anime_title=meta.anime_title,
-                        episode_id=ep.get("episodeId", 0),
-                        episode_title=ep.get("episodeTitle"),
-                        type=meta.type,
-                        type_description=meta.type_description,
+                matches = [
+                    (
+                        episode,
+                        api_episodes[0]
+                        if movie and len(api_episodes) == 1
+                        else ep_data.get(str(episode.episode)),
                     )
-                    if ep
-                    else None
-                )
+                    for episode in current_episodes
+                    if not episode.danmaku_meta
+                    or str(episode.danmaku_meta.get("anime_id")) != anime_id
+                ]
+                if not item.parent_id and matches and not any(ep for _, ep in matches):
+                    return False
 
-                await MediaItem.filter(id=db_episode.id).update(
-                    danmaku_path=None, danmaku_meta=danmaku_meta
-                )
+                for db_episode, ep in matches:
+                    # discard stale caches even when no new episode matches
+                    await cls._delete_cache(db_episode)
+                    danmaku_meta = (
+                        DanmakuMeta(
+                            anime_id=meta.anime_id,
+                            anime_title=meta.anime_title,
+                            episode_id=ep.get("episodeId", 0),
+                            episode_title=ep.get("episodeTitle"),
+                            type=meta.type,
+                            type_description=meta.type_description,
+                        )
+                        if ep
+                        else None
+                    )
+
+                    await MediaItem.filter(id=db_episode.id).update(
+                        danmaku_meta=danmaku_meta
+                    )
             return True
 
         except httpx.RequestError:

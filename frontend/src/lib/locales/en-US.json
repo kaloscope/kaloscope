@@ -402,6 +402,17 @@
     }
   },
   "media": {
+    "rename": {
+      "template": "Automatic rename template",
+      "tip": "Leave empty to disable. Applies the next time an NFO is successfully parsed; existing files are not renamed immediately in bulk.",
+      "help": "Template usage and available fields",
+      "path_tip": "Paths are relative to the library root and separated by /. The final part is the filename; omit the extension as the original is retained. Absolute paths and .. are not allowed. Only simple field placeholders are supported.",
+      "movie_path_tip": "Movies support filename or movie folder/filename.",
+      "tv_path_tip": "TV shows support show folder/filename or show folder/season folder/filename. Folders only allow show_title, show_year, year, season, unique_id and nfo_source from parent NFOs; title is the current episode title and is only used in filenames.",
+      "episode_tip": "season and episode use two digits (e.g. 01); episode_code combines them (e.g. S01E02).",
+      "example": "Example",
+      "fields": "Available fields"
+    },
     "director": "Director",
     "writer": "Writer",
     "cast": "Cast",

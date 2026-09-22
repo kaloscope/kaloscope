@@ -1,6 +1,7 @@
 """Test danmaku matching, cache updates, and server error recovery."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -8,12 +9,16 @@ import httpx
 import pytest
 from tortoise import Tortoise
 
+from app.core.config import KaloscopeConfig
+from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaItem, MediaLib
 from app.services import danmaku
 
 
 @pytest.fixture
 def library(monkeypatch, tmp_path):
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+
     @asynccontextmanager
     async def create(handler, lib_type=LibType.TV_SHOW, server="https://danmaku.test"):
         await Tortoise.init(
@@ -532,6 +537,176 @@ def test_override_without_comments(library, tmp_path, status):
     asyncio.run(run())
 
     assert requests == ["/api/v2/comment/manual-1", "/api/v2/comment/manual-1"]
+
+
+@pytest.mark.parametrize("pending_path", ["/api/v2/match", "/api/v2/comment/old"])
+@pytest.mark.parametrize("replacement", [{"hash": "new"}, {"size": 20}])
+def test_content_replacement(library, tmp_path, pending_path, replacement):
+    async def run():
+        loading = asyncio.Event()
+        release = asyncio.Event()
+        matches = []
+
+        async def handler(request):
+            if request.url.path == pending_path and not release.is_set():
+                loading.set()
+                await release.wait()
+            if request.url.path == "/api/v2/match":
+                payload = json.loads(request.content)
+                matches.append(payload)
+                episode_id = (
+                    "old"
+                    if (payload["fileHash"], payload["fileSize"]) == ("old", 10)
+                    else "new"
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "matches": [
+                            {
+                                "animeId": "anime",
+                                "episodeId": episode_id,
+                                "type": "tvseries",
+                            }
+                        ],
+                    },
+                )
+            assert request.url.path in (
+                "/api/v2/comment/old",
+                "/api/v2/comment/new",
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "comments": [
+                        {
+                            "cid": 1,
+                            "p": "1,1,16777215,1",
+                            "m": request.url.path.rsplit("/", 1)[-1],
+                        }
+                    ]
+                },
+            )
+
+        async with library(handler) as lib:
+            item = await media(lib, "video.mkv")
+            await MediaItem.filter(id=item.id).update(hash="old", size=10)
+            cache = tmp_path / ".video.mkv.json"
+            pending = asyncio.create_task(
+                danmaku.DanmakuService.match_danmakus(item.path)
+            )
+            try:
+                await asyncio.wait_for(loading.wait(), timeout=5)
+                async with library_lock(lib.dir):
+                    await MediaItem.filter(id=item.id).update(
+                        **replacement, danmaku_meta=None, danmaku_path=None
+                    )
+            finally:
+                release.set()
+
+            stale = await pending
+            await item.refresh_from_db()
+
+            assert stale.metadata is None
+            assert stale.comments == []
+            assert item.danmaku_meta is None
+            assert item.danmaku_path is None
+            assert not cache.exists()
+
+            current = await danmaku.DanmakuService.match_danmakus(item.path)
+            await item.refresh_from_db()
+
+            assert current.metadata is not None
+            assert current.metadata.episode_id == "new"
+            assert [comment.text for comment in current.comments] == ["new"]
+            assert item.danmaku_meta is not None
+            assert item.danmaku_meta["episode_id"] == "new"
+            assert item.danmaku_path == str(cache)
+            assert [comment["text"] for comment in json.loads(cache.read_text())] == [
+                "new"
+            ]
+            assert [(match["fileHash"], match["fileSize"]) for match in matches] == [
+                ("old", 10),
+                (item.hash, item.size),
+            ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("has_comments", [False, True])
+@pytest.mark.parametrize("replacement", [{"hash": "new"}, {"size": 20}])
+def test_confirmation_replacement(library, tmp_path, has_comments, replacement):
+    async def run():
+        loading = asyncio.Event()
+        release = asyncio.Event()
+        requests = []
+
+        async def handler(request):
+            requests.append(request.url.path)
+            if request.url.path == "/api/v2/comment/selected-1":
+                loading.set()
+                await release.wait()
+                comments = (
+                    [{"cid": 1, "p": "1,1,16777215,1", "m": "Stale comments"}]
+                    if has_comments
+                    else []
+                )
+                return httpx.Response(200, json={"comments": comments})
+            assert request.url.path == "/api/v2/bangumi/selected"
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "bangumi": {
+                        "episodes": [{"episodeNumber": 2, "episodeId": "selected-2"}]
+                    },
+                },
+            )
+
+        async with library(handler) as lib:
+            parent = await media(lib, "Series")
+            first = await media(lib, "1.mkv", parent=parent, episode=1)
+            second = await media(lib, "2.mkv", parent=parent, episode=2)
+            await MediaItem.filter(id=first.id).update(hash="old", size=10)
+            cache = tmp_path / ".1.mkv.json"
+            sibling_cache = tmp_path / ".2.mkv.json"
+            sibling_content = '[{"text": "Sibling comments"}]'
+            sibling_cache.write_text(sibling_content)
+            sibling_metadata = second.danmaku_meta
+            await MediaItem.filter(id=second.id).update(danmaku_path=str(sibling_cache))
+            pending = asyncio.create_task(
+                danmaku.DanmakuService.confirm_episode(
+                    first.path,
+                    danmaku.DanmakuMeta(
+                        anime_id="selected", episode_id="selected-1", type="tvseries"
+                    ),
+                )
+            )
+            try:
+                await asyncio.wait_for(loading.wait(), timeout=5)
+                async with library_lock(lib.dir):
+                    await MediaItem.filter(id=first.id).update(
+                        **replacement, danmaku_meta=None, danmaku_path=None
+                    )
+            finally:
+                release.set()
+
+            result = await pending
+            await first.refresh_from_db()
+            await second.refresh_from_db()
+
+            assert result.metadata is None
+            assert result.comments == []
+            assert first.danmaku_meta is None
+            assert first.danmaku_path is None
+            assert not cache.exists()
+            assert second.danmaku_meta == sibling_metadata
+            assert second.danmaku_path == str(sibling_cache)
+            assert sibling_cache.read_text() == sibling_content
+            assert requests == ["/api/v2/comment/selected-1"]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
