@@ -6,6 +6,8 @@
   import type OptionsPlugin from 'xgplayer/es/plugins/common/optionsIcon';
   import type FullscreenPlugin from 'xgplayer/es/plugins/fullscreen';
   import type MobilePlugin from 'xgplayer/es/plugins/mobile';
+  import type ChaptersPlugin from './plugins/chapters';
+  import type DefinitionsPlugin from './plugins/definitions';
 
   /**
    * The type of the video player options.
@@ -160,8 +162,8 @@
 
   // the plugins used in the player
   let mobilePlugin: MobilePlugin | null = $derived.by(() => player?.getPlugin('mobile'));
-  let chaptersPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('chapters'));
-  let definitionsPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('definitions'));
+  let chaptersPlugin: ChaptersPlugin | null = $derived.by(() => player?.getPlugin('chapters'));
+  let definitionsPlugin: DefinitionsPlugin | null = $derived.by(() => player?.getPlugin('definitions'));
   let fullscreenPlugin: FullscreenPlugin | null = $derived.by(() => player?.getPlugin('fullscreen'));
   let playbackRatePlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('playbackRate'));
   let texttrackPlugin: OptionsPlugin | null = $derived.by(() => player?.getPlugin('texttrack'));
@@ -285,9 +287,12 @@
   ];
 
   /**
-   * Mounts the player with the given options.
+   * Mount the player with the given options.
+   *
+   * Reuse the chapter directory and clear previous definition options for `next` loads.
    *
    * @param options - The video options.
+   * @returns A promise that settles after initializing or updating the player.
    */
   export async function mount(options: VideoOptions) {
     if (!options || !options.url) {
@@ -310,7 +315,25 @@
     if (player) {
       player.getPlugin('progresspreview')?.updateAllDots(progressDot);
       if (options.next) {
+        if (chaptersPlugin && 'chapterId' in options) {
+          chaptersPlugin.config.chapterId = options.chapterId;
+          player.config.chapters = chaptersPlugin.config;
+        }
+        const definitions = player.config.definitions as { list?: Definition[] } | undefined;
+        const clearDefinitions = !!definitions?.list?.length;
+        if (clearDefinitions) {
+          player.config.definitions = { ...definitions, list: [] };
+          if (definitionsPlugin) {
+            definitionsPlugin.config.list = [];
+          }
+        }
         player.playNext({ url, topBar: { title: options.title }, customDuration: duration });
+        if (clearDefinitions) {
+          definitionsPlugin?.renderItemList();
+          definitionsPlugin?.toggle(false);
+          definitionsPlugin?.hide();
+          videoSettings.updateDefinitions();
+        }
       } else {
         videoSettings.changePlaybackSource(url);
       }
