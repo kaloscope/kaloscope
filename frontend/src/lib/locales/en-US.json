@@ -840,6 +840,7 @@
     "http_request_failed": "HTTP request failed!",
     "danmaku_server_required": "Configure the library's danmaku server first.",
     "danmaku_match_failed": "Danmaku matching failed. Retry or select another result.",
+    "resource_load_failed": "Unable to load this content. Try another resource or try again later.",
     "magnet_link_copied": "Magnet link copied!",
     "select_export_items": "Please select at least one item to export.",
     "select_delete_items": "Please select at least one item to delete.",
