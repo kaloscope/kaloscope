@@ -1,6 +1,10 @@
 """Disk usage and filesystem cleanup utilities."""
 
+import ctypes
+import errno
+import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,3 +118,42 @@ def format_bytes(size_bytes: int) -> str:
         size /= 1024
         i += 1
     return f"{size:.1f}".rstrip("0").rstrip(".") + " " + sizes[i]
+
+
+def rename_exclusive(source: Path, destination: Path):
+    """Rename a file atomically without overwriting an existing destination.
+
+    Args:
+        source: The file to rename.
+        destination: The final path, which must not already exist.
+
+    Raises:
+        OSError: If exclusive renaming is unavailable or fails.
+    """
+    if sys.platform == "win32":
+        os.rename(source, destination)
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        # request `RENAME_EXCL`
+        arguments = (os.fsencode(source), os.fsencode(destination), 0x4)
+    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        # use `AT_FDCWD` and `RENAME_NOREPLACE`
+        arguments = (-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    else:
+        raise OSError(errno.ENOSYS, "Exclusive renaming is unavailable")
+    rename.restype = ctypes.c_int
+    if rename(*arguments) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)

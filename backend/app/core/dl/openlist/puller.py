@@ -1,5 +1,4 @@
 import asyncio
-import ctypes
 import errno
 import hashlib
 import logging
@@ -21,6 +20,7 @@ from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.manifest import RemoteManifestEntry, normalize_relative_path
 from app.core.dl.openlist.models import OpenListErrorKind, RemoteLink
 from app.models.download import OfflineDownloadErrorKind
+from app.utils.disk import rename_exclusive
 
 _PROXY_SEGMENTS = frozenset({"p", "d", "ap", "ad", "ae", "sd", "sad"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -651,45 +651,6 @@ def prepare_local_directory(task_dir: str | Path, relative_path: str) -> Path:
     return path
 
 
-def _rename_exclusive(source: Path, destination: Path):
-    """Publish a file atomically on filesystems without hard links.
-
-    Args:
-        source: The file to rename.
-        destination: The final path, which must not already exist.
-
-    Raises:
-        OSError: If exclusive renaming is unavailable or fails.
-    """
-    if sys.platform == "win32":
-        os.rename(source, destination)
-        return
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
-        rename = libc.renamex_np
-        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        # request `RENAME_EXCL`
-        arguments = (os.fsencode(source), os.fsencode(destination), 0x4)
-    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
-        rename = libc.renameat2
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        # use `AT_FDCWD` and `RENAME_NOREPLACE`
-        arguments = (-100, os.fsencode(source), -100, os.fsencode(destination), 1)
-    else:
-        raise OSError(errno.ENOSYS, "Exclusive renaming is unavailable")
-    rename.restype = ctypes.c_int
-    if rename(*arguments) != 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination)
-
-
 def _install_local_file_sync(target: LocalFileTarget):
     """Install one completed file without overwriting another job.
 
@@ -722,7 +683,7 @@ def _install_local_file_sync(target: LocalFileTarget):
         except OSError as exc:
             if exc.errno not in _HARDLINK_UNAVAILABLE:
                 raise
-            _rename_exclusive(target.part_path, target.final_path)
+            rename_exclusive(target.part_path, target.final_path)
         installed = True
         target.part_path.unlink(missing_ok=True)
     except FileExistsError as exc:
@@ -776,7 +737,7 @@ def transfer_local_file(
     destination.parent.mkdir(parents=True, exist_ok=True)
     if move:
         try:
-            _rename_exclusive(source, destination)
+            rename_exclusive(source, destination)
             return
         except OSError as exc:
             if exc.errno != errno.EXDEV:

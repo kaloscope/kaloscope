@@ -405,7 +405,7 @@ from app.core.dl.openlist import puller
 source = Path(sys.argv[1]) / 'movie.mkv'
 destination = Path(sys.argv[1]) / 'library' / 'movie.mkv'
 source.write_bytes(b'abc')
-rename = puller._rename_exclusive
+rename = puller.rename_exclusive
 
 def cross_device(old, new):
     if old == source:
@@ -421,7 +421,7 @@ def crash_after_publication(frame, event, _arg):
         os._exit(73)
     return crash_after_publication
 
-puller._rename_exclusive = cross_device
+puller.rename_exclusive = cross_device
 sys.settrace(crash_after_publication)
 puller.transfer_local_file(source, destination, '1' * 32, move=sys.argv[2] == 'True')
 """
