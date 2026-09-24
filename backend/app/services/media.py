@@ -181,26 +181,39 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         # calculate hash and size for the newly created item
         if created:
-            asyncio.create_task(cls._hash_and_size(item.id, item_path))
+            asyncio.create_task(cls._hash_and_size(item.id))
 
         return item
 
     @classmethod
-    async def _hash_and_size(cls, item_id: int, item_path: str):
-        """Calculate and persist the hash and size of a media file.
+    async def _hash_and_size(cls, item_id: int):
+        """Fill missing file identity values after earlier library work finishes.
 
         Args:
             item_id: The media item ID.
-            item_path: The file path of the media item.
         """
-        path = Path(item_path)
-        if not path.is_file():
+        item = await MediaItem.get_or_none(id=item_id).select_related("lib")
+        if item is None:
             return
-        size = path.stat().st_size
-        md5 = hashlib.md5()
-        async with aiofiles.open(path, "rb") as f:
-            md5.update(await f.read(cls.HASH_READ_SIZE))
-        await MediaItem.filter(id=item_id).update(hash=md5.hexdigest(), size=size)
+        async with library_lock(item.lib.dir):
+            current = await MediaItem.get_or_none(id=item_id)
+            if current is None or (
+                current.hash is not None and current.size is not None
+            ):
+                return
+            path = Path(current.path)
+            if not path.is_file():
+                return
+            md5 = hashlib.md5()
+            try:
+                async with aiofiles.open(path, "rb") as f:
+                    md5.update(await f.read(cls.HASH_READ_SIZE))
+                size = path.stat().st_size
+            except FileNotFoundError:
+                return
+            await MediaItem.filter(id=current.id).update(
+                hash=md5.hexdigest(), size=size
+            )
 
     @classmethod
     async def resolve_media_hash(cls, item_path: str) -> str:
