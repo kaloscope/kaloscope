@@ -11,7 +11,7 @@ from app.core.config import KaloscopeConfig
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.core.media.watcher import LibWatcher
-from app.models.media import LibType, MediaLib, MediaLibUpsert
+from app.models.media import LibType, MediaEvent, MediaLib, MediaLibUpsert
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaLibService
 
@@ -79,6 +79,76 @@ def test_directory_alias(tmp_path, library_services, relationship, existing_alia
             observer.assert_not_awaited()
             bind.assert_not_awaited()
         finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_delete_wait(tmp_path, monkeypatch):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        tasks = []
+        try:
+            library = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            event = await MediaEvent.create(
+                lib=library, src_path=str(tmp_path / "movie.mkv"), event_type="organize"
+            )
+            waiting = asyncio.Event()
+            stopping = asyncio.Event()
+            removed = []
+
+            async def cleanup():
+                await stopping.wait()
+                async with await library_lock(library.dir).acquire(timeout=0):
+                    assert not await MediaLib.filter(id=library.id).exists()
+                    assert not await MediaEvent.filter(id=event.id).exists()
+
+            consumer = asyncio.create_task(cleanup())
+            tasks.append(consumer)
+
+            async def remove_observer(directory):
+                stopping.set()
+                await consumer
+                removed.append(directory)
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            context = SimpleNamespace(
+                lib_watcher=SimpleNamespace(remove_observer=remove_observer)
+            )
+            monkeypatch.setattr(
+                MediaLibService, "app_ctx", classmethod(lambda cls: context)
+            )
+            monkeypatch.setattr(
+                "app.services.media.library_lock", waiting_lock, raising=False
+            )
+
+            async with library_lock(library.dir):
+                deletion = asyncio.create_task(MediaLibService.delete(library.id))
+                tasks.append(deletion)
+                await asyncio.wait_for(waiting.wait(), timeout=2)
+                assert not deletion.done()
+                updated = await asyncio.wait_for(
+                    MediaEvent.filter(id=event.id).update(payload={"complete": True}),
+                    timeout=2,
+                )
+                assert updated == 1
+                assert not stopping.is_set()
+            await asyncio.wait_for(deletion, timeout=3)
+
+            assert removed == [library.dir]
+            assert consumer.done()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await Tortoise.close_connections()
 
     asyncio.run(run())
