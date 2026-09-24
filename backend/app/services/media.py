@@ -9,7 +9,7 @@ from sanic.log import logger
 from tortoise.expressions import Q
 from tortoise.transactions import atomic, in_transaction
 
-from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata, NFOType
@@ -72,12 +72,24 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                     raise KaloscopeException(ErrorCode.DUPLICATE_DIRECTORY)
 
         if obj.id:
+            from app.core.media.naming import validate_template
+
+            lib = await MediaLib.get(id=obj.id)
+            extra = {}
+            if "rename_template" in obj.model_fields_set:
+                try:
+                    extra["rename_template"] = validate_template(
+                        obj.rename_template or "", lib.lib_type
+                    )
+                except ValueError as exc:
+                    raise BadRequestException() from exc
             # update the media library
             await MediaLib.filter(id=obj.id).update(
                 name=obj.name,
                 language=obj.language or None,
                 danmaku_server=obj.danmaku_server,
                 danmaku_ttl=obj.danmaku_ttl,
+                **extra,
             )
             lib = await MediaLib.get(id=obj.id)
         else:
@@ -90,6 +102,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                 language=obj.language or None,
                 danmaku_server=obj.danmaku_server,
                 danmaku_ttl=obj.danmaku_ttl,
+                rename_template=obj.rename_template,
                 priority=(max(priorities) + 1 if priorities else 1),
             )
             # add the observer
