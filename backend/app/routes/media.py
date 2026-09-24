@@ -176,7 +176,7 @@ async def get_item_details(_, id: int) -> HTTPResponse:
 @authorize(role=UserRole.ADMIN)
 @validate(json=MediaMetadata)
 async def generate_nfo(_, body: MediaMetadata, id: int) -> HTTPResponse:
-    """Generate the NFO file for the media item."""
+    """Generate the NFO before updating metadata and refreshing episodes."""
     item = await MediaItem.get_or_none(
         id=id,
         parent_id__isnull=True,
@@ -187,8 +187,9 @@ async def generate_nfo(_, body: MediaMetadata, id: int) -> HTTPResponse:
     lib = item.lib
     nfo_type = get_nfo_type(lib.lib_type)
     nfo_path = item.nfo_path or get_nfo_path(item.path)
-    if await gen_nfo(nfo_type, nfo_path, body.metadata, overwrite=True):
-        await update_metadata(lib, nfo_path, fallback=body.metadata)
+    if not await gen_nfo(nfo_type, nfo_path, body.metadata, overwrite=True):
+        raise BadRequestException
+    await update_metadata(lib, nfo_path, fallback=body.metadata)
     # also update the metadata of the child episodes if it's a TV show
     if lib.lib_type == LibType.TV_SHOW:
         await MediaItemService.refresh_episodes(item, body)
