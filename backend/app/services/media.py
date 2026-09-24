@@ -7,9 +7,10 @@ import aiofiles
 from sanic import Sanic
 from sanic.log import logger
 from tortoise.expressions import Q
-from tortoise.transactions import atomic
+from tortoise.transactions import atomic, in_transaction
 
 from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.media.coordination import library_lock
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata, NFOType
 from app.models.user import PermType, UserPermission
@@ -103,18 +104,19 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         return lib
 
     @classmethod
-    @atomic()
     async def delete(cls, id: int):
-        """Delete a media library.
+        """Delete a media library after active writers finish.
 
         Args:
             id: The media library ID.
         """
         lib = await MediaLib.get(id=id)
-        await MediaLib.filter(id=id).delete()
-        await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=id).delete()
-        await UserPermission.filter(rel_type=PermType.MEDIA_LIB, rel_id=id).delete()
-        # remove the observer
+        # wait for active filesystem writers before discarding their journals
+        async with library_lock(lib.dir), in_transaction("default"):
+            await MediaLib.filter(id=id).delete()
+            await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=id).delete()
+            await UserPermission.filter(rel_type=PermType.MEDIA_LIB, rel_id=id).delete()
+        # release the DB and library locks before waiting for consumer cancellation
         watcher = cls.app_ctx().lib_watcher
         await watcher.remove_observer(lib.dir)
 
