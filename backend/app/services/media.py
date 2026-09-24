@@ -60,10 +60,10 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             raise KaloscopeException(ErrorCode.NAME_ALREADY_EXISTS)
         # check if the directory overlaps with existing ones
         if obj.dir:
-            dir = Path(obj.dir)
+            dir = Path(obj.dir).resolve()
             dirs: list = await MediaLib.filter(filter).values_list("dir", flat=True)
             for d in dirs:
-                existing = Path(d)
+                existing = Path(d).resolve()
                 if dir.is_relative_to(existing) or existing.is_relative_to(dir):
                     raise KaloscopeException(ErrorCode.DUPLICATE_DIRECTORY)
 
