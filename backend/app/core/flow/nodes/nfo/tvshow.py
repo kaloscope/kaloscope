@@ -5,7 +5,6 @@ from app.core.flow.fields import ToggleField
 from app.core.flow.fields.code import CodeField
 from app.core.flow.handles import InputHandle
 from app.core.flow.nodes.base import CancellationSignal, Node, end_node
-from app.core.media.shelver import gen_nfo, nfo_context
 from app.models.flow import GraphCategory
 from app.utils import json
 
@@ -33,6 +32,18 @@ class TVShowNode(Node):
 
     @classmethod
     async def execute(cls, *, node_data: dict[str, Any], context: Context, **kwargs):
+        """Generate the NFO and optionally stop the workflow.
+
+        Args:
+            node_data: The node's field values.
+            context: The workflow context.
+            **kwargs: Additional execution arguments.
+
+        Raises:
+            CancellationSignal: If the node is configured to end the workflow.
+        """
+        from app.core.media.shelver import gen_nfo, nfo_context
+
         # extract the response
         context[RETVAL_KEY] = json.try_loads(
             cls.response.extract(node_data, context=context), with_comments=True

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiofiles
 from sanic import Sanic
@@ -9,13 +10,15 @@ from tortoise.expressions import Q
 from tortoise.transactions import atomic
 
 from app.core.exceptions import ErrorCode, KaloscopeException
-from app.core.media.handlers.base import MediaPathInfo
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata, NFOType
 from app.models.user import PermType, UserPermission
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
 from app.utils.disk import delete_path
+
+if TYPE_CHECKING:
+    from app.core.media.handlers.base import MediaPathInfo
 
 
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
@@ -143,7 +146,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         cls,
         lib_id: int,
         *,
-        path_info: MediaPathInfo,
+        path_info: "MediaPathInfo",
         parent_id: int | None = None,
         default_title: str | None = None,
     ) -> MediaItem:
