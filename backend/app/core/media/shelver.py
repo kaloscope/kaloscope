@@ -1,7 +1,11 @@
+import asyncio
 import mimetypes
+import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import aiofiles
 from lxml import etree
@@ -13,6 +17,7 @@ from app.core.flow.context import RETVAL_KEY, Context
 from app.core.media.handlers.base import MediaMeta, get_handler
 from app.core.renderer import render
 from app.models.media import LibType, MediaItem, MediaLib, NFOType
+from app.utils.disk import rename_exclusive
 from app.utils.extractor import extract_title
 
 # the path to the NFO templates
@@ -122,13 +127,34 @@ async def gen_nfo(
     """Generate NFO file from the given context.
 
     Args:
-        nfo_type: The type of the NFO file (e.g. "movie", "tvshow").
+        nfo_type: The type of the NFO file (e.g. `movie`, `tvshow`).
         nfo_path: The path to the NFO file to generate.
         data: The data to render the NFO file with.
         overwrite: Whether to overwrite the NFO file if it already exists.
 
     Returns:
-        True if the NFO file is generated successfully, False otherwise.
+        `True` if the NFO file is generated successfully, `False` otherwise.
+    """
+    return await _write_nfo(nfo_type, nfo_path, data, overwrite=overwrite)
+
+
+async def _write_nfo(
+    nfo_type: str, nfo_path: str, data: dict, *, overwrite: bool
+) -> bool:
+    """Publish an NFO file atomically.
+
+    Args:
+        nfo_type: The NFO template type.
+        nfo_path: The destination NFO path.
+        data: The metadata used to render the NFO.
+        overwrite: Whether to replace an existing NFO.
+
+    Returns:
+        `True` on success; `False` for invalid input or a name conflict.
+
+    Raises:
+        OSError: If file I/O fails without cancellation.
+        asyncio.CancelledError: If cancelled, after active publication stops.
     """
     # validate the parameters
     if not nfo_type or not nfo_path or not data:
@@ -151,10 +177,41 @@ async def gen_nfo(
     async with aiofiles.open(tmpl_path, encoding=ENCODING) as f:
         template = await f.read()
 
-    # generate NFO file
-    mode = "w" if overwrite else "x"
-    async with aiofiles.open(nfo_path, mode, encoding=ENCODING) as f:
-        await f.write(render(template, context=data))
+    temporary = path.with_name(f".nfo-{uuid4().hex}.tmp")
+    cancelled = False
+    try:
+        async with aiofiles.open(temporary, "x", encoding=ENCODING) as f:
+            await f.write(render(template, context=data))
+        if overwrite and path.exists() and not path.is_symlink():
+            temporary.chmod(path.stat().st_mode & 0o777)
+        publication = asyncio.create_task(
+            asyncio.to_thread(os.replace, temporary, path)
+            if overwrite
+            else asyncio.to_thread(rename_exclusive, temporary, path)
+        )
+        try:
+            await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            # wait for publication before removing the temporary file
+            with suppress(Exception):
+                await publication
+            raise
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    except FileExistsError:
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            if not cancelled:
+                raise
+            logger.warning(
+                "Failed to remove temporary NFO after cancellation: %s",
+                temporary,
+                exc_info=True,
+            )
     return True
 
 
