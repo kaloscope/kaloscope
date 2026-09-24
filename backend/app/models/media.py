@@ -145,12 +145,27 @@ class MediaLibUpsert(BaseModel):
     language: str | None = None
     danmaku_server: str | None = Field(max_length=255, default=None)
     danmaku_ttl: int | None = Field(ge=0, le=8760, default=None)
+    rename_template: str | None = Field(max_length=1024, default=None)
     triggers: list[GraphRef] | None = None
 
     @model_validator(mode="after")
     def check_dir(self) -> Self:
+        """Validate the directory and rename template.
+
+        Returns:
+            The validated library settings.
+
+        Raises:
+            ValueError: If the directory or rename template is invalid.
+        """
         if not self.id and (not self.dir or not is_directory(self.dir)):
             raise ValueError(f"invalid directory: {self.dir}")
+        if self.rename_template is not None:
+            from app.core.media.naming import validate_template
+
+            self.rename_template = validate_template(
+                self.rename_template, self.lib_type
+            )
         return self
 
 
