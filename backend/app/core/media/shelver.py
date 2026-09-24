@@ -1,11 +1,12 @@
 import mimetypes
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiofiles
 from lxml import etree
 from sanic.log import Colors, logger
+from tortoise.expressions import Q
 
 from app.core.constants import ENCODING, NFO_MIME_TYPE
 from app.core.flow.context import RETVAL_KEY, Context
@@ -192,13 +193,17 @@ def parse_nfo(lib_type: LibType, path: Path | str) -> MediaMeta | None:
 
 async def update_metadata(
     lib: MediaLib, path: Path | str, *, fallback: dict | None = None
-):
+) -> list[int]:
     """Update the metadata of the media item corresponding to the given NFO file.
 
     Args:
         lib: The media library instance.
         path: The path to the NFO file.
         fallback: The fallback metadata dictionary.
+
+    Returns:
+        The IDs of the updated media items, or an empty list if the NFO cannot be
+        parsed or no matching items exist.
     """
     # parse the NFO file to get the metadata
     if not isinstance(path, Path):
@@ -240,9 +245,14 @@ async def update_metadata(
         else:
             data["title"] = extract_title(path.stem)
 
-        # match the media item by library, directory and name
-        await MediaItem.filter(
+        # match registered NFO paths or the default filename
+        items = MediaItem.filter(
+            Q(nfo_path=str(path)) | Q(dir=str(path.parent), name=path.stem),
             lib_id=lib.id,
-            dir=str(path.parent),
-            name=path.stem,
-        ).update(**data)
+        )
+        # account for `flat=True` in the return annotation
+        ids = cast(list[int], await items.values_list("id", flat=True))
+        if ids:
+            await MediaItem.filter(id__in=ids).update(**data)
+        return ids
+    return []
