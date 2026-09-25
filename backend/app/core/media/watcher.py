@@ -536,7 +536,10 @@ async def _handle_deleted(event: MediaEvent):
 
 
 async def _handle_moved(event: MediaEvent) -> list[MediaPathInfo] | None:
-    """Handle the movement event.
+    """Handle a movement without deleting a reused source path.
+
+    Retain the source item's metadata and history when another file now occupies
+    its path, including when the original destination has already been deleted.
 
     Args:
         event: The media event.
@@ -545,8 +548,9 @@ async def _handle_moved(event: MediaEvent) -> list[MediaPathInfo] | None:
         A list of media path info generated from the moved media items,
         or None if the destination path is not accepted by the handler.
     """
-    # delete the source media item if it exists
-    await _handle_deleted(event)
+    source = Path(event.src_path)
+    if not (source.exists() or source.is_symlink()):
+        await _handle_deleted(event)
     # create media items for the destination path
     return await _handle_created(event)
 
