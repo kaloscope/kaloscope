@@ -1,14 +1,26 @@
 """Unit tests for NFO publication and media shelving."""
 
 import asyncio
+import hashlib
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from lxml import etree
+from tortoise import Tortoise
 
+from app.core.config import KaloscopeConfig
 from app.core.media import shelver
-from app.models.media import NFOType
+from app.core.media.coordination import library_lock
+from app.models.media import LibType, MediaItem, MediaLib, MediaMetadata, NFOType
+from app.services.media import MediaItemService
+
+
+@pytest.fixture(autouse=True)
+def workspace(monkeypatch, tmp_path_factory):
+    directory = tmp_path_factory.mktemp("workspace-temp")
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
 
 
 def test_nfo_publish(tmp_path, monkeypatch):
@@ -159,5 +171,112 @@ def test_publish_cancellation(tmp_path, monkeypatch, failure, cleanup_failure):
             assert etree.parse(temporary[0]).getroot().findtext("title") == "Movie"
         else:
             assert not temporary
+
+    asyncio.run(run())
+
+
+def test_current_path(tmp_path):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            destination = tmp_path / "New" / "New.mkv"
+            destination.parent.mkdir()
+            destination.write_bytes(b"video")
+            item = await MediaItem.create(
+                lib=lib, path=str(destination), dir=str(destination.parent), name="New"
+            )
+            stale_nfo = tmp_path / "Old" / "Old.nfo"
+            assert await shelver.gen_nfo(
+                NFOType.MOVIE, str(stale_nfo), {"title": "New"}, item_id=item.id
+            )
+            current_nfo = destination.with_suffix(".nfo")
+            assert current_nfo.is_file()
+            assert not stale_nfo.parent.exists()
+            assert await shelver.update_metadata(lib, current_nfo) == [item.id]
+            await item.refresh_from_db()
+            assert item.title == "New"
+            assert item.nfo_path == str(current_nfo)
+            # detail reads remain pure even when organization is configured
+            lib.rename_template = "{{title}} ({{year}})"
+            assert shelver.parse_nfo(lib.lib_type, current_nfo).title == "New"
+            assert Path(item.path).is_file()
+            async with library_lock(lib.dir):
+                await MediaItemService.refresh_hash_and_size(item)
+            await item.refresh_from_db()
+            assert item.hash == hashlib.md5(b"video").hexdigest()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["moved", "record", "file"])
+def test_episode_path(tmp_path, monkeypatch, change):
+    source = tmp_path / "Show" / "old.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    destination = source.with_name("new.mkv")
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
+            )
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(source.parent),
+                dir=str(source.parent),
+                name="Show",
+                season=1,
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(source),
+                dir=str(source.parent),
+                name=source.stem,
+                season=1,
+                episode=1,
+            )
+
+            async def execute(**kwargs):
+                if change == "moved":
+                    source.rename(destination)
+                    await MediaItem.filter(id=item.id).update(
+                        path=str(destination), name=destination.stem
+                    )
+                else:
+                    source.unlink()
+                    if change == "record":
+                        await item.delete()
+                return [{"title": "Updated"}]
+
+            app = SimpleNamespace(
+                ctx=SimpleNamespace(flow_engine=SimpleNamespace(execute=execute))
+            )
+            monkeypatch.setattr("app.services.media.Sanic.get_app", lambda: app)
+            meta = MediaMetadata(graph_id=1, metadata={"title": "Show", "season": 1})
+
+            await MediaItemService.refresh_episodes(parent, meta)
+
+            assert not source.with_suffix(".nfo").exists()
+            current_nfo = destination.with_suffix(".nfo")
+            if change == "moved":
+                assert etree.parse(current_nfo).getroot().findtext("title") == "Updated"
+                assert destination.read_bytes() == b"video"
+            else:
+                assert not current_nfo.exists()
+        finally:
+            await Tortoise.close_connections()
 
     asyncio.run(run())
