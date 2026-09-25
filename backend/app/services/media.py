@@ -270,12 +270,19 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         return md5.hexdigest()
 
     @classmethod
-    async def refresh_episodes(cls, item: MediaItem, meta: MediaMetadata):
+    async def refresh_episodes(
+        cls,
+        item: MediaItem,
+        meta: MediaMetadata,
+        *,
+        episode_ids: list[int] | None = None,
+    ):
         """Refresh the metadata of the episodes under a season.
 
         Args:
             item: The season media item.
             meta: The season metadata object.
+            episode_ids: The episode IDs to refresh.
         """
         from app.core.media.shelver import gen_nfo, get_nfo_path
 
@@ -293,7 +300,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         engine = Sanic.get_app().ctx.flow_engine
 
         # get the episodes under the season
-        episodes = await MediaItem.filter(parent_id=item.id)
+        episodes = await MediaItem.filter(
+            Q(id__in=episode_ids) if episode_ids is not None else Q(parent_id=item.id),
+            lib_id=item.lib_id,
+        )
         for e in episodes:
             episode = e.episode
             nfo_path = e.nfo_path
