@@ -24,6 +24,7 @@ class MediaPathInfo:
     """The information parsed from the media item path."""
 
     path: Path = field(kw_only=False)
+    item_id: int | None = None
     nfo_path: Path | None = None
     nfo_type: NFOType | None = None
     nfo_source: str | None = None

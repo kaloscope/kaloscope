@@ -169,7 +169,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Args:
             lib_id: The media library ID.
-            path_info: The media path info object.
+            path_info: The media path info whose item ID is populated.
             parent_id: The parent media item ID, if any.
             default_title: The default title to use if the media item is created.
 
@@ -191,6 +191,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 "visible": True,
             },
         )
+        path_info.item_id = item.id
 
         # calculate hash and size for the newly created item
         if created:

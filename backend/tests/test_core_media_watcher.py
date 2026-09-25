@@ -4,16 +4,23 @@ import asyncio
 import hashlib
 import mimetypes
 from datetime import UTC, datetime
+from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
+from app.core.flow.context import Context
+from app.core.flow.nodes.nfo.episode import EpisodeNode
+from app.core.flow.nodes.nfo.movie import MovieNode
+from app.core.flow.nodes.nfo.tvshow import TVShowNode
 from app.core.media import shelver, watcher
+from app.core.media.handlers.base import get_handler
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services.flow import FlowTriggerService
@@ -365,6 +372,76 @@ def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
                 [5] if fail_once else [1] if delivery == "duplicate" else []
             )
             fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", ["new", "existing", "legacy"])
+@pytest.mark.parametrize(
+    ("lib_type", "relative_path"),
+    [
+        (LibType.MOVIE, "Movie.mkv"),
+        (LibType.MOVIE, "Movie/Movie.mkv"),
+        (LibType.TV_SHOW, "Show/S01E01.mkv"),
+        (LibType.TV_SHOW, "Show/Season 01/S01E01.mkv"),
+    ],
+)
+def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_path):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    video = tmp_path / relative_path
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"video")
+    fired = []
+    nodes = {"movie": MovieNode, "tvshow": TVShowNode, "episode": EpisodeNode}
+
+    async def fire(*_args, bootparams):
+        item = await MediaItem.get(path=bootparams["item_path"])
+        assert bootparams["item_id"] == item.id
+        fired.append(item.id)
+        if bootparams["nfo_type"] is None:
+            return
+
+        nfo_path = Path(bootparams["nfo_path"])
+        params = dict(bootparams)
+        if state == "legacy":
+            params.pop("item_id")
+        else:
+            params["nfo_path"] = str(tmp_path / "stale" / nfo_path.name)
+        context = await Context.create(1, params)
+        await nodes[bootparams["nfo_type"]].execute(
+            node_data={"response": '[{"title": "Generated"}]', "force_end": False},
+            context=context,
+        )
+        assert etree.parse(nfo_path).getroot().findtext("title") == "Generated"
+        assert not (tmp_path / "stale").exists()
+
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            if state == "existing":
+                await get_handler(lib_type).gen_items(lib, video)
+            original_ids = await MediaItem.all().values_list("id", flat=True)
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(video), event_type="created"
+            )
+
+            await asyncio.wait_for(watcher.consume_event(event), timeout=3)
+
+            current_ids = await MediaItem.all().values_list("id", flat=True)
+            assert sorted(fired) == sorted(current_ids)
+            if original_ids:
+                assert sorted(current_ids) == sorted(original_ids)
         finally:
             await Tortoise.close_connections()
 

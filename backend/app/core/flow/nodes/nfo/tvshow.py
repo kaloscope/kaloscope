@@ -49,7 +49,7 @@ class TVShowNode(Node):
             cls.response.extract(node_data, context=context), with_comments=True
         )
         # generate NFO file
-        await gen_nfo(*nfo_context(context))
+        await gen_nfo(*nfo_context(context), item_id=context.bootparams.get("item_id"))
         # force end the flow if required
         if cls.force_end.extract(node_data):
             raise CancellationSignal
