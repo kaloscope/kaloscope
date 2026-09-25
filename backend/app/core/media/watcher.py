@@ -479,6 +479,7 @@ async def consume_event(event: MediaEvent):
                 GraphCategory.INGEST,
                 event.lib_id,
                 bootparams={
+                    "item_id": path_info.item_id,
                     "item_path": path_info.item_path,
                     "item_name": path_info.item_name,
                     "nfo_path": str(nfo_path) if nfo_path else None,
