@@ -160,19 +160,28 @@ class LibWatcher:
         await self._app.cancel_task(self._LISTENER)
 
     async def _listener(self):
-        """Listen for the actions and perform the corresponding operations."""
+        """Process library actions independently and retain failures for retry."""
         while True:
             try:
+                failed = False
                 for path in list(self._watcher_actions.keys()):
                     if path in self._observers:
-                        action = self._watcher_actions.get(path)
-                        if action == LibAction.SCAN:
-                            await self.scan_directory(path)
-                        elif action == LibAction.REMOVE:
-                            await self.remove_observer(path)
+                        try:
+                            action = self._watcher_actions.get(path)
+                            if action == LibAction.SCAN:
+                                await self.scan_directory(path)
+                            elif action == LibAction.REMOVE:
+                                await self.remove_observer(path)
 
-                        self._watcher_actions.pop(path)
-                await asyncio.sleep(10)
+                            self._watcher_actions.pop(path)
+                        except Exception:
+                            failed = True
+                            logger.error(
+                                "Failed to process the watcher action for %s!",
+                                path,
+                                exc_info=True,
+                            )
+                await asyncio.sleep(5 if failed else 10)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -315,7 +324,8 @@ class LibWatcher:
                 lib = await MediaLib.filter(dir=path).get()
             await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
         finally:
-            self._scanning_paths.remove(path)
+            if path in self._scanning_paths:
+                self._scanning_paths.remove(path)
 
     async def _enqueue_events(self, lib: MediaLib, *, backfill_nfo_events: bool = True):
         """Scan the directory for existing files and enqueue events.
