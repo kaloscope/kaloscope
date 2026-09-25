@@ -209,7 +209,9 @@ class LibWatcher:
                     observer.start()
                     self._observers[path] = (observer, events)
                     # create a task to consume events
-                    self._app.add_task(self._event_consumer(events), name=encrypt(path))
+                    self._app.add_task(
+                        self._event_consumer(lib.id, events), name=encrypt(path)
+                    )
                     # schedule the initial scan for existing files
                     self._app.add_task(
                         self._delay_scan(
@@ -258,14 +260,20 @@ class LibWatcher:
             events.put(event)
         return events
 
-    async def _event_consumer(self, events: Queue):
-        """Consume events from the queue and process them.
+    async def _event_consumer(self, lib_id: int, events: Queue):
+        """Consume queued events and reload persisted work when the queue drains.
 
         Args:
+            lib_id: The media library whose persisted events are consumed.
             events: The queue to store media events.
         """
         while True:
             try:
+                if events.empty():
+                    for pending in await MediaEvent.filter(lib_id=lib_id).exclude(
+                        event_type="organize"
+                    ):
+                        events.put(pending)
                 if not events.empty():
                     event: MediaEvent = events.get_nowait()
                     await consume_event(event)
@@ -276,7 +284,7 @@ class LibWatcher:
                 break
             except Exception:
                 logger.error("Failed to consume the media event!", exc_info=True)
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
 
     async def _delay_scan(self, lib: MediaLib, *, delay: int = 0):
         """Run the initial scan after an optional delay.
@@ -437,6 +445,14 @@ async def consume_event(event: MediaEvent):
     Args:
         event: The media event.
     """
+    lib = await MediaLib.get_or_none(id=event.lib_id)
+    if lib is None:
+        return
+    event = await MediaEvent.get_or_none(id=event.id)
+    if event is None:
+        return
+    event.lib = lib
+
     result: list[MediaPathInfo] | None = None
     async with in_transaction("default"):
         # delete the consumed event
