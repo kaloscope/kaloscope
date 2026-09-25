@@ -246,6 +246,7 @@ export type MediaLib = {
   dir: string;
   name: string;
   language: string | null;
+  rename_template: string | null;
   priority: number;
   danmaku_server: string | null;
   danmaku_ttl: number;

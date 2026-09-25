@@ -38,6 +38,29 @@ def test_partial_context():
     assert filename == "S00E123 - Special"
 
 
+def test_show_originaltitle():
+    template = (
+        "{{show_originaltitle}}/S{{season}}/{{show_originaltitle}} - {{originaltitle}}"
+    )
+    context = {
+        "show_originaltitle": "Show/A",
+        "originaltitle": "Pilot: Part 1",
+        "season": 1,
+    }
+
+    result = render_path(template, context, "tv_show")
+
+    assert result == PurePosixPath("Show_A/S01/Show_A - Pilot_ Part 1")
+
+
+@pytest.mark.parametrize("value", [None, "", " "])
+def test_missing_show_originaltitle(value):
+    context = {"show_title": "Show", "show_originaltitle": value}
+
+    with pytest.raises(ValueError, match="missing NFO field: show_originaltitle"):
+        render_path("{{show_originaltitle}}/episode", context, "tv_show")
+
+
 def test_flat_directory():
     assert render_directory("{{title}}", {}, "movie") == PurePosixPath(".")
 
@@ -57,7 +80,15 @@ def test_filename_length():
 
 
 @pytest.mark.parametrize(
-    "field", ["show_title", "show_year", "season", "episode", "episode_code"]
+    "field",
+    [
+        "show_title",
+        "show_originaltitle",
+        "show_year",
+        "season",
+        "episode",
+        "episode_code",
+    ],
 )
 @pytest.mark.parametrize("directory", [False, True])
 def test_movie_show_fields(field, directory):
@@ -70,7 +101,15 @@ def test_movie_show_fields(field, directory):
 
 
 @pytest.mark.parametrize(
-    "field", ["show_title", "show_year", "season", "episode", "episode_code"]
+    "field",
+    [
+        "show_title",
+        "show_originaltitle",
+        "show_year",
+        "season",
+        "episode",
+        "episode_code",
+    ],
 )
 def test_show_fields(field):
     placeholder = "{{" + field + "}}"
