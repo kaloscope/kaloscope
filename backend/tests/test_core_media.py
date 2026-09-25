@@ -156,7 +156,6 @@ def test_hash_current_path(tmp_path, monkeypatch, removed):
     source = tmp_path / "old.mkv"
     destination = tmp_path / "new.mkv"
     source.write_bytes(b"head-tail")
-    calculate = MediaItemService._hash_and_size
 
     async def run():
         await Tortoise.init(
@@ -166,15 +165,16 @@ def test_hash_current_path(tmp_path, monkeypatch, removed):
         tasks = []
         waiting = asyncio.Event()
 
-        async def track_hash(*args):
-            tasks.append(asyncio.current_task())
-            await calculate(*args)
+        def track_hash(coroutine):
+            task = asyncio.create_task(coroutine)
+            tasks.append(task)
+            return task
 
         def waiting_lock(directory):
             waiting.set()
             return library_lock(directory)
 
-        monkeypatch.setattr(MediaItemService, "_hash_and_size", track_hash)
+        monkeypatch.setattr("app.services.media.create_task", track_hash)
         monkeypatch.setattr("app.services.media.library_lock", waiting_lock)
         try:
             lib = await MediaLib.create(
@@ -218,6 +218,8 @@ def test_hash_current_path(tmp_path, monkeypatch, removed):
 @pytest.mark.parametrize("missing", ["hash", "size", "both", None])
 def test_hash_missing(tmp_path, monkeypatch, missing):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+    scheduled = []
+    monkeypatch.setattr("app.services.media.create_task", scheduled.append)
     path = tmp_path / "movie.mkv"
     path.write_bytes(b"video")
 
@@ -230,16 +232,14 @@ def test_hash_missing(tmp_path, monkeypatch, missing):
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
-            item = await MediaItem.create(
-                lib=lib,
-                path=str(path),
-                dir=str(tmp_path),
-                name=path.stem,
+            item = await MediaItemService.create(lib.id, path_info=MediaPathInfo(path))
+            await MediaItem.filter(id=item.id).update(
                 hash=None if missing in ("hash", "both") else "previous",
                 size=None if missing in ("size", "both") else 99,
             )
 
-            await MediaItemService._hash_and_size(item.id)
+            assert len(scheduled) == 1
+            await scheduled[0]
 
             await item.refresh_from_db()
             if missing is None:
@@ -248,6 +248,8 @@ def test_hash_missing(tmp_path, monkeypatch, missing):
                 assert item.hash == hashlib.md5(b"video").hexdigest()
                 assert item.size == len(b"video")
         finally:
+            for coroutine in scheduled:
+                coroutine.close()
             await Tortoise.close_connections()
 
     asyncio.run(run())

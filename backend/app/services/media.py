@@ -1,5 +1,5 @@
-import asyncio
 import hashlib
+from asyncio import create_task
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -194,39 +194,52 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         # calculate hash and size for the newly created item
         if created:
-            asyncio.create_task(cls._hash_and_size(item.id))
+            item_id = item.id
+
+            # fill missing file information under the library lock
+            async def refresh():
+                target = await MediaItem.get_or_none(id=item_id).select_related("lib")
+                if target is None:
+                    return
+                async with library_lock(target.lib.dir):
+                    current = await MediaItem.get_or_none(id=item_id)
+                    if current is not None and (
+                        current.hash is None or current.size is None
+                    ):
+                        await cls.refresh_hash_and_size(current)
+
+            create_task(refresh())
 
         return item
 
     @classmethod
-    async def _hash_and_size(cls, item_id: int):
-        """Fill missing file identity values after earlier library work finishes.
+    async def refresh_hash_and_size(cls, item: MediaItem) -> bool:
+        """Refresh a media file's hash and size while holding its library lock.
 
         Args:
-            item_id: The media item ID.
+            item: The current media item whose library lock the caller holds.
+
+        Returns:
+            `True` if a previously known hash or size changed, or `False` if only
+            missing values were filled, both values are unchanged, or the file
+            is unavailable.
         """
-        item = await MediaItem.get_or_none(id=item_id).select_related("lib")
-        if item is None:
-            return
-        async with library_lock(item.lib.dir):
-            current = await MediaItem.get_or_none(id=item_id)
-            if current is None or (
-                current.hash is not None and current.size is not None
-            ):
-                return
-            path = Path(current.path)
-            if not path.is_file():
-                return
-            md5 = hashlib.md5()
-            try:
-                async with aiofiles.open(path, "rb") as f:
-                    md5.update(await f.read(cls.HASH_READ_SIZE))
-                size = path.stat().st_size
-            except FileNotFoundError:
-                return
-            await MediaItem.filter(id=current.id).update(
-                hash=md5.hexdigest(), size=size
-            )
+        if not Path(item.path).is_file():
+            return False
+        md5 = hashlib.md5()
+        try:
+            async with aiofiles.open(item.path, "rb") as f:
+                md5.update(await f.read(cls.HASH_READ_SIZE))
+            size = Path(item.path).stat().st_size
+        except FileNotFoundError:
+            return False
+        digest = md5.hexdigest()
+        changed = (item.hash is not None and item.hash != digest) or (
+            item.size is not None and item.size != size
+        )
+        await MediaItem.filter(id=item.id).update(hash=digest, size=size)
+        item.hash, item.size = digest, size
+        return changed
 
     @classmethod
     async def resolve_media_hash(cls, item_path: str) -> str:

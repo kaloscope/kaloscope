@@ -31,12 +31,14 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
 from app.core.media.shelver import is_nfo, update_metadata
 from app.models.flow import GraphCategory
 from app.models.media import MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, UserHistory
 from app.services.flow import FlowTriggerService
+from app.services.media import MediaItemService
 from app.utils.crypto import encrypt
 from app.utils.disk import delete_path
 
@@ -322,13 +324,17 @@ class LibWatcher:
         try:
             if lib is None:
                 lib = await MediaLib.filter(dir=path).get()
-            await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
+            async with library_lock(lib.dir):
+                await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
         finally:
             if path in self._scanning_paths:
                 self._scanning_paths.remove(path)
 
     async def _enqueue_events(self, lib: MediaLib, *, backfill_nfo_events: bool = True):
         """Scan the directory for existing files and enqueue events.
+
+        Fill missing video hashes and sizes while the caller holds the library
+        lock, without treating incomplete identities as file replacements.
 
         Args:
             lib: The media library instance.
@@ -393,6 +399,8 @@ class LibWatcher:
                         await _create_media_event(sys_event)
                     else:
                         existing_ids.append(media_item.id)
+                        if media_item.hash is None or media_item.size is None:
+                            await MediaItemService.refresh_hash_and_size(media_item)
                         if media_item.nfo_path:
                             # check if the NFO file has been deleted
                             nfo_path = Path(media_item.nfo_path)

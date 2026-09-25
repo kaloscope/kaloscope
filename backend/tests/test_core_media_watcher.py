@@ -1,6 +1,7 @@
 """Unit tests for the media library watcher."""
 
 import asyncio
+import hashlib
 import mimetypes
 from datetime import UTC, datetime
 from queue import Queue
@@ -12,10 +13,16 @@ from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
-from app.core.media import watcher
+from app.core.media import shelver, watcher
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
-from app.services.media import MediaItemService
+from app.services.flow import FlowTriggerService
+
+
+@pytest.fixture(autouse=True)
+def workspace(monkeypatch, tmp_path_factory):
+    directory = tmp_path_factory.mktemp("workspace-temp")
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
 
 
 @pytest.mark.parametrize("action", [watcher.LibAction.SCAN, watcher.LibAction.REMOVE])
@@ -116,7 +123,7 @@ def test_action_cancellation(tmp_path, monkeypatch):
 @pytest.mark.parametrize("destination_exists", [False, True])
 def test_move_source(tmp_path, monkeypatch, suffix, source_state, destination_exists):
     mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
-    monkeypatch.setattr(MediaItemService, "_hash_and_size", AsyncMock())
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
     monkeypatch.setattr(
         KaloscopeConfig, "get", lambda: SimpleNamespace(filesystem_trash_mode=False)
     )
@@ -213,6 +220,71 @@ def test_move_source(tmp_path, monkeypatch, suffix, source_state, destination_ex
             else:
                 assert result is None
                 assert not await MediaItem.filter(path=str(destination)).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("backfill_nfo_events", [False, True])
+@pytest.mark.parametrize("missing", ["hash", "size", "both", None])
+def test_hash_scan(tmp_path, monkeypatch, backfill_nfo_events, missing):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"video")
+    digest = hashlib.md5(b"video").hexdigest()
+    stored_hash = "previous" if missing is None else digest
+    stored_size = 99 if missing is None else len(b"video")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>New</title></movie>")
+    cache = tmp_path / "custom.json"
+    cache.write_text("[]")
+    cached_meta = {"episode_id": 42}
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(tmp_path),
+                name=source.stem,
+                hash=None if missing in ("hash", "both") else stored_hash,
+                size=None if missing in ("size", "both") else stored_size,
+                danmaku_path=str(cache),
+                danmaku_meta=cached_meta,
+            )
+            await shelver.update_metadata(lib, nfo)
+            monitor = watcher.LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+
+            await monitor.scan_directory(lib, backfill_nfo_events=backfill_nfo_events)
+            while not events.empty():
+                await watcher.consume_event(events.get_nowait())
+
+            await item.refresh_from_db()
+            assert item.path == str(source)
+            assert item.hash == stored_hash
+            assert item.size == stored_size
+            assert item.danmaku_path == str(cache)
+            assert item.danmaku_meta == cached_meta
+            assert cache.read_text() == "[]"
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_not_awaited()
         finally:
             await Tortoise.close_connections()
 
