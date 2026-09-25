@@ -11,12 +11,20 @@ FIELDS = frozenset(
         "episode",
         "episode_code",
         "show_title",
+        "show_originaltitle",
         "show_year",
         "unique_id",
         "nfo_source",
     }
 )
-MOVIE_FIELDS = FIELDS - {"season", "episode", "episode_code", "show_title", "show_year"}
+MOVIE_FIELDS = FIELDS - {
+    "season",
+    "episode",
+    "episode_code",
+    "show_title",
+    "show_originaltitle",
+    "show_year",
+}
 PARENT_FIELDS = FIELDS - {"title", "originaltitle", "episode", "episode_code"}
 _TOKEN = re.compile(r"{{\s*([a-z_]+)\s*}}")
 _UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f\x7f]')

@@ -8,6 +8,7 @@
     dir: string;
     name: string;
     language: string | null;
+    rename_template: string | null;
     danmaku_server: string | null;
     danmaku_ttl: number;
     triggers: FlowTrigger[];
@@ -15,6 +16,10 @@
   }>;
 
   const DANMAKU_SERVER_PRESET = 'danmaku.kaloscope.org';
+  const RENAME_EXAMPLES = {
+    movie: '{{title}} ({{year}})/{{title}} ({{year}})',
+    tv_show: '{{show_title}}/S{{season}}/{{episode_code}}'
+  };
 </script>
 
 <script lang="ts">
@@ -31,6 +36,7 @@
     dir,
     name,
     language = '',
+    rename_template = null,
     danmaku_server,
     danmaku_ttl = 24,
     triggers,
@@ -53,6 +59,7 @@
   const schema = createFormSchema(({ text, number }) => ({
     dir: text().maxlength(4096),
     name: text().maxlength(64),
+    rename_template: text().maxlength(1024).required(false),
     danmaku_server: text().maxlength(245).required(false),
     danmaku_ttl: number().min(0).max(8760).required(false)
   }));
@@ -67,6 +74,7 @@
     loading.start();
     const json: Record<string, unknown> = Object.fromEntries(data);
     json.id = id;
+    json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
     json.danmaku_server = urlWrapper?.full(danmaku_server);
     json.triggers = triggers;
     api
@@ -146,6 +154,14 @@
         />
         <input type="text" class="hidden" name="dir" value={dir} />
       </button>
+      <Label tip={$_('media.rename.tip')}>{$_('media.rename.template')}</Label>
+      <input
+        aria-label={$_('media.rename.template')}
+        placeholder={RENAME_EXAMPLES[lib_type ?? 'movie']}
+        class="input w-full font-mono text-sm"
+        bind:value={rename_template}
+        {...schema.rename_template}
+      />
       <div class="flex flex-wrap gap-2">
         <div class="flex-3/5 space-y-1.5">
           <Label tip={$_('media.danmaku.server_tip')}>{$_('media.danmaku.server')}</Label>
