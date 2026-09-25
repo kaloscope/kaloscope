@@ -14,6 +14,7 @@ from tortoise.expressions import Q
 
 from app.core.constants import ENCODING, NFO_MIME_TYPE
 from app.core.flow.context import RETVAL_KEY, Context
+from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaMeta, get_handler
 from app.core.renderer import render
 from app.models.media import LibType, MediaItem, MediaLib, NFOType
@@ -122,7 +123,12 @@ def nfo_context(flow_ctx: Context) -> tuple[str, str, dict]:
 
 
 async def gen_nfo(
-    nfo_type: str, nfo_path: str, data: dict, *, overwrite: bool = False
+    nfo_type: str,
+    nfo_path: str,
+    data: dict,
+    *,
+    overwrite: bool = False,
+    item_id: int | None = None,
 ) -> bool:
     """Generate NFO file from the given context.
 
@@ -131,10 +137,40 @@ async def gen_nfo(
         nfo_path: The path to the NFO file to generate.
         data: The data to render the NFO file with.
         overwrite: Whether to overwrite the NFO file if it already exists.
+        item_id: The media item ID used to resolve the current NFO path.
 
     Returns:
         `True` if the NFO file is generated successfully, `False` otherwise.
     """
+    if item_id is not None:
+        item = await MediaItem.get_or_none(id=item_id).select_related("lib")
+        if item is None:
+            return False
+        async with library_lock(item.lib.dir):
+            item = await MediaItem.get_or_none(id=item_id).select_related("lib")
+            if item is None:
+                return False
+            # the workflow may still hold a path from before organization
+            if not Path(item.path).exists():
+                return False
+            current_nfo = item.nfo_path
+            if (
+                not current_nfo
+                and item.parent_id is not None
+                and item.lib.lib_type == LibType.MOVIE
+            ):
+                parent = await MediaItem.get_or_none(
+                    id=item.parent_id, lib_id=item.lib_id
+                )
+                if parent is not None:
+                    current_nfo = parent.nfo_path or get_nfo_path(parent.path)
+            current_nfo = current_nfo or get_nfo_path(item.path)
+            return await _write_nfo(
+                nfo_type,
+                current_nfo,
+                data,
+                overwrite=overwrite,
+            )
     return await _write_nfo(nfo_type, nfo_path, data, overwrite=overwrite)
 
 

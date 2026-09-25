@@ -341,4 +341,6 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     result["season"] = _s if (_s := result.get("season")) else season
                     result["episode"] = _e if (_e := result.get("episode")) else episode
                     nfo_path = nfo_path or get_nfo_path(e.path)
-                    await gen_nfo(NFOType.EPISODE, nfo_path, result, overwrite=True)
+                    await gen_nfo(
+                        NFOType.EPISODE, nfo_path, result, overwrite=True, item_id=e.id
+                    )
