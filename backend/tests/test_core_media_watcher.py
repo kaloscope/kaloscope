@@ -289,3 +289,83 @@ def test_hash_scan(tmp_path, monkeypatch, backfill_nfo_events, missing):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("delivery", ["persisted", "queued", "duplicate"])
+@pytest.mark.parametrize("fail_once", [False, True])
+def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    source = tmp_path / "Movie.mkv"
+    source.write_bytes(b"video")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>Updated</title></movie>")
+    fire = AsyncMock()
+    pause = AsyncMock()
+    attempts = []
+    events = Queue()
+    update_metadata = watcher.update_metadata
+    consume_event = watcher.consume_event
+
+    async def update(lib, path):
+        attempts.append((lib.id, lib.name, str(path)))
+        if fail_once and len(attempts) == 1:
+            raise OSError("temporary metadata failure")
+        return await update_metadata(lib, path)
+
+    async def finish(event):
+        await consume_event(event)
+        if events.empty():
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr(watcher, "update_metadata", update)
+    monkeypatch.setattr(watcher, "consume_event", finish)
+    monkeypatch.setattr(watcher.asyncio, "sleep", pause)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Original", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            other = await MediaLib.create(
+                name="Other",
+                dir=str(tmp_path / "other"),
+                lib_type=LibType.MOVIE,
+                priority=2,
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(source), dir=lib.dir, name=source.stem, title="Old"
+            )
+            pending = await MediaEvent.create(
+                lib=lib, src_path=str(nfo), event_type="modified"
+            )
+            other_event = await MediaEvent.create(
+                lib=other, src_path=str(tmp_path / "Other.nfo"), event_type="modified"
+            )
+            await MediaLib.filter(id=lib.id).update(name="Current")
+            if delivery != "persisted":
+                events.put(pending)
+            if delivery == "duplicate":
+                events.put(pending)
+            monitor = watcher.LibWatcher(None)
+
+            await asyncio.wait_for(monitor._event_consumer(lib.id, events), 3)
+
+            await item.refresh_from_db()
+            assert item.title == "Updated"
+            assert item.nfo_path == str(nfo)
+            assert not await MediaEvent.filter(lib_id=lib.id).exists()
+            assert await MediaEvent.filter(id=other_event.id).exists()
+            assert attempts == [(lib.id, "Current", str(nfo))] * (2 if fail_once else 1)
+            assert [call.args[0] for call in pause.await_args_list] == (
+                [5] if fail_once else [1] if delivery == "duplicate" else []
+            )
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
