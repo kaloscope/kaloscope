@@ -586,6 +586,8 @@ class DanmakuService:
     ) -> bool:
         """Refresh the danmaku metadata of the episodes under an anime.
 
+        Reload episodes under the library lock after fetching remote metadata.
+
         Args:
             item: The media item or a confirmed episode.
             meta: The confirmed danmaku metadata.
@@ -667,40 +669,47 @@ class DanmakuService:
                     return False
                 ep_data[number] = ep
 
-            matches = [
-                (
-                    episode,
-                    api_episodes[0]
-                    if movie and len(api_episodes) == 1
-                    else ep_data.get(str(episode.episode)),
+            async with library_lock(item.lib.dir):
+                # retain the original scope if organization split or merged a parent
+                current_episodes = await MediaItem.filter(
+                    id__in=[episode.id for episode in db_episodes], lib_id=item.lib_id
                 )
-                for episode in db_episodes
-            ]
-            if not item.parent_id and not any(ep for _, ep in matches):
-                return False
-
-            for db_episode, ep in matches:
-                # discard stale caches even when no new episode matches
-                danmaku_path = cls._cache_path(db_episode)
-                if danmaku_path.is_file():
-                    danmaku_path.unlink()
-
-                danmaku_meta = (
-                    DanmakuMeta(
-                        anime_id=meta.anime_id,
-                        anime_title=meta.anime_title,
-                        episode_id=ep.get("episodeId", 0),
-                        episode_title=ep.get("episodeTitle"),
-                        type=meta.type,
-                        type_description=meta.type_description,
+                matches = [
+                    (
+                        episode,
+                        api_episodes[0]
+                        if movie and len(api_episodes) == 1
+                        else ep_data.get(str(episode.episode)),
                     )
-                    if ep
-                    else None
-                )
+                    for episode in current_episodes
+                    if not episode.danmaku_meta
+                    or str(episode.danmaku_meta.get("anime_id")) != anime_id
+                ]
+                if not item.parent_id and matches and not any(ep for _, ep in matches):
+                    return False
 
-                await MediaItem.filter(id=db_episode.id).update(
-                    danmaku_path=None, danmaku_meta=danmaku_meta
-                )
+                for db_episode, ep in matches:
+                    # discard stale caches even when no new episode matches
+                    danmaku_path = cls._cache_path(db_episode)
+                    if danmaku_path.is_file():
+                        danmaku_path.unlink()
+
+                    danmaku_meta = (
+                        DanmakuMeta(
+                            anime_id=meta.anime_id,
+                            anime_title=meta.anime_title,
+                            episode_id=ep.get("episodeId", 0),
+                            episode_title=ep.get("episodeTitle"),
+                            type=meta.type,
+                            type_description=meta.type_description,
+                        )
+                        if ep
+                        else None
+                    )
+
+                    await MediaItem.filter(id=db_episode.id).update(
+                        danmaku_path=None, danmaku_meta=danmaku_meta
+                    )
             return True
 
         except httpx.RequestError:
