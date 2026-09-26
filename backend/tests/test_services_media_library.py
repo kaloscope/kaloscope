@@ -1,21 +1,24 @@
 """Unit tests for media library services."""
 
 import asyncio
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
 from tortoise import Tortoise
+from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.core.media.watcher import LibWatcher
 from app.models.flow import GraphCategory
-from app.models.media import LibType, MediaEvent, MediaLib, MediaLibUpsert
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaLibUpsert
 from app.services.flow import FlowTriggerService
-from app.services.media import MediaLibService
+from app.services.media import MediaItemService, MediaLibService
 
 
 @pytest.fixture(autouse=True)
@@ -318,6 +321,156 @@ def test_delete_wait(tmp_path, monkeypatch):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("layout", ["same", "split", "merged", "flat", "removed"])
+def test_item_delete_scope(tmp_path, monkeypatch, local, layout):
+    def remove(path):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    monkeypatch.setattr("app.services.media.delete_path", remove)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        deletion = None
+        try:
+            lib = await MediaLib.create(
+                name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
+            )
+
+            async def create_parent(name):
+                directory = tmp_path / name
+                directory.mkdir()
+                return await MediaItem.create(
+                    lib=lib, path=str(directory), dir=str(directory), name=name
+                )
+
+            async def create_child(parent, name):
+                path = Path(parent.path) / f"{name}.mkv"
+                path.write_bytes(name.encode())
+                return await MediaItem.create(
+                    lib=lib, parent=parent, path=str(path), dir=parent.path, name=name
+                )
+
+            parent = await create_parent("Original")
+            selected = [
+                await create_child(parent, "first"),
+                await create_child(parent, "second"),
+            ]
+            other_parent = await create_parent("Other")
+            untouched = [await create_child(other_parent, "other")]
+            affected_parents = [parent]
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr("app.services.media.library_lock", waiting_lock)
+            async with library_lock(lib.dir):
+                deletion = asyncio.create_task(
+                    MediaItemService.delete(parent.id, local=local)
+                )
+                await asyncio.wait_for(waiting.wait(), timeout=3)
+                assert not deletion.done()
+                assert all(Path(child.path).is_file() for child in selected)
+
+                if layout in {"split", "merged"}:
+                    destination = (
+                        other_parent
+                        if layout == "merged"
+                        else await create_parent("Split")
+                    )
+                    affected_parents.append(destination)
+                    child = selected[1]
+                    old_path = Path(child.path)
+                    new_path = Path(destination.path) / old_path.name
+                    old_path.rename(new_path)
+                    child.path, child.dir = str(new_path), destination.path
+                    child.parent_id = destination.id
+                    await child.save(update_fields=["path", "dir", "parent_id"])
+                    if layout == "merged":
+                        incoming = await create_child(parent, "second")
+                        Path(incoming.path).write_bytes(b"replacement")
+                        untouched.append(incoming)
+                elif layout == "flat":
+                    for child in selected:
+                        old_path = Path(child.path)
+                        new_path = tmp_path / old_path.name
+                        old_path.rename(new_path)
+                        child.path, child.dir, child.parent_id = (
+                            str(new_path),
+                            str(tmp_path),
+                            None,
+                        )
+                        await child.save(update_fields=["path", "dir", "parent_id"])
+                    Path(parent.path).rmdir()
+                    await parent.delete()
+                elif layout == "removed":
+                    await parent.delete()
+
+            await asyncio.wait_for(deletion, timeout=3)
+
+            for child in selected:
+                current = await MediaItem.get_or_none(id=child.id)
+                if layout == "removed":
+                    assert current is None
+                    assert Path(child.path).read_bytes() == child.name.encode()
+                elif local:
+                    assert current is None
+                    assert not Path(child.path).exists()
+                else:
+                    assert current is not None
+                    assert current.visible is False
+                    assert Path(child.path).read_bytes() == child.name.encode()
+            for affected in affected_parents:
+                current = await MediaItem.get_or_none(id=affected.id)
+                if layout in {"flat", "removed"} or (local and layout != "merged"):
+                    assert current is None
+                else:
+                    assert current is not None
+                    assert current.visible is (layout == "merged")
+            for child in untouched:
+                await child.refresh_from_db()
+                assert child.visible is True
+                expected = b"replacement" if child.name == "second" else b"other"
+                assert Path(child.path).read_bytes() == expected
+            await other_parent.refresh_from_db()
+            assert other_parent.visible is True
+        finally:
+            if deletion is not None:
+                if not deletion.done():
+                    deletion.cancel()
+                await asyncio.gather(deletion, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_item_delete_missing(local):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            if local:
+                with pytest.raises(DoesNotExist):
+                    await MediaItemService.delete(1, local=True)
+            else:
+                assert await MediaItemService.delete(1) is None
+        finally:
             await Tortoise.close_connections()
 
     asyncio.run(run())

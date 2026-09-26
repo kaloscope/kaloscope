@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import aiofiles
 from sanic import Sanic
 from sanic.log import logger
+from tortoise.exceptions import DoesNotExist
 from tortoise.expressions import Q
 from tortoise.transactions import atomic, in_transaction
 
@@ -141,20 +142,54 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):
-        """Delete a media item.
+        """Delete or hide a media item under its library lock.
+
+        Retain original children across parent changes and clean up empty parents.
 
         Args:
             id: The media item ID.
             local: Whether to delete the local files.
+
+        Raises:
+            DoesNotExist: If the item is missing before a local deletion.
         """
-        if local:
-            item = await MediaItem.get(id=id)
-            path = Path(item.path)
-            if path.exists():
-                delete_path(path)
-            await item.delete()
-        else:
-            await MediaItem.filter(id=id).update(visible=False)
+        items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related("lib")
+        item = next((row for row in items if row.id == id), None)
+        if item is None:
+            if local:
+                raise DoesNotExist(MediaItem)
+            return
+        child_ids = [row.id for row in items if row.id != id]
+        async with library_lock(item.lib.dir):
+            items = await MediaItem.filter(id__in=[id, *child_ids], lib_id=item.lib_id)
+            parent_ids = {row.parent_id for row in items if row.parent_id is not None}
+            # a surviving parent may have received children outside the requested scope
+            if await MediaItem.filter(parent_id=id).exclude(id__in=child_ids).exists():
+                items = [row for row in items if row.id != id]
+            if local:
+                if any(row.id == id for row in items):
+                    items = [row for row in items if row.parent_id != id]
+                for current in items:
+                    path = Path(current.path)
+                    if path.exists():
+                        delete_path(path)
+                    await current.delete()
+                for parent_id in parent_ids:
+                    if not await MediaItem.filter(parent_id=parent_id).exists():
+                        await MediaItem.filter(
+                            id=parent_id, lib_id=item.lib_id
+                        ).delete()
+            else:
+                await MediaItem.filter(id__in=[row.id for row in items]).update(
+                    visible=False
+                )
+                for parent_id in parent_ids:
+                    if not await MediaItem.filter(
+                        parent_id=parent_id, visible=True
+                    ).exists():
+                        await MediaItem.filter(id=parent_id, lib_id=item.lib_id).update(
+                            visible=False
+                        )
 
     @classmethod
     async def create(
