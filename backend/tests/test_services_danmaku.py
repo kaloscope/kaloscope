@@ -733,3 +733,111 @@ def test_cache_deletion(library, tmp_path, monkeypatch, change, recorded_path):
                     await asyncio.gather(deletion, return_exceptions=True)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["moved", "removed", "confirmed"])
+@pytest.mark.parametrize("recorded_path", [False, True])
+def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
+    async def run():
+        loading, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def handler(request):
+            assert request.url.path == "/api/v2/bangumi/new"
+            loading.set()
+            await release.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "bangumi": {
+                        "episodes": [
+                            {"episodeNumber": number, "episodeId": f"new-{number}"}
+                            for number in range(1, 5)
+                        ]
+                    },
+                },
+            )
+
+        def waiting_lock(directory):
+            waiting.set()
+            return library_lock(directory)
+
+        monkeypatch.setattr(danmaku, "library_lock", waiting_lock)
+        async with library(handler) as lib:
+            parent = await media(lib, "Series")
+            destination = await media(lib, "Other Series")
+            item = await media(lib, "1.mkv", parent=parent, episode=1)
+            other = await media(lib, "other.mkv", parent=destination, episode=4)
+            cache = tmp_path / (
+                "cached.json" if recorded_path else f".{item.name}.json"
+            )
+            cache.write_text("original")
+            if recorded_path:
+                await MediaItem.filter(id=item.id).update(danmaku_path=str(cache))
+            current_cache = cache
+            metadata = {"anime_id": "new", "episode_id": "manual", "type": "tvseries"}
+            refresh = asyncio.create_task(
+                danmaku.DanmakuService.refresh_episodes(
+                    parent, danmaku.DanmakuAnime(anime_id="new", type="tvseries")
+                )
+            )
+
+            try:
+                await asyncio.wait_for(loading.wait(), timeout=3)
+                async with await library_lock(lib.dir).acquire(timeout=1):
+                    release.set()
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    assert not refresh.done()
+                    assert cache.read_text() == "original"
+
+                    if change == "moved":
+                        directory = tmp_path / "Renamed"
+                        directory.mkdir()
+                        current_cache = directory / (
+                            "cached.json" if recorded_path else ".Renamed.mkv.json"
+                        )
+                        cache.rename(current_cache)
+                        await MediaItem.filter(id=item.id).update(
+                            parent_id=destination.id,
+                            path=str(directory / "Renamed.mkv"),
+                            dir=str(directory),
+                            name="Renamed.mkv",
+                            episode=2,
+                            danmaku_path=str(current_cache) if recorded_path else None,
+                        )
+                        cache.write_text("replacement")
+                    elif change == "removed":
+                        await item.delete()
+                    else:
+                        await MediaItem.filter(id=item.id).update(
+                            danmaku_meta=metadata, danmaku_path=str(cache)
+                        )
+                        cache.write_text("manual")
+                    added = await media(lib, "added.mkv", parent=parent, episode=3)
+
+                assert await asyncio.wait_for(refresh, timeout=3) is True
+                current = await MediaItem.get_or_none(id=item.id)
+
+                if change == "removed":
+                    assert current is None
+                    assert cache.read_text() == "original"
+                elif change == "confirmed":
+                    assert current.danmaku_meta == metadata
+                    assert current.danmaku_path == str(cache)
+                    assert cache.read_text() == "manual"
+                else:
+                    assert current.parent_id == destination.id
+                    assert current.danmaku_meta["episode_id"] == "new-2"
+                    assert current.danmaku_path is None
+                    assert not current_cache.exists()
+                    assert cache.read_text() == "replacement"
+                for untouched in (other, added):
+                    await untouched.refresh_from_db()
+                    assert untouched.danmaku_meta["anime_id"] == "old"
+            finally:
+                release.set()
+                if not refresh.done():
+                    refresh.cancel()
+                await asyncio.gather(refresh, return_exceptions=True)
+
+    asyncio.run(run())
