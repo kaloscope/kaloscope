@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from filelock import Timeout
 from lxml import etree
 from tortoise import Tortoise
 
@@ -20,6 +21,7 @@ from app.core.flow.nodes.nfo.episode import EpisodeNode
 from app.core.flow.nodes.nfo.movie import MovieNode
 from app.core.flow.nodes.nfo.tvshow import TVShowNode
 from app.core.media import shelver, watcher
+from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import get_handler
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
@@ -442,6 +444,163 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
             assert sorted(fired) == sorted(current_ids)
             if original_ids:
                 assert sorted(current_ids) == sorted(original_ids)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("event_type", ["created", "modified"])
+@pytest.mark.parametrize("change", ["updated", "event_removed", "library_removed"])
+def test_event_lock(tmp_path, monkeypatch, event_type, change):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    video = tmp_path / "Movie.mkv"
+    video.write_bytes(b"video")
+    nfo = video.with_suffix(".nfo")
+    nfo.write_text("<movie><title>Updated</title></movie>")
+    update_metadata = watcher.update_metadata
+    attempts = []
+
+    async def update(lib, path):
+        with pytest.raises(Timeout):
+            async with await library_lock(lib.dir).acquire(timeout=0):
+                pass
+        attempts.append(lib.name)
+        return await update_metadata(lib, path)
+
+    async def fire(*_args, **_kwargs):
+        async with await library_lock(str(tmp_path)).acquire(timeout=1):
+            pass
+
+    fire = AsyncMock(side_effect=fire)
+    monkeypatch.setattr(watcher, "update_metadata", update)
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        waiting = asyncio.Event()
+
+        def waiting_lock(directory):
+            waiting.set()
+            return library_lock(directory)
+
+        monkeypatch.setattr(watcher, "library_lock", waiting_lock)
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        request = None
+        try:
+            lib = await MediaLib.create(
+                name="Original", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(video), dir=lib.dir, name=video.stem, title="Original"
+            )
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(video if event_type == "created" else nfo),
+                event_type=event_type,
+            )
+
+            async with library_lock(lib.dir):
+                request = asyncio.create_task(watcher.consume_event(event))
+                await asyncio.wait_for(waiting.wait(), timeout=3)
+                assert not request.done()
+                assert await MediaEvent.filter(id=event.id).exists()
+                assert (await MediaItem.get(id=item.id)).title == "Original"
+                assert attempts == []
+                fire.assert_not_awaited()
+                if change == "updated":
+                    await MediaLib.filter(id=lib.id).update(name="Current")
+                elif change == "event_removed":
+                    await event.delete()
+                else:
+                    await lib.delete()
+
+            await asyncio.wait_for(request, timeout=3)
+
+            assert not await MediaEvent.filter(id=event.id).exists()
+            if change == "updated":
+                await item.refresh_from_db()
+                assert item.title == "Updated"
+                assert item.nfo_path == str(nfo)
+                assert attempts == ["Current"]
+                assert fire.await_count == (1 if event_type == "created" else 0)
+            else:
+                assert attempts == []
+                fire.assert_not_awaited()
+                if change == "event_removed":
+                    await item.refresh_from_db()
+                    assert item.title == "Original"
+                    assert item.nfo_path is None
+                else:
+                    assert not await MediaItem.filter(id=item.id).exists()
+        finally:
+            if request is not None:
+                if not request.done():
+                    request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("event_type", ["created", "modified"])
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+def test_event_retry(tmp_path, monkeypatch, event_type, error):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    video = tmp_path / "Movie.mkv"
+    video.write_bytes(b"video")
+    nfo = video.with_suffix(".nfo")
+    nfo.write_text("<movie><title>Updated</title></movie>")
+    update_metadata = watcher.update_metadata
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def interrupted(lib, path):
+        await update_metadata(lib, path)
+        raise error("metadata update interrupted")
+
+    monkeypatch.setattr(watcher, "update_metadata", interrupted)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(video), dir=lib.dir, name=video.stem, title="Original"
+            )
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(video if event_type == "created" else nfo),
+                event_type=event_type,
+            )
+
+            with pytest.raises(error, match="metadata update interrupted"):
+                await watcher.consume_event(event)
+
+            async with await library_lock(lib.dir).acquire(timeout=1):
+                assert await MediaEvent.filter(id=event.id).exists()
+                await item.refresh_from_db()
+                assert item.title == "Original"
+                assert item.nfo_path is None
+            fire.assert_not_awaited()
+            monkeypatch.setattr(watcher, "update_metadata", update_metadata)
+
+            await asyncio.wait_for(watcher.consume_event(event), timeout=3)
+
+            await item.refresh_from_db()
+            assert item.title == "Updated"
+            assert item.nfo_path == str(nfo)
+            assert not await MediaEvent.filter(id=event.id).exists()
+            assert fire.await_count == (1 if event_type == "created" else 0)
         finally:
             await Tortoise.close_connections()
 
