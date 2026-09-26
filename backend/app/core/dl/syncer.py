@@ -508,6 +508,8 @@ async def _complete_openlist_tasks(task_ids: list[int]):
 async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
     """Synchronize tasks through a local HTTP/RPC downloader.
 
+    Preserve known files when a response omits a usable file list.
+
     Args:
         driver: The configured RPC downloader driver.
         tasks: The local tasks assigned to `driver`.
@@ -634,6 +636,8 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
             )
             continue
 
+        # keep stored files and transfer inputs consistent
+        files = files if isinstance(files, list) else task.files
         if completed_at is not None:
             await Notifications.send(NotificationTemplate.DOWNLOAD_COMPLETED, name=name)
 
@@ -657,9 +661,7 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
         # transfer files to media library after completion
         if state == DownloadState.COMPLETED:
             try:
-                await transfer_files(
-                    task, files if isinstance(files, list) else task.files
-                )
+                await transfer_files(task, files)
             except Exception:
                 logger.error(
                     "Failed to transfer files for task: %s",

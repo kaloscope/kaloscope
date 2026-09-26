@@ -1461,3 +1461,76 @@ def test_xunlei_file_paths(tmp_path, monkeypatch, directory, paths):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("source", ["list", "details"])
+@pytest.mark.parametrize(
+    ("files", "expected_files"),
+    [
+        (None, ["movie.mkv"]),
+        ("unavailable", ["movie.mkv"]),
+        ([], []),
+        (["fresh.mkv"], ["fresh.mkv"]),
+    ],
+)
+@pytest.mark.parametrize("state", [DownloadState.PAUSED, DownloadState.COMPLETED])
+def test_rpc_file_retention(
+    tmp_path, monkeypatch, source, files, expected_files, state
+):
+    known_files = ["movie.mkv"]
+
+    async def transfer(task, selected):
+        stored = await DownloadTask.get(id=task.id)
+        assert stored.files == selected
+        return True
+
+    transfer_files = AsyncMock(side_effect=transfer)
+    monkeypatch.setattr(syncer, "transfer_files", transfer_files)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config="config", name="RPC", priority=1
+            )
+            task = await DownloadTask.create(
+                downloader=downloader,
+                unique_id="remote",
+                dir=str(tmp_path),
+                name="movie.mkv",
+                files=known_files,
+                state=DownloadState.DOWNLOADING,
+            )
+            item = {"unique_id": task.unique_id, "state": state}
+            responses = (
+                [[{**item, "files": files}]]
+                if source == "list"
+                else [[item], {"files": files}]
+            )
+            driver = cast(
+                RpcDriver,
+                SimpleNamespace(
+                    client=SimpleNamespace(call=AsyncMock(side_effect=responses)),
+                    config=SimpleNamespace(
+                        methods={"details": None} if source == "details" else {}
+                    ),
+                ),
+            )
+
+            await syncer._sync_rpc_tasks(driver, [task])
+
+            await task.refresh_from_db()
+            assert task.state == state
+            assert task.files == expected_files
+            if state == DownloadState.COMPLETED:
+                transfer_files.assert_awaited_once_with(task, expected_files)
+            else:
+                transfer_files.assert_not_awaited()
+            assert driver.client.call.await_count == (2 if source == "details" else 1)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
