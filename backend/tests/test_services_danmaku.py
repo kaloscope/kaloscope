@@ -8,12 +8,16 @@ import httpx
 import pytest
 from tortoise import Tortoise
 
+from app.core.config import KaloscopeConfig
+from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaItem, MediaLib
 from app.services import danmaku
 
 
 @pytest.fixture
 def library(monkeypatch, tmp_path):
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+
     @asynccontextmanager
     async def create(handler, lib_type=LibType.TV_SHOW, server="https://danmaku.test"):
         await Tortoise.init(
@@ -653,5 +657,79 @@ def test_confirmation_scope(library, change):
             if change == "moved":
                 expected.append("/api/v2/bangumi/new")
             assert requests == expected
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["unchanged", "moved", "removed"])
+@pytest.mark.parametrize("recorded_path", [False, True])
+def test_cache_deletion(library, tmp_path, monkeypatch, change, recorded_path):
+    def handler(request):
+        pytest.fail(f"cache deletion should not request {request.url}")
+
+    async def run():
+        async with library(handler) as lib:
+            item = await media(lib, "1.mkv", episode=1)
+            cache = tmp_path / (
+                "cached.json" if recorded_path else f".{item.name}.json"
+            )
+            cache.write_text("original")
+            if recorded_path:
+                await MediaItem.filter(id=item.id).update(danmaku_path=str(cache))
+            metadata = item.danmaku_meta
+            current_cache = cache
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr(danmaku, "library_lock", waiting_lock)
+            deletion = None
+            try:
+                async with library_lock(lib.dir):
+                    deletion = asyncio.create_task(
+                        danmaku.DanmakuService.delete_danmakus(item.path)
+                    )
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    assert not deletion.done()
+                    assert cache.read_text() == "original"
+
+                    if change == "moved":
+                        directory = tmp_path / "Renamed"
+                        directory.mkdir()
+                        current_cache = directory / (
+                            "cached.json" if recorded_path else ".Renamed.mkv.json"
+                        )
+                        cache.rename(current_cache)
+                        await MediaItem.filter(id=item.id).update(
+                            path=str(directory / "Renamed.mkv"),
+                            dir=str(directory),
+                            name="Renamed.mkv",
+                            danmaku_path=str(current_cache) if recorded_path else None,
+                        )
+                        await media(lib, "1.mkv", episode=2)
+                        cache.write_text("replacement")
+                    elif change == "removed":
+                        await item.delete()
+
+                await asyncio.wait_for(deletion, timeout=3)
+                current = await MediaItem.get_or_none(id=item.id)
+
+                if change == "removed":
+                    assert current is None
+                    assert cache.read_text() == "original"
+                else:
+                    assert current is not None
+                    assert current.danmaku_path is None
+                    assert current.danmaku_meta == metadata
+                    assert not current_cache.exists()
+                    if change == "moved":
+                        assert cache.read_text() == "replacement"
+            finally:
+                if deletion is not None:
+                    if not deletion.done():
+                        deletion.cancel()
+                    await asyncio.gather(deletion, return_exceptions=True)
 
     asyncio.run(run())
