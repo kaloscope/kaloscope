@@ -440,41 +440,47 @@ class LibWatcher:
 
 
 async def consume_event(event: MediaEvent):
-    """Consume the media event.
+    """Consume a media event under its library lock.
+
+    Commit metadata before releasing the lock and firing ingest workflows.
 
     Args:
-        event: The media event.
+        event: The persisted media event to process.
     """
     lib = await MediaLib.get_or_none(id=event.lib_id)
     if lib is None:
         return
-    event = await MediaEvent.get_or_none(id=event.id)
-    if event is None:
-        return
-    event.lib = lib
-
     result: list[MediaPathInfo] | None = None
-    async with in_transaction("default"):
-        # delete the consumed event
-        await event.delete()
-        # handle the event based on its type
-        if event.event_type == EVENT_TYPE_MODIFIED:
-            await _handle_modified(event)
-        elif event.event_type == EVENT_TYPE_DELETED:
-            await _handle_deleted(event)
-        elif event.event_type == EVENT_TYPE_MOVED:
-            result = await _handle_moved(event)
-        elif event.event_type == EVENT_TYPE_CREATED:
-            result = await _handle_created(event)
+    async with library_lock(lib.dir):
+        lib = await MediaLib.get_or_none(id=lib.id)
+        if lib is None:
+            return
+        event = await MediaEvent.get_or_none(id=event.id)
+        if event is None:
+            return
+        event.lib = lib
+
+        async with in_transaction("default"):
+            # delete the consumed event
+            await event.delete()
+            # handle the event based on its type
+            if event.event_type == EVENT_TYPE_MODIFIED:
+                await _handle_modified(event)
+            elif event.event_type == EVENT_TYPE_DELETED:
+                await _handle_deleted(event)
+            elif event.event_type == EVENT_TYPE_MOVED:
+                result = await _handle_moved(event)
+            elif event.event_type == EVENT_TYPE_CREATED:
+                result = await _handle_created(event)
+
+            for path_info in result or []:
+                if path_info.nfo_path is not None:
+                    await update_metadata(event.lib, path_info.nfo_path)
 
     if result:
         for path_info in result:
-            # parse the NFO file if it exists
             nfo_path = path_info.nfo_path
-            if nfo_path is not None:
-                await update_metadata(event.lib, nfo_path)
-
-            # fire the flow triggers
+            # fire workflows after releasing the lock used by NFO writers
             await FlowTriggerService.fire(
                 GraphCategory.INGEST,
                 event.lib_id,
