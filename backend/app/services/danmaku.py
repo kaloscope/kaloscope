@@ -442,14 +442,21 @@ class DanmakuService:
         media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media:
             return
-        async with library_lock(media.lib.dir):
-            media = await MediaItem.get_or_none(id=media.id)
-            if not media:
-                return
-            danmaku_path = cls._cache_path(media)
-            if danmaku_path.is_file():
-                danmaku_path.unlink()
-            await MediaItem.filter(id=media.id).update(danmaku_path=None)
+        async with cls._locked_media(media) as current:
+            if current is not None:
+                await cls.delete_cache(current)
+
+    @classmethod
+    async def delete_cache(cls, media: MediaItem):
+        """Delete cached comments while the caller holds the library lock.
+
+        Args:
+            media: The current media item whose cached comments are deleted.
+        """
+        danmaku_path = cls._cache_path(media)
+        if danmaku_path.is_file():
+            danmaku_path.unlink()
+        await MediaItem.filter(id=media.id).update(danmaku_path=None)
 
     @classmethod
     async def search_anime(cls, path: str, title: str) -> list[DanmakuAnime]:
