@@ -129,15 +129,17 @@ async def gen_nfo(
     *,
     overwrite: bool = False,
     item_id: int | None = None,
+    refresh: bool = False,
 ) -> bool:
     """Generate NFO file from the given context.
 
     Args:
         nfo_type: The type of the NFO file (e.g. `movie`, `tvshow`).
         nfo_path: The path to the NFO file to generate.
-        data: The data to render the NFO file with.
+        data: The metadata used to render the NFO and fill missing parsed values.
         overwrite: Whether to overwrite the NFO file if it already exists.
         item_id: The media item ID used to resolve the current NFO path.
+        refresh: Whether to update metadata after writing when `item_id` is set.
 
     Returns:
         `True` if the NFO file is generated successfully, `False` otherwise.
@@ -165,12 +167,15 @@ async def gen_nfo(
                 if parent is not None:
                     current_nfo = parent.nfo_path or get_nfo_path(parent.path)
             current_nfo = current_nfo or get_nfo_path(item.path)
-            return await _write_nfo(
+            written = await _write_nfo(
                 nfo_type,
                 current_nfo,
                 data,
                 overwrite=overwrite,
             )
+            if written and refresh:
+                await update_metadata(item.lib, current_nfo, fallback=data)
+            return written
     return await _write_nfo(nfo_type, nfo_path, data, overwrite=overwrite)
 
 
