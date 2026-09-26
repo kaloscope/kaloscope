@@ -11,6 +11,7 @@ from sanic import Sanic
 from sanic.log import logger
 
 from app.core.constants import ENCODING
+from app.core.media.coordination import library_lock
 from app.models.media import Language, LibType, MediaItem, MediaResource
 from app.utils import json
 
@@ -374,19 +375,23 @@ class DanmakuService:
 
     @classmethod
     async def delete_danmakus(cls, path: str):
-        """Delete the locally cached danmakus for the given media resource.
+        """Delete the cache at the media's current path under its library lock.
 
         Args:
             path: The media resource path.
         """
         # get the media item by the path
-        media = await MediaItem.filter(path=path).first()
+        media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media:
             return
-        danmaku_path = cls._cache_path(media)
-        if danmaku_path.is_file():
-            danmaku_path.unlink()
-        await MediaItem.filter(id=media.id).update(danmaku_path=None)
+        async with library_lock(media.lib.dir):
+            media = await MediaItem.get_or_none(id=media.id)
+            if not media:
+                return
+            danmaku_path = cls._cache_path(media)
+            if danmaku_path.is_file():
+                danmaku_path.unlink()
+            await MediaItem.filter(id=media.id).update(danmaku_path=None)
 
     @classmethod
     async def search_anime(cls, path: str, title: str) -> list[DanmakuAnime]:
