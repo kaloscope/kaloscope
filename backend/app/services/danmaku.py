@@ -537,6 +537,15 @@ class DanmakuService:
         if not media or not (server := media.lib.danmaku_server):
             return result
 
+        episode_ids = None
+        if media.lib.lib_type == LibType.TV_SHOW:
+            episode_ids = await MediaItem.filter(
+                lib_id=media.lib_id,
+                parent_id=media.parent_id or media.id,
+                id__not=media.id,
+                episode__not_isnull=True,
+            ).values_list("id", flat=True)
+
         # load danmakus from the danmaku server
         danmakus = await cls.load_from_server(
             server, meta.episode_id, media.lib.language
@@ -558,17 +567,24 @@ class DanmakuService:
 
         # also refresh the danmaku metadata of sibling episodes if it's a TV show
         if media.lib.lib_type == LibType.TV_SHOW:
-            await cls.refresh_episodes(media, meta)
+            await cls.refresh_episodes(media, meta, episode_ids=episode_ids)
 
         return result
 
     @classmethod
-    async def refresh_episodes(cls, item: MediaItem, meta: DanmakuAnime) -> bool:
+    async def refresh_episodes(
+        cls,
+        item: MediaItem,
+        meta: DanmakuAnime,
+        *,
+        episode_ids: list[int] | None = None,
+    ) -> bool:
         """Refresh the danmaku metadata of the episodes under an anime.
 
         Args:
             item: The media item or a confirmed episode.
             meta: The confirmed danmaku metadata.
+            episode_ids: The episode IDs, or `None` to use the current group.
 
         Returns:
             Whether the match was applied or already up to date.
@@ -578,7 +594,11 @@ class DanmakuService:
 
         anime_id = meta.anime_id
         # include all files for a library match, or siblings for a player match
-        query = MediaItem.filter(parent_id=item.parent_id or item.id, id__not=item.id)
+        query = MediaItem.filter(lib_id=item.lib_id, id__not=item.id)
+        if episode_ids is None:
+            query = query.filter(parent_id=item.parent_id or item.id)
+        else:
+            query = query.filter(id__in=episode_ids)
         movie = item.lib.lib_type == LibType.MOVIE
         if not movie:
             query = query.filter(episode__not_isnull=True)

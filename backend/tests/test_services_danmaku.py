@@ -585,3 +585,73 @@ def test_confirmed_anime_playback(library, suffix, prefix):
     assert result.metadata is not None
     assert result.metadata.episode_id == "new-1"
     assert result.comments[0].text == "New"
+
+
+@pytest.mark.parametrize("change", ["moved", "removed", "empty"])
+def test_confirmation_scope(library, change):
+    async def run():
+        requests = []
+        unrelated = []
+
+        async def handler(request):
+            requests.append(request.url.path)
+            if request.url.path == "/api/v2/comment/new-1":
+                await MediaItem.filter(id=first.id).update(parent_id=other.id)
+                if second is not None:
+                    if change == "removed":
+                        await second.delete()
+                    else:
+                        await MediaItem.filter(id=second.id).update(parent_id=other.id)
+                unrelated.append(await media(lib, "new.mkv", parent=parent, episode=3))
+                return httpx.Response(200, json={"comments": []})
+
+            assert request.url.path == "/api/v2/bangumi/new"
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "bangumi": {
+                        "episodes": [
+                            {"episodeNumber": number, "episodeId": f"new-{number}"}
+                            for number in (2, 3, 4)
+                        ]
+                    },
+                },
+            )
+
+        async with library(handler) as lib:
+            parent = await media(lib, "Series")
+            other = await media(lib, "Other")
+            first = await media(lib, "1.mkv", parent=parent, episode=1)
+            second = (
+                None
+                if change == "empty"
+                else await media(lib, "2.mkv", parent=parent, episode=2)
+            )
+            unrelated.append(await media(lib, "other.mkv", parent=other, episode=4))
+            meta = danmaku.DanmakuMeta(
+                anime_id="new", episode_id="new-1", type="tvseries"
+            )
+
+            result = await danmaku.DanmakuService.confirm_episode(first.path, meta)
+
+            await first.refresh_from_db()
+            assert result.metadata == meta
+            assert first.danmaku_meta["episode_id"] == "new-1"
+            if second is not None:
+                if change == "removed":
+                    assert not await MediaItem.filter(id=second.id).exists()
+                else:
+                    await second.refresh_from_db()
+                    assert second.parent_id == other.id
+                    assert second.danmaku_meta["episode_id"] == "new-2"
+            for item in unrelated:
+                await item.refresh_from_db()
+                assert item.danmaku_meta["anime_id"] == "old"
+                assert item.danmaku_meta["episode_id"] == f"old-{item.episode}"
+            expected = ["/api/v2/comment/new-1"]
+            if change == "moved":
+                expected.append("/api/v2/bangumi/new")
+            assert requests == expected
+
+    asyncio.run(run())
