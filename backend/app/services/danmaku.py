@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -132,6 +133,20 @@ class DanmakuService:
         return Path(media.dir) / f".{media.name}.json"
 
     @classmethod
+    @contextlib.asynccontextmanager
+    async def _locked_media(cls, media: MediaItem) -> AsyncIterator[MediaItem | None]:
+        """Reload a media item while holding its library lock.
+
+        Args:
+            media: The media identity with its library already loaded.
+
+        Yields:
+            The current media item, or `None` if it was deleted while waiting.
+        """
+        async with library_lock(media.lib.dir):
+            yield await MediaItem.get_or_none(id=media.id).select_related("lib")
+
+    @classmethod
     async def _write_cache(cls, media: MediaItem, comments: list[Danmaku]) -> Path:
         """Write comments without releasing the caller's lock on cancellation.
 
@@ -164,27 +179,31 @@ class DanmakuService:
     async def match_danmakus(cls, path: str) -> DanmakuWrapper:
         """Match danmakus for the given media resource.
 
+        Fetch outside the lock and use current media paths for cache access.
+        Discard fetched comments if the file or its confirmed match changes.
+
         Args:
             path: The media resource path.
 
         Returns:
-            The wrapped danmakus with metadata if available.
+            The wrapped danmakus with metadata if available, or an empty wrapper
+            if the media was removed or replaced during the request.
         """
         # get the media item by the path
         media = await MediaItem.filter(path=path).first().select_related("lib")
         if not media:
             return DanmakuWrapper(comments=[])
 
-        # check if the local cache file exists
-        danmaku_path = cls._cache_path(media)
-        cached = danmaku_path.exists()
-
-        # check if the local cache file is expired
-        expired = False
-        if cached and (ttl := media.lib.danmaku_ttl) is not None:
-            mtime = danmaku_path.stat().st_mtime
-            if mtime + ttl * 3600 < datetime.now().timestamp():
-                expired = True
+        async with cls._locked_media(media) as current:
+            if current is None:
+                return DanmakuWrapper(comments=[])
+            media = current
+            danmaku_path = cls._cache_path(media)
+            cached = danmaku_path.exists()
+            expired = False
+            if cached and (ttl := media.lib.danmaku_ttl) is not None:
+                mtime = danmaku_path.stat().st_mtime
+                expired = mtime + ttl * 3600 < datetime.now().timestamp()
 
         if (not cached or expired) and (server := media.lib.danmaku_server):
             meta = media.danmaku_meta
@@ -199,24 +218,33 @@ class DanmakuService:
                     server, meta.episode_id, media.lib.language
                 )
                 if danmakus:
-                    # save to local cache file
-                    async with aiofiles.open(danmaku_path, "wb") as f:
-                        await f.write(json.dumps([d.model_dump() for d in danmakus]))
-
-                    # update the media item with the danmaku info
-                    await MediaItem.filter(id=media.id).update(
-                        danmaku_meta=meta,
-                        danmaku_path=str(danmaku_path),
-                    )
-
-                    return DanmakuWrapper(metadata=meta, comments=danmakus)
+                    async with cls._locked_media(media) as current:
+                        if current is None:
+                            return DanmakuWrapper(comments=[])
+                        if (current.hash, current.size) != (media.hash, media.size):
+                            return DanmakuWrapper(comments=[])
+                        if current.danmaku_meta == media.danmaku_meta:
+                            danmaku_path = cls._cache_path(current)
+                            try:
+                                danmaku_path = await cls._write_cache(current, danmakus)
+                                await MediaItem.filter(id=current.id).update(
+                                    danmaku_meta=meta,
+                                    danmaku_path=str(danmaku_path),
+                                )
+                            except asyncio.CancelledError:
+                                danmaku_path.unlink(missing_ok=True)
+                                raise
+                            return DanmakuWrapper(metadata=meta, comments=danmakus)
 
         # load danmakus from the local cache file
-        meta = media.danmaku_meta
-        return DanmakuWrapper(
-            metadata=DanmakuMeta.model_validate(meta) if meta else None,
-            comments=await cls.load_from_cache(danmaku_path),
-        )
+        async with cls._locked_media(media) as current:
+            if current is None:
+                return DanmakuWrapper(comments=[])
+            meta = current.danmaku_meta
+            return DanmakuWrapper(
+                metadata=DanmakuMeta.model_validate(meta) if meta else None,
+                comments=await cls.load_from_cache(cls._cache_path(current)),
+            )
 
     @classmethod
     async def match_metadata(cls, server: str, media: MediaItem) -> DanmakuMeta | None:
