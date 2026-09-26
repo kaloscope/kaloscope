@@ -13,6 +13,7 @@ import pytest
 from filelock import Timeout
 from lxml import etree
 from tortoise import Tortoise
+from watchdog.events import FileMovedEvent
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
@@ -601,6 +602,241 @@ def test_event_retry(tmp_path, monkeypatch, event_type, error):
             assert item.nfo_path == str(nfo)
             assert not await MediaEvent.filter(id=event.id).exists()
             assert fire.await_count == (1 if event_type == "created" else 0)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("explicit_cache", [False, True])
+@pytest.mark.parametrize("replacement", ["recreated", "moved", "temporary"])
+@pytest.mark.parametrize(
+    ("missing", "content", "preserved"),
+    [
+        (None, b"old video", True),
+        (None, b"new video", False),
+        (None, b"a longer replacement video", False),
+        ("hash", b"old video", True),
+        ("size", b"old video", True),
+        ("both", b"old video", True),
+        ("hash", b"a longer replacement video", False),
+        ("size", b"new video", False),
+    ],
+)
+def test_replaced_video(
+    tmp_path, monkeypatch, explicit_cache, replacement, missing, content, preserved
+):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    source = tmp_path / "Movie.mkv"
+    source.write_bytes(b"old video")
+    nfo = source.with_suffix(".nfo")
+    nfo_content = "<movie><title>Movie</title></movie>"
+    nfo.write_text(nfo_content)
+    default_cache = tmp_path / ".Movie.json"
+    default_cache.write_text("[]")
+    cache = tmp_path / "custom.json" if explicit_cache else default_cache
+    cache.write_text("[]")
+    cached_meta = {"episode_id": 42}
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(tmp_path),
+                name=source.stem,
+                hash=(
+                    None
+                    if missing in {"hash", "both"}
+                    else hashlib.md5(source.read_bytes()).hexdigest()
+                ),
+                size=None if missing in {"size", "both"} else source.stat().st_size,
+                nfo_path=str(nfo),
+                danmaku_path=str(cache) if explicit_cache else None,
+                danmaku_meta=cached_meta,
+            )
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user, rel_type=HistoryType.VIDEO, rel_id=item.id, position=42
+            )
+            events = []
+            if replacement == "recreated":
+                source.unlink()
+                events.append(
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(source), event_type="deleted"
+                    )
+                )
+                source.write_bytes(content)
+                events.append(
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(source), event_type="created"
+                    )
+                )
+            else:
+                temporary = tmp_path / (
+                    "Replacement.mkv" if replacement == "moved" else ".replacement.tmp"
+                )
+                temporary.write_bytes(content)
+                temporary.replace(source)
+                event = watcher.get_handler(lib.lib_type).filter_event(
+                    FileMovedEvent(str(temporary), str(source)), base_path=lib.dir
+                )
+                events.append(
+                    await MediaEvent.create(
+                        lib=lib,
+                        src_path=event.src_path,
+                        dest_path=event.dest_path,
+                        event_type=event.event_type,
+                    )
+                )
+
+            for event in events:
+                await asyncio.wait_for(watcher.consume_event(event), timeout=3)
+
+            current = await MediaItem.get(id=item.id)
+            assert current.path == str(source)
+            assert current.hash == hashlib.md5(content).hexdigest()
+            assert current.size == len(content)
+            assert current.nfo_path == str(nfo)
+            assert nfo.read_text() == nfo_content
+            await history.refresh_from_db()
+            assert history.rel_id == item.id
+            assert history.position == 42
+            if preserved:
+                assert cache.is_file()
+                assert default_cache.is_file()
+                assert current.danmaku_meta == cached_meta
+                assert current.danmaku_path == (str(cache) if explicit_cache else None)
+            else:
+                assert not cache.exists()
+                assert not default_cache.exists()
+                assert current.danmaku_path is None
+                assert current.danmaku_meta is None
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing_parent", [False, True])
+def test_missing_nfo(tmp_path, monkeypatch, missing_parent):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    folder = tmp_path / "Series"
+    folder.mkdir()
+    nfo = folder / "Series.nfo"
+    if not missing_parent:
+        nfo.write_text("<tvshow><title>Series</title></tvshow>")
+    video = folder / "S01E01.mkv"
+    video.write_bytes(b"video")
+    if missing_parent:
+        video.with_suffix(".nfo").write_text(
+            "<episodedetails><title>Pilot</title><season>1</season>"
+            "<episode>1</episode></episodedetails>"
+        )
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
+            )
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(folder),
+                dir=str(folder),
+                name=folder.name,
+                title="Series",
+                nfo_path=None if missing_parent else str(nfo),
+                season=1,
+            )
+            child = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(folder),
+                name=video.stem,
+                nfo_path=str(video.with_suffix(".nfo")) if missing_parent else None,
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(video), event_type="created"
+            )
+            await watcher.consume_event(event)
+            params = [call.kwargs["bootparams"] for call in fire.call_args_list]
+            expected_id = parent.id if missing_parent else child.id
+            expected_type = "tvshow" if missing_parent else "episode"
+            assert any(
+                p["item_id"] == expected_id and p["nfo_type"] == expected_type
+                for p in params
+            )
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_recreated_link(tmp_path, monkeypatch):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    source = tmp_path / "Movie.mkv"
+    source.symlink_to(tmp_path / "missing.mkv")
+    nfo = source.with_suffix(".nfo")
+    nfo_content = "<movie><title>Movie</title></movie>"
+    nfo.write_text(nfo_content)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=lib.dir,
+                name=source.stem,
+                hash="original",
+                size=10,
+                nfo_path=str(nfo),
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(source), event_type="deleted"
+            )
+
+            await asyncio.wait_for(watcher.consume_event(event), timeout=3)
+
+            await item.refresh_from_db()
+            assert item.path == str(source)
+            assert (item.hash, item.size) == ("original", 10)
+            assert item.nfo_path == str(nfo)
+            assert nfo.read_text() == nfo_content
+            assert source.is_symlink()
+            assert not source.exists()
+            assert not await MediaEvent.filter(id=event.id).exists()
+            fire.assert_not_awaited()
         finally:
             await Tortoise.close_connections()
 

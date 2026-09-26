@@ -35,8 +35,9 @@ from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
 from app.core.media.shelver import is_nfo, update_metadata
 from app.models.flow import GraphCategory
-from app.models.media import MediaEvent, MediaItem, MediaLib
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, UserHistory
+from app.services.danmaku import DanmakuService
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService
 from app.utils.crypto import encrypt
@@ -467,7 +468,16 @@ async def consume_event(event: MediaEvent):
             if event.event_type == EVENT_TYPE_MODIFIED:
                 await _handle_modified(event)
             elif event.event_type == EVENT_TYPE_DELETED:
-                await _handle_deleted(event)
+                source = Path(event.src_path)
+                if not (source.exists() or source.is_symlink()):
+                    await _handle_deleted(event)
+                elif not event.is_directory and not is_nfo(source):
+                    # retain media identity when a deleted path has been reused
+                    item = await MediaItem.get_or_none(
+                        lib_id=event.lib_id, path=event.src_path
+                    )
+                    if item is not None:
+                        await _refresh_replaced(item)
             elif event.event_type == EVENT_TYPE_MOVED:
                 result = await _handle_moved(event)
             elif event.event_type == EVENT_TYPE_CREATED:
@@ -512,6 +522,27 @@ async def _handle_modified(event: MediaEvent):
     src_path = Path(event.src_path)
     if is_nfo(src_path):
         await update_metadata(event.lib, src_path)
+
+
+async def _refresh_replaced(item: MediaItem):
+    """Refresh an indexed video's content identity and cached danmakus.
+
+    Hold the library lock and clear cached danmakus only when a known hash or
+    size changes. Preserve the media ID and NFO.
+
+    Args:
+        item: The indexed media item to refresh.
+    """
+    if not await MediaItemService.refresh_hash_and_size(item):
+        return
+
+    await DanmakuService.delete_cache(item)
+    if item.danmaku_path:
+        # clearing an explicit cache path also exposes the default cache location
+        default_cache = Path(item.dir) / f".{item.name}.json"
+        if default_cache.is_file():
+            default_cache.unlink()
+    await MediaItem.filter(id=item.id).update(danmaku_meta=None)
 
 
 async def _handle_deleted(event: MediaEvent):
@@ -587,14 +618,13 @@ async def _handle_moved(event: MediaEvent) -> list[MediaPathInfo] | None:
 
 
 async def _handle_created(event: MediaEvent) -> list[MediaPathInfo] | None:
-    """Handle the creation event.
+    """Index a created path or refresh an existing media item.
 
     Args:
         event: The media event.
 
     Returns:
-        A list of media path info generated from the created media items,
-        or None if the destination path is not accepted by the handler.
+        The media paths needing ingest workflows, or `None` if none are needed.
     """
     # check if the destination path exists
     path = Path(event.dest_path or event.src_path)
@@ -605,6 +635,23 @@ async def _handle_created(event: MediaEvent) -> list[MediaPathInfo] | None:
     if is_nfo(path):
         await update_metadata(event.lib, path)
         return None
+
+    existing = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(path))
+    if existing is not None:
+        await _refresh_replaced(existing)
+        nfo_path = existing.nfo_path
+        parent = (
+            await MediaItem.get_or_none(id=existing.parent_id)
+            if existing.parent_id
+            else None
+        )
+        if not nfo_path and event.lib.lib_type == LibType.MOVIE:
+            nfo_path = parent.nfo_path if parent else None
+        parent_ready = event.lib.lib_type != LibType.TV_SHOW or (
+            parent is not None and parent.nfo_path and Path(parent.nfo_path).is_file()
+        )
+        if parent_ready and nfo_path and Path(nfo_path).is_file():
+            return None
 
     # generate media items
     handler = get_handler(event.lib.lib_type)
