@@ -18,10 +18,8 @@ from app.routes import media as media_routes
 @pytest.mark.parametrize("written", [False, True])
 def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
     publish = AsyncMock(return_value=written)
-    update = AsyncMock()
     refresh = AsyncMock()
     monkeypatch.setattr(media_routes, "gen_nfo", publish)
-    monkeypatch.setattr(media_routes, "update_metadata", update)
     monkeypatch.setattr(media_routes.MediaItemService, "refresh_episodes", refresh)
 
     async def run():
@@ -58,13 +56,14 @@ def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
                 with pytest.raises(BadRequestException):
                     await route(None, body, item.id)
 
-            publish.assert_awaited_once()
-            if written:
-                update.assert_awaited_once_with(
-                    lib, item.nfo_path, fallback=body.metadata
-                )
-            else:
-                update.assert_not_awaited()
+            publish.assert_awaited_once_with(
+                media_routes.get_nfo_type(lib_type),
+                item.nfo_path,
+                body.metadata,
+                overwrite=True,
+                item_id=item.id,
+                refresh=True,
+            )
             if written and lib_type == LibType.TV_SHOW:
                 refresh.assert_awaited_once_with(item, body, episode_ids=[child.id])
             else:

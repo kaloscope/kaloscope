@@ -5,15 +5,24 @@ import hashlib
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from filelock import Timeout
 from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.media import shelver
 from app.core.media.coordination import library_lock
-from app.models.media import LibType, MediaItem, MediaLib, MediaMetadata, NFOType
+from app.models.media import (
+    LibType,
+    MediaEvent,
+    MediaItem,
+    MediaLib,
+    MediaMetadata,
+    NFOType,
+)
 from app.services.media import MediaItemService
 
 
@@ -276,6 +285,71 @@ def test_episode_path(tmp_path, monkeypatch, change):
                 assert destination.read_bytes() == b"video"
             else:
                 assert not current_nfo.exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("written", [False, True])
+@pytest.mark.parametrize("refresh", [False, True])
+def test_metadata_fallback(tmp_path, monkeypatch, written, refresh):
+    update_metadata = shelver.update_metadata
+
+    async def locked_update(lib, path, **kwargs):
+        with pytest.raises(Timeout):
+            async with await library_lock(lib.dir).acquire(timeout=0):
+                pass
+        return await update_metadata(lib, path, **kwargs)
+
+    update = AsyncMock(side_effect=locked_update)
+    monkeypatch.setattr(shelver, "update_metadata", update)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
+            )
+            current = tmp_path / "New"
+            current.mkdir()
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(current),
+                dir=str(current),
+                name="New",
+                title="Original",
+            )
+            nfo_path = current / "New.nfo"
+            if not written:
+                nfo_path.write_text("<tvshow><title>Original</title></tvshow>")
+            body = {"title": "New", "season": 3}
+
+            result = await shelver.gen_nfo(
+                NFOType.TV_SHOW,
+                str(tmp_path / "Old" / "Old.nfo"),
+                body,
+                item_id=item.id,
+                refresh=refresh,
+            )
+
+            assert result is written
+            await item.refresh_from_db()
+            if written and refresh:
+                update.assert_awaited_once()
+                assert item.nfo_path == str(nfo_path)
+                assert item.season == 3
+                assert item.title == "New"
+            else:
+                update.assert_not_awaited()
+                assert item.nfo_path is None
+                assert item.season is None
+                assert item.title == "Original"
+            assert not (tmp_path / "Old").exists()
+            assert not await MediaEvent.all().exists()
         finally:
             await Tortoise.close_connections()
 
