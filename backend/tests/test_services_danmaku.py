@@ -1,11 +1,14 @@
 """Test danmaku matching, cache updates, and server error recovery."""
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from filelock import Timeout
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -839,5 +842,268 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                 if not refresh.done():
                     refresh.cancel()
                 await asyncio.gather(refresh, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("has_comments", [False, True])
+@pytest.mark.parametrize("replacement", [{"hash": "new"}, {"size": 20}])
+def test_confirmation_replacement(library, tmp_path, has_comments, replacement):
+    async def run():
+        loading = asyncio.Event()
+        release = asyncio.Event()
+        requests = []
+
+        async def handler(request):
+            requests.append(request.url.path)
+            if request.url.path == "/api/v2/comment/selected-1":
+                loading.set()
+                await release.wait()
+                comments = (
+                    [{"cid": 1, "p": "1,1,16777215,1", "m": "Stale comments"}]
+                    if has_comments
+                    else []
+                )
+                return httpx.Response(200, json={"comments": comments})
+            assert request.url.path == "/api/v2/bangumi/selected"
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "bangumi": {
+                        "episodes": [{"episodeNumber": 2, "episodeId": "selected-2"}]
+                    },
+                },
+            )
+
+        async with library(handler) as lib:
+            parent = await media(lib, "Series")
+            first = await media(lib, "1.mkv", parent=parent, episode=1)
+            second = await media(lib, "2.mkv", parent=parent, episode=2)
+            await MediaItem.filter(id=first.id).update(hash="old", size=10)
+            cache = tmp_path / ".1.mkv.json"
+            sibling_cache = tmp_path / ".2.mkv.json"
+            sibling_content = '[{"text": "Sibling comments"}]'
+            sibling_cache.write_text(sibling_content)
+            sibling_metadata = second.danmaku_meta
+            await MediaItem.filter(id=second.id).update(danmaku_path=str(sibling_cache))
+            pending = asyncio.create_task(
+                danmaku.DanmakuService.confirm_episode(
+                    first.path,
+                    danmaku.DanmakuMeta(
+                        anime_id="selected", episode_id="selected-1", type="tvseries"
+                    ),
+                )
+            )
+            try:
+                await asyncio.wait_for(loading.wait(), timeout=5)
+                async with library_lock(lib.dir):
+                    await MediaItem.filter(id=first.id).update(
+                        **replacement, danmaku_meta=None, danmaku_path=None
+                    )
+            finally:
+                release.set()
+
+            result = await pending
+            await first.refresh_from_db()
+            await second.refresh_from_db()
+
+            assert result.metadata is None
+            assert result.comments == []
+            assert first.danmaku_meta is None
+            assert first.danmaku_path is None
+            assert not cache.exists()
+            assert second.danmaku_meta == sibling_metadata
+            assert second.danmaku_path == str(sibling_cache)
+            assert sibling_cache.read_text() == sibling_content
+            assert requests == ["/api/v2/comment/selected-1"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["moved", "removed"])
+@pytest.mark.parametrize("has_comments", [False, True])
+def test_confirmation_wait(library, tmp_path, monkeypatch, change, has_comments):
+    async def run():
+        loading, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def handler(request):
+            assert request.url.path == "/api/v2/comment/selected"
+            loading.set()
+            await release.wait()
+            comments = (
+                [{"cid": 1, "p": "1,1,16777215,1", "m": "New"}] if has_comments else []
+            )
+            return httpx.Response(200, json={"comments": comments})
+
+        def waiting_lock(directory):
+            if release.is_set():
+                waiting.set()
+            return library_lock(directory)
+
+        monkeypatch.setattr(danmaku, "library_lock", waiting_lock)
+        async with library(handler, lib_type=LibType.MOVIE) as lib:
+            item = await media(lib, "movie.mkv")
+            cache = tmp_path / "cached.json"
+            cache.write_text('[{"text":"Original"}]')
+            await MediaItem.filter(id=item.id).update(danmaku_path=str(cache))
+            meta = danmaku.DanmakuMeta(
+                anime_id="new", episode_id="selected", type="movie"
+            )
+            confirmation = asyncio.create_task(
+                danmaku.DanmakuService.confirm_episode(item.path, meta)
+            )
+            try:
+                await asyncio.wait_for(loading.wait(), timeout=3)
+                async with await library_lock(lib.dir).acquire(timeout=1):
+                    release.set()
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    assert not confirmation.done()
+                    assert cache.read_text() == '[{"text":"Original"}]'
+
+                    if change == "moved":
+                        directory = tmp_path / "Renamed"
+                        directory.mkdir()
+                        current_cache = directory / cache.name
+                        cache.rename(current_cache)
+                        await MediaItem.filter(id=item.id).update(
+                            path=str(directory / "Renamed.mkv"),
+                            dir=str(directory),
+                            name="Renamed",
+                            danmaku_path=str(current_cache),
+                        )
+                        cache.write_text('[{"text":"Replacement"}]')
+                    else:
+                        await item.delete()
+
+                result = await asyncio.wait_for(confirmation, timeout=3)
+                current = await MediaItem.get_or_none(id=item.id)
+
+                if change == "removed":
+                    assert current is None
+                    assert result.comments == []
+                    assert cache.read_text() == '[{"text":"Original"}]'
+                else:
+                    assert result.metadata == meta
+                    assert current.danmaku_meta["episode_id"] == "selected"
+                    assert cache.read_text() == '[{"text":"Replacement"}]'
+                    if has_comments:
+                        assert [comment.text for comment in result.comments] == ["New"]
+                        assert current.danmaku_path == str(current_cache)
+                        assert (
+                            await danmaku.DanmakuService.load_from_cache(current_cache)
+                            == result.comments
+                        )
+                    else:
+                        assert result.comments == []
+                        assert current.danmaku_path is None
+                        assert not current_cache.exists()
+            finally:
+                release.set()
+                if not confirmation.done():
+                    confirmation.cancel()
+                await asyncio.gather(confirmation, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancellations", [1, 2])
+def test_confirmation_cancellation(library, tmp_path, monkeypatch, cancellations):
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    cache = tmp_path / ".movie.mkv.json"
+    write_bytes = Path.write_bytes
+
+    def delayed_write(path, content):
+        if path != cache:
+            return write_bytes(path, content)
+        started.set()
+        assert release.wait(timeout=5)
+        try:
+            return write_bytes(path, content)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(Path, "write_bytes", delayed_write)
+
+    async def run():
+        async with library(
+            lambda _: httpx.Response(
+                200,
+                json={"comments": [{"cid": 1, "p": "1,1,16777215,1", "m": "New"}]},
+            ),
+            lib_type=LibType.MOVIE,
+        ) as lib:
+            item = await media(lib, "movie.mkv")
+            metadata = {"anime_id": "old", "episode_id": "previous", "type": "movie"}
+            await MediaItem.filter(id=item.id).update(
+                danmaku_meta=metadata, danmaku_path=str(cache)
+            )
+            cache.write_text('[{"text":"Old"}]')
+            confirmation = asyncio.create_task(
+                danmaku.DanmakuService.confirm_episode(
+                    item.path,
+                    danmaku.DanmakuMeta(
+                        anime_id="new", episode_id="selected", type="movie"
+                    ),
+                )
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                for _ in range(cancellations):
+                    confirmation.cancel()
+                    with pytest.raises(Timeout):
+                        async with await library_lock(lib.dir).acquire(timeout=0):
+                            pass
+                    assert not confirmation.done()
+                    assert not finished.is_set()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(confirmation, timeout=3)
+                async with await library_lock(lib.dir).acquire(timeout=1):
+                    assert finished.is_set()
+                    assert not cache.exists()
+                    await item.refresh_from_db()
+                    assert item.danmaku_meta == metadata
+                    assert item.danmaku_path == str(cache)
+            finally:
+                release.set()
+                await asyncio.gather(confirmation, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_confirmation_cancel_after_write(library, tmp_path, monkeypatch):
+    write_cache = danmaku.DanmakuService._write_cache
+
+    async def cancelled_write(media, comments):
+        path = await write_cache(media, comments)
+        asyncio.current_task().cancel()
+        return path
+
+    monkeypatch.setattr(danmaku.DanmakuService, "_write_cache", cancelled_write)
+
+    async def run():
+        async with library(
+            lambda _: httpx.Response(
+                200,
+                json={"comments": [{"cid": 1, "p": "1,1,16777215,1", "m": "New"}]},
+            ),
+            lib_type=LibType.MOVIE,
+        ) as lib:
+            item = await media(lib, "movie.mkv")
+            confirmation = asyncio.create_task(
+                danmaku.DanmakuService.confirm_episode(
+                    item.path,
+                    danmaku.DanmakuMeta(
+                        anime_id="new", episode_id="selected", type="movie"
+                    ),
+                )
+            )
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(confirmation, timeout=3)
+
+            async with await library_lock(lib.dir).acquire(timeout=1):
+                assert not (tmp_path / ".movie.mkv.json").exists()
 
     asyncio.run(run())
