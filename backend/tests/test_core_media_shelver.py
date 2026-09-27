@@ -688,3 +688,79 @@ def test_metadata_event_failure(tmp_path, monkeypatch):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+def test_movie_parent_wait(tmp_path, monkeypatch):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        task = None
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}} ({{year}})/{{title}}",
+            )
+            video = tmp_path / "old.mkv"
+            video.write_bytes(b"video")
+            original_nfo = video.with_suffix(".nfo")
+            original_nfo.write_text(
+                "<movie><title>Movie</title><year>2026</year></movie>"
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(video),
+                dir=str(tmp_path),
+                name=video.stem,
+                nfo_path=str(original_nfo),
+            )
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr(shelver, "library_lock", waiting_lock)
+            async with library_lock(lib.dir):
+                task = asyncio.create_task(
+                    shelver.gen_nfo(
+                        NFOType.MOVIE,
+                        str(original_nfo),
+                        {"title": "Corrected", "year": 2027},
+                        overwrite=True,
+                        item_id=item.id,
+                        refresh=True,
+                    )
+                )
+                await asyncio.wait_for(waiting.wait(), timeout=3)
+                assert not task.done()
+
+                await organizer.organize_items(lib, [item.id])
+                await item.refresh_from_db()
+                assert item.parent_id is not None
+                assert item.nfo_path is None
+
+            assert await asyncio.wait_for(task, timeout=3)
+
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+            assert parent.nfo_path == str(tmp_path / "Movie (2026)/Movie (2026).nfo")
+            assert etree.parse(parent.nfo_path).getroot().findtext("title") == (
+                "Corrected"
+            )
+            assert parent.title == "Corrected"
+            assert parent.year == 2027
+            assert item.nfo_path is None
+            assert not Path(item.path).with_suffix(".nfo").exists()
+            assert not original_nfo.exists()
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
