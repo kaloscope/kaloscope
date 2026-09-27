@@ -13,7 +13,7 @@ import pytest
 from filelock import Timeout
 from lxml import etree
 from tortoise import Tortoise
-from watchdog.events import FileMovedEvent
+from watchdog.events import FileCreatedEvent, FileMovedEvent
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
@@ -1630,6 +1630,285 @@ def test_ingest_paths(tmp_path, monkeypatch):
             assert (await MediaItem.get(lib_id=lib.id)).id == original_id
             assert fire.await_count == 1
             assert await MediaEvent.all().count() == 0
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("arrival", ["created", "moved"])
+@pytest.mark.parametrize("recovery", [False, True])
+def test_organization_arrival(tmp_path, monkeypatch, arrival, recovery):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"first video")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>New</title></movie>")
+    destination = tmp_path / "New.mkv"
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            original = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(tmp_path),
+                name=source.stem,
+                nfo_path=str(nfo),
+                hash=hashlib.md5(b"first video").hexdigest(),
+                size=len(b"first video"),
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(nfo), event_type="modified"
+            )
+            if recovery:
+                with monkeypatch.context() as patcher:
+                    patcher.setattr(
+                        organizer,
+                        "_write_in_thread",
+                        AsyncMock(side_effect=OSError("interrupted organization")),
+                    )
+                    with pytest.raises(organizer.OrganizePendingError):
+                        await watcher.consume_event(event)
+            events = Queue()
+            handler = watcher.EventHandler(lib, asyncio.get_running_loop(), events)
+            write = organizer._write_in_thread
+            arrived = False
+
+            async def write_and_arrive(function, *args):
+                nonlocal arrived
+                result = await write(function, *args)
+                if function is organizer._move_files and not arrived:
+                    arrived = True
+                    await handler._persist(
+                        FileMovedEvent(str(source), str(destination))
+                    )
+                    if arrival == "created":
+                        source.write_bytes(b"second video")
+                        incoming = FileCreatedEvent(str(source))
+                    else:
+                        staged = tmp_path / "incoming.mkv"
+                        staged.write_bytes(b"second video")
+                        staged.rename(source)
+                        incoming = FileMovedEvent(str(staged), str(source))
+                    await handler._persist(incoming)
+                return result
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(organizer, "_write_in_thread", write_and_arrive)
+                await watcher.consume_event(event)
+            while not events.empty():
+                await watcher.consume_event(events.get_nowait())
+
+            await original.refresh_from_db()
+            incoming = await MediaItem.get_or_none(lib=lib, path=str(source))
+            assert incoming is not None
+            assert incoming.id != original.id
+            assert incoming.hash == hashlib.md5(b"second video").hexdigest()
+            assert incoming.size == len(b"second video")
+            assert original.path == str(destination)
+            assert original.nfo_path == str(destination.with_suffix(".nfo"))
+            assert original.hash == hashlib.md5(b"first video").hexdigest()
+            assert source.read_bytes() == b"second video"
+            assert destination.read_bytes() == b"first video"
+            assert await MediaItem.filter(lib=lib).count() == 2
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_awaited_once()
+            params = fire.call_args.kwargs["bootparams"]
+            assert params["item_id"] == incoming.id
+            assert params["item_path"] == str(source)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("suffix", [".mkv", ".nfo"])
+@pytest.mark.parametrize("destination_removed", [False, True])
+def test_reused_move_source(tmp_path, monkeypatch, suffix, destination_removed):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    monkeypatch.setattr(
+        KaloscopeConfig,
+        "get",
+        lambda: SimpleNamespace(filesystem_trash_mode=False),
+    )
+    source = tmp_path / "old.mkv"
+    nfo = source.with_suffix(".nfo")
+    source.write_bytes(b"first video")
+    nfo.write_text("<movie><title>New</title><year>2026</year></movie>")
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}} ({{year}})",
+            )
+            await watcher.consume_event(
+                await MediaEvent.create(
+                    lib=lib, src_path=str(source), event_type="created"
+                )
+            )
+            original = await MediaItem.get(lib=lib)
+            destination = tmp_path / "New (2026).mkv"
+            assert original.path == str(destination)
+            assert not source.exists()
+            source.write_bytes(b"second video")
+            nfo_content = "<movie><title>Second</title></movie>"
+            nfo.write_text(nfo_content)
+            await watcher.consume_event(
+                await MediaEvent.create(
+                    lib=lib, src_path=str(source), event_type="created"
+                )
+            )
+            recreated = await MediaItem.get(lib=lib, path=str(source))
+            assert recreated.id != original.id
+            assert recreated.nfo_mtime is not None
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.VIDEO,
+                rel_id=recreated.id,
+                position=42,
+            )
+            if destination_removed:
+                destination.unlink()
+                await watcher.consume_event(
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(destination), event_type="deleted"
+                    )
+                )
+            fire.reset_mock()
+
+            await watcher.consume_event(
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source.with_suffix(suffix)),
+                    dest_path=str(destination.with_suffix(suffix)),
+                    event_type="moved",
+                )
+            )
+
+            current = await MediaItem.get_or_none(id=recreated.id)
+            assert current is not None
+            assert current.path == str(source)
+            assert current.nfo_path == str(nfo)
+            assert current.nfo_mtime == recreated.nfo_mtime
+            if destination_removed:
+                assert not await MediaItem.filter(id=original.id).exists()
+                assert not destination.exists()
+                assert await MediaItem.filter(lib=lib).count() == 1
+            else:
+                assert (await MediaItem.get(path=str(destination))).id == original.id
+                assert destination.read_bytes() == b"first video"
+                assert await MediaItem.filter(lib=lib).count() == 2
+            await history.refresh_from_db()
+            assert history.rel_id == recreated.id
+            assert history.position == 42
+            assert source.read_bytes() == b"second video"
+            assert nfo.read_text() == nfo_content
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("suffix", [".mkv", ".nfo"])
+def test_missing_move_source(tmp_path, monkeypatch, suffix):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    monkeypatch.setattr(
+        KaloscopeConfig,
+        "get",
+        lambda: SimpleNamespace(filesystem_trash_mode=False),
+    )
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"video")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>Movie</title></movie>")
+    destination = tmp_path / "New.mkv"
+    destination.write_bytes(b"video")
+    destination_nfo = destination.with_suffix(".nfo")
+    destination_nfo.write_text("<movie><title>Movie</title></movie>")
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            for path in (source, destination):
+                await watcher.consume_event(
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(path), event_type="created"
+                    )
+                )
+            original = await MediaItem.get(lib=lib, path=str(source))
+            known = await MediaItem.get(lib=lib, path=str(destination))
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user, rel_type=HistoryType.VIDEO, rel_id=original.id, position=42
+            )
+            source.with_suffix(suffix).replace(destination.with_suffix(suffix))
+
+            await watcher.consume_event(
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source.with_suffix(suffix)),
+                    dest_path=str(destination.with_suffix(suffix)),
+                    event_type="moved",
+                )
+            )
+
+            if suffix == ".mkv":
+                assert not await MediaItem.filter(id=original.id).exists()
+                assert not await UserHistory.filter(id=history.id).exists()
+                assert not nfo.exists()
+            else:
+                await original.refresh_from_db()
+                assert original.nfo_path is None
+                assert original.nfo_mtime is None
+                assert await UserHistory.filter(id=history.id).exists()
+                assert source.is_file()
+            current = await MediaItem.get(id=known.id)
+            assert current.path == str(destination)
+            assert current.nfo_path == str(destination_nfo)
+            assert current.nfo_mtime is not None
+            assert destination.is_file()
+            assert destination_nfo.is_file()
+            assert not await MediaEvent.filter(lib=lib).exists()
         finally:
             await Tortoise.close_connections()
 
