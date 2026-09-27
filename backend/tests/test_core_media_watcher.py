@@ -21,7 +21,7 @@ from app.core.flow.context import Context
 from app.core.flow.nodes.nfo.episode import EpisodeNode
 from app.core.flow.nodes.nfo.movie import MovieNode
 from app.core.flow.nodes.nfo.tvshow import TVShowNode
-from app.core.media import shelver, watcher
+from app.core.media import organizer, shelver, watcher
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import get_handler
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
@@ -73,6 +73,109 @@ def test_pending_actions(tmp_path, monkeypatch, action):
     assert [call.args[0] for call in remove_action.await_args_list] == (
         [pending, removed, pending] if action == watcher.LibAction.REMOVE else [removed]
     )
+
+
+@pytest.mark.parametrize("stage", ["pending", "published", "conflict"])
+@pytest.mark.parametrize("by_path", [False, True])
+def test_scan_recovery(tmp_path, stage, by_path):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"video")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>New</title></movie>")
+    destination = tmp_path / "New.mkv"
+    target_nfo = destination.with_suffix(".nfo")
+    mapping = {str(source): str(destination), str(nfo): str(target_nfo)}
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=lib.dir,
+                name=source.stem,
+                nfo_path=str(nfo),
+                hash=hashlib.md5(b"video").hexdigest(),
+                size=len(b"video"),
+            )
+            journal = await MediaEvent.create(
+                lib=lib,
+                src_path=str(source),
+                event_type="organize",
+                payload={
+                    "moves": [
+                        {
+                            "src": old,
+                            "dst": new,
+                            "identity": organizer._fingerprint(Path(old)),
+                        }
+                        for old, new in mapping.items()
+                    ],
+                    "updates": [
+                        {
+                            "id": item.id,
+                            "path": str(destination),
+                            "name": destination.stem,
+                            "nfo_path": str(target_nfo),
+                        }
+                    ],
+                    "parent": None,
+                    "delete_parent": None,
+                    "mapping": mapping,
+                    "creates": [],
+                    "symlinks": [],
+                    "nfo_edits": [],
+                },
+            )
+            monitor = watcher.LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+            target = lib.dir if by_path else lib
+
+            if stage == "published":
+                for old, new in mapping.items():
+                    Path(old).rename(new)
+            elif stage == "conflict":
+                destination.write_bytes(b"unrelated")
+                with pytest.raises(organizer.OrganizePendingError):
+                    await monitor.scan_directory(target, validate_request=True)
+                await item.refresh_from_db()
+                assert item.path == str(source)
+                assert item.nfo_path == str(nfo)
+                assert source.read_bytes() == b"video"
+                assert destination.read_bytes() == b"unrelated"
+                assert await MediaEvent.filter(id=journal.id).exists()
+                assert await MediaEvent.filter(lib=lib).count() == 1
+                assert events.empty()
+                assert not monitor.is_scanning(lib.dir)
+                destination.unlink()
+
+            await monitor.scan_directory(target, validate_request=True)
+
+            await item.refresh_from_db()
+            assert item.path == str(destination)
+            assert item.name == destination.stem
+            assert item.nfo_path == str(target_nfo)
+            assert destination.read_bytes() == b"video"
+            assert target_nfo.read_text() == "<movie><title>New</title></movie>"
+            assert not source.exists()
+            assert not nfo.exists()
+            assert await MediaItem.filter(lib=lib).count() == 1
+            assert not await MediaEvent.filter(lib=lib).exists()
+            assert events.empty()
+            assert not monitor.is_scanning(lib.dir)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
 
 
 def test_scan_retry(tmp_path, monkeypatch):

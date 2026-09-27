@@ -33,6 +33,7 @@ from watchdog.observers.api import BaseObserver
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
+from app.core.media.organizer import recover_organizing
 from app.core.media.shelver import get_nfo_path, is_nfo, update_metadata
 from app.models.flow import GraphCategory
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
@@ -307,10 +308,16 @@ class LibWatcher:
     ):
         """Scan the directory for existing files and create events.
 
+        Recover pending organization before comparing files with indexed paths.
+
         Args:
             target: The media library instance or the directory path to scan.
             backfill_nfo_events: Whether to create events for missing NFO files.
             validate_request: Whether to validate the scanning request.
+
+        Raises:
+            KaloscopeException: If the requested scan is already in progress.
+            OrganizePendingError: If pending organization cannot finish safely.
         """
         lib = None
         if isinstance(target, MediaLib):
@@ -334,6 +341,7 @@ class LibWatcher:
             if lib is None:
                 lib = await MediaLib.filter(dir=path).get()
             async with library_lock(lib.dir):
+                await recover_organizing(lib)
                 await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
         finally:
             if path in self._scanning_paths:
