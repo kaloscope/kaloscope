@@ -81,6 +81,19 @@ def _metadata(path: Path, lib_type: str, root_tag: str) -> dict:
     return data
 
 
+def _identity(metadata: dict) -> tuple | None:
+    """Get the external identity used to match media directories.
+
+    Args:
+        metadata: The parsed media metadata.
+
+    Returns:
+        The NFO source and unique ID, or `None` if no unique ID is available.
+    """
+    value = metadata.get("unique_id")
+    return (metadata.get("nfo_source"), value) if value else None
+
+
 def _fingerprint(path: Path) -> list[int]:
     """Read file attributes used to detect changes during recovery.
 
@@ -128,6 +141,28 @@ def _companions(path: Path) -> list[Path]:
             and not sibling.name.startswith(other_video_prefixes)
         )
     ]
+
+
+def _context(metadata: dict, parent: dict | None) -> dict:
+    """Build template values from media and optional parent metadata.
+
+    Args:
+        metadata: The media item's parsed metadata.
+        parent: The parent show's metadata, or `None` for a standalone item.
+
+    Returns:
+        A metadata copy with show fields and missing values inherited from the
+        parent where supported.
+    """
+    result = dict(metadata)
+    if parent:
+        result["show_title"] = parent.get("title")
+        result["show_originaltitle"] = parent.get("originaltitle")
+        result["show_year"] = parent.get("year")
+        for name in ("year", "season", "nfo_source"):
+            if result.get(name) is None:
+                result[name] = parent.get(name)
+    return result
 
 
 def _move_files(root: Path, payload: dict):
