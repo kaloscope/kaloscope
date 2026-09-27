@@ -601,7 +601,8 @@ class DanmakuService:
     async def confirm_episode(cls, path: str, meta: DanmakuMeta) -> DanmakuWrapper:
         """Confirm the episode match result for the given media resource.
 
-        Fetch outside the lock and discard results if the file content changes.
+        Recover organization before resolving paths or updating caches. Fetch outside
+        the lock and discard results if the file content changes.
 
         Args:
             path: The media resource path.
@@ -610,6 +611,9 @@ class DanmakuService:
         Returns:
             The wrapped danmakus with the confirmed metadata, or an empty wrapper
             if the media content changed during the request.
+
+        Raises:
+            OrganizePendingError: If pending organization cannot finish safely.
         """
         result = DanmakuWrapper(metadata=meta, comments=[])
         media = await MediaItem.filter(path=path).first().select_related("lib")
@@ -617,8 +621,7 @@ class DanmakuService:
             return result
 
         episode_ids = None
-        async with library_lock(media.lib.dir):
-            current = await MediaItem.get_or_none(id=media.id).select_related("lib")
+        async with cls._locked_media(media) as current:
             if current is None:
                 return result
             media = current
@@ -634,8 +637,7 @@ class DanmakuService:
         danmakus = await cls.load_from_server(
             server, meta.episode_id, media.lib.language
         )
-        async with library_lock(media.lib.dir):
-            current = await MediaItem.get_or_none(id=media.id).select_related("lib")
+        async with cls._locked_media(media) as current:
             if current is None:
                 return result
             if (current.hash, current.size) != (media.hash, media.size):
