@@ -133,6 +133,8 @@ async def gen_nfo(
 ) -> bool:
     """Generate NFO file from the given context.
 
+    Recover pending organization before writing for an indexed media item.
+
     Args:
         nfo_type: The type of the NFO file (e.g. `movie`, `tvshow`).
         nfo_path: The path to the NFO file to generate.
@@ -143,12 +145,18 @@ async def gen_nfo(
 
     Returns:
         `True` if the NFO file is generated successfully, `False` otherwise.
+
+    Raises:
+        OrganizePendingError: If pending organization cannot finish safely.
     """
     if item_id is not None:
         item = await MediaItem.get_or_none(id=item_id).select_related("lib")
         if item is None:
             return False
         async with library_lock(item.lib.dir):
+            from app.core.media.organizer import recover_organizing
+
+            await recover_organizing(item.lib)
             item = await MediaItem.get_or_none(id=item_id).select_related("lib")
             if item is None:
                 return False

@@ -13,7 +13,7 @@ from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
-from app.core.media import shelver
+from app.core.media import organizer, shelver
 from app.core.media.coordination import library_lock
 from app.models.media import (
     LibType,
@@ -449,6 +449,116 @@ def test_child_nfo(tmp_path, lib_type, nfo_type, explicit_nfo):
             assert item.title == "Child"
             assert parent.title == "Parent"
             assert parent_nfo.read_text() == parent_content
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["pending", "moved", "conflict"])
+@pytest.mark.parametrize("refresh", [False, True])
+def test_nfo_recovery(tmp_path, stage, refresh):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            source, destination = tmp_path / "old.mkv", tmp_path / "new.mkv"
+            source.write_bytes(b"video")
+            old_nfo, new_nfo = (
+                source.with_suffix(".nfo"),
+                destination.with_suffix(".nfo"),
+            )
+            original = "<movie><title>Original</title></movie>"
+            old_nfo.write_text(original)
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(tmp_path),
+                name=source.stem,
+                title="Original",
+                nfo_path=str(old_nfo),
+            )
+            moves = [(source, destination), (old_nfo, new_nfo)]
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(source),
+                event_type="organize",
+                payload={
+                    "moves": [
+                        {
+                            "src": str(old),
+                            "dst": str(new),
+                            "identity": organizer._fingerprint(old),
+                        }
+                        for old, new in moves
+                    ],
+                    "updates": [
+                        {
+                            "id": item.id,
+                            "path": str(destination),
+                            "dir": str(tmp_path),
+                            "name": destination.stem,
+                            "nfo_path": str(new_nfo),
+                        }
+                    ],
+                    "parent": None,
+                    "delete_parent": None,
+                    "mapping": {str(source): str(destination)},
+                    "creates": [],
+                    "symlinks": [],
+                    "nfo_edits": [],
+                },
+            )
+            if stage == "moved":
+                for old, new in moves:
+                    old.rename(new)
+            elif stage == "conflict":
+                destination.write_bytes(b"unrelated")
+
+            if stage == "conflict":
+                with pytest.raises(organizer.OrganizePendingError):
+                    await shelver.gen_nfo(
+                        NFOType.MOVIE,
+                        str(old_nfo),
+                        {"title": "Corrected"},
+                        overwrite=True,
+                        item_id=item.id,
+                        refresh=refresh,
+                    )
+                await item.refresh_from_db()
+                assert item.path == str(source)
+                assert item.nfo_path == str(old_nfo)
+                assert item.title == "Original"
+                assert old_nfo.read_text() == original
+                assert not new_nfo.exists()
+                assert source.read_bytes() == b"video"
+                assert destination.read_bytes() == b"unrelated"
+                assert await MediaEvent.filter(id=event.id).exists()
+                return
+
+            assert await shelver.gen_nfo(
+                NFOType.MOVIE,
+                str(old_nfo),
+                {"title": "Corrected"},
+                overwrite=True,
+                item_id=item.id,
+                refresh=refresh,
+            )
+
+            await item.refresh_from_db()
+            assert item.path == str(destination)
+            assert item.nfo_path == str(new_nfo)
+            assert item.title == ("Corrected" if refresh else "Original")
+            assert etree.parse(new_nfo).getroot().findtext("title") == "Corrected"
+            assert destination.read_bytes() == b"video"
+            assert not source.exists()
+            assert not old_nfo.exists()
+            assert not await MediaEvent.filter(id=event.id).exists()
         finally:
             await Tortoise.close_connections()
 
