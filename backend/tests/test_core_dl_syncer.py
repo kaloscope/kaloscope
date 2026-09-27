@@ -2878,3 +2878,160 @@ def test_transfer_backfill_invalid(tmp_path, pattern, replacement):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+def test_organization_legacy_transfer(tmp_path):
+    from app.core.media import organizer
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.MOVE, ["movie.mkv"]
+            )
+            library.rename_template = "{{title}}"
+            await library.save()
+            job_id = "1" * 32
+            await OfflineDownloadJob.create(
+                download=task,
+                job_uuid=job_id,
+                source_fingerprint="a" * 64,
+                remote_dir="/Kaloscope/test",
+            )
+            source = Path(task.dir) / "movie.mkv"
+            root = Path(library.dir)
+            destination = root / source.name
+            copy_id = hashlib.sha256(f"library:{job_id}".encode()).hexdigest()[:32]
+            target = puller.prepare_local_file(root, source.name, copy_id)
+            target.part_path.write_bytes(source.read_bytes())
+            puller._install_local_file_sync(target)
+            source.unlink()
+            source.write_bytes(b"unrelated replacement")
+            video = root / "other.mkv"
+            video.write_bytes(b"other movie")
+            nfo = video.with_suffix(".nfo")
+            nfo.write_text("<movie><title>Organized</title></movie>")
+            item = await MediaItem.create(
+                lib=library,
+                path=str(video),
+                dir=library.dir,
+                name=video.stem,
+                nfo_path=str(nfo),
+            )
+
+            async with syncer.library_lock(library.dir):
+                await organizer.organize_items(library, [item.id])
+                await syncer.backfill_transfer_targets(library)
+            transferred = await syncer.transfer_files(task, task.files, job_id=job_id)
+            await task.refresh_from_db()
+            await item.refresh_from_db()
+
+            assert transferred is True
+            assert source.read_bytes() == b"unrelated replacement"
+            assert destination.read_bytes() == b"movie.mkv"
+            assert task.transfer_targets == {source.name: str(destination)}
+            assert item.path == str(root / "Organized.mkv")
+            assert Path(item.path).read_bytes() == b"other movie"
+            assert not target.marker_path.exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", [TransferMethod.COPY, TransferMethod.MOVE])
+@pytest.mark.parametrize("offline", [False, True])
+def test_organization_transfer_recovery(tmp_path, monkeypatch, method, offline):
+    from app.core.media import organizer
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            library.rename_template = "{{title}}"
+            await library.save()
+            job_id = "1" * 32 if offline else None
+            if offline:
+                await OfflineDownloadJob.create(
+                    download=task,
+                    job_uuid=job_id,
+                    source_fingerprint="a" * 64,
+                    remote_dir="/Kaloscope/test",
+                )
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "movie.mkv"
+            rename = puller.rename_exclusive
+            install = puller._install_local_file_sync
+
+            def cross_device(old, new):
+                if old == source:
+                    raise OSError(errno.EXDEV, "Different filesystem")
+                return rename(old, new)
+
+            def interrupted_install(target, **kwargs):
+                install(target, **kwargs)
+                raise OSError(errno.EINTR, "Interrupted after publication")
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(puller, "rename_exclusive", cross_device)
+                patcher.setattr(puller, "_install_local_file_sync", interrupted_install)
+                with pytest.raises(OSError, match="Interrupted after publication"):
+                    await syncer.transfer_files(task, task.files, job_id=job_id)
+            assert source.is_file()
+            assert destination.is_file()
+            nfo = destination.with_suffix(".nfo")
+            nfo.write_text("<movie><title>Renamed</title></movie>")
+            item = await MediaItem.create(
+                lib=library,
+                path=str(destination),
+                dir=library.dir,
+                name="movie",
+                nfo_path=str(nfo),
+            )
+
+            unlink = Path.unlink
+
+            def blocked_cleanup(path, *args, **kwargs):
+                if (
+                    method is TransferMethod.MOVE
+                    and path == source
+                    or method is TransferMethod.COPY
+                    and path.suffix == ".done"
+                ):
+                    raise PermissionError("Transfer cleanup is blocked")
+                return unlink(path, *args, **kwargs)
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(Path, "unlink", blocked_cleanup)
+                async with syncer.library_lock(library.dir):
+                    with pytest.raises(PermissionError, match="cleanup is blocked"):
+                        await organizer.organize_items(library, [item.id])
+            assert destination.is_file()
+            assert not (Path(library.dir) / "Renamed.mkv").exists()
+
+            async with syncer.library_lock(library.dir):
+                await organizer.organize_items(library, [item.id])
+            await syncer.transfer_files(task, task.files, job_id=job_id)
+            await task.refresh_from_db()
+            await item.refresh_from_db()
+
+            organized = Path(library.dir) / "Renamed.mkv"
+            assert item.path == str(organized)
+            assert task.transfer_targets == {"movie.mkv": str(organized)}
+            assert organized.read_bytes() == b"movie.mkv"
+            assert source.exists() is (method is TransferMethod.COPY)
+            assert sorted(path.name for path in Path(library.dir).iterdir()) == [
+                "Renamed.mkv",
+                "Renamed.nfo",
+            ]
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
