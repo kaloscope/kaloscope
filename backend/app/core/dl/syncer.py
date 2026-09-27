@@ -27,7 +27,11 @@ from app.core.dl.driver import (
     DownloadSource,
 )
 from app.core.dl.openlist import OpenListDriver
-from app.core.dl.openlist.puller import recover_local_transfer, transfer_local_file
+from app.core.dl.openlist.puller import (
+    owns_local_transfer,
+    recover_local_transfer,
+    transfer_local_file,
+)
 from app.core.dl.rpc import RpcClient, RpcDriver
 from app.core.flow.engine import FlowEngine
 from app.core.media.coordination import library_lock
@@ -802,6 +806,42 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
     return (metadata, gid)
 
 
+def _transfer_names(task: DownloadTask, files: list[str]) -> list[str]:
+    """Apply the download task's destination-name substitution.
+
+    Args:
+        task: The download task containing the substitution pattern and replacement.
+        files: The relative file paths within the download directory.
+
+    Returns:
+        The destination paths in input order, or the original paths if substitution
+        is disabled or produces duplicate names.
+    """
+    # apply file name substitution if `sub_pattern` is specified
+    new_files = files
+    if task.sub_pattern:
+        replaced = []
+        for file in files:
+            repl = task.sub_repl or ""
+            # render the template with the extracted metadata
+            if is_template(repl):
+                stem = Path(file).stem
+                context = {
+                    "title": extract_title(stem),
+                    "year": extract_year(stem),
+                    "season": extract_season(stem),
+                    "episode": extract_episode(stem),
+                }
+                repl = render(repl, context=context)
+            # apply the replacement pattern
+            replaced.append(re.sub(task.sub_pattern, repl, file))
+
+        # discard replacement if duplicate file names arise
+        if len(set(replaced)) == len(replaced):
+            new_files = replaced
+    return new_files
+
+
 def _same_transfer_file(source: Path, destination: Path) -> bool:
     """Check whether two transfer paths identify the same filesystem object.
 
@@ -817,6 +857,76 @@ def _same_transfer_file(source: Path, destination: Path) -> bool:
         return source.samefile(destination)
     except OSError:
         return False
+
+
+async def backfill_transfer_targets(lib: MediaLib):
+    """Recover published transfers and record their library destinations.
+
+    The caller must hold the library lock. Use recorded paths, ownership markers,
+    or file identity to confirm destinations. Save paths before cleanup, and skip
+    invalid substitutions without losing recorded destinations.
+
+    Args:
+        lib: The media library whose existing transfer destinations are recorded.
+
+    Raises:
+        OSError: If cleanup for an interrupted transfer fails.
+        PullError: If transfer sidecar paths are invalid.
+    """
+    destination_dir = Path(lib.dir).absolute()
+    tasks = await DownloadTask.filter(transfer_lib_id=lib.id)
+    job_ids = dict(
+        await OfflineDownloadJob.filter(
+            download_id__in=[task.id for task in tasks]
+        ).values_list("download_id", "job_uuid")
+    )
+    for task in tasks:
+        if not task.files:
+            continue
+        targets = dict(task.transfer_targets or {})
+        destinations = {name: Path(path) for name, path in targets.items() if path}
+        if any(name not in destinations for name in task.files):
+            try:
+                new_files = _transfer_names(task, task.files)
+            except Exception as error:
+                logger.warning(
+                    "Skipping transfer target backfill for task %s: %s",
+                    task.id,
+                    error,
+                )
+            else:
+                for name, new_name in zip(task.files, new_files, strict=True):
+                    destinations.setdefault(name, destination_dir / new_name)
+        transfer_id = (
+            job_ids.get(task.id)
+            or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
+        )
+        owned = []
+        for name in task.files:
+            destination = destinations.get(name)
+            if destination is None or not destination.is_file():
+                continue
+            source = Path(task.dir) / name
+            recovered = False
+            if task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
+                recovered = owns_local_transfer(destination, transfer_id)
+                if recovered:
+                    owned.append((source, destination))
+            if (
+                targets.get(name)
+                or recovered
+                or _same_transfer_file(source, destination)
+            ):
+                targets[name] = str(destination)
+        if targets != (task.transfer_targets or {}):
+            await DownloadTask.filter(id=task.id).update(transfer_targets=targets)
+        for source, destination in owned:
+            recover_local_transfer(
+                source,
+                destination,
+                transfer_id,
+                move=task.transfer_method is TransferMethod.MOVE,
+            )
 
 
 async def transfer_files(
@@ -858,38 +968,13 @@ async def transfer_files(
         # recheck the library association after waiting for its lock
         if not await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).exists():
             return True
-
         from app.core.media.organizer import recover_organizing
 
         await recover_organizing(lib)
         # refresh paths that may have changed since the task was loaded
         await task.refresh_from_db(fields=["transfer_targets"])
         targets = dict(task.transfer_targets or {})
-
-        # apply file name substitution if sub_pattern is specified
-        new_files = files
-        if task.sub_pattern:
-            replaced = []
-            for file in files:
-                repl = task.sub_repl or ""
-                # render the template with the extracted metadata
-                if is_template(repl):
-                    stem = Path(file).stem
-                    context = {
-                        "title": extract_title(stem),
-                        "year": extract_year(stem),
-                        "season": extract_season(stem),
-                        "episode": extract_episode(stem),
-                    }
-                    repl = render(repl, context=context)
-                # apply the replacement pattern
-                replaced.append(re.sub(task.sub_pattern, repl, file))
-
-            # discard replacement if duplicate file names arise
-            if len(set(replaced)) == len(replaced):
-                new_files = replaced
-
-        for name, new_name in zip(files, new_files, strict=True):
+        for name, new_name in zip(files, _transfer_names(task, files), strict=True):
             src = src_dir / name
             dst = Path(targets.get(name) or dst_dir / new_name)
             published = False
