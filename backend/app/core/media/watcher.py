@@ -440,10 +440,38 @@ class LibWatcher:
         return path in self._scanning_paths
 
 
+def _ingest_params(info: MediaPathInfo) -> dict:
+    """Build serializable parameters for pending ingest workflows.
+
+    Args:
+        info: The indexed media item and its initial scrape parameters.
+
+    Returns:
+        The workflow parameters retaining the stable media item ID.
+    """
+    return {
+        "item_id": info.item_id,
+        "item_path": info.item_path,
+        "item_name": info.item_name,
+        "nfo_path": str(info.nfo_path) if info.nfo_path else None,
+        "nfo_type": info.nfo_type,
+        "language": info.language,
+        "title": info.title,
+        "year": info.year,
+        "season": info.season,
+        "episode": info.episode,
+        "series_id": info.series_id,
+        "nfo_source": info.nfo_source,
+        "page_num": 1,
+        "page_size": 1,
+    }
+
+
 async def consume_event(event: MediaEvent):
     """Consume a media event under its library lock.
 
-    Commit metadata before releasing the lock and firing ingest workflows.
+    Persist pending workflows with metadata, then fire them after releasing the
+    lock. Save progress after each successful trigger so failures can be retried.
 
     Args:
         event: The persisted media event to process.
@@ -461,56 +489,49 @@ async def consume_event(event: MediaEvent):
             return
         event.lib = lib
 
-        async with in_transaction("default"):
-            # delete the consumed event
-            await event.delete()
-            # handle the event based on its type
-            if event.event_type == EVENT_TYPE_MODIFIED:
-                await _handle_modified(event)
-            elif event.event_type == EVENT_TYPE_DELETED:
-                source = Path(event.src_path)
-                if not (source.exists() or source.is_symlink()):
-                    await _handle_deleted(event)
-                elif not event.is_directory and not is_nfo(source):
-                    # retain media identity when a deleted path has been reused
-                    item = await MediaItem.get_or_none(
-                        lib_id=event.lib_id, path=event.src_path
-                    )
-                    if item is not None:
-                        await _refresh_replaced(item)
-            elif event.event_type == EVENT_TYPE_MOVED:
-                result = await _handle_moved(event)
-            elif event.event_type == EVENT_TYPE_CREATED:
-                result = await _handle_created(event)
+        if event.event_type != "ingest":
+            async with in_transaction("default"):
+                # handle the event based on its type
+                if event.event_type == EVENT_TYPE_MODIFIED:
+                    await _handle_modified(event)
+                elif event.event_type == EVENT_TYPE_DELETED:
+                    source = Path(event.src_path)
+                    if not (source.exists() or source.is_symlink()):
+                        await _handle_deleted(event)
+                    elif not event.is_directory and not is_nfo(source):
+                        # retain media identity when a deleted path has been reused
+                        item = await MediaItem.get_or_none(
+                            lib_id=event.lib_id, path=event.src_path
+                        )
+                        if item is not None:
+                            await _refresh_replaced(item)
+                elif event.event_type == EVENT_TYPE_MOVED:
+                    result = await _handle_moved(event)
+                elif event.event_type == EVENT_TYPE_CREATED:
+                    result = await _handle_created(event)
 
-            for path_info in result or []:
-                if path_info.nfo_path is not None:
-                    await update_metadata(event.lib, path_info.nfo_path)
+                for path_info in result or []:
+                    if path_info.nfo_path is not None:
+                        await update_metadata(event.lib, path_info.nfo_path)
 
-    if result:
-        for path_info in result:
-            nfo_path = path_info.nfo_path
-            # fire workflows after releasing the lock used by NFO writers
-            await FlowTriggerService.fire(
-                GraphCategory.INGEST,
-                event.lib_id,
-                bootparams={
-                    "item_id": path_info.item_id,
-                    "item_path": path_info.item_path,
-                    "item_name": path_info.item_name,
-                    "nfo_path": str(nfo_path) if nfo_path else None,
-                    "nfo_type": path_info.nfo_type,
-                    "language": path_info.language,
-                    "title": path_info.title,
-                    "year": path_info.year,
-                    "season": path_info.season,
-                    "episode": path_info.episode,
-                    "series_id": path_info.series_id,
-                    "nfo_source": path_info.nfo_source,
-                    "page_num": 1,
-                    "page_size": 1,
-                },
-            )
+                if not result:
+                    await event.delete()
+                    return
+                event.event_type = "ingest"
+                event.payload = {
+                    "bootparams": [_ingest_params(info) for info in result]
+                }
+                await event.save(update_fields=["event_type", "payload"])
+        pending = event.payload["bootparams"]
+
+    # fire workflows after releasing the lock used by NFO writers
+    for index, params in enumerate(pending):
+        await FlowTriggerService.fire(
+            GraphCategory.INGEST, event.lib_id, bootparams=params
+        )
+        event.payload = {"bootparams": pending[index + 1 :]}
+        await event.save(update_fields=["payload"])
+    await event.delete()
 
 
 async def _handle_modified(event: MediaEvent):
