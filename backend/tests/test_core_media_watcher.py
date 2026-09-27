@@ -1635,6 +1635,186 @@ def test_ingest_paths(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("lib_type", "source_name", "template", "target_name"),
+    [
+        (LibType.MOVIE, "old.mkv", "{{title}}/{{title}}", "Film/Film.mkv"),
+        (LibType.MOVIE, "Old/old.mkv", "{{title}}", "Film.mkv"),
+        (
+            LibType.TV_SHOW,
+            "Old/S01E02.mkv",
+            "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}",
+            "Series/Season 01/S01E02 - Pilot.mkv",
+        ),
+        (
+            LibType.TV_SHOW,
+            "Old/Season 01/S01E02.mkv",
+            "{{show_title}}/{{episode_code}} - {{title}}",
+            "Series/S01E02 - Pilot.mkv",
+        ),
+    ],
+)
+def test_organization_rescan(
+    tmp_path, monkeypatch, lib_type, source_name, template, target_name
+):
+    """Exercise actual scanning, metadata parsing, organization and late events."""
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    source = tmp_path / source_name
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"video")
+    parent_nfo = (
+        source.with_suffix(".nfo")
+        if source.parent == tmp_path
+        else source.parent / f"{source.parent.name}.nfo"
+    )
+    tag = "movie" if lib_type == LibType.MOVIE else "tvshow"
+    title = "Film" if lib_type == LibType.MOVIE else "Series"
+    parent_nfo.write_text(
+        f"<{tag}><title>{title}</title><year>2026</year>"
+        '<uniqueid type="tmdb" default="true">42</uniqueid></' + tag + ">"
+    )
+    if lib_type == LibType.TV_SHOW:
+        source.with_suffix(".nfo").write_text(
+            "<episodedetails><title>Pilot</title><season>1</season>"
+            "<episode>2</episode></episodedetails>"
+        )
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            monitor = watcher.LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+
+            async def scan():
+                await monitor.scan_directory(lib)
+                while not events.empty():
+                    await watcher.consume_event(events.get_nowait())
+
+            await scan()
+            item = await MediaItem.get(lib_id=lib.id, path=str(source))
+            original_id = item.id
+            fire.reset_mock()
+            lib.rename_template = template
+            await lib.save(update_fields=["rename_template"])
+            await scan()
+            await item.refresh_from_db()
+            assert item.path == str(source)
+            fire.assert_not_awaited()
+
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(parent_nfo), event_type="modified"
+            )
+            await watcher.consume_event(event)
+            destination = tmp_path / target_name
+            await item.refresh_from_db()
+            assert item.path == str(destination)
+            assert destination.read_bytes() == b"video"
+            # watchdog can deliver these after the journal transaction commits
+            for kind, origin, target in [
+                ("moved", source, destination),
+                ("deleted", source, None),
+                ("created", destination, None),
+            ]:
+                await watcher.consume_event(
+                    await MediaEvent.create(
+                        lib=lib,
+                        src_path=str(origin),
+                        dest_path=str(target) if target else None,
+                        event_type=kind,
+                    )
+                )
+            await scan()
+            await scan()
+            assert (await MediaItem.get(path=str(destination))).id == original_id
+            assert not await MediaEvent.filter(lib_id=lib.id).exists()
+            assert all(
+                Path(row.path).exists() for row in await MediaItem.filter(lib_id=lib.id)
+            )
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("season_nfo", [False, True])
+def test_unindexed_season(tmp_path, monkeypatch, season_nfo):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    source = tmp_path / "Old"
+    nested = source / "Season 02"
+    nested.mkdir(parents=True)
+    (source / "Old.nfo").write_text("<tvshow><title>Series</title></tvshow>")
+    (source / "S01E01.mkv").write_bytes(b"first season")
+    (nested / "S02E01.mkv").write_bytes(b"second season")
+    if season_nfo:
+        (nested / "Season 02.nfo").write_text("<tvshow><title>Series</title></tvshow>")
+    artwork = source / "art"
+    artwork.mkdir()
+    (artwork / "poster.jpg").write_bytes(b"poster")
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+            )
+            monitor = watcher.LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+
+            async def scan():
+                await monitor.scan_directory(lib)
+                while not events.empty():
+                    await watcher.consume_event(events.get_nowait())
+
+            await scan()
+
+            first = tmp_path / "Series/Season 01/S01E01.mkv"
+            second = (
+                tmp_path / "Series/Season 02/S02E01.mkv"
+                if season_nfo
+                else nested / "S02E01.mkv"
+            )
+            assert first.read_bytes() == b"first season"
+            assert second.read_bytes() == b"second season"
+            assert set(tmp_path.rglob("*.mkv")) == {first, second}
+            assert (first.parent / "art/poster.jpg").read_bytes() == b"poster"
+            items = await MediaItem.filter(lib_id=lib.id, parent_id__not_isnull=True)
+            ids = {item.path: item.id for item in items}
+            assert set(ids) == {str(first), str(second)}
+
+            await scan()
+
+            items = await MediaItem.filter(lib_id=lib.id, parent_id__not_isnull=True)
+            assert {item.path: item.id for item in items} == ids
+            assert not await MediaEvent.filter(lib_id=lib.id).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 def test_persisted_event(tmp_path, monkeypatch):
     mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
     fire = AsyncMock()
