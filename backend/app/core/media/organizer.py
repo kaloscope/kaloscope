@@ -12,9 +12,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from lxml import etree
+from tortoise.exceptions import ValidationError
 from tortoise.transactions import in_transaction
 
-from app.models.download import DownloadTask
+from app.core.media.naming import render_directory, render_filename, render_path
+from app.models.download import DownloadTask, OfflineDownloadJob
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.utils.disk import rename_exclusive
 from app.utils.xml import get_integer
@@ -22,8 +24,26 @@ from app.utils.xml import get_integer
 _SUBTITLES = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".lrc"}
 
 
+_METADATA = (
+    "title",
+    "year",
+    "season",
+    "episode",
+    "aired",
+    "unique_id",
+    "nfo_source",
+    "poster",
+    "backdrop",
+    "rating",
+)
+
+
 class OrganizePendingError(RuntimeError):
     """A persisted organization must finish before this library is scanned."""
+
+
+class OrganizeDeferredError(RuntimeError):
+    """A media group must wait for its remaining download files before moving."""
 
 
 def _safe_path(root: Path, path: Path):
@@ -368,6 +388,562 @@ def _context(metadata: dict, parent: dict | None) -> dict:
             if result.get(name) is None:
                 result[name] = parent.get(name)
     return result
+
+
+async def _validate_updates(lib: MediaLib, updates: list[dict]):
+    """Check ORM constraints before a journal can move any files.
+
+    Args:
+        lib: The media library whose destination paths must remain unique.
+        updates: The planned media item field values, including item IDs.
+
+    Raises:
+        ValueError: If a field cannot be saved or a destination path conflicts
+            with another planned or existing media item.
+    """
+    try:
+        for update in updates:
+            for name, value in update.items():
+                if name == "parent_id" and value == "target":
+                    continue
+                MediaItem._meta.fields_map[name].to_db_value(value, MediaItem)
+    except ValidationError as error:
+        raise ValueError(f"organized metadata cannot be saved: {error}") from error
+    paths = {update["path"]: update["id"] for update in updates}
+    if len(paths) != len(updates):
+        raise ValueError("multiple media items render to the same database path")
+    for item in await MediaItem.filter(lib_id=lib.id, path__in=paths):
+        if item.id != paths[item.path]:
+            raise ValueError(f"destination is already indexed: {item.path}")
+
+
+async def _plan(
+    lib: MediaLib,
+    group: list[MediaItem],
+    parent: MediaItem | None,
+    *,
+    season: int | None = None,
+    split: bool = False,
+):
+    """Build a recoverable organization plan while holding the library lock.
+
+    Validate destinations, metadata, companion references, and download ownership
+    before recording filesystem changes. Preserve media IDs and shared resources.
+
+    Args:
+        lib: The media library containing the naming template and root path.
+        group: The nonempty group of video items to organize together.
+        parent: The group's directory item, or `None` for a standalone movie.
+        season: The resolved group season used for the destination directory and
+            missing episode metadata, or `None` to use the parent metadata.
+        split: Whether this group is one part of a source directory being split
+            into separate season directories.
+
+    Raises:
+        OSError: If required files cannot be inspected or read.
+        etree.LxmlError: If the required parent NFO cannot be parsed.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        ValueError: If the proposed organization is unsafe, would modify an
+            original download source or linked NFO, or cannot be saved.
+
+    Returns:
+        The journal payload describing file moves, metadata changes, reference
+        edits, and source directory cleanup.
+    """
+    root = Path(lib.dir).absolute()
+    template = lib.rename_template
+    source_dir = Path(parent.path) if parent else Path(group[0].path).parent
+    _safe_path(root, source_dir)
+    is_tv = lib.lib_type == LibType.TV_SHOW
+    if is_tv and parent is None:
+        raise ValueError("TV episodes require a parent directory")
+    if not is_tv and len(group) != 1:
+        raise ValueError("multi-file movies require an explicit part naming rule")
+    parent_nfo = (
+        Path(parent.nfo_path or str(source_dir / f"{source_dir.name}.nfo"))
+        if parent
+        else Path(group[0].nfo_path or Path(group[0].path).with_suffix(".nfo"))
+    )
+    _safe_path(root, parent_nfo)
+    parent_meta = await asyncio.to_thread(
+        _metadata, parent_nfo, lib.lib_type, "tvshow" if is_tv else "movie"
+    )
+    if is_tv and season is not None:
+        # retain the group season if an earlier group edited the parent NFO
+        parent_meta["season"] = season
+    parent_context = _context(parent_meta, parent_meta if is_tv else None)
+    if is_tv:
+        for name in ("season", "year"):
+            if parent_context.get(name) is None:
+                parent_context[name] = getattr(parent, name)
+        parent_context["show_year"] = parent_context.get("year")
+    target_dir = root / render_directory(template, parent_context, lib.lib_type)
+    _safe_path(root, target_dir)
+
+    if not is_tv:
+        basename = Path(group[0].path).stem
+        videos = [
+            file
+            for file in source_dir.iterdir()
+            if file.is_file()
+            and (parent is not None or file.stem == basename)
+            and (mimetypes.guess_file_type(file)[0] or "").startswith("video/")
+        ]
+        if len(videos) != 1:
+            raise ValueError("multi-file movies require an explicit part naming rule")
+
+    target_parent = None
+    if target_dir != root:
+        target_parent = await MediaItem.filter(
+            lib_id=lib.id, path=str(target_dir)
+        ).first()
+    if target_parent and (parent is None or target_parent.id != parent.id):
+        if not target_dir.is_dir():
+            raise ValueError("indexed destination directory is unavailable")
+        source_visible = parent.visible if parent else group[0].visible
+        if target_parent.visible != source_visible:
+            raise ValueError("merging would change the media item's visibility")
+    target_nfo = target_dir / f"{target_dir.name}.nfo"
+    reuse_nfo = False
+    target_meta = None
+    if target_dir not in (root, source_dir) and target_dir.exists():
+        if not target_dir.is_dir():
+            raise ValueError("destination is not a directory")
+        if any(target_dir.iterdir()):
+            if target_nfo.exists():
+                target_meta = await asyncio.to_thread(
+                    _metadata, target_nfo, lib.lib_type, "tvshow" if is_tv else "movie"
+                )
+                if not _identity(parent_meta) or _identity(target_meta) != _identity(
+                    parent_meta
+                ):
+                    raise ValueError("destination belongs to a different media item")
+                reuse_nfo = True
+            elif target_dir not in source_dir.parents:
+                raise ValueError("nonempty destination has no matching NFO identity")
+            else:
+                # merge into the series directory only when every indexed parent
+                # at the destination identifies the same show
+                if target_parent is not None and (
+                    not _identity(parent_meta)
+                    or (target_parent.nfo_source, target_parent.unique_id)
+                    != _identity(parent_meta)
+                ):
+                    raise ValueError("destination has an unknown media identity")
+
+    moves: dict[str, str] = {}
+    if parent and target_dir != source_dir and not split:
+        # keep other seasons in place while moving this directory's companion files
+        blocked = set()
+        ids = {item.id for item in group} | {parent.id}
+        for other in await MediaItem.filter(lib_id=lib.id):
+            other_path = Path(other.path)
+            if other.id not in ids and other_path.is_relative_to(source_dir):
+                relative = other_path.relative_to(source_dir)
+                if len(relative.parts) > 1:
+                    blocked.add(relative.parts[0])
+        if is_tv:
+            for child in source_dir.iterdir():
+                if (
+                    child.is_dir()
+                    and not child.is_symlink()
+                    and any(
+                        file.is_file()
+                        and (mimetypes.guess_file_type(file)[0] or "").startswith(
+                            "video/"
+                        )
+                        for file in child.iterdir()
+                    )
+                ):
+                    blocked.add(child.name)
+        for directory, dirs, files in os.walk(source_dir, followlinks=False):
+            directory = Path(directory)
+            dirs[:] = [
+                name
+                for name in dirs
+                if directory / name != target_dir
+                and not (directory == source_dir and name in blocked)
+            ]
+            for name in dirs:
+                _safe_path(root, directory / name)
+            for name in files:
+                path = directory / name
+                moves[str(path)] = str(target_dir / path.relative_to(source_dir))
+
+    updates = []
+    source_nfos = {}
+    for item in group:
+        old = Path(item.path)
+        _safe_path(root, old)
+        metadata = {} if is_tv else parent_meta
+        own_nfo = Path(item.nfo_path or str(old.with_suffix(".nfo")))
+        if is_tv:
+            try:
+                _safe_path(root, own_nfo)
+                metadata = await asyncio.to_thread(
+                    _metadata, own_nfo, lib.lib_type, "episodedetails"
+                )
+                context = _context(metadata, parent_meta)
+                if metadata.get("season") is None and item.season is not None:
+                    context["season"] = item.season
+                if context.get("season") is None:
+                    context["season"] = parent.season
+                destination = target_dir / (
+                    render_filename(template, context, lib.lib_type) + old.suffix
+                )
+            except (OSError, ValueError, etree.LxmlError):
+                # the parent NFO may arrive before the episode scraper finishes
+                destination = target_dir / old.name
+        else:
+            destination = root / render_path(template, parent_context, lib.lib_type)
+            destination = destination.with_name(destination.name + old.suffix)
+            if target_dir.is_dir() and any(
+                file != old
+                and (target_dir != root or file.stem == destination.stem)
+                and file.is_file()
+                and (mimetypes.guess_file_type(file)[0] or "").startswith("video/")
+                for file in target_dir.iterdir()
+            ):
+                raise ValueError("destination contains another movie video")
+        moves[str(old)] = str(destination)
+        for companion in _companions(old):
+            if companion == parent_nfo:
+                continue
+            moves[str(companion)] = str(
+                destination.parent
+                / (destination.stem + companion.name[len(old.stem) :])
+            )
+        cache = old.parent / f".{old.stem}.json"
+        if (not item.danmaku_path or Path(item.danmaku_path) == cache) and (
+            cache.is_file() or cache.is_symlink()
+        ):
+            moves[str(cache)] = str(destination.parent / f".{destination.stem}.json")
+        data = {
+            "id": item.id,
+            "path": str(destination),
+            "dir": str(destination.parent),
+            "name": destination.stem,
+            "parent_id": "target" if target_dir != root else None,
+        }
+        if parent and target_dir == root:
+            data["visible"] = item.visible and parent.visible
+        if not is_tv and target_dir == root:
+            for name in _METADATA:
+                value = parent_meta.get(name)
+                if value is not None:
+                    data[name] = str(value) if name == "rating" else value
+            data["nfo_path"] = str(destination.with_suffix(".nfo"))
+        elif not parent and target_dir != root:
+            data["nfo_path"] = None
+        if is_tv:
+            if metadata:
+                for name in _METADATA:
+                    value = metadata.get(name)
+                    if value is not None or name not in ("year", "season", "episode"):
+                        data[name] = (
+                            str(value)
+                            if name == "rating" and value is not None
+                            else value
+                        )
+                data["nfo_path"] = moves.get(str(own_nfo), str(own_nfo))
+                source_nfos[item.id] = own_nfo
+            for name in ("season", "episode"):
+                value = metadata.get(name)
+                if value is None:
+                    value = getattr(item, name)
+                if value is None and name == "season":
+                    value = parent_meta.get(name)
+                    if value is None:
+                        value = parent.season
+                if value is not None:
+                    data[name] = value
+        updates.append(data)
+
+    if target_dir == root:
+        target_nfo = Path(updates[0]["path"]).with_suffix(".nfo")
+    copy_parent_nfo = split and parent_nfo != target_nfo
+    if reuse_nfo or copy_parent_nfo:
+        # preserve an existing NFO even when its external ID matches
+        moves.pop(str(parent_nfo), None)
+        if reuse_nfo:
+            moves[str(target_nfo)] = str(target_nfo)
+    else:
+        moves[str(parent_nfo)] = str(target_nfo)
+
+    artwork = {
+        Path(source)
+        for source, destination in moves.items()
+        if source != destination
+        and (mimetypes.guess_file_type(source)[0] or "").startswith("image/")
+    }
+    for field in ("poster", "backdrop"):
+        value = parent_meta.get(field)
+        if value and not urlsplit(value).scheme and not value.startswith("//"):
+            path = Path(os.path.normpath(parent_nfo.parent / value))
+            if path.is_file() and path.is_relative_to(root):
+                # include artwork outside a flat movie's basename companions
+                if parent is None:
+                    moves[str(path)] = str(target_dir / path.name)
+                if str(path) in moves and moves[str(path)] != str(path):
+                    artwork.add(path)
+    if artwork:
+        nfo_paths = {
+            Path(source)
+            for source in moves
+            if Path(source).suffix.lower() == ".nfo" and not Path(source).is_symlink()
+        }
+        for path in await asyncio.to_thread(_shared_artwork, root, artwork, nfo_paths):
+            moves.pop(str(path))
+
+    parent_nfo_key = unicodedata.normalize("NFC", str(target_nfo)).casefold()
+    for source, destination in moves.items():
+        _safe_path(root, Path(source))
+        _safe_path(root, Path(destination))
+        if (
+            is_tv
+            and (mimetypes.guess_file_type(source)[0] or "").startswith("video/")
+            and unicodedata.normalize(
+                "NFC", str(Path(destination).with_suffix(".nfo"))
+            ).casefold()
+            == parent_nfo_key
+        ):
+            raise ValueError("episode and parent NFO names conflict")
+    changing = {src: dst for src, dst in moves.items() if src != dst}
+    targets = [
+        unicodedata.normalize("NFC", path).casefold() for path in changing.values()
+    ]
+    target_paths = set(targets)
+    if len(targets) != len(target_paths):
+        raise ValueError("multiple files render to the same destination")
+    if any(
+        str(ancestor) in target_paths
+        for target in target_paths
+        for ancestor in Path(target).parents
+    ):
+        raise ValueError("destination file conflicts with a planned directory")
+    for source, destination in changing.items():
+        target = Path(destination)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"destination already exists: {target}")
+        ancestor = target.parent
+        while not ancestor.exists():
+            ancestor = ancestor.parent
+        if not ancestor.is_dir():
+            raise ValueError(f"destination ancestor is not a directory: {ancestor}")
+        if not os.access(Path(source).parent, os.W_OK | os.X_OK) or not os.access(
+            ancestor, os.W_OK | os.X_OK
+        ):
+            raise ValueError("media directory is not writable")
+        if Path(source).lstat().st_dev != ancestor.stat().st_dev:
+            raise ValueError("organization cannot cross filesystem boundaries")
+
+    await asyncio.to_thread(_validate_link_references, root, moves)
+
+    for item, data in zip(group, updates, strict=True):
+        for name in ("nfo_path", "danmaku_path"):
+            value = getattr(item, name)
+            if name in data or not value:
+                continue
+            if value in moves:
+                data[name] = moves[value]
+            elif not Path(value).exists() and not Path(value).is_symlink():
+                data[name] = None
+                if name == "nfo_path":
+                    data["nfo_mtime"] = None
+        old_nfo = source_nfos.get(item.id) or Path(item.nfo_path or parent_nfo)
+        new_nfo = Path(
+            data.get("nfo_path", item.nfo_path)
+            or moves.get(str(old_nfo), str(Path(data["path"]).with_suffix(".nfo")))
+        )
+        for name in ("poster", "backdrop"):
+            value = data.get(name, getattr(item, name))
+            updated = _relocate_reference(value, old_nfo, new_nfo, moves)
+            if updated != value:
+                data[name] = updated
+
+    parent_data = None
+    if target_dir != root:
+        # use the retained destination NFO's metadata when merging so the stored
+        # metadata and mtime describe the same file
+        stored_meta = target_meta if reuse_nfo else parent_meta
+        parent_data = {
+            "id": target_parent.id
+            if target_parent
+            else (parent.id if parent and not split else None),
+            "path": str(target_dir),
+            "dir": str(target_dir),
+            "name": target_dir.name,
+            "nfo_path": str(target_nfo),
+            "parent_id": None,
+            "visible": (
+                target_parent.visible
+                if target_parent
+                else (parent.visible if parent else group[0].visible)
+            ),
+        }
+        for name in _METADATA:
+            value = stored_meta.get(name)
+            if value is not None or reuse_nfo:
+                parent_data[name] = (
+                    str(value) if name == "rating" and value is not None else value
+                )
+        if is_tv:
+            parent_data["season"] = parent_context.get("season")
+            if reuse_nfo:
+                existing_season = target_meta.get("season")
+                if existing_season is None and target_parent:
+                    existing_season = target_parent.season
+                if existing_season != parent_data["season"]:
+                    parent_data["season"] = None
+            elif (
+                target_parent
+                and target_parent.id != parent.id
+                and target_parent.season != parent_data["season"]
+            ):
+                parent_data["season"] = None
+        for name in ("poster", "backdrop"):
+            parent_data[name] = _relocate_reference(
+                parent_data.get(name),
+                target_nfo if reuse_nfo else parent_nfo,
+                target_nfo,
+                moves,
+            )
+
+    await _validate_updates(lib, [*updates, *([parent_data] if parent_data else [])])
+
+    path_map = dict(changing)
+    if parent and source_dir != target_dir and not split:
+        path_map[str(source_dir)] = str(target_dir)
+    aliases: dict[str, list[tuple[str, str]]] = {}
+    for source, destination in changing.items():
+        aliases.setdefault(_reference_key(Path(source)), []).append(
+            (source, destination)
+        )
+    symlinks = []
+    for source, destination in moves.items():
+        if Path(source).is_symlink():
+            link = os.readlink(source)
+            target = os.path.normpath(Path(source).parent / link)
+            relocated = moves.get(target)
+            if relocated is None and (
+                candidates := aliases.get(_reference_key(Path(target)))
+            ):
+                identity = _fingerprint(Path(target))
+                matches = {
+                    dst
+                    for src, dst in candidates
+                    if _fingerprint(Path(src)) == identity
+                }
+                if len(matches) > 1:
+                    raise ValueError(f"ambiguous symlink target: {target}")
+                relocated = next(iter(matches), None)
+            if source == destination and relocated in (None, target):
+                continue
+            target = relocated or target
+            target = (
+                target
+                if os.path.isabs(link)
+                else os.path.relpath(target, Path(destination).parent)
+            )
+            if target != link:
+                if source == destination and not os.access(
+                    Path(source).parent, os.W_OK | os.X_OK
+                ):
+                    raise ValueError("media directory is not writable")
+                symlinks.append(
+                    {
+                        "path": destination,
+                        "before": link,
+                        "target": target,
+                    }
+                )
+    creates = []
+    seasons = (
+        {str(target_nfo): parent_data.get("season")} if is_tv and parent_data else None
+    )
+    if copy_parent_nfo and not reuse_nfo:
+        if target_nfo.exists() or target_nfo.is_symlink():
+            raise ValueError(f"destination already exists: {target_nfo}")
+        if unicodedata.normalize("NFC", str(target_nfo)).casefold() in targets:
+            raise ValueError("episode and parent NFO names conflict")
+        copied_content = etree.tostring(etree.parse(parent_nfo), encoding="unicode")
+        for edit in await asyncio.to_thread(
+            _nfo_edits, {**moves, str(parent_nfo): str(target_nfo)}, seasons
+        ):
+            if edit["path"] == str(target_nfo):
+                copied_content = edit["content"]
+        creates.append(
+            {
+                "path": str(target_nfo),
+                "content": copied_content,
+                "mode": parent_nfo.stat().st_mode & 0o777,
+            }
+        )
+    nfo_edits = await asyncio.to_thread(_nfo_edits, moves, seasons)
+    linked_nfos = {
+        destination
+        for source, destination in moves.items()
+        if Path(source).is_symlink()
+    }
+    if any(edit["path"] in linked_nfos for edit in nfo_edits):
+        raise ValueError("organization would modify a linked NFO")
+    affected_paths = set(changing) | set(changing.values())
+    affected_paths.update(link["path"] for link in symlinks)
+    affected_paths.update(edit["path"] for edit in nfo_edits)
+    affected_paths.update(create["path"] for create in creates)
+    for task in await DownloadTask.all():
+        targets = task.transfer_targets or {}
+        if (
+            task.transfer_lib_id == lib.id
+            and affected_paths.intersection(targets.values())
+            and any(
+                not targets.get(name) or not Path(targets[name]).is_file()
+                for name in task.files or []
+            )
+            and (
+                task.transfer_pending
+                or await OfflineDownloadJob.filter(
+                    download_id=task.id, completion_due_at__not_isnull=True
+                ).exists()
+            )
+        ):
+            raise OrganizeDeferredError(
+                f"waiting for download task {task.id} to finish transferring"
+            )
+        download_dir = Path(task.dir).resolve()
+        sources = {
+            str((download_dir / name).parent.resolve() / Path(name).name)
+            for name in task.files or []
+        }
+        if any(
+            str(Path(path).parent.resolve() / Path(path).name) in sources
+            or (
+                not task.files
+                and (Path(path).parent.resolve() / Path(path).name).is_relative_to(
+                    download_dir
+                )
+            )
+            for path in affected_paths
+        ):
+            raise ValueError("organization would modify an original download source")
+    return {
+        "moves": [
+            {"src": src, "dst": dst, "identity": _fingerprint(Path(src))}
+            for src, dst in changing.items()
+        ],
+        "updates": updates,
+        "parent": parent_data,
+        "delete_parent": (
+            parent.id
+            if parent and (parent_data is None or parent_data["id"] != parent.id)
+            else None
+        ),
+        "mapping": path_map,
+        "nfo_edits": nfo_edits,
+        "symlinks": symlinks,
+        "creates": creates,
+        "cleanup": str(source_dir) if parent and source_dir != target_dir else None,
+    }
 
 
 def _move_files(root: Path, payload: dict):
