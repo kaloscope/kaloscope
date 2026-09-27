@@ -843,6 +843,52 @@ def test_unsafe_plan(tmp_path, invalid):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("conflict", ["existing_file", "planned_file"])
+def test_destination_ancestor(tmp_path, conflict):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            source = Path(parent.path)
+            destination = tmp_path / "Show" / "Season 01"
+            filename = "S01E01 - Old title.mkv"
+            directory_name = "extras" if conflict == "existing_file" else filename
+            artwork = source / directory_name / "poster.jpg"
+            artwork.parent.mkdir()
+            artwork.write_bytes(b"poster")
+            if conflict == "existing_file":
+                destination.mkdir(parents=True)
+                _nfo(
+                    destination / "Season 01.nfo",
+                    "Show",
+                    "tvshow",
+                    "<season>1</season>",
+                )
+                blocker = destination / directory_name
+                blocker.write_bytes(b"existing file")
+                blocker.chmod(0o755)
+            original_path = item.path
+            original_nfo = Path(item.nfo_path).read_bytes()
+            original_parent_nfo = Path(parent.nfo_path).read_bytes()
+
+            mapping = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            assert mapping == {}
+            assert item.path == original_path
+            assert Path(item.path).read_bytes() == b"video"
+            assert Path(item.nfo_path).read_bytes() == original_nfo
+            assert Path(parent.nfo_path).read_bytes() == original_parent_nfo
+            assert artwork.read_bytes() == b"poster"
+            if conflict == "existing_file":
+                assert blocker.read_bytes() == b"existing file"
+            else:
+                assert not destination.exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+            assert await organizer.recover_organizing(lib) == {}
+
+    asyncio.run(run())
+
+
 def test_recovery(tmp_path, monkeypatch):
     async def run():
         async with _database():
@@ -1142,6 +1188,74 @@ def test_tvshow_missing_nfo(tmp_path):
             assert items[1].parent_id == parent.id
             assert Path(parent.nfo_path).name == "Season 01.nfo"
             assert not source.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("show_title", "basename"),
+    [("Show", "Show"), ("Show", "show"), ("Café", "Cafe\u0301")],
+)
+@pytest.mark.parametrize("indexed", [False, True])
+def test_pending_episode_nfo(tmp_path, show_title, basename, indexed):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            lib.rename_template = "{{show_title}}/{{episode_code}} - {{title}}"
+            source = Path(parent.path)
+            parent_nfo = Path(parent.nfo_path)
+            _nfo(parent_nfo, show_title, "tvshow", "<season>1</season>")
+            original_nfo = parent_nfo.read_bytes()
+            pending_video = source / f"{basename}.mkv"
+            pending_video.write_bytes(b"pending episode")
+            if indexed:
+                await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(pending_video),
+                    dir=str(source),
+                    name=basename,
+                )
+
+            mapping = await organizer.organize_items(lib, [parent.id])
+
+            await parent.refresh_from_db()
+            await item.refresh_from_db()
+            assert mapping == {}
+            assert parent.path == str(source)
+            assert item.path == str(source / "old.mkv")
+            assert pending_video.read_bytes() == b"pending episode"
+            assert parent_nfo.read_bytes() == original_nfo
+            assert not (tmp_path / show_title).exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+            _nfo(
+                pending_video.with_suffix(".nfo"),
+                "Second",
+                "episodedetails",
+                "<season>1</season><episode>2</episode>",
+            )
+            pending_item, _ = await MediaItem.get_or_create(
+                lib=lib,
+                path=str(pending_video),
+                defaults={
+                    "parent_id": parent.id,
+                    "dir": str(source),
+                    "name": basename,
+                },
+            )
+
+            await organizer.organize_items(lib, [parent.id])
+
+            await pending_item.refresh_from_db()
+            await parent.refresh_from_db()
+            destination = tmp_path / show_title / "S01E02 - Second.mkv"
+            assert pending_item.path == str(destination)
+            assert destination.read_bytes() == b"pending episode"
+            assert pending_item.nfo_path == str(destination.with_suffix(".nfo"))
+            assert parent.nfo_path != pending_item.nfo_path
+            assert Path(parent.nfo_path).read_bytes() == original_nfo
+            assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
 
@@ -2231,6 +2345,80 @@ def test_artwork_symlink(tmp_path):
     asyncio.run(run())
 
 
+def test_episode_case_collision(tmp_path):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/{{title}}",
+            )
+            directory = tmp_path / "Original"
+            directory.mkdir()
+            nfo = directory / "Original.nfo"
+            _nfo(nfo, "Show", "tvshow")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(directory),
+                dir=str(directory),
+                name=directory.name,
+                nfo_path=str(nfo),
+                season=1,
+            )
+            for index, title in enumerate(("Pilot", "pilot")):
+                video = directory / f"old{index}.mkv"
+                video.write_bytes(b"video")
+                nfo = video.with_suffix(".nfo")
+                _nfo(
+                    nfo,
+                    title,
+                    "episodedetails",
+                    "<season>1</season><episode>1</episode>",
+                )
+                await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(video),
+                    dir=str(directory),
+                    name=video.stem,
+                    nfo_path=str(nfo),
+                )
+            assert await organizer.organize_items(lib, [parent.id]) == {}
+            assert (directory / "old0.mkv").is_file()
+            assert (directory / "old1.mkv").is_file()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_metadata_length(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            artwork = tmp_path / "poster.jpg"
+            artwork.write_bytes(b"picture")
+            title = "a" * 230
+            _nfo(
+                Path(item.nfo_path),
+                title,
+                extra=f"<art><poster>{artwork}</poster></art>",
+            )
+            assert len(str(tmp_path / title / artwork.name)) > 255
+            item.poster = str(artwork)
+            await item.save(update_fields=["poster"])
+
+            assert await organizer.organize_items(lib, [item.id]) == {}
+            await item.refresh_from_db()
+            assert Path(item.path).read_bytes() == b"video"
+            assert artwork.read_bytes() == b"picture"
+            assert not (tmp_path / title).exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("absolute", [False, True])
 @pytest.mark.parametrize("template", ["{{title}}", "{{title}}/{{title}}"])
 def test_subtitle_symlink(tmp_path, absolute, template):
@@ -2360,6 +2548,51 @@ def test_hidden_movie(tmp_path):
             await item.refresh_from_db()
             assert item.parent_id is None
             assert not item.visible
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("parent_collision", [False, True])
+def test_indexed_destination(tmp_path, parent_collision):
+    async def run():
+        async with _database():
+            lib, item = await _movie(
+                tmp_path, "{{title}}/{{title}}" if parent_collision else "{{title}}"
+            )
+            destination = tmp_path / (
+                "New Movie" if parent_collision else "New Movie.mkv"
+            )
+            stale = await MediaItem.create(
+                lib=lib,
+                path=str(destination),
+                dir=str(destination if parent_collision else destination.parent),
+                name=destination.stem,
+                title="Existing historical record",
+            )
+            assert not destination.exists()
+            assert await organizer.organize_items(lib, [item.id]) == {}
+            assert Path(item.path).read_bytes() == b"video"
+            assert not destination.exists()
+            await stale.refresh_from_db()
+            assert stale.title == "Existing historical record"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_planned_path_collision(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            destination = str(tmp_path / "same-target")
+            with pytest.raises(ValueError, match="same database path"):
+                await organizer._validate_updates(
+                    lib,
+                    [
+                        {"id": item.id, "path": destination},
+                        {"id": None, "path": destination},
+                    ],
+                )
 
     asyncio.run(run())
 
