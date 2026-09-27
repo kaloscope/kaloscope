@@ -824,6 +824,7 @@ async def transfer_files(
 ) -> bool:
     """Transfer files and persist their current library destinations.
 
+    Recover pending organization before resolving transfer destinations.
     Keep ownership markers until each path is saved. Skip unrelated targets and
     tasks removed or detached while waiting for the library lock.
 
@@ -838,6 +839,7 @@ async def transfer_files(
         required; `False` if a file is missing or conflicts with an unrelated target.
 
     Raises:
+        OrganizePendingError: If pending organization cannot finish safely.
         asyncio.CancelledError: If cancelled, after the worker stops and published
             paths are recorded when possible.
     """
@@ -857,6 +859,9 @@ async def transfer_files(
         if not await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).exists():
             return True
 
+        from app.core.media.organizer import recover_organizing
+
+        await recover_organizing(lib)
         # refresh paths that may have changed since the task was loaded
         await task.refresh_from_db(fields=["transfer_targets"])
         targets = dict(task.transfer_targets or {})

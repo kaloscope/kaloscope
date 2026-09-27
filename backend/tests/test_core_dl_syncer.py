@@ -62,7 +62,7 @@ from app.models.download import (
 )
 from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.general import Notification
-from app.models.media import LibType, MediaLib
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.services import download as download_service
 
 
@@ -1848,7 +1848,10 @@ def test_transfer_worker(tmp_path, monkeypatch, method, job_id, cancel_count, fa
 
 
 @pytest.mark.parametrize("method", list(TransferMethod))
-def test_transfer_retry(tmp_path, method):
+@pytest.mark.parametrize("stage", ["complete", "pending", "published", "conflict"])
+def test_transfer_retry(tmp_path, method, stage):
+    from app.core.media import organizer
+
     async def run():
         await Tortoise.init(
             db_url="sqlite://:memory:", modules={"models": ["app.models"]}
@@ -1860,11 +1863,61 @@ def test_transfer_retry(tmp_path, method):
             original = Path(library.dir) / "movie.mkv"
             organized = Path(library.dir) / "Organized.mkv"
             assert task.transfer_targets == {"movie.mkv": str(original)}
-            original.rename(organized)
-
-            await DownloadTask.filter(id=task.id).update(
-                transfer_targets={"movie.mkv": str(organized)}
-            )
+            identity = organizer._fingerprint(original)
+            event = item = None
+            if stage == "complete":
+                original.rename(organized)
+                await DownloadTask.filter(id=task.id).update(
+                    transfer_targets={"movie.mkv": str(organized)}
+                )
+            else:
+                item = await MediaItem.create(
+                    lib=library,
+                    path=str(original),
+                    dir=library.dir,
+                    name=original.stem,
+                )
+                event = await MediaEvent.create(
+                    lib=library,
+                    src_path=str(original),
+                    event_type="organize",
+                    payload={
+                        "moves": [
+                            {
+                                "src": str(original),
+                                "dst": str(organized),
+                                "identity": identity,
+                            }
+                        ],
+                        "updates": [
+                            {
+                                "id": item.id,
+                                "path": str(organized),
+                                "name": organized.stem,
+                            }
+                        ],
+                        "parent": None,
+                        "delete_parent": None,
+                        "mapping": {str(original): str(organized)},
+                        "creates": [],
+                        "symlinks": [],
+                        "nfo_edits": [],
+                    },
+                )
+                if stage == "published":
+                    original.rename(organized)
+                elif stage == "conflict":
+                    organized.write_bytes(b"unrelated")
+                    with pytest.raises(organizer.OrganizePendingError):
+                        await syncer.transfer_files(task, task.files)
+                    await item.refresh_from_db()
+                    await task.refresh_from_db()
+                    assert item.path == str(original)
+                    assert task.transfer_targets == {"movie.mkv": str(original)}
+                    assert original.read_bytes() == b"movie.mkv"
+                    assert organized.read_bytes() == b"unrelated"
+                    assert await MediaEvent.filter(id=event.id).exists()
+                    organized.unlink()
 
             # keep the stale instance to exercise the locked database refresh
             assert await syncer.transfer_files(task, task.files)
@@ -1872,7 +1925,15 @@ def test_transfer_retry(tmp_path, method):
             assert task.transfer_targets == {"movie.mkv": str(organized)}
             assert task.files == ["movie.mkv"]
             assert organized.read_bytes() == b"movie.mkv"
+            assert organizer._fingerprint(organized) == identity
             assert not original.exists()
+            if event is not None:
+                await item.refresh_from_db()
+                assert item.path == str(organized)
+                assert not await MediaEvent.filter(id=event.id).exists()
+            assert await syncer.transfer_files(task, task.files)
+            assert list(organized.parent.iterdir()) == [organized]
+            assert organizer._fingerprint(organized) == identity
             source = Path(task.dir) / "movie.mkv"
             assert source.exists() is (method is not TransferMethod.MOVE)
             if method is TransferMethod.HARDLINK:
