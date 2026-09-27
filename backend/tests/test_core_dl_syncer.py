@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from filelock import FileLock, Timeout
 from pydantic import SecretStr
 from sanic import Sanic
 from torrentool.bencode import Bencode
@@ -1531,6 +1532,156 @@ def test_rpc_file_retention(
                 transfer_files.assert_not_awaited()
             assert driver.client.call.await_count == (2 if source == "details" else 1)
         finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+async def _create_transfer_task(tmp_path, method, files):
+    downloader = await Downloader.create(config="config", name="RPC", priority=1)
+    library = await MediaLib.create(
+        dir=str(tmp_path / "library"),
+        name="library",
+        priority=1,
+        lib_type=LibType.MOVIE,
+    )
+    source = tmp_path / "downloads"
+    source.mkdir()
+    for name in files:
+        (source / name).write_bytes(name.encode())
+    task = await DownloadTask.create(
+        downloader=downloader,
+        dir=str(source),
+        name="movie",
+        files=files,
+        state=DownloadState.COMPLETED,
+        transfer_lib=library,
+        transfer_method=method,
+    )
+    return task, library
+
+
+@pytest.mark.parametrize("change", ["detached", "library_removed", "task_removed"])
+def test_transfer_detach(tmp_path, monkeypatch, change):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        running = None
+        try:
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.MOVE, ["movie.mkv"]
+            )
+            requested = asyncio.Event()
+            lock = syncer.library_lock
+
+            def waiting_lock(directory):
+                requested.set()
+                return lock(directory)
+
+            monkeypatch.setattr(syncer, "library_lock", waiting_lock)
+            async with lock(library.dir):
+                running = asyncio.create_task(syncer.transfer_files(task, task.files))
+                await asyncio.wait_for(requested.wait(), 2)
+                assert not running.done()
+                if change == "library_removed":
+                    await MediaLib.filter(id=library.id).delete()
+                elif change == "task_removed":
+                    await task.delete()
+                else:
+                    await DownloadTask.filter(id=task.id).update(transfer_lib_id=None)
+
+            await asyncio.wait_for(running, 2)
+            current = await DownloadTask.get_or_none(id=task.id)
+            if change == "task_removed":
+                assert current is None
+            else:
+                assert current.transfer_lib_id is None
+                assert current.transfer_targets is None
+            assert not (Path(library.dir) / "movie.mkv").exists()
+            assert (Path(task.dir) / "movie.mkv").read_bytes() == b"movie.mkv"
+        finally:
+            if running is not None:
+                if not running.done():
+                    running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("method", "job_id"),
+    [
+        (TransferMethod.COPY, None),
+        (TransferMethod.MOVE, None),
+        (TransferMethod.HARDLINK, None),
+        (TransferMethod.SYMLINK, None),
+        (TransferMethod.COPY, "offline-job"),
+        (TransferMethod.MOVE, "offline-job"),
+    ],
+)
+def test_transfer_lock(tmp_path, monkeypatch, method, job_id):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        running = None
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            task.sub_pattern, task.sub_repl = "^movie", "Renamed"
+            await task.save(update_fields=["sub_pattern", "sub_repl"])
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "Renamed.mkv"
+            requested = asyncio.Event()
+            library_lock = syncer.library_lock
+            lock_path = library_lock(library.dir).lock_file
+            mkdir = Path.mkdir
+            checked = []
+
+            def waiting_lock(directory):
+                requested.set()
+                return library_lock(directory)
+
+            def guarded_mkdir(path, *args, **kwargs):
+                if path == Path(library.dir):
+                    with pytest.raises(Timeout), FileLock(lock_path, timeout=0):
+                        pass
+                    checked.append(path)
+                return mkdir(path, *args, **kwargs)
+
+            monkeypatch.setattr(syncer, "library_lock", waiting_lock)
+            monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
+            async with library_lock(library.dir):
+                running = asyncio.create_task(
+                    syncer.transfer_files(task, task.files, job_id=job_id)
+                )
+                await asyncio.wait_for(requested.wait(), timeout=3)
+                assert not running.done()
+                assert source.read_bytes() == b"movie.mkv"
+                assert not destination.parent.exists()
+                assert checked == []
+
+            await asyncio.wait_for(running, timeout=3)
+
+            assert checked
+            assert destination.read_bytes() == b"movie.mkv"
+            assert not (destination.parent / "movie.mkv").exists()
+            assert source.exists() is (method is not TransferMethod.MOVE)
+            if method is TransferMethod.HARDLINK:
+                assert source.samefile(destination)
+            elif method is TransferMethod.SYMLINK:
+                assert destination.is_symlink()
+                assert destination.readlink() == source
+            with FileLock(lock_path, timeout=0):
+                pass
+        finally:
+            if running is not None:
+                if not running.done():
+                    running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
             await Tortoise.close_connections()
 
     asyncio.run(run())

@@ -31,6 +31,7 @@ from app.core.dl.openlist import OpenListDriver
 from app.core.dl.openlist.puller import transfer_local_file
 from app.core.dl.rpc import RpcClient, RpcDriver
 from app.core.flow.engine import FlowEngine
+from app.core.media.coordination import library_lock
 from app.core.notifications import Notifications, NotificationTemplate
 from app.core.renderer import is_template, render
 from app.models.base import TortoiseModel
@@ -770,7 +771,9 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
 async def transfer_files(
     task: DownloadTask, files: list[str] | None, *, job_id: str | None = None
 ):
-    """Transfer completed download files to the media library directory.
+    """Transfer completed download files under the media library lock.
+
+    Skip tasks removed or detached while waiting for the lock.
 
     Args:
         task: The download task.
@@ -790,63 +793,68 @@ async def transfer_files(
         # and no file name substitution is needed
         return
 
-    # apply file name substitution if sub_pattern is specified
-    new_files = files
-    if task.sub_pattern:
-        repl = task.sub_repl or ""
-        replaced = []
-        for file in files:
-            # render the template with the extracted metadata
-            if is_template(repl):
-                stem = Path(file).stem
-                context = {
-                    "title": extract_title(stem),
-                    "year": extract_year(stem),
-                    "season": extract_season(stem),
-                    "episode": extract_episode(stem),
-                }
-                repl = render(repl, context=context)
-            # apply the replacement pattern
-            replaced.append(re.sub(task.sub_pattern, repl, file))
+    async with library_lock(lib.dir):
+        # recheck the library association after waiting for its lock
+        if not await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).exists():
+            return
 
-        # discard replacement if duplicate file names arise
-        if len(set(replaced)) == len(replaced):
-            new_files = replaced
+        # apply file name substitution if sub_pattern is specified
+        new_files = files
+        if task.sub_pattern:
+            repl = task.sub_repl or ""
+            replaced = []
+            for file in files:
+                # render the template with the extracted metadata
+                if is_template(repl):
+                    stem = Path(file).stem
+                    context = {
+                        "title": extract_title(stem),
+                        "year": extract_year(stem),
+                        "season": extract_season(stem),
+                        "episode": extract_episode(stem),
+                    }
+                    repl = render(repl, context=context)
+                # apply the replacement pattern
+                replaced.append(re.sub(task.sub_pattern, repl, file))
 
-    for name, new_name in zip(files, new_files, strict=True):
-        src = src_dir / name
-        dst = dst_dir / new_name
-        if job_id is not None and task.transfer_method in {
-            TransferMethod.COPY,
-            TransferMethod.MOVE,
-        }:
-            transfer_local_file(
-                src, dst, job_id, move=task.transfer_method is TransferMethod.MOVE
-            )
-            continue
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue
+            # discard replacement if duplicate file names arise
+            if len(set(replaced)) == len(replaced):
+                new_files = replaced
 
-        # create parent directory if it doesn't exist
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        for name, new_name in zip(files, new_files, strict=True):
+            src = src_dir / name
+            dst = dst_dir / new_name
+            if job_id is not None and task.transfer_method in {
+                TransferMethod.COPY,
+                TransferMethod.MOVE,
+            }:
+                transfer_local_file(
+                    src, dst, job_id, move=task.transfer_method is TransferMethod.MOVE
+                )
+                continue
+            if not src.exists():
+                continue
+            if dst.exists():
+                continue
 
-        if task.transfer_method == TransferMethod.HARDLINK:
-            try:
-                os.link(src, dst)
-            except OSError as e:
-                # fallback to symlink if hard link fails due to cross-device link error
-                if e.errno == errno.EXDEV:
-                    os.symlink(src, dst)
-                else:
-                    raise
-        elif task.transfer_method == TransferMethod.SYMLINK:
-            os.symlink(src, dst)
-        elif task.transfer_method == TransferMethod.MOVE:
-            shutil.move(src, dst)
-        elif task.transfer_method == TransferMethod.COPY:
-            shutil.copy2(src, dst)
+            # create parent directory if it doesn't exist
+            dst.parent.mkdir(parents=True, exist_ok=True)
+
+            if task.transfer_method == TransferMethod.HARDLINK:
+                try:
+                    os.link(src, dst)
+                except OSError as e:
+                    # fall back to a symlink across filesystems
+                    if e.errno == errno.EXDEV:
+                        os.symlink(src, dst)
+                    else:
+                        raise
+            elif task.transfer_method == TransferMethod.SYMLINK:
+                os.symlink(src, dst)
+            elif task.transfer_method == TransferMethod.MOVE:
+                shutil.move(src, dst)
+            elif task.transfer_method == TransferMethod.COPY:
+                shutil.copy2(src, dst)
 
 
 async def check_download_plans():
