@@ -258,6 +258,102 @@ def test_template_lib_type(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("delete_parent", [False, True])
+@pytest.mark.parametrize("pending_recovery", [False, True])
+def test_local_delete_lock(tmp_path, monkeypatch, delete_parent, pending_recovery):
+    deleted_paths = []
+
+    def delete(path):
+        deleted_paths.append(path)
+        path.unlink()
+
+    monkeypatch.setattr("app.services.media.delete_path", delete)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            source_dir = tmp_path / "Original" if delete_parent else tmp_path
+            source_dir.mkdir(exist_ok=True)
+            video = source_dir / "original.mkv"
+            video.write_bytes(b"video")
+            nfo = (
+                source_dir / "Original.nfo"
+                if delete_parent
+                else video.with_suffix(".nfo")
+            )
+            nfo.write_text("<movie><title>New</title></movie>")
+            parent = (
+                await MediaItem.create(
+                    lib=lib,
+                    path=str(source_dir),
+                    dir=str(source_dir),
+                    name=source_dir.name,
+                    nfo_path=str(nfo),
+                )
+                if delete_parent
+                else None
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(source_dir),
+                name=video.stem,
+                nfo_path=None if parent else str(nfo),
+            )
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr("app.services.media.library_lock", waiting_lock)
+            async with library_lock(lib.dir):
+                task = asyncio.create_task(
+                    MediaItemService.delete(
+                        parent.id if parent else item.id, local=True
+                    )
+                )
+                try:
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    assert not task.done()
+                    assert video.is_file()
+                    if pending_recovery:
+                        payload = await organizer._plan(lib, [item], parent)
+                        await MediaEvent.create(
+                            lib=lib,
+                            event_type="organize",
+                            src_path=item.path,
+                            payload=payload,
+                        )
+                    else:
+                        await organizer.organize_items(lib, [item.id])
+                        assert not video.exists()
+                        assert (tmp_path / "New.mkv").is_file()
+                except BaseException:
+                    task.cancel()
+                    raise
+            await asyncio.wait_for(task, timeout=3)
+            assert deleted_paths == [tmp_path / "New.mkv"]
+            assert not await MediaItem.filter(id=item.id).exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+            assert not (tmp_path / "New.mkv").exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 def test_library_delete_lock(tmp_path, monkeypatch):
     started = threading.Event()
     release = threading.Event()
@@ -343,6 +439,88 @@ def test_library_delete_lock(tmp_path, monkeypatch):
             assert (tmp_path / "New.mkv").read_bytes() == b"video"
         finally:
             release.set()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+@pytest.mark.parametrize("pending_recovery", [False, True])
+def test_hide_lock(tmp_path, monkeypatch, flatten, pending_recovery):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}" if flatten else "{{title}}/{{title}}",
+            )
+            folder = tmp_path / "Old"
+            folder.mkdir()
+            video = folder / "old.mkv"
+            video.write_bytes(b"video")
+            nfo = folder / "Old.nfo"
+            nfo.write_text("<movie><title>New</title></movie>")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(folder),
+                dir=str(folder),
+                name=folder.name,
+                nfo_path=str(nfo),
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(folder),
+                name=video.stem,
+            )
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr("app.services.media.library_lock", waiting_lock)
+            async with library_lock(lib.dir):
+                payload = await organizer._plan(lib, [item], parent)
+                if not flatten:
+                    assert payload["parent"]["id"] == parent.id
+                    assert payload["parent"]["visible"] is True
+                event = await MediaEvent.create(
+                    lib=lib,
+                    event_type="organize",
+                    src_path=str(folder),
+                    payload=payload,
+                )
+                task = asyncio.create_task(MediaItemService.delete(parent.id))
+                try:
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    assert not task.done()
+                    if not pending_recovery:
+                        await organizer._finish(lib, event)
+                except BaseException:
+                    task.cancel()
+                    raise
+            await asyncio.wait_for(task, timeout=3)
+            if flatten:
+                assert not await MediaItem.filter(id=parent.id).exists()
+                await item.refresh_from_db()
+                assert item.parent_id is None
+                assert item.visible is False
+                assert (tmp_path / "New.mkv").read_bytes() == b"video"
+            else:
+                await parent.refresh_from_db()
+                assert parent.path == str(tmp_path / "New")
+                assert parent.visible is False
+                assert (tmp_path / "New" / "New.mkv").read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+        finally:
             await Tortoise.close_connections()
 
     asyncio.run(run())
