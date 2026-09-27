@@ -386,3 +386,70 @@ def test_metadata_fallback(tmp_path, monkeypatch, written, refresh):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("lib_type", "nfo_type", "explicit_nfo"),
+    [
+        (LibType.MOVIE, NFOType.MOVIE, True),
+        (LibType.TV_SHOW, NFOType.EPISODE, False),
+        (LibType.TV_SHOW, NFOType.EPISODE, True),
+    ],
+)
+def test_child_nfo(tmp_path, lib_type, nfo_type, explicit_nfo):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            directory = tmp_path / "Parent"
+            directory.mkdir()
+            parent_nfo = directory / "Parent.nfo"
+            parent_type = shelver.get_nfo_type(lib_type)
+            parent_content = f"<{parent_type}><title>Parent</title></{parent_type}>"
+            parent_nfo.write_text(parent_content)
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(directory),
+                dir=str(directory),
+                name=directory.name,
+                nfo_path=str(parent_nfo),
+                title="Parent",
+            )
+            video = directory / "child.mkv"
+            video.write_bytes(b"video")
+            child_nfo = directory / "custom.nfo" if explicit_nfo else None
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(directory),
+                name=video.stem,
+                nfo_path=str(child_nfo) if child_nfo else None,
+            )
+
+            assert await shelver.gen_nfo(
+                nfo_type,
+                str(tmp_path / "stale.nfo"),
+                {"title": "Child", "year": 2027},
+                overwrite=True,
+                item_id=item.id,
+                refresh=True,
+            )
+
+            await item.refresh_from_db()
+            await parent.refresh_from_db()
+            expected_nfo = child_nfo or video.with_suffix(".nfo")
+            assert item.nfo_path == str(expected_nfo)
+            assert etree.parse(expected_nfo).getroot().findtext("title") == "Child"
+            assert item.title == "Child"
+            assert parent.title == "Parent"
+            assert parent_nfo.read_text() == parent_content
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
