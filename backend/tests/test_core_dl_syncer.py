@@ -223,7 +223,7 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
 
             with monkeypatch.context() as patcher:
                 if scenario == "copy":
-                    patcher.setattr(syncer.shutil, "copy2", interrupted_copy)
+                    patcher.setattr(puller.shutil, "copy2", interrupted_copy)
                 else:
                     patcher.setattr(
                         syncer.Notifications,
