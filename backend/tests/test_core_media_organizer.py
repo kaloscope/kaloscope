@@ -1325,6 +1325,67 @@ def test_cancelled_writer(tmp_path, monkeypatch, failure):
     asyncio.run(run())
 
 
+def test_season_merge(tmp_path):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/{{episode_code}} - {{title}}",
+            )
+            items, parents = [], []
+            for season in (1, 2):
+                directory = tmp_path / "Old Show" / f"Season {season}"
+                directory.mkdir(parents=True)
+                nfo = directory / f"Season {season}.nfo"
+                _nfo(nfo, "Show", "tvshow")
+                parent = await MediaItem.create(
+                    lib=lib,
+                    path=str(directory),
+                    dir=str(directory),
+                    name=directory.name,
+                    nfo_path=str(nfo),
+                    season=season,
+                )
+                video = directory / "old.mkv"
+                video.write_bytes(b"video")
+                nfo = video.with_suffix(".nfo")
+                _nfo(
+                    nfo,
+                    "Episode",
+                    "episodedetails",
+                    f"<season>{season}</season><episode>1</episode>",
+                )
+                item = await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(video),
+                    dir=str(directory),
+                    name=video.stem,
+                    nfo_path=str(nfo),
+                    season=season,
+                    episode=1,
+                )
+                parents.append(parent)
+                items.append(item)
+            await organizer.organize_items(lib, [parent.id for parent in parents])
+            for season, item in enumerate(items, 1):
+                await item.refresh_from_db()
+                assert item.path == str(
+                    tmp_path / "Show" / f"S0{season}E01 - Episode.mkv"
+                )
+                assert item.season == season
+            assert items[0].parent_id == items[1].parent_id
+            parent = await MediaItem.get(id=items[0].parent_id)
+            assert parent.season is None
+            assert Path(parent.nfo_path).is_file()
+            assert (tmp_path / "Old Show" / "Season 2" / "Season 2.nfo").is_file()
+
+    asyncio.run(run())
+
+
 def test_shared_image(tmp_path):
     async def run():
         async with _database():
@@ -1414,6 +1475,116 @@ def test_subtitle_symlink(tmp_path, absolute, template):
             assert moved_link.resolve() == target.resolve()
             assert moved_link.read_text() == "subtitles"
             assert moved_link.readlink().is_absolute() == absolute
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("visible", [False, True])
+@pytest.mark.parametrize("different_visibility", [False, True])
+def test_parent_merge(tmp_path, visible, different_visibility):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="Merged/{{episode_code}} - {{title}}",
+            )
+            items, parents = [], []
+            for season, title in enumerate(("First Title", "Second Title"), 1):
+                directory = tmp_path / f"Original {season}"
+                directory.mkdir()
+                nfo = directory / f"{directory.name}.nfo"
+                image = directory / f"poster{season}.jpg"
+                image.write_bytes(b"poster")
+                _nfo(
+                    nfo,
+                    title,
+                    "tvshow",
+                    f"<season>{season}</season>"
+                    f"<art><poster>{image.name}</poster></art>",
+                )
+                parent = await MediaItem.create(
+                    lib=lib,
+                    path=str(directory),
+                    dir=str(directory),
+                    name=directory.name,
+                    nfo_path=str(nfo),
+                    season=season,
+                    visible=(
+                        not visible if season == 2 and different_visibility else visible
+                    ),
+                )
+                video = directory / "old.mkv"
+                video.write_bytes(b"video")
+                nfo = video.with_suffix(".nfo")
+                _nfo(
+                    nfo,
+                    "Episode",
+                    "episodedetails",
+                    f"<season>{season}</season><episode>1</episode>",
+                )
+                items.append(
+                    await MediaItem.create(
+                        lib=lib,
+                        parent=parent,
+                        path=str(video),
+                        dir=str(directory),
+                        name=video.stem,
+                        nfo_path=str(nfo),
+                        season=season,
+                    )
+                )
+                parents.append(parent)
+
+            await organizer.organize_items(lib, [parent.id for parent in parents])
+            await items[1].refresh_from_db()
+            if different_visibility:
+                assert items[1].parent_id == parents[1].id
+                assert Path(items[1].path).parent == tmp_path / "Original 2"
+                await parents[0].refresh_from_db()
+                await parents[1].refresh_from_db()
+                assert parents[0].visible == visible
+                assert parents[1].visible != visible
+                assert not await MediaEvent.filter(event_type="organize").exists()
+                return
+            parent = await MediaItem.get(id=items[1].parent_id)
+            metadata = organizer._metadata(
+                Path(parent.nfo_path), lib.lib_type, "tvshow"
+            )
+            assert parent.title == metadata["title"] == "First Title"
+            assert parent.poster == metadata["poster"] == "poster1.jpg"
+            assert parent.season == metadata["season"] is None
+            assert parent.visible == visible
+            assert (Path(parent.path) / parent.poster).read_bytes() == b"poster"
+
+    asyncio.run(run())
+
+
+def test_hidden_movie(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            item.visible = False
+            await item.save(update_fields=["visible"])
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+            assert not parent.visible
+
+            # a child under a hidden parent may still have its default visibility
+            item.visible = True
+            await item.save(update_fields=["visible"])
+            lib.rename_template = "Renamed/{{title}}"
+            await organizer.organize_items(lib, [item.id])
+            await parent.refresh_from_db()
+            assert not parent.visible
+            lib.rename_template = "{{title}}"
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            assert item.parent_id is None
+            assert not item.visible
 
     asyncio.run(run())
 
