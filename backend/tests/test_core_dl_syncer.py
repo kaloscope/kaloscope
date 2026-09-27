@@ -2478,3 +2478,50 @@ def test_rpc_transfer_restart(tmp_path, monkeypatch, interruption):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("suffix", [".mkv", ".srt"])
+def test_transfer_template(tmp_path, suffix):
+    files = ["First.2020.S01E01.mkv", f"Second.2021.S02E03{suffix}"]
+    expected = ["First.2020.S1E1.mkv", f"Second.2021.S2E3{suffix}"]
+    template = "{{title}}.{{year}}.S{{season}}E{{episode}}"
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            task.sub_pattern = r"^.+(?=\.[^.]+$)"
+            task.sub_repl = template
+            await task.save(update_fields=["sub_pattern", "sub_repl"])
+            stale = await DownloadTask.get(id=task.id)
+            root = Path(library.dir)
+            targets = {
+                source: str(root / destination)
+                for source, destination in zip(files, expected, strict=True)
+            }
+
+            assert await syncer.transfer_files(task, files)
+
+            await task.refresh_from_db()
+            assert task.transfer_targets == targets
+            assert task.files == files
+            assert task.sub_repl == template
+            for source, destination in zip(files, expected, strict=True):
+                assert (root / destination).read_bytes() == source.encode()
+            assert sorted(path.name for path in root.iterdir()) == sorted(expected)
+            inodes = {name: (root / name).stat().st_ino for name in expected}
+
+            assert await syncer.transfer_files(stale, files)
+
+            assert stale.transfer_targets == targets
+            assert sorted(path.name for path in root.iterdir()) == sorted(expected)
+            assert {name: (root / name).stat().st_ino for name in expected} == inodes
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
