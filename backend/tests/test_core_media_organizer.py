@@ -6,6 +6,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Queue
 
 import pytest
 from filelock import Timeout
@@ -16,6 +17,7 @@ from app.core.config import KaloscopeConfig
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.core.media.shelver import update_metadata
+from app.core.media.watcher import LibWatcher
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
@@ -612,6 +614,78 @@ def test_recovery(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("known_nfo", [False, True])
+@pytest.mark.parametrize("episode", [None, 1])
+def test_episode_recovery(tmp_path, monkeypatch, known_nfo, episode):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            nfo = Path(item.nfo_path)
+            shared = tmp_path / "shared"
+            shared.mkdir()
+            poster = shared / "poster.jpg"
+            poster.write_bytes(b"poster")
+            backdrop = nfo.parent / "backdrop.jpg"
+            backdrop.write_bytes(b"backdrop")
+            episode_element = (
+                f"<episode>{episode}</episode>" if episode is not None else ""
+            )
+            nfo.write_text(
+                "<episodedetails><title>New title</title><year>2027</year>"
+                f"<season>2</season>{episode_element}"
+                '<uniqueid type="imdb" default="true">new-id</uniqueid>'
+                "<aired>2027-01-02</aired><rating>8.25</rating>"
+                "<art><poster>../shared/poster.jpg</poster>"
+                "<fanart>backdrop.jpg</fanart></art></episodedetails>",
+                encoding="utf-8",
+            )
+            if not known_nfo:
+                await MediaItem.filter(id=item.id).update(nfo_path=None, nfo_mtime=None)
+            original = organizer._move_files
+
+            def interrupted(root, payload):
+                original(root, payload)
+                raise OSError("interrupted before metadata commit")
+
+            monkeypatch.setattr(organizer, "_move_files", interrupted)
+
+            with pytest.raises(organizer.OrganizePendingError):
+                await organizer.organize_items(lib, [parent.id])
+            monkeypatch.setattr(organizer, "_move_files", original)
+            await organizer.recover_organizing(lib)
+            await item.refresh_from_db()
+
+            expected = tmp_path / "Show" / "Season 02"
+            filename = "S02E01 - New title.mkv" if episode is not None else "old.mkv"
+            assert item.path == str(expected / filename)
+            assert Path(item.path).read_bytes() == b"video"
+            assert item.title == "New title"
+            assert item.year == 2027
+            assert item.season == 2 and item.episode == 1
+            assert item.nfo_source == "imdb" and item.unique_id == "new-id"
+            assert item.aired == "2027-01-02" and str(item.rating) == "8.25"
+            assert item.poster == "../../shared/poster.jpg"
+            assert (expected / item.poster).resolve() == poster
+            assert (expected / item.backdrop).read_bytes() == b"backdrop"
+            assert not backdrop.exists()
+            metadata = organizer._metadata(
+                Path(item.nfo_path), lib.lib_type, "episodedetails"
+            )
+            assert metadata["poster"] == item.poster
+            assert metadata["backdrop"] == item.backdrop
+            assert item.nfo_mtime == datetime.fromtimestamp(
+                Path(item.nfo_path).stat().st_mtime, tz=UTC
+            )
+            events = Queue()
+            watcher = LibWatcher(None)
+            watcher._observers = {lib.dir: (None, events)}
+            await watcher._enqueue_events(lib, backfill_nfo_events=False)
+            assert events.empty()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("invalid", [False, True])
 def test_episode_metadata(tmp_path, invalid):
     async def run():
@@ -645,6 +719,48 @@ def test_episode_metadata(tmp_path, invalid):
                 ):
                     assert getattr(item, name) is None
             assert Path(item.path).read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_legacy_episode_recovery(tmp_path):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            _nfo(
+                Path(item.nfo_path),
+                "New title",
+                "episodedetails",
+                "<season>1</season><episode>1</episode>",
+            )
+            payload = await organizer._plan(lib, [item], parent)
+            for name in organizer._METADATA:
+                if name not in ("season", "episode"):
+                    payload["updates"][0].pop(name, None)
+            await MediaEvent.create(
+                lib=lib,
+                event_type="organize",
+                src_path=item.path,
+                is_directory=True,
+                payload=payload,
+            )
+            organizer._move_files(tmp_path, payload)
+
+            await organizer.recover_organizing(lib)
+            await item.refresh_from_db()
+
+            assert item.nfo_mtime is None
+            events = Queue()
+            watcher = LibWatcher(None)
+            watcher._observers = {lib.dir: (None, events)}
+            await watcher._enqueue_events(lib, backfill_nfo_events=False)
+            assert events.qsize() == 1
+            event = events.get_nowait()
+            assert event.src_path == item.nfo_path
+            await update_metadata(lib, event.src_path)
+            await item.refresh_from_db()
+            assert item.title == "New title"
             assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
@@ -891,6 +1007,42 @@ def test_download_nfo(tmp_path, listed):
             assert nfo.read_bytes() == original
             assert video.read_bytes() == b"video"
             assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [None, "before", "after"])
+def test_cancelled_writer(tmp_path, monkeypatch, failure):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            entered, release = threading.Event(), threading.Event()
+            original = organizer._move_files
+
+            def paused_writer(root, payload):
+                entered.set()
+                assert release.wait(timeout=5)
+                if failure == "before":
+                    raise OSError("Disk unavailable")
+                original(root, payload)
+                if failure == "after":
+                    raise OSError("Interrupted after movement")
+
+            monkeypatch.setattr(organizer, "_move_files", paused_writer)
+            task = asyncio.create_task(organizer.organize_items(lib, [item.id]))
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await MediaEvent.filter(lib=lib, event_type="organize").exists()
+            monkeypatch.setattr(organizer, "_move_files", original)
+            await organizer.recover_organizing(lib)
+            await item.refresh_from_db()
+            assert Path(item.path).is_file()
+            assert not await MediaEvent.filter(lib=lib, event_type="organize").exists()
 
     asyncio.run(run())
 
