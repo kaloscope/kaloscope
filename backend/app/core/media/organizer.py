@@ -3,9 +3,11 @@ import hashlib
 import os
 import tempfile
 from contextlib import suppress
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from lxml import etree
 from tortoise.transactions import in_transaction
 
 from app.models.download import DownloadTask
@@ -41,6 +43,39 @@ def _safe_path(root: Path, path: Path):
             raise ValueError(f"directory symlink is not allowed: {ancestor}")
     if path.is_symlink() and path.is_dir():
         raise ValueError(f"directory symlink is not allowed: {path}")
+
+
+def _metadata(path: Path, lib_type: str, root_tag: str) -> dict:
+    """Extract organization metadata from a complete NFO document.
+
+    Args:
+        path: The NFO file path.
+        lib_type: The library type used to select a metadata handler.
+        root_tag: The required XML root element name.
+
+    Raises:
+        OSError: If the NFO file cannot be read.
+        etree.LxmlError: If the NFO document cannot be parsed.
+        ValueError: If the root element is unexpected or the title is missing.
+
+    Returns:
+        The extracted metadata, including the NFO path.
+    """
+    # require a complete XML document before changing files
+    from app.core.media.handlers.base import get_handler
+
+    tree = etree.parse(
+        path,
+        etree.XMLParser(recover=False, resolve_entities=False, no_network=True),
+    )
+    if tree.getroot().tag != root_tag:
+        raise ValueError(f"unexpected NFO type: {path}")
+    metadata = get_handler(lib_type).extract_meta(tree)
+    metadata.nfo_path = str(path)
+    data = asdict(metadata)
+    if not data.get("title"):
+        raise ValueError(f"NFO has no title: {path}")
+    return data
 
 
 def _fingerprint(path: Path) -> list[int]:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from filelock import Timeout
+from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -35,6 +36,75 @@ def _nfo(path: Path, title: str, tag="movie", extra=""):
         f"{extra}</{tag}>",
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize(
+    ("lib_type", "tag"),
+    [
+        (LibType.MOVIE, "movie"),
+        (LibType.TV_SHOW, "tvshow"),
+        (LibType.TV_SHOW, "episodedetails"),
+    ],
+)
+def test_metadata(tmp_path, lib_type, tag):
+    path = tmp_path / "media.nfo"
+    _nfo(
+        path,
+        "示例 &amp; New",
+        tag=tag,
+        extra=(
+            "<originaltitle>Original</originaltitle>"
+            "<season>0</season><episode>2</episode>"
+            "<actor><name>Alice</name><role>Lead</role></actor>"
+        ),
+    )
+
+    metadata = organizer._metadata(path, lib_type, tag)
+
+    assert metadata["title"] == "示例 & New"
+    assert metadata["originaltitle"] == "Original"
+    assert metadata["year"] == 2026
+    assert metadata["unique_id"] == "10"
+    assert metadata["nfo_source"] == "tmdb"
+    assert metadata["nfo_path"] == str(path)
+    assert metadata["actors"] == [{"name": "Alice", "role": "Lead", "thumb": None}]
+    assert (metadata["season"], metadata["episode"]) == (
+        (0, 2) if lib_type is LibType.TV_SHOW else (None, None)
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "error"),
+    [
+        ("", etree.XMLSyntaxError),
+        ("<movie><title>Partial</title>", etree.XMLSyntaxError),
+        ("<movie><title>First</title></movie><movie/>", etree.XMLSyntaxError),
+        ("<tvshow><title>Wrong type</title></tvshow>", ValueError),
+        ("<movie><year>2026</year></movie>", ValueError),
+        ("<movie><title/></movie>", ValueError),
+        ("<movie><title>  </title></movie>", ValueError),
+    ],
+)
+def test_metadata_invalid(tmp_path, content, error):
+    path = tmp_path / "media.nfo"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(error):
+        organizer._metadata(path, LibType.MOVIE, "movie")
+
+
+def test_metadata_entity(tmp_path):
+    title = tmp_path / "title.txt"
+    title.write_text("External title", encoding="utf-8")
+    path = tmp_path / "media.nfo"
+    path.write_text(
+        f'<!DOCTYPE movie [<!ENTITY title SYSTEM "{title.as_uri()}">]>'
+        "<movie><title>&title;</title></movie>",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="NFO has no title"):
+        organizer._metadata(path, LibType.MOVIE, "movie")
 
 
 async def _movie(root: Path, template="{{title}}"):
