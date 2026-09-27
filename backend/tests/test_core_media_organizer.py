@@ -18,6 +18,7 @@ from app.core.media.coordination import library_lock
 from app.core.media.shelver import update_metadata
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
+from app.models.user import HistoryType, User, UserHistory, UserRole
 
 
 @asynccontextmanager
@@ -495,6 +496,158 @@ async def _episode(root: Path):
     await update_metadata(lib, nfo)
     await item.refresh_from_db()
     return lib, parent, item
+
+
+def test_movie_rename(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.VIDEO,
+                rel_id=item.id,
+                position=42,
+            )
+            subtitle = tmp_path / "original.zh-CN.srt"
+            subtitle.write_text("subtitles")
+            mapping = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            assert item.path == str(tmp_path / "New Movie.mkv")
+            assert item.hash == "a" * 32
+            await history.refresh_from_db()
+            assert history.rel_id == item.id and history.position == 42
+            assert (tmp_path / "New Movie.zh-CN.srt").read_text() == "subtitles"
+            assert Path(item.nfo_path).is_file()
+            assert mapping[str(tmp_path / "original.mkv")] == item.path
+            assert await MediaItem.all().count() == 1
+            assert await organizer.organize_items(lib, [item.id]) == {}
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_movie_hierarchy(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            assert item.parent_id is not None
+            parent_id = item.parent_id
+            parent = await MediaItem.get(id=parent_id)
+            assert parent.path == str(tmp_path / "New Movie")
+            assert Path(parent.nfo_path).is_file()
+            assert item.nfo_path is None
+            lib.rename_template = "{{title}}"
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            assert item.parent_id is None
+            assert item.path == str(tmp_path / "New Movie.mkv")
+            assert item.title == "New Movie"
+            assert Path(item.nfo_path).is_file()
+            assert not await MediaItem.filter(id=parent_id).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "invalid", ["collision", "incomplete_nfo", "directory_symlink"]
+)
+def test_unsafe_plan(tmp_path, invalid):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            if invalid == "collision":
+                (tmp_path / "New Movie.mkv").write_bytes(b"other")
+            elif invalid == "incomplete_nfo":
+                Path(item.nfo_path).write_text("<movie><title>Partial</title>")
+            else:
+                real = tmp_path / "real"
+                real.mkdir()
+                (tmp_path / "destination").symlink_to(real, target_is_directory=True)
+                lib.rename_template = "destination/{{title}}"
+            assert await organizer.organize_items(lib, [item.id]) == {}
+            assert Path(item.path).read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_recovery(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            cache = tmp_path / ".original.json"
+            cache.write_text('[{"text":"Local comment"}]')
+            original_rename = organizer.rename_exclusive
+            calls = 0
+
+            def fail_second(source, destination):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated interruption")
+                original_rename(source, destination)
+
+            monkeypatch.setattr(organizer, "rename_exclusive", fail_second)
+            with pytest.raises(organizer.OrganizePendingError):
+                await organizer.organize_items(lib, [item.id])
+            assert await MediaEvent.filter(event_type="organize").count() == 1
+            assert (tmp_path / "New Movie.mkv").is_file()
+            assert cache.is_file()
+            monkeypatch.setattr(organizer, "rename_exclusive", original_rename)
+            await organizer.recover_organizing(lib)
+            await item.refresh_from_db()
+            assert item.path == str(tmp_path / "New Movie.mkv")
+            assert Path(item.nfo_path).is_file()
+            assert (tmp_path / ".New Movie.json").read_text() == (
+                '[{"text":"Local comment"}]'
+            )
+            assert not cache.exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_episode_metadata(tmp_path, invalid):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            original_path = item.path
+            title = "x" * 256 if invalid else "New title"
+            Path(item.nfo_path).write_text(
+                f"<episodedetails><title>{title}</title></episodedetails>",
+                encoding="utf-8",
+            )
+
+            mapping = await organizer.organize_items(lib, [parent.id])
+            await item.refresh_from_db()
+
+            if invalid:
+                assert mapping == {}
+                assert item.path == original_path
+                assert item.title == "Old title"
+            else:
+                assert item.title == title
+                assert item.year == 2026
+                assert item.season == 1 and item.episode == 1
+                for name in (
+                    "nfo_source",
+                    "unique_id",
+                    "aired",
+                    "rating",
+                    "poster",
+                    "backdrop",
+                ):
+                    assert getattr(item, name) is None
+            assert Path(item.path).read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("reference", ["ancestor", "chained", "unrelated"])

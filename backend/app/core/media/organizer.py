@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from lxml import etree
+from sanic.log import logger
 from tortoise.exceptions import ValidationError
 from tortoise.transactions import in_transaction
 
@@ -1271,3 +1272,91 @@ async def _season_groups(
         ):
             raise ValueError("waiting for unindexed videos before splitting seasons")
     return list(groups.items())
+
+
+async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
+    """Organize NFO-backed groups while holding the library lock throughout.
+
+    Pending plans are recovered first. Groups with unsafe or incomplete plans
+    are logged and skipped without creating a new journal. Persist inherited
+    seasons before splitting so retries do not depend on an edited parent NFO.
+    Defer groups with unfinished download transfers while processing other groups.
+
+    Args:
+        lib: The media library whose lock is held by the caller.
+        item_ids: The media item IDs identifying groups to organize.
+
+    Raises:
+        OrganizePendingError: If a persisted organization plan cannot finish.
+        OrganizeDeferredError: If any group is waiting for its remaining transfers.
+
+    Returns:
+        The combined mapping of paths changed by recovery and new plans.
+    """
+    mapping = await recover_organizing(lib)
+    if not lib.rename_template or not item_ids:
+        return mapping
+    from app.core.dl.syncer import backfill_transfer_targets
+
+    await backfill_transfer_targets(lib)
+    processed = set()
+    deferred = None
+    for item_id in item_ids:
+        item = await MediaItem.filter(id=item_id, lib_id=lib.id).first()
+        if item is None:
+            continue
+        parent = None
+        if item.parent_id is not None:
+            parent = await MediaItem.filter(id=item.parent_id).first()
+        elif Path(item.path).is_dir():
+            parent = item
+        key = parent.id if parent else item.id
+        if key in processed:
+            continue
+        processed.add(key)
+        group = (
+            await MediaItem.filter(parent_id=parent.id, lib_id=lib.id)
+            if parent
+            else [item]
+        )
+        if not group:
+            continue
+        try:
+            groups = await _season_groups(lib, group, parent)
+        except (OSError, ValueError, etree.LxmlError) as error:
+            logger.warning(
+                "Skipping automatic organization for %s: %s", item.path, error
+            )
+            continue
+        if len(groups) > 1:
+            for season, subgroup in groups:
+                await MediaItem.filter(
+                    id__in=[row.id for row in subgroup], season=None
+                ).update(season=season)
+        for season, subgroup in groups:
+            try:
+                payload = await _plan(
+                    lib, subgroup, parent, season=season, split=len(groups) > 1
+                )
+                if not any(payload[key] for key in ("moves", "creates", "nfo_edits")):
+                    continue
+            except OrganizeDeferredError as error:
+                deferred = error
+                continue
+            except (OSError, ValueError, etree.LxmlError) as error:
+                logger.warning(
+                    "Skipping automatic organization for %s: %s", item.path, error
+                )
+                continue
+            event = await MediaEvent.create(
+                lib_id=lib.id,
+                event_type="organize",
+                src_path=item.path,
+                dest_path=None,
+                is_directory=parent is not None,
+                payload=payload,
+            )
+            mapping.update(await _finish(lib, event))
+    if deferred is not None:
+        raise deferred
+    return mapping
