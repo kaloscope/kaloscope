@@ -798,9 +798,11 @@ def test_fast_sync(monkeypatch):
 
     downloader = SimpleNamespace(id=1, config="invalid")
     task = SimpleNamespace(downloader_id=1)
-    monkeypatch.setattr(
-        syncer, "DownloadTask", SimpleNamespace(filter=AsyncMock(return_value=[task]))
-    )
+
+    async def filtered_tasks(*_args, **filters):
+        return [] if filters.get("transfer_pending") else [task]
+
+    monkeypatch.setattr(syncer, "DownloadTask", SimpleNamespace(filter=filtered_tasks))
     monkeypatch.setattr(
         syncer, "Downloader", SimpleNamespace(get=AsyncMock(return_value=downloader))
     )
