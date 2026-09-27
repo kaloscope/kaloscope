@@ -555,6 +555,165 @@ def test_movie_hierarchy(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("conflict", [None, ".mkv", ".nfo"])
+def test_movie_flatten(tmp_path, conflict):
+    async def run():
+        async with _database():
+            root = tmp_path / "Movies"
+            root.mkdir()
+            lib, item = await _movie(root, "{{title}}/{{title}}")
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            parent_id, original_path = item.parent_id, item.path
+            original_nfo = (await MediaItem.get(id=parent_id)).nfo_path
+            other_video = root / "Movies.mkv"
+            other_video.write_bytes(b"another movie")
+            other_nfo = other_video.with_suffix(".nfo")
+            other_content = (
+                "<movie><title>Another Movie</title>"
+                '<uniqueid type="tmdb" default="true">20</uniqueid></movie>'
+            )
+            other_nfo.write_text(other_content)
+            other = await MediaItem.create(
+                lib=lib,
+                path=str(other_video),
+                dir=str(root),
+                name=other_video.stem,
+                nfo_path=str(other_nfo),
+            )
+            destination = root / "New Movie.mkv"
+            if conflict:
+                destination.with_suffix(conflict).write_bytes(b"existing file")
+            lib.rename_template = "{{title}}"
+
+            mapping = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            if conflict:
+                assert mapping == {}
+                assert item.path == original_path
+                assert item.parent_id == parent_id
+                assert Path(original_nfo).is_file()
+                assert (
+                    destination.with_suffix(conflict).read_bytes() == b"existing file"
+                )
+            else:
+                assert item.path == str(destination)
+                assert item.parent_id is None
+                assert item.nfo_path == str(destination.with_suffix(".nfo"))
+                assert Path(item.nfo_path).is_file()
+                assert mapping[original_path] == item.path
+                assert not await MediaItem.filter(id=parent_id).exists()
+            assert Path(item.path).read_bytes() == b"video"
+            await other.refresh_from_db()
+            assert other.path == str(other_video)
+            assert other.nfo_path == str(other_nfo)
+            assert other_video.read_bytes() == b"another movie"
+            assert other_nfo.read_text() == other_content
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("template", ["{{title}}", "{{title}}/{{title}}"])
+def test_shared_movie_companions(tmp_path, indexed, template):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, template)
+            other_video = tmp_path / "original.mp4"
+            other_video.write_bytes(b"other version")
+            subtitle = tmp_path / "original.en.srt"
+            subtitle.write_text("shared subtitles")
+            ids = [item.id]
+            if indexed:
+                other = await MediaItem.create(
+                    lib=lib,
+                    path=str(other_video),
+                    dir=str(tmp_path),
+                    name=other_video.stem,
+                    nfo_path=item.nfo_path,
+                )
+                ids.append(other.id)
+            contents = {file.name: file.read_bytes() for file in tmp_path.iterdir()}
+
+            mapping = await organizer.organize_items(lib, ids)
+
+            assert mapping == {}
+            assert {file.name: file.read_bytes() for file in tmp_path.iterdir()} == (
+                contents
+            )
+            for current in await MediaItem.filter(lib=lib):
+                assert Path(current.path).name in contents
+                assert current.nfo_path == str(tmp_path / "original.nfo")
+                assert Path(current.nfo_path).is_file()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("layout", ["flat", "directory"])
+@pytest.mark.parametrize("filename", ["New Movie.mp4", "Another Edition.mkv"])
+def test_movie_destination(tmp_path, indexed, layout, filename):
+    async def run():
+        async with _database():
+            template = "{{title}}/{{title}}" if layout == "directory" else "{{title}}"
+            lib, item = await _movie(tmp_path, template)
+            destination = tmp_path / "New Movie" if layout == "directory" else tmp_path
+            parent = None
+            if layout == "directory":
+                destination.mkdir()
+                nfo = destination / "New Movie.nfo"
+                _nfo(nfo, "New Movie")
+                if indexed:
+                    parent = await MediaItem.create(
+                        lib=lib,
+                        path=str(destination),
+                        dir=str(destination),
+                        name=destination.name,
+                        nfo_path=str(nfo),
+                    )
+            video = destination / filename
+            video.write_bytes(b"existing video")
+            if indexed:
+                await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(video),
+                    dir=str(destination),
+                    name=video.stem,
+                )
+            original_path = item.path
+            original_items = await MediaItem.all().values()
+            original_files = {
+                path: path.read_bytes()
+                for path in tmp_path.rglob("*")
+                if path.is_file()
+            }
+
+            mapping = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            if layout == "directory" or filename == "New Movie.mp4":
+                assert mapping == {}
+                assert item.path == original_path
+                assert await MediaItem.all().values() == original_items
+                assert {
+                    path: path.read_bytes()
+                    for path in tmp_path.rglob("*")
+                    if path.is_file()
+                } == original_files
+            else:
+                assert item.path == str(tmp_path / "New Movie.mkv")
+                assert mapping[original_path] == item.path
+                assert Path(item.nfo_path).is_file()
+            assert video.read_bytes() == b"existing video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "invalid", ["collision", "incomplete_nfo", "directory_symlink"]
 )
