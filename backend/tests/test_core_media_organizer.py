@@ -984,6 +984,122 @@ def test_directory_link_scope(tmp_path, reference):
     assert alias.is_dir()
 
 
+def test_movie_artwork(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            artwork = tmp_path / "poster.jpg"
+            artwork.write_bytes(b"picture")
+            _nfo(
+                Path(item.nfo_path),
+                "New Movie",
+                extra=f"<art><poster>{artwork}</poster></art>",
+            )
+            item.poster = str(artwork)
+            await item.save(update_fields=["poster"])
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+            target = tmp_path / "New Movie" / "poster.jpg"
+            assert target.read_bytes() == b"picture"
+            assert parent.poster == str(target)
+            assert item.poster == str(target)
+            assert str(target) in Path(parent.nfo_path).read_text()
+            assert not list(target.parent.glob(".organizing-*"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("absolute", [False, True])
+def test_shared_artwork(tmp_path, nested, indexed, absolute):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            if nested:
+                await organizer.organize_items(lib, [item.id])
+                await item.refresh_from_db()
+                parent = await MediaItem.get(id=item.parent_id)
+                nfo = Path(parent.nfo_path)
+            else:
+                nfo = Path(item.nfo_path)
+            artwork = nfo.parent / "cover.jpg"
+            artwork.write_bytes(b"shared cover")
+            _nfo(nfo, "New Movie", extra="<art><poster>cover.jpg</poster></art>")
+            other_video = tmp_path / "other.mkv"
+            other_video.write_bytes(b"other video")
+            other_nfo = other_video.with_suffix(".nfo")
+            reference = str(artwork if absolute else artwork.relative_to(tmp_path))
+            _nfo(
+                other_nfo,
+                "Other Movie",
+                extra=f"<art><poster>\n  {reference}\n</poster></art>",
+            )
+            other_content = other_nfo.read_bytes()
+            if indexed:
+                await MediaItem.create(
+                    lib=lib,
+                    path=str(other_video),
+                    dir=str(tmp_path),
+                    name=other_video.stem,
+                    nfo_path=str(other_nfo),
+                    poster=reference,
+                )
+            lib.rename_template = "Renamed/{{title}}"
+
+            await organizer.organize_items(lib, [item.id])
+
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+            assert item.path == str(tmp_path / "Renamed" / "New Movie.mkv")
+            assert artwork.read_bytes() == b"shared cover"
+            assert (Path(parent.nfo_path).parent / parent.poster).resolve() == artwork
+            metadata = organizer._metadata(Path(parent.nfo_path), lib.lib_type, "movie")
+            assert (
+                Path(parent.nfo_path).parent / metadata["poster"]
+            ).resolve() == artwork
+            assert other_nfo.read_bytes() == other_content
+            assert not (tmp_path / "Renamed" / "cover.jpg").exists()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_whitespace_artwork(tmp_path, absolute):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            artwork = tmp_path / "poster.jpg"
+            artwork.write_bytes(b"shared poster")
+            reference = str(artwork) if absolute else artwork.name
+            _nfo(
+                Path(item.nfo_path),
+                "New Movie",
+                extra=f"<art><poster>\n  {reference}\n</poster></art>",
+            )
+            if not absolute:
+                _nfo(
+                    tmp_path / "other.nfo",
+                    "Other Movie",
+                    extra="<art><poster>poster.jpg</poster></art>",
+                )
+
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+            await update_metadata(lib, parent.nfo_path)
+            await parent.refresh_from_db()
+
+            expected = tmp_path / "New Movie" / artwork.name if absolute else artwork
+            assert (Path(parent.nfo_path).parent / parent.poster).resolve() == expected
+            assert expected.read_bytes() == b"shared poster"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("template", "reference", "organized"),
     [
@@ -1206,6 +1322,35 @@ def test_cancelled_writer(tmp_path, monkeypatch, failure):
     asyncio.run(run())
 
 
+def test_shared_image(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+            shared = tmp_path / "shared"
+            shared.mkdir()
+            (shared / "cover.jpg").write_bytes(b"cover")
+            _nfo(
+                Path(parent.nfo_path),
+                "New Movie",
+                extra="<art><poster>../shared/cover.jpg</poster></art>",
+            )
+            parent.poster = "../shared/cover.jpg"
+            await parent.save(update_fields=["poster"])
+            lib.rename_template = "{{title}}"
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            assert item.poster == "shared/cover.jpg"
+            assert (
+                "<poster>shared/cover.jpg</poster>" in Path(item.nfo_path).read_text()
+            )
+            assert (shared / "cover.jpg").is_file()
+
+    asyncio.run(run())
+
+
 def test_download_source_alias(tmp_path):
     async def run():
         async with _database():
@@ -1224,6 +1369,25 @@ def test_download_source_alias(tmp_path):
             )
             assert await organizer.organize_items(lib, [item.id]) == {}
             assert Path(item.path).read_bytes() == b"video"
+
+    asyncio.run(run())
+
+
+def test_artwork_symlink(tmp_path):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            directory = Path(item.path).parent
+            (directory / "cover.jpg").write_bytes(b"cover")
+            (directory / "poster.jpg").symlink_to("cover.jpg")
+            lib.rename_template = "Renamed/{{title}}"
+            await organizer.organize_items(lib, [item.id])
+            link = tmp_path / "Renamed" / "poster.jpg"
+            assert link.is_symlink()
+            assert link.resolve() == tmp_path / "Renamed" / "cover.jpg"
+            assert link.read_bytes() == b"cover"
 
     asyncio.run(run())
 
