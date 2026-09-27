@@ -1166,6 +1166,185 @@ def test_external_companion_link(tmp_path, suffix):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("interruption", [None, "moved", "updated"])
+@pytest.mark.parametrize("target_name", ["old.mkv", "OLD.mkv"])
+def test_retained_symlink(tmp_path, monkeypatch, absolute, interruption, target_name):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+    monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
+
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            lib.rename_template = "Original/{{episode_code}} - {{title}}"
+            await lib.save(update_fields=["rename_template"])
+            source = Path(item.path)
+            target = source.with_name(target_name)
+            if not target.exists():
+                pytest.skip("Filesystem does not support this filename alias")
+            alias = source.with_name("alias.mkv")
+            alias.symlink_to(target if absolute else target.name)
+            linked = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(alias),
+                dir=str(alias.parent),
+                name=alias.stem,
+                season=1,
+            )
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.VIDEO,
+                rel_id=linked.id,
+                position=42,
+            )
+
+            if interruption:
+                name = "rename_exclusive" if interruption == "moved" else "_move_files"
+                operation = getattr(organizer, name)
+
+                def interrupt(*args):
+                    """Interrupt organization after the selected filesystem write.
+
+                    Args:
+                        *args: The arguments passed to the original writer.
+
+                    Raises:
+                        OSError: After the filesystem operation has completed.
+                    """
+                    operation(*args)
+                    raise OSError("simulated interruption")
+
+                with monkeypatch.context() as interrupted:
+                    interrupted.setattr(organizer, name, interrupt)
+                    with pytest.raises(organizer.OrganizePendingError):
+                        await organizer.organize_items(lib, [parent.id])
+                assert await MediaEvent.filter(event_type="organize").exists()
+            else:
+                await organizer.organize_items(lib, [parent.id])
+
+            monitor = LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+            await monitor.scan_directory(lib)
+            while not events.empty():
+                await consume_event(events.get_nowait())
+
+            await item.refresh_from_db()
+            await linked.refresh_from_db()
+            await history.refresh_from_db()
+            assert item.path == str(source.with_name("S01E01 - Old title.mkv"))
+            assert linked.path == str(alias)
+            assert alias.is_symlink()
+            assert alias.resolve() == Path(item.path)
+            assert alias.readlink().is_absolute() is absolute
+            assert alias.read_bytes() == b"video"
+            assert history.rel_id == linked.id and history.position == 42
+            assert await MediaItem.filter(lib=lib).count() == 3
+            assert not await MediaEvent.filter(lib=lib).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reference", ["directory", "unicode"])
+@pytest.mark.parametrize("relocated", [False, True])
+def test_symlink_target_alias(tmp_path, reference, relocated):
+    async def run():
+        async with _database():
+            root = tmp_path / "library"
+            root.mkdir()
+            lib, parent, item = await _episode(root)
+            directory = "Renamed" if relocated else "Original"
+            lib.rename_template = directory + "/{{episode_code}} - {{title}}"
+            source = Path(item.path)
+            if reference == "unicode":
+                source = source.rename(source.with_name("Café.mkv"))
+                nfo = Path(item.nfo_path).rename(source.with_suffix(".nfo"))
+                await MediaItem.filter(id=item.id).update(
+                    path=str(source), name=source.stem, nfo_path=str(nfo)
+                )
+                target = source.with_name("Cafe\u0301.mkv")
+                if not target.exists():
+                    pytest.skip("Filesystem does not support this filename alias")
+                reference_path = target.name
+            else:
+                (tmp_path / "Alias").symlink_to(source.parent, target_is_directory=True)
+                reference_path = f"../../Alias/{source.name}"
+            alias = source.with_name("alias.mkv")
+            alias.symlink_to(reference_path)
+            linked = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(alias),
+                dir=str(alias.parent),
+                name=alias.stem,
+            )
+
+            await organizer.organize_items(lib, [parent.id])
+
+            await item.refresh_from_db()
+            await linked.refresh_from_db()
+            destination = root / directory / "S01E01 - Old title.mkv"
+            assert item.path == str(destination)
+            assert linked.path == str(destination.with_name("alias.mkv"))
+            assert Path(linked.path).readlink() == Path(destination.name)
+            assert Path(linked.path).read_bytes() == b"video"
+            assert await MediaItem.filter(lib=lib).count() == 3
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_retained_download_symlink(tmp_path, pending):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            lib.rename_template = "Original/{{episode_code}} - {{title}}"
+            source = Path(item.path)
+            alias = source.with_name("alias.mkv")
+            alias.symlink_to(source.name)
+            await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(alias),
+                dir=str(alias.parent),
+                name=alias.stem,
+                season=1,
+            )
+            downloader = await Downloader.create(name="Test", config="{}", priority=1)
+            await DownloadTask.create(
+                downloader=downloader,
+                name="Alias",
+                dir=str(tmp_path / "downloads" if pending else alias.parent),
+                files=["alias.mkv", "alias.srt"] if pending else ["alias.mkv"],
+                state=DownloadState.COMPLETED,
+                transfer_lib=lib,
+                transfer_pending=pending,
+                transfer_targets={"alias.mkv": str(alias)} if pending else None,
+            )
+
+            if pending:
+                with pytest.raises(organizer.OrganizeDeferredError):
+                    await organizer.organize_items(lib, [parent.id])
+            else:
+                assert await organizer.organize_items(lib, [parent.id]) == {}
+
+            await item.refresh_from_db()
+            assert item.path == str(source)
+            assert source.read_bytes() == b"video"
+            assert alias.readlink() == Path(source.name)
+            assert alias.read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 def test_movie_artwork(tmp_path):
     async def run():
         async with _database():
