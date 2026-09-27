@@ -19,6 +19,8 @@ from pydantic import SecretStr
 from sanic import Sanic
 from torrentool.bencode import Bencode
 from tortoise import Tortoise
+from tortoise.exceptions import OperationalError
+from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
 from app.core.dl import syncer
@@ -165,7 +167,9 @@ def test_completion_recovery(tmp_path, monkeypatch, restart):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("scenario", ["copy", "notification", "delete"])
+@pytest.mark.parametrize(
+    "scenario", ["copy", "notification", "delete", "missing", "conflict"]
+)
 def test_completion_pending(tmp_path, monkeypatch, scenario):
     async def run():
         await Tortoise.init(
@@ -217,6 +221,12 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
                 assert await Notification.all().count() == 0
                 return
 
+            if scenario == "missing":
+                (tmp_path / task.name).unlink()
+            elif scenario == "conflict":
+                library_dir.mkdir()
+                (library_dir / task.name).write_bytes(b"existing video")
+
             def interrupted_copy(_source, destination):
                 Path(destination).write_bytes(b"a")
                 raise OSError(errno.ENOSPC, "Disk is full")
@@ -224,7 +234,7 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
             with monkeypatch.context() as patcher:
                 if scenario == "copy":
                     patcher.setattr(puller.shutil, "copy2", interrupted_copy)
-                else:
+                elif scenario == "notification":
                     patcher.setattr(
                         syncer.Notifications,
                         "send",
@@ -236,6 +246,11 @@ def test_completion_pending(tmp_path, monkeypatch, scenario):
             assert await Notification.all().count() == 0
             if scenario == "copy":
                 assert not (library_dir / task.name).exists()
+            elif scenario == "missing":
+                (tmp_path / task.name).write_bytes(b"abc")
+            elif scenario == "conflict":
+                assert (library_dir / task.name).read_bytes() == b"existing video"
+                (library_dir / task.name).unlink()
 
             await driver.close()
             driver = OpenListDriver(driver.config)
@@ -1827,6 +1842,243 @@ def test_transfer_worker(tmp_path, monkeypatch, method, job_id, cancel_count, fa
             finish.set()
             if running is not None:
                 await asyncio.gather(running, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", list(TransferMethod))
+def test_transfer_retry(tmp_path, method):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            assert await syncer.transfer_files(task, task.files)
+            original = Path(library.dir) / "movie.mkv"
+            organized = Path(library.dir) / "Organized.mkv"
+            assert task.transfer_targets == {"movie.mkv": str(original)}
+            original.rename(organized)
+
+            await DownloadTask.filter(id=task.id).update(
+                transfer_targets={"movie.mkv": str(organized)}
+            )
+
+            # keep the stale instance to exercise the locked database refresh
+            assert await syncer.transfer_files(task, task.files)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {"movie.mkv": str(organized)}
+            assert task.files == ["movie.mkv"]
+            assert organized.read_bytes() == b"movie.mkv"
+            assert not original.exists()
+            source = Path(task.dir) / "movie.mkv"
+            assert source.exists() is (method is not TransferMethod.MOVE)
+            if method is TransferMethod.HARDLINK:
+                assert os.path.samefile(source, organized)
+            elif method is TransferMethod.SYMLINK:
+                assert organized.is_symlink()
+                assert organized.readlink() == source
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_partial_transfer(tmp_path, monkeypatch):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["first.mkv", "second.mkv"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            copy_file = puller.shutil.copy2
+
+            def interrupted_copy(source, destination):
+                if Path(source).name == "second.mkv":
+                    Path(destination).write_bytes(b"partial")
+                    raise OSError(errno.ENOSPC, "Disk is full")
+                return copy_file(source, destination)
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(puller.shutil, "copy2", interrupted_copy)
+                with pytest.raises(OSError, match="Disk is full"):
+                    await syncer.transfer_files(task, files)
+            await task.refresh_from_db()
+            first = Path(library.dir) / files[0]
+            second = Path(library.dir) / files[1]
+            assert task.transfer_targets == {files[0]: str(first)}
+            assert not second.exists()
+
+            assert await syncer.transfer_files(task, files)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {
+                files[0]: str(first),
+                files[1]: str(second),
+            }
+            assert second.read_bytes() == b"second.mkv"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("method", "cross_device"),
+    [
+        (TransferMethod.COPY, False),
+        (TransferMethod.MOVE, False),
+        (TransferMethod.MOVE, True),
+    ],
+)
+@pytest.mark.parametrize("job_id", [None, "offline-job"])
+@pytest.mark.parametrize("failure", ["mapping", "cleanup"])
+def test_transfer_persistence(
+    tmp_path, monkeypatch, method, cross_device, job_id, failure
+):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "movie.mkv"
+            transfer_id = (
+                job_id
+                or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
+            )
+            if cross_device:
+                rename = puller.rename_exclusive
+
+                def cross_device_rename(old, new):
+                    if old == source:
+                        raise OSError(errno.EXDEV, "Different filesystem")
+                    return rename(old, new)
+
+                monkeypatch.setattr(puller, "rename_exclusive", cross_device_rename)
+            update = QuerySet.update
+
+            def failed_update(query, **kwargs):
+                if "transfer_targets" in kwargs:
+                    raise OperationalError("Target persistence interrupted")
+                return update(query, **kwargs)
+
+            def failed_cleanup(*args, **kwargs):
+                raise OSError("Transfer cleanup interrupted")
+
+            with monkeypatch.context() as patcher:
+                if failure == "mapping":
+                    patcher.setattr(QuerySet, "update", failed_update)
+                    error = OperationalError
+                else:
+                    patcher.setattr(syncer, "recover_local_transfer", failed_cleanup)
+                    error = OSError
+                with pytest.raises(error, match="interrupted"):
+                    await syncer.transfer_files(task, task.files, job_id=job_id)
+
+            targets = {"movie.mkv": str(destination)}
+            await task.refresh_from_db()
+            assert task.transfer_targets == (targets if failure == "cleanup" else None)
+            assert destination.read_bytes() == b"movie.mkv"
+            assert puller.owns_local_transfer(destination, transfer_id)
+            assert source.exists() is (method is TransferMethod.COPY or cross_device)
+
+            task = await DownloadTask.get(id=task.id)
+            assert await syncer.transfer_files(task, task.files, job_id=job_id)
+
+            await task.refresh_from_db()
+            assert task.transfer_targets == targets
+            assert destination.read_bytes() == b"movie.mkv"
+            assert source.exists() is (method is TransferMethod.COPY)
+            assert not puller.owns_local_transfer(destination, transfer_id)
+            assert list(destination.parent.iterdir()) == [destination]
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", list(TransferMethod))
+@pytest.mark.parametrize("obstacle", ["missing", "conflict"])
+@pytest.mark.parametrize("blocked", ["first.mkv", "second.mkv"])
+def test_transfer_result(tmp_path, method, obstacle, blocked):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["first.mkv", "second.mkv"]
+            task, library = await _create_transfer_task(tmp_path, method, files)
+            source = Path(task.dir) / blocked
+            destination = Path(library.dir) / blocked
+            if obstacle == "missing":
+                source.unlink()
+            else:
+                destination.parent.mkdir()
+                destination.write_bytes(b"existing video")
+
+            assert not await syncer.transfer_files(task, files)
+
+            completed = next(name for name in files if name != blocked)
+            transferred = Path(library.dir) / completed
+            transferred_inode = transferred.lstat().st_ino
+            await task.refresh_from_db()
+            assert task.transfer_targets == {completed: str(transferred)}
+            assert not await syncer.transfer_files(task, files)
+            assert transferred.lstat().st_ino == transferred_inode
+            if obstacle == "missing":
+                assert not destination.exists()
+                source.write_bytes(blocked.encode())
+            else:
+                assert destination.read_bytes() == b"existing video"
+                assert source.read_bytes() == blocked.encode()
+                destination.unlink()
+
+            assert await syncer.transfer_files(task, files)
+            assert await syncer.transfer_files(task, files)
+
+            await task.refresh_from_db()
+            assert task.transfer_targets == {
+                name: str(Path(library.dir) / name) for name in files
+            }
+            assert transferred.lstat().st_ino == transferred_inode
+            for name in files:
+                assert (Path(library.dir) / name).read_bytes() == name.encode()
+            assert source.exists() is (method is not TransferMethod.MOVE)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", list(TransferMethod))
+def test_transfer_same_path(tmp_path, method):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            library.dir = task.dir
+            await library.save(update_fields=["dir"])
+            source = Path(task.dir) / "movie.mkv"
+
+            assert await syncer.transfer_files(task, task.files)
+
+            await task.refresh_from_db()
+            assert task.transfer_targets == {"movie.mkv": str(source)}
+            assert source.read_bytes() == b"movie.mkv"
+            assert list(source.parent.iterdir()) == [source]
+        finally:
             await Tortoise.close_connections()
 
     asyncio.run(run())
