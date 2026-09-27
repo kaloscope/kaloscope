@@ -69,23 +69,22 @@
   }
 
   /**
-   * Resolve app-level video URL values into `xgplayer` URL values.
+   * Resolve playback URLs for `xgplayer`.
    *
-   * Make media proxy URLs absolute so player plugins can report network errors.
+   * Use absolute media proxy URLs so plugins can report network errors.
    *
-   * @param url - The app-level video URL.
+   * @param url - The app URL or inline `MPD` XML.
    * @param videoType - The source video type.
-   * @returns A URL value `xgplayer` can consume.
+   * @returns A playback URL or a data URL for inline `MPD` XML.
    */
   function resolvePlaybackUrl(url: string, videoType?: string | null): string {
     // dash sources are passed as inline `MPD` XML strings
     if (videoType?.toLowerCase() === 'dash' && /^\s*(?:<\?xml[\s\S]*?)?<MPD[\s>]/i.test(url)) {
       const origin = globalThis.location?.origin ?? '';
       if (origin) {
-        // make app proxy paths absolute
         url = url.replace(/(<BaseURL>)\/_api\//g, `$1${origin}/_api/`);
       }
-      // encode as UTF-8 first so `btoa` can safely handle non-Latin XML content
+      // encode non-Latin XML as UTF-8 before `btoa`
       const bytes = new TextEncoder().encode(url);
       let binary = '';
       for (const byte of bytes) {

@@ -1,4 +1,4 @@
-"""Native library locks share the configured workspace across workers."""
+"""Unit tests for media library locks."""
 
 import asyncio
 import hashlib
@@ -72,7 +72,7 @@ asyncio.run(run())
             async with library_lock(str(tmp_path / "another-library")):
                 assert await probe() == 74
         assert await probe() == 73
-        # abrupt process exit leaves no soft lock that could block future writers
+        # process exit releases the native lock
         async with await library_lock(str(directory)).acquire(timeout=1):
             pass
 

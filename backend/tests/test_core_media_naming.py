@@ -1,4 +1,4 @@
-"""The naming field accepts data placeholders, never executable templates."""
+"""Unit tests for media naming templates."""
 
 from pathlib import PurePosixPath
 

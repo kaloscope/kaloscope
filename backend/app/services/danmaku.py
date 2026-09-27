@@ -183,7 +183,7 @@ class DanmakuService:
 
     @classmethod
     async def match_danmakus(cls, path: str) -> DanmakuWrapper:
-        """Match danmakus for the given media resource.
+        """Match and cache danmakus for a media path.
 
         Fetch outside the lock and use current media paths for cache access.
         Discard fetched comments if the file or its confirmed match changes.
@@ -599,7 +599,7 @@ class DanmakuService:
 
     @classmethod
     async def confirm_episode(cls, path: str, meta: DanmakuMeta) -> DanmakuWrapper:
-        """Confirm the episode match result for the given media resource.
+        """Confirm an episode match and cache its danmakus.
 
         Recover organization before resolving paths or updating caches. Fetch outside
         the lock and discard results if the file content changes.
@@ -674,10 +674,9 @@ class DanmakuService:
         *,
         episode_ids: list[int] | None = None,
     ) -> bool:
-        """Refresh the danmaku metadata of the episodes under an anime.
+        """Refresh episode danmaku matches under the library lock.
 
-        Recover organization and reload episodes under the library lock after
-        fetching remote metadata.
+        Fetch metadata before locking, then recover organization and reload episodes.
 
         Args:
             item: The media item or a confirmed episode.

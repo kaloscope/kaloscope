@@ -464,9 +464,7 @@ async def sync_tasks(
 
 
 async def _complete_openlist_tasks(task_ids: list[int]):
-    """Consume durable local completion work independently of remote snapshots.
-
-    Retry incomplete transfers before acknowledging completion or notifying users.
+    """Retry OpenList transfers before acknowledging completion or notifying users.
 
     Args:
         task_ids: The tasks selected for this synchronization cycle.
@@ -516,10 +514,9 @@ async def _complete_openlist_tasks(task_ids: list[int]):
 
 
 async def _resume_transfers():
-    """Resume durable RPC transfers independently of remote download snapshots.
+    """Resume saved RPC transfers without repeating completion notifications.
 
-    Keep incomplete, failed, or cancelled transfers pending for the next cycle.
-    Reuse persisted file destinations without repeating completion notifications.
+    Retry failed, incomplete, or cancelled transfers without remote task data.
     """
     tasks = await DownloadTask.filter(
         state=DownloadState.COMPLETED, transfer_pending=True
@@ -537,9 +534,8 @@ async def _resume_transfers():
 async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
     """Synchronize tasks through a local HTTP/RPC downloader.
 
-    Persist completion and pending local transfer work together so interrupted
-    or incomplete transfers can resume even after the remote task disappears.
-    Preserve known files when a response omits a usable file list.
+    Save completion with pending transfers so retries survive remote task removal.
+    Keep known files when a response omits a usable file list.
 
     Args:
         driver: The configured RPC downloader driver.
@@ -817,7 +813,6 @@ def _transfer_names(task: DownloadTask, files: list[str]) -> list[str]:
         The destination paths in input order, or the original paths if substitution
         is disabled or produces duplicate names.
     """
-    # apply file name substitution if `sub_pattern` is specified
     new_files = files
     if task.sub_pattern:
         replaced = []
@@ -862,9 +857,8 @@ def _same_transfer_file(source: Path, destination: Path) -> bool:
 async def backfill_transfer_targets(lib: MediaLib):
     """Recover published transfers and record their library destinations.
 
-    The caller must hold the library lock. Use recorded paths, ownership markers,
-    or file identity to confirm destinations. Save paths before cleanup, and skip
-    invalid substitutions without losing recorded destinations.
+    The caller must hold the library lock. Save confirmed paths before cleanup,
+    preserving recorded destinations when name substitution is invalid.
 
     Args:
         lib: The media library whose existing transfer destinations are recorded.
@@ -934,9 +928,8 @@ async def transfer_files(
 ) -> bool:
     """Transfer files and persist their current library destinations.
 
-    Recover pending organization before resolving transfer destinations.
-    Keep ownership markers until each path is saved. Skip unrelated targets and
-    tasks removed or detached while waiting for the library lock.
+    Recover organization and recheck the task's library association under the lock.
+    Save each destination before cleaning up its transfer markers.
 
     Args:
         task: The download task.

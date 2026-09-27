@@ -1,4 +1,4 @@
-"""Filesystem and database behavior of metadata-driven media organization."""
+"""Unit tests for media organization and recovery."""
 
 import asyncio
 import hashlib

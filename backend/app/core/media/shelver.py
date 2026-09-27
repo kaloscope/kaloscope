@@ -132,12 +132,10 @@ async def gen_nfo(
     item_id: int | None = None,
     refresh: bool = False,
 ) -> bool:
-    """Generate NFO file from the given context.
+    """Generate an NFO using the media item's current path when available.
 
-    Recover pending organization before writing for an indexed media item.
-
-    Persist pending organization with immediate metadata updates so a restart
-    cannot lose work before the filesystem observer records publication.
+    Recover organization before writing indexed media. When refreshing metadata,
+    persist any follow-up organization so it survives restarts.
 
     Args:
         nfo_type: The type of the NFO file (e.g. `movie`, `tvshow`).
@@ -317,7 +315,7 @@ def parse_nfo(lib_type: LibType, path: Path | str) -> MediaMeta | None:
 async def update_metadata(
     lib: MediaLib, path: Path | str, *, fallback: dict | None = None
 ) -> list[int]:
-    """Update the metadata of the media item corresponding to the given NFO file.
+    """Update media items matched by their NFO path.
 
     Args:
         lib: The media library instance.

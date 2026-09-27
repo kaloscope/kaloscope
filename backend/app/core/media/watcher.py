@@ -366,10 +366,9 @@ class LibWatcher:
                 self._scanning_paths.remove(path)
 
     async def _enqueue_events(self, lib: MediaLib, *, backfill_nfo_events: bool = True):
-        """Scan the directory for existing files and enqueue events.
+        """Enqueue scan events under the caller's library lock.
 
-        Fill missing video hashes and sizes while the caller holds the library
-        lock, without treating incomplete identities as file replacements.
+        Fill missing hashes and sizes without treating them as file replacements.
 
         Args:
             lib: The media library instance.
@@ -496,9 +495,8 @@ def _ingest_params(info: MediaPathInfo) -> dict:
 async def consume_event(event: MediaEvent):
     """Consume a media event under its library lock.
 
-    Recover pending organization before handling the event. Persist pending
-    workflows with metadata, then fire them after releasing the lock. Save progress
-    after each successful trigger so failures can be retried.
+    Recover organization and persist ingest work under the lock. Run workflows
+    after releasing it, saving progress after each successful trigger.
 
     Args:
         event: The persisted media event to process.
@@ -533,9 +531,8 @@ async def consume_event(event: MediaEvent):
 async def _consume_event(event: MediaEvent):
     """Persist pending work before organizing outside the metadata transaction.
 
-    The caller must hold the library lock and recover pending organization plans.
-    Preserve records and NFO associations at source paths reused before delayed
-    movement events are consumed.
+    The caller must hold the library lock and recover pending plans first.
+    Preserve media and NFO associations at reused paths when handling delayed events.
 
     Args:
         event: The media event with its current library instance attached.
@@ -739,17 +736,15 @@ async def _handle_deleted(event: MediaEvent):
 
 
 async def _handle_moved(event: MediaEvent) -> list[MediaPathInfo] | None:
-    """Handle a movement without deleting a reused source path.
+    """Handle a move without deleting a reused source path.
 
-    Retain the source item's metadata and history when another file now occupies
-    its path, including when the original destination has already been deleted.
+    Preserve its metadata and history even if the destination no longer exists.
 
     Args:
         event: The media event.
 
     Returns:
-        A list of media path info generated from the moved media items,
-        or None if the destination path is not accepted by the handler.
+        The destination paths needing ingest, or `None` if none are needed.
     """
     source = Path(event.src_path)
     if not (source.exists() or source.is_symlink()):

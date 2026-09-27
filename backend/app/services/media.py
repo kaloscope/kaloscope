@@ -261,9 +261,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             item: The current media item whose library lock the caller holds.
 
         Returns:
-            `True` if a previously known hash or size changed, or `False` if only
-            missing values were filled, both values are unchanged, or the file
-            is unavailable.
+            `True` if a known hash or size changed. `False` if values only needed
+            backfilling, are unchanged, or the file is missing or not a regular file.
         """
         if not Path(item.path).is_file():
             return False
@@ -323,7 +322,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Args:
             item: The season media item.
             meta: The season metadata object.
-            episode_ids: The episode IDs to refresh.
+            episode_ids: The original episode IDs, or `None` to use current children.
         """
         from app.core.media.shelver import gen_nfo, get_nfo_path
 

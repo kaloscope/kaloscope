@@ -9,16 +9,14 @@ from app.core.config import KaloscopeConfig
 def library_lock(directory: str) -> AsyncFileLock:
     """Create a native file lock for the canonical library path.
 
-    Workers share a library-scoped path in `workspace/temp`, like submission locks.
-    Acquisition waits asynchronously so competing writers can finish and release
-    their lock without blocking the event loop. Process exit releases the OS lock.
+    Share a lock path in `workspace/temp` across workers. Wait without blocking
+    the event loop; process exit releases the OS lock.
 
     Args:
-        directory: The media library root directory used to identify the lock.
+        directory: The library root, resolved to identify the shared lock.
 
     Returns:
-        An independent asynchronous native file lock for the library that must be
-        acquired before use.
+        A new, unacquired asynchronous file lock for the library.
     """
     key = hashlib.sha256(str(Path(directory).resolve()).encode()).hexdigest()
     return AsyncFileLock(

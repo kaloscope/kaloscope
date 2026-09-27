@@ -40,7 +40,7 @@ _METADATA = (
 
 
 class OrganizePendingError(RuntimeError):
-    """A persisted organization must finish before this library is scanned."""
+    """Indicate that a persisted organization plan could not finish."""
 
 
 class OrganizeDeferredError(RuntimeError):
@@ -126,8 +126,7 @@ def _fingerprint(path: Path) -> list[int]:
         path: The file or symlink path to inspect without following the link.
 
     Returns:
-        A list containing the device ID, inode number, byte size, and modification
-        time in nanoseconds.
+        The device ID, inode, byte size, and modification time in nanoseconds.
     """
     stat = path.lstat()
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
@@ -428,9 +427,8 @@ async def _plan(
 ):
     """Build a recoverable organization plan while holding the library lock.
 
-    Validate destinations, metadata, companion references, and download ownership
-    before recording filesystem changes. Preserve media IDs and shared resources.
-    Normalize case and Unicode when checking download source paths.
+    Validate paths, metadata, references, and download ownership before any move.
+    Preserve media IDs and shared resources.
 
     Args:
         lib: The media library containing the naming template and root path.
@@ -438,8 +436,7 @@ async def _plan(
         parent: The group's directory item, or `None` for a standalone movie.
         season: The resolved group season used for the destination directory and
             missing episode metadata, or `None` to use the parent metadata.
-        split: Whether this group is one part of a source directory being split
-            into separate season directories.
+        split: Whether the source directory is being split into season groups.
 
     Raises:
         OSError: If required files cannot be inspected or read.
@@ -524,8 +521,7 @@ async def _plan(
             elif target_dir not in source_dir.parents:
                 raise ValueError("nonempty destination has no matching NFO identity")
             else:
-                # merge into the series directory only when every indexed parent
-                # at the destination identifies the same show
+                # merge only when all destination parents identify the same show
                 if target_parent is not None and (
                     not _identity(parent_meta)
                     or (target_parent.nfo_source, target_parent.unique_id)
@@ -765,8 +761,7 @@ async def _plan(
 
     parent_data = None
     if target_dir != root:
-        # use the retained destination NFO's metadata when merging so the stored
-        # metadata and mtime describe the same file
+        # keep stored metadata and modification time aligned with the retained NFO
         stored_meta = target_meta if reuse_nfo else parent_meta
         parent_data = {
             "id": target_parent.id
@@ -1064,10 +1059,9 @@ def _move_files(root: Path, payload: dict):
 
 
 async def _write_in_thread(function, *args):
-    """Run a filesystem writer without releasing its lock on cancellation.
+    """Run a filesystem writer to completion, even when cancelled.
 
-    The caller holds the library lock until this function finishes waiting for
-    the worker thread, including when the calling task is cancelled.
+    The caller must hold the library lock until this function exits.
 
     Args:
         function: The synchronous filesystem operation to run in a worker thread.
@@ -1084,7 +1078,7 @@ async def _write_in_thread(function, *args):
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        # keep the caller's library lock until its filesystem writer has stopped
+        # wait for the writer before releasing the caller's lock
         while not task.done():
             with suppress(asyncio.CancelledError, Exception):
                 await asyncio.shield(task)
@@ -1096,10 +1090,9 @@ async def _write_in_thread(function, *args):
 async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     """Finish a journal's filesystem and database updates under the library lock.
 
-    Leave episode NFOs eligible for scanning when their complete metadata was
-    not included in the journal, including plans persisted by older versions.
-    Retain filesystem events for normal consumption because external writers can
-    reuse source paths or change destinations before the database commit.
+    Keep episode NFOs scannable if the journal lacks full metadata, including
+    legacy plans. Retain filesystem events for reused sources or destinations
+    changed by external writers before the database commit.
 
     Args:
         lib: The media library whose lock is held by the caller.
@@ -1275,10 +1268,8 @@ async def _season_groups(
 async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
     """Organize NFO-backed groups while holding the library lock throughout.
 
-    Pending plans are recovered first. Groups with unsafe or incomplete plans
-    are logged and skipped without creating a new journal. Persist inherited
-    seasons before splitting so retries do not depend on an edited parent NFO.
-    Defer groups with unfinished download transfers while processing other groups.
+    Recover pending plans, skip invalid groups, and continue past deferred transfers.
+    Save inherited seasons before splitting so retries survive parent NFO edits.
 
     Args:
         lib: The media library whose lock is held by the caller.
