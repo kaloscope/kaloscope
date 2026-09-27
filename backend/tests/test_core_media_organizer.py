@@ -7,7 +7,9 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from filelock import Timeout
 from lxml import etree
@@ -21,6 +23,7 @@ from app.core.media.watcher import LibWatcher
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
+from app.services.danmaku import Danmaku, DanmakuAnime, DanmakuMeta, DanmakuService
 
 
 @asynccontextmanager
@@ -1411,6 +1414,162 @@ def test_subtitle_symlink(tmp_path, absolute, template):
             assert moved_link.resolve() == target.resolve()
             assert moved_link.read_text() == "subtitles"
             assert moved_link.readlink().is_absolute() == absolute
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "operation", ["confirm_anime", "refresh_episodes", "confirm_episode"]
+)
+def test_danmaku_scope(tmp_path, monkeypatch, operation):
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    root = tmp_path / "library"
+    root.mkdir()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
+
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(root),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="Merged/{{episode_code}}",
+                danmaku_server="https://danmaku.example",
+            )
+            parents, items, caches = [], [], []
+            for episode, name in enumerate(("Original", "Merged"), 1):
+                directory = root / name
+                directory.mkdir()
+                parent_nfo = directory / f"{name}.nfo"
+                _nfo(parent_nfo, "Show", "tvshow", "<season>1</season>")
+                parent = await MediaItem.create(
+                    lib=lib,
+                    path=str(directory),
+                    dir=str(directory),
+                    name=name,
+                    nfo_path=str(parent_nfo),
+                    season=1,
+                )
+                video = directory / f"old{episode}.mkv"
+                video.write_bytes(b"video")
+                nfo = video.with_suffix(".nfo")
+                _nfo(
+                    nfo,
+                    "Episode",
+                    "episodedetails",
+                    f"<season>1</season><episode>{episode}</episode>",
+                )
+                cache = directory / f".{video.stem}.json"
+                cache.write_text("[]")
+                item = await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(video),
+                    dir=str(directory),
+                    name=video.stem,
+                    nfo_path=str(nfo),
+                    season=1,
+                    episode=episode,
+                    danmaku_path=str(cache),
+                    danmaku_meta={
+                        "anime_id": "old",
+                        "episode_id": str(episode),
+                        "type": "tvseries",
+                    },
+                )
+                parents.append(parent)
+                items.append(item)
+                caches.append(cache)
+            loading, release, loaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            comments = [Danmaku(text="Updated", start=1)]
+
+            async def load(*args):
+                loading.set()
+                await release.wait()
+                loaded.set()
+                return comments
+
+            async def respond(request):
+                assert request.url.path == "/api/v2/bangumi/new"
+                if operation != "confirm_episode":
+                    await load()
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "bangumi": {
+                            "episodes": [
+                                {"episodeNumber": "1", "episodeId": "new-1"},
+                                {"episodeNumber": "2", "episodeId": "new-2"},
+                            ]
+                        },
+                    },
+                )
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(respond)
+            ) as client:
+                app = SimpleNamespace(ctx=SimpleNamespace(httpx=client))
+                monkeypatch.setattr("app.services.danmaku.Sanic.get_app", lambda: app)
+                monkeypatch.setattr(DanmakuService, "load_from_server", load)
+                meta = DanmakuAnime(anime_id="new", type="tvseries")
+                if operation == "confirm_anime":
+                    pending = DanmakuService.confirm_anime(parents[0].path, meta)
+                elif operation == "refresh_episodes":
+                    pending = DanmakuService.refresh_episodes(parents[0], meta)
+                else:
+                    pending = DanmakuService.confirm_episode(
+                        items[0].path,
+                        DanmakuMeta(**meta.model_dump(), episode_id="new-1"),
+                    )
+                request = asyncio.create_task(pending)
+                original_plan = organizer._plan
+
+                async def plan_with_response(*args, **kwargs):
+                    payload = await original_plan(*args, **kwargs)
+                    release.set()
+                    await asyncio.wait_for(loaded.wait(), timeout=1)
+                    with pytest.raises(TimeoutError):
+                        await asyncio.wait_for(asyncio.shield(request), timeout=0.1)
+                    assert caches[0].exists()
+                    return payload
+
+                try:
+                    await asyncio.wait_for(loading.wait(), timeout=1)
+                    monkeypatch.setattr(organizer, "_plan", plan_with_response)
+                    async with await library_lock(lib.dir).acquire(timeout=1):
+                        await organizer.organize_items(lib, [parents[0].id])
+                    result = await asyncio.wait_for(request, timeout=3)
+
+                    await items[0].refresh_from_db()
+                    await items[1].refresh_from_db()
+                    assert items[0].path == str(root / "Merged" / "S01E01.mkv")
+                    assert items[0].parent_id == items[1].parent_id == parents[1].id
+                    assert items[0].danmaku_meta["episode_id"] == "new-1"
+                    new_cache = root / "Merged" / ".S01E01.json"
+                    if operation == "confirm_episode":
+                        assert result.comments == comments
+                        assert items[0].danmaku_path == str(new_cache)
+                        assert (
+                            await DanmakuService.load_from_cache(new_cache) == comments
+                        )
+                    else:
+                        assert result is True
+                        assert items[0].danmaku_path is None
+                        assert not new_cache.exists()
+                    assert not caches[0].exists()
+                    assert items[1].danmaku_path == str(caches[1])
+                    assert items[1].danmaku_meta["anime_id"] == "old"
+                    assert caches[1].read_text() == "[]"
+                    assert not await MediaItem.filter(id=parents[0].id).exists()
+                    assert not await MediaEvent.filter(event_type="organize").exists()
+                finally:
+                    release.set()
+                    if not request.done():
+                        request.cancel()
+                    await asyncio.gather(request, return_exceptions=True)
 
     asyncio.run(run())
 
