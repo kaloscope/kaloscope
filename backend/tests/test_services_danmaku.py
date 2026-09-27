@@ -740,7 +740,9 @@ def test_cache_deletion(library, tmp_path, monkeypatch, change, recorded_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("change", ["moved", "removed", "confirmed"])
+@pytest.mark.parametrize(
+    "change", ["moved", "pending", "published", "conflict", "removed", "confirmed"]
+)
 @pytest.mark.parametrize("recorded_path", [False, True])
 def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
     async def run():
@@ -780,6 +782,7 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
             if recorded_path:
                 await MediaItem.filter(id=item.id).update(danmaku_path=str(cache))
             current_cache = cache
+            event = None
             metadata = {"anime_id": "new", "episode_id": "manual", "type": "tvseries"}
             refresh = asyncio.create_task(
                 danmaku.DanmakuService.refresh_episodes(
@@ -795,22 +798,58 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                     assert not refresh.done()
                     assert cache.read_text() == "original"
 
-                    if change == "moved":
+                    if change in {"moved", "pending", "published", "conflict"}:
                         directory = tmp_path / "Renamed"
                         directory.mkdir()
+                        moved_video = directory / "Renamed.mkv"
                         current_cache = directory / (
                             "cached.json" if recorded_path else ".Renamed.mkv.json"
                         )
-                        cache.rename(current_cache)
-                        await MediaItem.filter(id=item.id).update(
-                            parent_id=destination.id,
-                            path=str(directory / "Renamed.mkv"),
-                            dir=str(directory),
-                            name="Renamed.mkv",
-                            episode=2,
-                            danmaku_path=str(current_cache) if recorded_path else None,
-                        )
-                        cache.write_text("replacement")
+                        data = {
+                            "parent_id": destination.id,
+                            "path": str(moved_video),
+                            "dir": str(directory),
+                            "name": "Renamed.mkv",
+                            "episode": 2,
+                            "danmaku_path": str(current_cache)
+                            if recorded_path
+                            else None,
+                        }
+                        if change == "moved":
+                            cache.rename(current_cache)
+                            await MediaItem.filter(id=item.id).update(**data)
+                            cache.write_text("replacement")
+                        else:
+                            video = Path(item.path)
+                            video.write_bytes(b"video")
+                            moves = [(video, moved_video), (cache, current_cache)]
+                            event = await MediaEvent.create(
+                                lib=lib,
+                                src_path=item.path,
+                                event_type="organize",
+                                payload={
+                                    "moves": [
+                                        {
+                                            "src": str(source),
+                                            "dst": str(target),
+                                            "identity": organizer._fingerprint(source),
+                                        }
+                                        for source, target in moves
+                                    ],
+                                    "updates": [{"id": item.id, **data}],
+                                    "parent": None,
+                                    "delete_parent": None,
+                                    "mapping": {item.path: str(moved_video)},
+                                    "creates": [],
+                                    "symlinks": [],
+                                    "nfo_edits": [],
+                                },
+                            )
+                            if change == "published":
+                                for source, target in moves:
+                                    source.rename(target)
+                            elif change == "conflict":
+                                moved_video.write_bytes(b"unrelated")
                     elif change == "removed":
                         await item.delete()
                     else:
@@ -820,10 +859,25 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                         cache.write_text("manual")
                     added = await media(lib, "added.mkv", parent=parent, episode=3)
 
-                assert await asyncio.wait_for(refresh, timeout=3) is True
+                if change == "conflict":
+                    with pytest.raises(organizer.OrganizePendingError):
+                        await asyncio.wait_for(refresh, timeout=3)
+                else:
+                    assert await asyncio.wait_for(refresh, timeout=3) is True
                 current = await MediaItem.get_or_none(id=item.id)
 
-                if change == "removed":
+                if change == "conflict":
+                    assert current.path == item.path
+                    assert current.parent_id == parent.id
+                    assert current.danmaku_meta["episode_id"] == "old-1"
+                    assert current.danmaku_path == (
+                        str(cache) if recorded_path else None
+                    )
+                    assert cache.read_text() == "original"
+                    assert not current_cache.exists()
+                    assert video.read_bytes() == b"video"
+                    assert moved_video.read_bytes() == b"unrelated"
+                elif change == "removed":
                     assert current is None
                     assert cache.read_text() == "original"
                 elif change == "confirmed":
@@ -835,7 +889,17 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                     assert current.danmaku_meta["episode_id"] == "new-2"
                     assert current.danmaku_path is None
                     assert not current_cache.exists()
-                    assert cache.read_text() == "replacement"
+                    if change == "moved":
+                        assert cache.read_text() == "replacement"
+                    else:
+                        assert current.path == str(moved_video)
+                        assert not cache.exists()
+                        assert not video.exists()
+                        assert moved_video.read_bytes() == b"video"
+                if event is not None:
+                    assert await MediaEvent.filter(id=event.id).exists() is (
+                        change == "conflict"
+                    )
                 for untouched in (other, added):
                     await untouched.refresh_from_db()
                     assert untouched.danmaku_meta["anime_id"] == "old"
