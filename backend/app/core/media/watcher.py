@@ -33,7 +33,7 @@ from watchdog.observers.api import BaseObserver
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
-from app.core.media.shelver import is_nfo, update_metadata
+from app.core.media.shelver import get_nfo_path, is_nfo, update_metadata
 from app.models.flow import GraphCategory
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, UserHistory
@@ -522,7 +522,7 @@ async def consume_event(event: MediaEvent):
                     "bootparams": [_ingest_params(info) for info in result]
                 }
                 await event.save(update_fields=["event_type", "payload"])
-        pending = event.payload["bootparams"]
+        pending = await _resume_ingest(event)
 
     # fire workflows after releasing the lock used by NFO writers
     for index, params in enumerate(pending):
@@ -532,6 +532,60 @@ async def consume_event(event: MediaEvent):
         event.payload = {"bootparams": pending[index + 1 :]}
         await event.save(update_fields=["payload"])
     await event.delete()
+
+
+async def _resume_ingest(event: MediaEvent) -> list[dict]:
+    """Refresh pending ingest parameters from current media records.
+
+    The caller must hold the library lock. Fill missing file hashes and sizes
+    before triggering workflows.
+
+    Args:
+        event: The ingest event containing unfinished workflow parameters.
+
+    Returns:
+        The remaining workflow parameters with current paths and parent metadata.
+    """
+    payload = event.payload
+    pending = []
+    for params in payload["bootparams"]:
+        # skip media removed after the event was persisted
+        if params["item_id"] is not None:
+            current = await MediaItem.get_or_none(
+                id=params["item_id"], lib_id=event.lib_id
+            )
+            if current is None:
+                continue
+            if current.hash is None or current.size is None:
+                await MediaItemService.refresh_hash_and_size(current)
+            parent = (
+                await MediaItem.get_or_none(id=current.parent_id)
+                if current.parent_id
+                else None
+            )
+            info = MediaPathInfo(Path(current.path))
+            params["item_path"] = info.item_path
+            params["item_name"] = info.item_name
+            if current.nfo_path or params["nfo_path"]:
+                nfo_path = current.nfo_path
+                if not nfo_path and parent and event.lib.lib_type == LibType.MOVIE:
+                    nfo_path = parent.nfo_path
+                params["nfo_path"] = nfo_path or get_nfo_path(current.path)
+            for field in ("year", "season", "episode"):
+                if (value := getattr(current, field)) is not None:
+                    params[field] = value
+            if parent is not None and event.lib.lib_type == LibType.TV_SHOW:
+                params["title"] = parent.title or params["title"]
+                params["series_id"] = parent.unique_id
+                params["nfo_source"] = parent.nfo_source
+                if parent.year is not None:
+                    params["year"] = parent.year
+            elif current.title:
+                params["title"] = current.title
+        pending.append(params)
+    event.payload = {"bootparams": pending}
+    await event.save(update_fields=["payload"])
+    return pending
 
 
 async def _handle_modified(event: MediaEvent):

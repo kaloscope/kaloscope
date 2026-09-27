@@ -988,3 +988,235 @@ def test_ingest_persistence(tmp_path, monkeypatch, error):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("lib_type", "nfo"),
+    [
+        (LibType.MOVIE, "default"),
+        (LibType.MOVIE, "recorded"),
+        (LibType.MOVIE, "shared"),
+        (LibType.MOVIE, "unrequested"),
+        (LibType.TV_SHOW, "default"),
+        (LibType.TV_SHOW, "recorded"),
+    ],
+)
+def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo):
+    old = tmp_path / "Old.mkv"
+    old.write_bytes(b"unrelated replacement")
+    video = tmp_path / "Current" / "Current S02E03.mkv"
+    video.parent.mkdir()
+    video.write_bytes(b"current video")
+    is_show = lib_type == LibType.TV_SHOW
+    parent_nfo = video.parent / "Current.nfo" if nfo == "shared" or is_show else None
+    recorded_nfo = video.parent / "metadata.nfo" if nfo == "recorded" else None
+    for path in (parent_nfo, recorded_nfo):
+        if path is not None:
+            path.write_text("<metadata/>")
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(video.parent),
+                dir=str(video.parent),
+                name=video.parent.name,
+                title="Current series",
+                year=2024,
+                unique_id="42",
+                nfo_source="tmdb",
+                nfo_path=str(parent_nfo) if parent_nfo else None,
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(video.parent),
+                name=video.stem,
+                title="Current title",
+                year=2026,
+                season=2 if is_show else None,
+                episode=3 if is_show else None,
+                nfo_path=str(recorded_nfo) if recorded_nfo else None,
+            )
+            params = {
+                "item_id": item.id,
+                "item_path": str(old),
+                "item_name": old.stem,
+                "nfo_path": str(old.with_suffix(".nfo"))
+                if nfo != "unrequested"
+                else None,
+                "nfo_type": (
+                    None if nfo == "unrequested" else "episode" if is_show else "movie"
+                ),
+                "language": "en-US",
+                "title": "Old title",
+                "year": 1990,
+                "season": 1 if is_show else None,
+                "episode": 1 if is_show else None,
+                "series_id": "old-series" if is_show else None,
+                "nfo_source": "old-source" if is_show else None,
+                "page_num": 1,
+                "page_size": 1,
+            }
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(old),
+                event_type="ingest",
+                payload={"bootparams": [params]},
+            )
+
+            async def fire(*_args, bootparams):
+                async with await library_lock(lib.dir).acquire(timeout=1):
+                    pending = await MediaEvent.get(id=event.id)
+                    assert pending.payload["bootparams"] == [bootparams]
+                    await item.refresh_from_db()
+                    assert item.hash == hashlib.md5(b"current video").hexdigest()
+                    assert item.size == len(b"current video")
+
+            fire = AsyncMock(side_effect=fire)
+            monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+            await watcher.consume_event(event)
+
+            assert fire.await_count == 1
+            result = fire.call_args.kwargs["bootparams"]
+            expected_nfo = recorded_nfo or (
+                parent_nfo if nfo == "shared" else video.with_suffix(".nfo")
+            )
+            assert result == {
+                **params,
+                "item_path": str(video),
+                "item_name": video.stem,
+                "nfo_path": str(expected_nfo) if nfo != "unrequested" else None,
+                "title": "Current series" if is_show else "Current title",
+                "year": 2024 if is_show else 2026,
+                "season": 2 if is_show else None,
+                "episode": 3 if is_show else None,
+                "series_id": "42" if is_show else None,
+                "nfo_source": "tmdb" if is_show else None,
+            }
+            assert not await MediaEvent.filter(id=event.id).exists()
+            assert old.read_bytes() == b"unrelated replacement"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", ["removed", "other_library", "unbound"])
+def test_ingest_scope(tmp_path, monkeypatch, state):
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            other = await MediaLib.create(
+                name="Other",
+                dir=str(tmp_path / "Other"),
+                lib_type=LibType.MOVIE,
+                priority=2,
+            )
+            item = await MediaItem.create(
+                lib=other if state == "other_library" else lib,
+                path=str(tmp_path / "Movie.mkv"),
+                dir=str(tmp_path),
+                name="Movie",
+            )
+            if state in {"removed", "unbound"}:
+                await item.delete()
+            params = {
+                "item_id": None if state == "unbound" else item.id,
+                "item_path": item.path,
+                "item_name": item.name,
+                "nfo_path": None,
+            }
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=item.path,
+                event_type="ingest",
+                payload={"bootparams": [params]},
+            )
+
+            await watcher.consume_event(event)
+
+            if state == "unbound":
+                assert fire.await_count == 1
+                assert fire.call_args.kwargs["bootparams"] == params
+            else:
+                fire.assert_not_awaited()
+            assert not await MediaEvent.filter(id=event.id).exists()
+            if state == "other_library":
+                assert await MediaItem.filter(id=item.id, lib=other).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error", [OSError, asyncio.CancelledError])
+def test_ingest_hash_retry(tmp_path, monkeypatch, error):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    video = tmp_path / "Movie.mkv"
+    video.write_bytes(b"video")
+    video.with_suffix(".nfo").write_text("<movie><title>Movie</title></movie>")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        db_url = f"sqlite://{tmp_path / 'media.sqlite3'}"
+        await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(video), event_type="created"
+            )
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(
+                    watcher.MediaItemService,
+                    "refresh_hash_and_size",
+                    AsyncMock(side_effect=error("hash interrupted")),
+                )
+                with pytest.raises(error, match="hash interrupted"):
+                    await watcher.consume_event(event)
+
+            item = await MediaItem.get(lib_id=lib.id)
+            pending = await MediaEvent.get(id=event.id)
+            assert pending.event_type == "ingest"
+            assert pending.payload["bootparams"][0]["item_id"] == item.id
+            assert item.hash is None and item.size is None
+            fire.assert_not_awaited()
+
+            await Tortoise.close_connections()
+            await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+            await watcher.consume_event(pending)
+
+            await item.refresh_from_db()
+            assert item.hash == hashlib.md5(b"video").hexdigest()
+            assert item.size == len(b"video")
+            assert fire.await_count == 1
+            assert fire.call_args.kwargs["bootparams"]["item_id"] == item.id
+            assert not await MediaEvent.filter(id=event.id).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
