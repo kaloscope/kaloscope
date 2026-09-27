@@ -3,7 +3,6 @@ import errno
 import hashlib
 import os
 import re
-import shutil
 from datetime import datetime, timedelta
 from functools import cached_property
 from multiprocessing.managers import DictProxy
@@ -771,9 +770,10 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
 async def transfer_files(
     task: DownloadTask, files: list[str] | None, *, job_id: str | None = None
 ):
-    """Transfer completed download files under the media library lock.
+    """Publish completed download files under the media library lock.
 
     Skip tasks removed or detached while waiting for the lock.
+    Copy and move files atomically to keep partial copies out of the library.
 
     Args:
         task: The download task.
@@ -851,10 +851,16 @@ async def transfer_files(
                         raise
             elif task.transfer_method == TransferMethod.SYMLINK:
                 os.symlink(src, dst)
-            elif task.transfer_method == TransferMethod.MOVE:
-                shutil.move(src, dst)
-            elif task.transfer_method == TransferMethod.COPY:
-                shutil.copy2(src, dst)
+            elif task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
+                transfer_id = hashlib.sha256(
+                    f"download:{task.id}".encode()
+                ).hexdigest()[:32]
+                transfer_local_file(
+                    src,
+                    dst,
+                    transfer_id,
+                    move=task.transfer_method is TransferMethod.MOVE,
+                )
 
 
 async def check_download_plans():
