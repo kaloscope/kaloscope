@@ -709,6 +709,127 @@ def test_directory_link_scope(tmp_path, reference):
     assert alias.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("template", "reference", "organized"),
+    [
+        ("{{title}}", "poster.jpg", True),
+        ("{{title}}", "./poster.jpg", True),
+        ("{{title}}/{{title}}", "poster.jpg", False),
+        ("{{title}}/{{title}}", "absolute", True),
+        ("{{title}}/{{title}}", "https://example.com/poster.jpg", True),
+    ],
+)
+def test_nfo_symlink(tmp_path, template, reference, organized):
+    async def run():
+        async with _database():
+            root = tmp_path / "library"
+            root.mkdir()
+            lib, item = await _movie(root, template)
+            artwork = root / "poster.jpg"
+            artwork.write_bytes(b"poster")
+            value = str(artwork) if reference == "absolute" else reference
+            external_nfo = tmp_path / "source.nfo"
+            _nfo(
+                external_nfo,
+                "New Movie",
+                extra=f"<art><poster>\n  {value}\n</poster></art>",
+            )
+            original_content = external_nfo.read_bytes()
+            nfo = Path(item.nfo_path)
+            nfo.unlink()
+            nfo.symlink_to("../source.nfo")
+            original_path = item.path
+
+            mapping = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            assert bool(mapping) == organized
+            assert (item.path != original_path) == organized
+            owner = await MediaItem.get(id=item.parent_id) if item.parent_id else item
+            current_nfo = Path(owner.nfo_path)
+            assert current_nfo.is_symlink()
+            assert current_nfo.resolve() == external_nfo
+            assert external_nfo.read_bytes() == original_content
+            await update_metadata(lib, current_nfo)
+            await owner.refresh_from_db()
+            if not reference.startswith("https://"):
+                assert (current_nfo.parent / owner.poster).resolve() == artwork
+            assert artwork.read_bytes() == b"poster"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("season", "organized"),
+    [(None, False), ("1", True), ("\n  01\n", True), ("2", False)],
+)
+def test_season_nfo_symlink(tmp_path, season, organized):
+    async def run():
+        async with _database():
+            root = tmp_path / "library"
+            source = root / "Original"
+            source.mkdir(parents=True)
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(root),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+            )
+            external_nfo = tmp_path / "show.nfo"
+            _nfo(
+                external_nfo,
+                "Show",
+                "tvshow",
+                f"<season>{season}</season>" if season is not None else "",
+            )
+            original_content = external_nfo.read_bytes()
+            parent_nfo = source / "Original.nfo"
+            parent_nfo.symlink_to("../../show.nfo")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(source),
+                name=source.name,
+                nfo_path=str(parent_nfo),
+                season=1,
+            )
+            video = source / "old.mkv"
+            video.write_bytes(b"video")
+            episode_nfo = video.with_suffix(".nfo")
+            _nfo(
+                episode_nfo,
+                "Pilot",
+                "episodedetails",
+                "<season>1</season><episode>1</episode>",
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(source),
+                name=video.stem,
+                nfo_path=str(episode_nfo),
+                season=1,
+                episode=1,
+            )
+
+            mapping = await organizer.organize_items(lib, [parent.id])
+            await parent.refresh_from_db()
+            await item.refresh_from_db()
+
+            assert bool(mapping) == organized
+            assert (item.path != str(video)) == organized
+            assert Path(parent.nfo_path).is_symlink()
+            assert Path(parent.nfo_path).resolve() == external_nfo
+            assert external_nfo.read_bytes() == original_content
+            assert Path(item.path).read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("listed", [False, True])
 def test_download_nfo(tmp_path, listed):
     async def run():
@@ -792,6 +913,29 @@ def test_download_source_alias(tmp_path):
             )
             assert await organizer.organize_items(lib, [item.id]) == {}
             assert Path(item.path).read_bytes() == b"video"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("template", ["{{title}}", "{{title}}/{{title}}"])
+def test_subtitle_symlink(tmp_path, absolute, template):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path, template)
+            subtitle = tmp_path / "original.en.srt"
+            subtitle.write_text("subtitles")
+            link = tmp_path / "original.zh.srt"
+            link.symlink_to(subtitle if absolute else subtitle.name)
+
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            target = Path(item.path).with_suffix(".en.srt")
+            moved_link = Path(item.path).with_suffix(".zh.srt")
+            assert moved_link.is_symlink()
+            assert moved_link.resolve() == target.resolve()
+            assert moved_link.read_text() == "subtitles"
+            assert moved_link.readlink().is_absolute() == absolute
 
     asyncio.run(run())
 
