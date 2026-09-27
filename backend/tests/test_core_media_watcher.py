@@ -1923,3 +1923,211 @@ def test_deferred_events(tmp_path, monkeypatch):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("interruption", ["organization", "workflow"])
+def test_ingest_recovery(tmp_path, monkeypatch, restart, interruption):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    source = tmp_path / "Old" / "S01E01.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    (source.parent / "Old.nfo").write_text("<tvshow><title>Series</title></tvshow>")
+    destination = tmp_path / "Series" / source.name
+    move_files = organizer._move_files
+    interrupted = False
+    fired = []
+
+    def move(root, payload):
+        nonlocal interrupted
+        if interruption == "organization" and not interrupted:
+            interrupted = True
+            raise OSError("temporary filesystem failure")
+        return move_files(root, payload)
+
+    async def fire(*_args, bootparams):
+        nonlocal interrupted
+        if bootparams["nfo_type"] == "episode":
+            if interruption == "workflow" and not interrupted:
+                interrupted = True
+                raise RuntimeError("temporary workflow failure")
+            body = {"title": "Pilot", "season": 1, "episode": 1}
+            assert await shelver.gen_nfo(
+                bootparams["nfo_type"],
+                bootparams["nfo_path"],
+                body,
+                item_id=bootparams["item_id"],
+                refresh=True,
+            )
+        fired.append(bootparams)
+
+    monkeypatch.setattr(organizer, "_move_files", move)
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/{{episode_code}} - {{title}}",
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(source), event_type="created"
+            )
+            expected = (
+                watcher.OrganizePendingError
+                if interruption == "organization"
+                else RuntimeError
+            )
+            with pytest.raises(expected):
+                await watcher.consume_event(event)
+
+            if restart:
+                monitor = watcher.LibWatcher(None)
+                events = await monitor._create_events(lib)
+                while not events.empty():
+                    await watcher.consume_event(events.get_nowait())
+            else:
+                await watcher.consume_event(event)
+
+            assert destination.is_file()
+            assert destination.with_suffix(".nfo").is_file()
+            assert len(fired) == 2
+            episode = next(
+                params for params in fired if params["nfo_type"] == "episode"
+            )
+            assert episode["item_path"] == str(destination)
+            assert episode["nfo_path"] == str(destination.with_suffix(".nfo"))
+            assert episode["title"] == "Series"
+            for kind, origin, target in [
+                ("moved", source, destination),
+                ("created", destination, None),
+                ("deleted", source, None),
+            ]:
+                await watcher.consume_event(
+                    await MediaEvent.create(
+                        lib=lib,
+                        src_path=str(origin),
+                        dest_path=str(target) if target else None,
+                        event_type=kind,
+                    )
+                )
+            for pending in await MediaEvent.filter(lib=lib):
+                await watcher.consume_event(pending)
+            organized = destination.with_name("S01E01 - Pilot.mkv")
+            assert organized.read_bytes() == b"video"
+            assert organized.with_suffix(".nfo").is_file()
+            assert len(fired) == 2
+            assert await MediaEvent.filter(lib=lib).count() == 0
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_hash_recovery(tmp_path, monkeypatch, restart):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"video")
+    source.with_suffix(".nfo").write_text("<movie><title>New</title></movie>")
+    destination = tmp_path / "New.mkv"
+    move_files = organizer._move_files
+    blocked = True
+
+    def move(root, payload):
+        move_files(root, payload)
+        if blocked:
+            raise OSError("interrupted after moving files")
+
+    monkeypatch.setattr(organizer, "_move_files", move)
+
+    async def run():
+        nonlocal blocked
+        db_url = f"sqlite://{tmp_path / 'media.sqlite3'}"
+        hash_started = asyncio.Event()
+        hash_finished = asyncio.Event()
+        hash_tasks = []
+
+        async def track_hash(coroutine):
+            hash_started.set()
+            try:
+                if restart:
+                    await asyncio.Event().wait()
+                await coroutine
+            finally:
+                coroutine.close()
+                hash_finished.set()
+
+        def start_hash(coroutine):
+            task = asyncio.create_task(track_hash(coroutine))
+            hash_tasks.append(task)
+            return task
+
+        monkeypatch.setattr("app.services.media.create_task", start_hash)
+        await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(source), event_type="created"
+            )
+
+            with pytest.raises(watcher.OrganizePendingError):
+                await watcher.consume_event(event)
+            await asyncio.wait_for(hash_started.wait(), timeout=3)
+            if restart:
+                for task in hash_tasks:
+                    task.cancel()
+                await asyncio.gather(*hash_tasks, return_exceptions=True)
+                await Tortoise.close_connections()
+                await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+                lib = await MediaLib.get(id=lib.id)
+            else:
+                await asyncio.wait_for(hash_finished.wait(), timeout=3)
+
+            item = await MediaItem.get(lib=lib)
+            original_id = item.id
+            assert item.hash is None and item.size is None
+            assert item.path == str(source)
+            assert destination.is_file() and not source.exists()
+            with pytest.raises(watcher.OrganizePendingError):
+                await watcher.consume_event(event)
+            fire.assert_not_awaited()
+
+            blocked = False
+            monitor = watcher.LibWatcher(None)
+            events = await monitor._create_events(lib)
+            while not events.empty():
+                await watcher.consume_event(events.get_nowait())
+
+            await item.refresh_from_db()
+            assert item.id == original_id
+            assert item.path == str(destination)
+            assert item.hash == hashlib.md5(b"video").hexdigest()
+            assert item.size == len(b"video")
+            assert not await MediaEvent.filter(lib=lib).exists()
+            assert fire.await_count == 1
+        finally:
+            for task in hash_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*hash_tasks, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
