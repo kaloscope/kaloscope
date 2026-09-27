@@ -2,12 +2,14 @@
 
 import asyncio
 import hashlib
+import mimetypes
 import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -16,14 +18,16 @@ from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
+from app.core.constants import NFO_MIME_TYPE
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.core.media.shelver import update_metadata
-from app.core.media.watcher import LibWatcher
+from app.core.media.watcher import LibWatcher, consume_event
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services.danmaku import Danmaku, DanmakuAnime, DanmakuMeta, DanmakuService
+from app.services.flow import FlowTriggerService
 
 
 @asynccontextmanager
@@ -960,6 +964,158 @@ def test_transfer_mapping(tmp_path, original_source):
     asyncio.run(run())
 
 
+def test_relative_symlink(tmp_path):
+    async def run():
+        async with _database():
+            root = tmp_path / "library"
+            root.mkdir()
+            original = tmp_path / "download.mkv"
+            original.write_bytes(b"original download")
+            lib, item = await _movie(root, "{{title}}/{{title}}")
+            path = Path(item.path)
+            path.unlink()
+            path.symlink_to("../download.mkv")
+            alias = root / "independent.mkv"
+            alias.symlink_to("../download.mkv")
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            assert Path(item.path).is_symlink()
+            assert Path(item.path).resolve() == original
+            assert alias.resolve() == original
+            assert original.read_bytes() == b"original download"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("chained", [False, True])
+@pytest.mark.parametrize("target_name", ["original.mkv", "ORIGINAL.mkv"])
+def test_external_symlink(tmp_path, monkeypatch, absolute, chained, target_name):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+    monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
+
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            source = Path(item.path)
+            target = source.with_name(target_name)
+            if not target.exists():
+                pytest.skip("Filesystem does not support this filename alias")
+            if chained:
+                bridge = tmp_path / "bridge"
+                bridge.symlink_to(target if absolute else target.name)
+                target = bridge
+            alias = tmp_path / "alias.mkv"
+            alias.symlink_to(target if absolute else target.name)
+            linked = await MediaItem.create(
+                lib=lib, path=str(alias), dir=lib.dir, name=alias.stem
+            )
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.VIDEO,
+                rel_id=linked.id,
+                position=42,
+            )
+
+            mapping = await organizer.organize_items(lib, [item.id])
+            monitor = LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+            await monitor.scan_directory(lib, backfill_nfo_events=False)
+            while not events.empty():
+                await consume_event(events.get_nowait())
+
+            assert await MediaItem.filter(id=linked.id).exists()
+            await item.refresh_from_db()
+            await history.refresh_from_db()
+            assert mapping == {}
+            assert item.path == str(source)
+            assert alias.samefile(source)
+            assert alias.read_bytes() == b"video"
+            assert history.rel_id == linked.id and history.position == 42
+            assert await MediaItem.filter(lib=lib).count() == 2
+            assert not await MediaEvent.filter(lib=lib).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("relocated", [False, True])
+def test_external_directory_symlink(tmp_path, monkeypatch, absolute, relocated):
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+    monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
+
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            directory = "Renamed" if relocated else "Original"
+            lib.rename_template = directory + "/{{episode_code}} - {{title}}"
+            await lib.save(update_fields=["rename_template"])
+            source = Path(parent.path)
+            alias = tmp_path / "Alias"
+            alias.symlink_to(
+                source if absolute else source.name, target_is_directory=True
+            )
+            alias_parent = await MediaItem.create(
+                lib=lib,
+                path=str(alias),
+                dir=str(alias),
+                name=alias.name,
+                nfo_path=str(alias / Path(parent.nfo_path).name),
+                season=1,
+            )
+            linked_path = alias / Path(item.path).name
+            linked = await MediaItem.create(
+                lib=lib,
+                parent=alias_parent,
+                path=str(linked_path),
+                dir=str(alias),
+                name=linked_path.stem,
+                nfo_path=str(linked_path.with_suffix(".nfo")),
+                season=1,
+                episode=1,
+            )
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.VIDEO,
+                rel_id=linked.id,
+                position=42,
+            )
+            original_path = item.path
+
+            mapping = await organizer.organize_items(lib, [parent.id])
+            monitor = LibWatcher(None)
+            events = Queue()
+            monitor._observers = {lib.dir: (None, events)}
+            monitor._scanning_paths = []
+            await monitor.scan_directory(lib, backfill_nfo_events=False)
+            while not events.empty():
+                await consume_event(events.get_nowait())
+
+            assert await MediaItem.filter(id=linked.id).exists()
+            await item.refresh_from_db()
+            await linked.refresh_from_db()
+            await history.refresh_from_db()
+            assert mapping == {}
+            assert item.path == original_path
+            assert linked.path == str(linked_path)
+            assert alias.samefile(source)
+            assert linked_path.read_bytes() == b"video"
+            assert history.rel_id == linked.id and history.position == 42
+            assert await MediaItem.filter(lib=lib).count() == 4
+            assert not await MediaEvent.filter(lib=lib).exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("reference", ["ancestor", "chained", "unrelated"])
 def test_directory_link_scope(tmp_path, reference):
     root = tmp_path / "library"
@@ -985,6 +1141,29 @@ def test_directory_link_scope(tmp_path, reference):
 
     assert source.read_bytes() == b"video"
     assert alias.is_dir()
+
+
+@pytest.mark.parametrize("suffix", [".nfo", ".srt"])
+def test_external_companion_link(tmp_path, suffix):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            source = Path(item.path).with_suffix(suffix)
+            if suffix == ".srt":
+                source.write_text("Subtitles")
+            content = source.read_bytes()
+            alias = tmp_path / "shared" / f"alias{suffix}"
+            alias.parent.mkdir()
+            alias.symlink_to(f"../{source.name}")
+
+            mapping = await organizer.organize_items(lib, [item.id])
+
+            assert mapping == {}
+            assert alias.read_bytes() == content
+            assert Path(item.path).read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
 
 
 def test_movie_artwork(tmp_path):
