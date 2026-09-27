@@ -1991,6 +1991,132 @@ def test_partial_transfer(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_transfer_backfill(tmp_path):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["movie.mkv", "missing.mkv", "organized.mkv"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            task.sub_pattern = r"^"
+            task.sub_repl = "legacy/"
+            organized = Path(library.dir) / "Final.mkv"
+            task.transfer_targets = {"organized.mkv": str(organized)}
+            await task.save()
+            destination = Path(library.dir) / "legacy/movie.mkv"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(b"existing")
+            organized.write_bytes(b"organized")
+
+            async with syncer.library_lock(library.dir):
+                await syncer.backfill_transfer_targets(library)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {
+                "organized.mkv": str(organized),
+            }
+            assert not (Path(library.dir) / "legacy/missing.mkv").exists()
+            assert (Path(task.dir) / "movie.mkv").read_bytes() == b"movie.mkv"
+
+            # leave unowned legacy destinations untouched during ordinary transfer
+            await DownloadTask.filter(id=task.id).update(transfer_targets=None)
+            await syncer.transfer_files(task, ["movie.mkv"])
+            await task.refresh_from_db()
+            assert task.transfer_targets is None
+            assert destination.read_bytes() == b"existing"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", [TransferMethod.HARDLINK, TransferMethod.SYMLINK])
+def test_transfer_backfill_links(tmp_path, method):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "movie.mkv"
+            destination.parent.mkdir()
+            if method is TransferMethod.HARDLINK:
+                destination.hardlink_to(source)
+            else:
+                destination.symlink_to(source)
+
+            async with syncer.library_lock(library.dir):
+                await syncer.backfill_transfer_targets(library)
+            await task.refresh_from_db()
+
+            assert task.transfer_targets == {"movie.mkv": str(destination)}
+            assert destination.samefile(source)
+            assert destination.read_bytes() == b"movie.mkv"
+
+            await DownloadTask.filter(id=task.id).update(transfer_targets=None)
+            await syncer.transfer_files(task, task.files)
+            await task.refresh_from_db()
+            assert task.transfer_targets == {"movie.mkv": str(destination)}
+            assert destination.samefile(source)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_transfer_backfill_recorded(tmp_path, monkeypatch, caplog, partial):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["movie.mkv", "missing.mkv"] if partial else ["movie.mkv"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.MOVE, files
+            )
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "Recorded.mkv"
+            transfer_id = hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[
+                :32
+            ]
+            install = puller._install_local_file_sync
+
+            def interrupted_install(target, **kwargs):
+                install(target, **kwargs)
+                raise OSError("Interrupted after publication")
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(puller, "_install_local_file_sync", interrupted_install)
+                with pytest.raises(OSError, match="Interrupted after publication"):
+                    puller.transfer_local_file(source, destination, transfer_id)
+            task.sub_pattern = "["
+            task.transfer_targets = {"movie.mkv": str(destination)}
+            await task.save()
+
+            async with syncer.library_lock(library.dir):
+                await syncer.backfill_transfer_targets(library)
+            await task.refresh_from_db()
+
+            assert task.transfer_targets == {"movie.mkv": str(destination)}
+            assert destination.read_bytes() == b"movie.mkv"
+            assert source.read_bytes() == b"movie.mkv"
+            assert list(Path(library.dir).iterdir()) == [destination]
+            assert ("Skipping transfer target backfill" in caplog.text) is partial
+            if partial:
+                assert (Path(task.dir) / "missing.mkv").read_bytes() == b"missing.mkv"
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("method", "cross_device"),
     [
@@ -2001,8 +2127,9 @@ def test_partial_transfer(tmp_path, monkeypatch):
 )
 @pytest.mark.parametrize("job_id", [None, "offline-job"])
 @pytest.mark.parametrize("failure", ["mapping", "cleanup"])
+@pytest.mark.parametrize("recovery", ["transfer", "backfill"])
 def test_transfer_persistence(
-    tmp_path, monkeypatch, method, cross_device, job_id, failure
+    tmp_path, monkeypatch, method, cross_device, job_id, failure, recovery
 ):
     async def run():
         await Tortoise.init(
@@ -2011,6 +2138,13 @@ def test_transfer_persistence(
         await Tortoise.generate_schemas()
         try:
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            if job_id:
+                await OfflineDownloadJob.create(
+                    download=task,
+                    job_uuid=job_id,
+                    source_fingerprint="a" * 64,
+                    remote_dir="/Kaloscope/test",
+                )
             source = Path(task.dir) / "movie.mkv"
             destination = Path(library.dir) / "movie.mkv"
             transfer_id = (
@@ -2045,6 +2179,10 @@ def test_transfer_persistence(
                     error = OSError
                 with pytest.raises(error, match="interrupted"):
                     await syncer.transfer_files(task, task.files, job_id=job_id)
+                if recovery == "backfill":
+                    async with syncer.library_lock(library.dir):
+                        with pytest.raises(error, match="interrupted"):
+                            await syncer.backfill_transfer_targets(library)
 
             targets = {"movie.mkv": str(destination)}
             await task.refresh_from_db()
@@ -2054,7 +2192,11 @@ def test_transfer_persistence(
             assert source.exists() is (method is TransferMethod.COPY or cross_device)
 
             task = await DownloadTask.get(id=task.id)
-            assert await syncer.transfer_files(task, task.files, job_id=job_id)
+            if recovery == "backfill":
+                async with syncer.library_lock(library.dir):
+                    await syncer.backfill_transfer_targets(library)
+            else:
+                assert await syncer.transfer_files(task, task.files, job_id=job_id)
 
             await task.refresh_from_db()
             assert task.transfer_targets == targets
