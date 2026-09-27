@@ -14,7 +14,6 @@ from tortoise.transactions import in_transaction
 from watchdog.events import (
     EVENT_TYPE_CREATED,
     EVENT_TYPE_DELETED,
-    EVENT_TYPE_MODIFIED,
     EVENT_TYPE_MOVED,
     DirCreatedEvent,
     DirDeletedEvent,
@@ -33,7 +32,12 @@ from watchdog.observers.api import BaseObserver
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
-from app.core.media.organizer import OrganizePendingError, recover_organizing
+from app.core.media.organizer import (
+    OrganizeDeferredError,
+    OrganizePendingError,
+    organize_items,
+    recover_organizing,
+)
 from app.core.media.shelver import get_nfo_path, is_nfo, update_metadata
 from app.models.flow import GraphCategory
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
@@ -296,6 +300,8 @@ class LibWatcher:
                 continue
             except asyncio.CancelledError:
                 break
+            except OrganizeDeferredError:
+                await asyncio.sleep(1)
             except Exception:
                 logger.error("Failed to consume the media event!", exc_info=True)
                 await asyncio.sleep(5)
@@ -499,11 +505,11 @@ async def consume_event(event: MediaEvent):
 
     Raises:
         OrganizePendingError: If organization cannot finish safely.
+        OrganizeDeferredError: If a group is waiting for its remaining transfers.
     """
     lib = await MediaLib.get_or_none(id=event.lib_id)
     if lib is None:
         return
-    result: list[MediaPathInfo] | None = None
     async with library_lock(lib.dir):
         lib = await MediaLib.get_or_none(id=lib.id)
         if lib is None:
@@ -513,50 +519,89 @@ async def consume_event(event: MediaEvent):
         if event is None:
             return
         event.lib = lib
-
-        if event.event_type != "ingest":
-            async with in_transaction("default"):
-                # handle the event based on its type
-                if event.event_type == EVENT_TYPE_MODIFIED:
-                    await _handle_modified(event)
-                elif event.event_type == EVENT_TYPE_DELETED:
-                    source = Path(event.src_path)
-                    if not (source.exists() or source.is_symlink()):
-                        await _handle_deleted(event)
-                    elif not event.is_directory and not is_nfo(source):
-                        # retain media identity when a deleted path has been reused
-                        item = await MediaItem.get_or_none(
-                            lib_id=event.lib_id, path=event.src_path
-                        )
-                        if item is not None:
-                            await _refresh_replaced(item)
-                elif event.event_type == EVENT_TYPE_MOVED:
-                    result = await _handle_moved(event)
-                elif event.event_type == EVENT_TYPE_CREATED:
-                    result = await _handle_created(event)
-
-                for path_info in result or []:
-                    if path_info.nfo_path is not None:
-                        await update_metadata(event.lib, path_info.nfo_path)
-
-                if not result:
-                    await event.delete()
-                    return
-                event.event_type = "ingest"
-                event.payload = {
-                    "bootparams": [_ingest_params(info) for info in result]
-                }
-                await event.save(update_fields=["event_type", "payload"])
-        pending = await _resume_ingest(event)
-
-    # fire workflows after releasing the lock used by NFO writers
+        pending = await _consume_event(event)
+    # fire workflows after releasing the library lock they also use to write NFOs
     for index, params in enumerate(pending):
         await FlowTriggerService.fire(
             GraphCategory.INGEST, event.lib_id, bootparams=params
         )
-        event.payload = {"bootparams": pending[index + 1 :]}
+        event.payload = {"bootparams": pending[index + 1 :], "organize_ids": []}
         await event.save(update_fields=["payload"])
     await event.delete()
+
+
+async def _consume_event(event: MediaEvent):
+    """Persist pending work before organizing outside the metadata transaction.
+
+    The caller must hold the library lock and recover pending organization plans.
+    Preserve records and NFO associations at source paths reused before delayed
+    movement events are consumed.
+
+    Args:
+        event: The media event with its current library instance attached.
+
+    Returns:
+        The ingest workflow parameter dictionaries using the current media paths.
+
+    Raises:
+        OrganizePendingError: If organization cannot finish safely.
+        OrganizeDeferredError: If a group is waiting for its remaining transfers.
+    """
+    if event.event_type == "ingest":
+        return await _resume_ingest(event)
+
+    result: list[MediaPathInfo] | None = None
+    affected: list[int] = []
+    source_path = Path(event.src_path)
+    target = Path(event.dest_path or event.src_path)
+    async with in_transaction("default"):
+        if event.event_type == EVENT_TYPE_DELETED:
+            if not (source_path.exists() or source_path.is_symlink()):
+                await _handle_deleted(event)
+            elif not event.is_directory and not is_nfo(target):
+                # preserve identity when a video is replaced before events are consumed
+                item = await MediaItem.get_or_none(
+                    lib_id=event.lib_id, path=event.src_path
+                )
+                if item is not None:
+                    await _refresh_replaced(item)
+        elif is_nfo(target):
+            if event.event_type == EVENT_TYPE_MOVED and not (
+                source_path.exists() or source_path.is_symlink()
+            ):
+                await _handle_deleted(event)
+            affected.extend(await update_metadata(event.lib, target))
+        elif event.event_type == EVENT_TYPE_MOVED:
+            # skip reindexing when organization already moved the original record
+            known = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(target))
+            source = await MediaItem.filter(
+                lib_id=event.lib_id, path=event.src_path
+            ).exists()
+            if known is not None and (
+                not source or source_path.exists() or source_path.is_symlink()
+            ):
+                await _refresh_replaced(known)
+            else:
+                result = await _handle_moved(event)
+        elif event.event_type == EVENT_TYPE_CREATED:
+            result = await _handle_created(event)
+
+        for info in result or []:
+            if info.nfo_path is not None:
+                affected.extend(await update_metadata(event.lib, info.nfo_path))
+
+        if result or affected:
+            # retain pending work independently of filesystem notifications
+            event.event_type = "ingest"
+            event.payload = {
+                "bootparams": [_ingest_params(info) for info in result or []],
+                "organize_ids": list(set(affected)),
+            }
+            await event.save(update_fields=["event_type", "payload"])
+
+    if event.event_type == "ingest":
+        return await _resume_ingest(event)
+    return []
 
 
 async def _resume_ingest(event: MediaEvent) -> list[dict]:
@@ -570,8 +615,15 @@ async def _resume_ingest(event: MediaEvent) -> list[dict]:
 
     Returns:
         The remaining workflow parameters with current paths and parent metadata.
+
+    Raises:
+        OrganizePendingError: If organization cannot finish safely.
+        OrganizeDeferredError: If a group is waiting for its remaining transfers.
     """
     payload = event.payload
+    if affected := payload.get("organize_ids"):
+        await organize_items(event.lib, affected)
+
     pending = []
     for params in payload["bootparams"]:
         # skip media removed after the event was persisted
@@ -608,20 +660,9 @@ async def _resume_ingest(event: MediaEvent) -> list[dict]:
             elif current.title:
                 params["title"] = current.title
         pending.append(params)
-    event.payload = {"bootparams": pending}
+    event.payload = {"bootparams": pending, "organize_ids": []}
     await event.save(update_fields=["payload"])
     return pending
-
-
-async def _handle_modified(event: MediaEvent):
-    """Handle the modification event.
-
-    Args:
-        event: The media event.
-    """
-    src_path = Path(event.src_path)
-    if is_nfo(src_path):
-        await update_metadata(event.lib, src_path)
 
 
 async def _refresh_replaced(item: MediaItem):

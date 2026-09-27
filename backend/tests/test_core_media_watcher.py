@@ -1559,3 +1559,135 @@ def test_ingest_hash_retry(tmp_path, monkeypatch, error):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+def test_ingest_paths(tmp_path, monkeypatch):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    monkeypatch.setattr(watcher, "recover_organizing", AsyncMock(return_value={}))
+    old = tmp_path / "old.mkv"
+    old.write_bytes(b"video")
+    old.with_suffix(".nfo").write_text("<movie><title>New</title></movie>")
+    destination = tmp_path / "New.mkv"
+    configs = []
+
+    async def organize(lib, ids):
+        configs.append(lib.rename_template)
+        assert len(ids) == 1
+        old.rename(destination)
+        old.with_suffix(".nfo").rename(destination.with_suffix(".nfo"))
+        await MediaItem.filter(id=ids[0]).update(
+            path=str(destination),
+            name="New",
+            nfo_path=str(destination.with_suffix(".nfo")),
+        )
+        return {
+            str(old): str(destination),
+            str(old.with_suffix(".nfo")): str(destination.with_suffix(".nfo")),
+        }
+
+    monkeypatch.setattr(watcher, "organize_items", organize)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(old), event_type="created"
+            )
+            # the queued event contains the old library instance
+            await MediaLib.filter(id=lib.id).update(rename_template="{{title}}")
+            await watcher.consume_event(event)
+            item = await MediaItem.get(lib_id=lib.id)
+            original_id = item.id
+            assert configs == ["{{title}}"]
+            params = fire.call_args.kwargs["bootparams"]
+            assert params["item_id"] == item.id
+            assert params["item_path"] == str(destination)
+            assert params["item_name"] == "New"
+            assert params["title"] == "New"
+            assert params["nfo_path"] == str(destination.with_suffix(".nfo"))
+            for kind, source, target in [
+                ("moved", old, destination),
+                ("created", destination, None),
+                ("deleted", old, None),
+            ]:
+                event = await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source),
+                    dest_path=str(target) if target else None,
+                    event_type=kind,
+                )
+                await watcher.consume_event(event)
+            assert (await MediaItem.get(lib_id=lib.id)).id == original_id
+            assert fire.await_count == 1
+            assert await MediaEvent.all().count() == 0
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_deferred_events(tmp_path, monkeypatch):
+    attempts = []
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            pending = await MediaEvent.create(
+                lib=lib,
+                src_path=str(tmp_path / "Pending.nfo"),
+                event_type="ingest",
+                payload={"bootparams": [], "organize_ids": [1]},
+            )
+            events = Queue()
+            events.put(pending)
+
+            async def organize(current_lib, ids):
+                attempts.append(ids)
+                if ids == [1]:
+                    if len(attempts) == 1:
+                        await MediaEvent.create(
+                            lib=current_lib,
+                            src_path=str(tmp_path / "Ready.nfo"),
+                            event_type="ingest",
+                            payload={"bootparams": [], "organize_ids": [2]},
+                        )
+                    raise watcher.OrganizeDeferredError("pending transfer")
+                return {}
+
+            consume = watcher.consume_event
+
+            async def finish(event):
+                await consume(event)
+                raise asyncio.CancelledError
+
+            monkeypatch.setattr(watcher, "organize_items", organize)
+            monkeypatch.setattr(watcher, "consume_event", finish)
+            monitor = watcher.LibWatcher(None)
+            await asyncio.wait_for(monitor._event_consumer(lib.id, events), 5)
+
+            await pending.refresh_from_db()
+            assert attempts == [[1], [1], [2]]
+            assert pending.payload["organize_ids"] == [1]
+            assert await MediaEvent.filter(lib=lib).count() == 1
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
