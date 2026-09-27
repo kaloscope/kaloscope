@@ -126,7 +126,11 @@ def test_publication_conflict(tmp_path, monkeypatch):
     ("failure", "cleanup_failure"),
     [(None, False), (OSError, False), (FileExistsError, False), (OSError, True)],
 )
-def test_publish_cancellation(tmp_path, monkeypatch, failure, cleanup_failure):
+@pytest.mark.parametrize("cancel_count", [1, 2])
+@pytest.mark.parametrize("indexed", [False, True])
+def test_publish_cancellation(
+    tmp_path, monkeypatch, failure, cleanup_failure, cancel_count, indexed
+):
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -153,33 +157,61 @@ def test_publish_cancellation(tmp_path, monkeypatch, failure, cleanup_failure):
         monkeypatch.setattr(Path, "unlink", failed_cleanup)
 
     async def run():
-        nfo = tmp_path / "movie.nfo"
-        task = asyncio.create_task(
-            shelver.gen_nfo(NFOType.MOVIE, str(nfo), {"title": "Movie"})
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
         )
+        await Tortoise.generate_schemas()
         try:
-            assert await asyncio.to_thread(started.wait, 3)
-            task.cancel()
-            await asyncio.sleep(0)
-            assert not finished.is_set()
-            assert not task.done()
-            assert len(list(tmp_path.glob(".nfo-*.tmp"))) == 1
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            video = tmp_path / "Movie.mkv"
+            video.write_bytes(b"video")
+            item = await MediaItem.create(
+                lib=lib, path=str(video), dir=str(tmp_path), name=video.stem
+            )
+            nfo = video.with_suffix(".nfo")
+            task = asyncio.create_task(
+                shelver.gen_nfo(
+                    NFOType.MOVIE,
+                    str(nfo),
+                    {"title": "Movie"},
+                    item_id=item.id if indexed else None,
+                )
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                for _ in range(cancel_count):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    if indexed:
+                        with pytest.raises(Timeout):
+                            async with await library_lock(lib.dir).acquire(timeout=0):
+                                pass
+                    assert not finished.is_set()
+                    assert not task.done()
+                    assert len(list(tmp_path.glob(".nfo-*.tmp"))) == 1
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert finished.is_set()
+            if failure is None:
+                assert etree.parse(nfo).getroot().findtext("title") == "Movie"
+            else:
+                assert not nfo.exists()
+            async with await library_lock(lib.dir).acquire(timeout=1):
+                temporary = list(tmp_path.glob(".*.tmp"))
+                if cleanup_failure:
+                    assert len(temporary) == 1
+                    assert (
+                        etree.parse(temporary[0]).getroot().findtext("title") == "Movie"
+                    )
+                else:
+                    assert not temporary
         finally:
             release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        assert finished.is_set()
-        if failure is None:
-            assert etree.parse(nfo).getroot().findtext("title") == "Movie"
-        else:
-            assert not nfo.exists()
-        temporary = list(tmp_path.glob(".nfo-*.tmp"))
-        if cleanup_failure:
-            assert len(temporary) == 1
-            assert etree.parse(temporary[0]).getroot().findtext("title") == "Movie"
-        else:
-            assert not temporary
+            await Tortoise.close_connections()
 
     asyncio.run(run())
 
