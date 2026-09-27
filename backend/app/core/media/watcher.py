@@ -33,7 +33,7 @@ from watchdog.observers.api import BaseObserver
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaPathInfo, get_handler
-from app.core.media.organizer import recover_organizing
+from app.core.media.organizer import OrganizePendingError, recover_organizing
 from app.core.media.shelver import get_nfo_path, is_nfo, update_metadata
 from app.models.flow import GraphCategory
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
@@ -247,17 +247,29 @@ class LibWatcher:
             self._watcher_lock.release()
 
     async def _create_events(self, lib: MediaLib) -> Queue:
-        """Create a new queue for the specified media library.
+        """Recover organization and queue pending media events.
+
+        Log recovery conflicts so other libraries can start.
 
         Args:
             lib: The media library instance.
 
         Returns:
-            A new queue instance.
+            A queue of pending events excluding organization journals.
         """
         events = Queue()
-        # load existing events from the database for the library
-        for event in await MediaEvent.filter(lib_id=lib.id):
+        try:
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+        except OrganizePendingError:
+            logger.error(
+                "Media library %s has an organization awaiting recovery",
+                lib.id,
+                exc_info=True,
+            )
+        for event in await MediaEvent.filter(lib_id=lib.id).exclude(
+            event_type="organize"
+        ):
             event.lib = lib
             events.put(event)
         return events

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from filelock import Timeout
@@ -33,6 +33,106 @@ from app.services.flow import FlowTriggerService
 def workspace(monkeypatch, tmp_path_factory):
     directory = tmp_path_factory.mktemp("workspace-temp")
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
+def test_pending_startup(tmp_path, monkeypatch):
+    tasks = []
+    attempts = []
+    observer = Mock()
+    monkeypatch.setattr(watcher, "Observer", observer)
+
+    async def recover(lib):
+        with pytest.raises(Timeout):
+            async with await library_lock(lib.dir).acquire(timeout=0):
+                pass
+        attempts.append(lib.id)
+        if lib.name == "Pending":
+            raise watcher.OrganizePendingError("destination replaced externally")
+        await MediaEvent.filter(lib_id=lib.id, event_type="organize").delete()
+        return {}
+
+    monkeypatch.setattr(watcher, "recover_organizing", recover)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            libraries = []
+            for priority, name in enumerate(("Pending", "Healthy"), start=1):
+                directory = tmp_path / name
+                directory.mkdir()
+                libraries.append(
+                    await MediaLib.create(
+                        name=name,
+                        dir=str(directory),
+                        lib_type=LibType.MOVIE,
+                        priority=priority,
+                    )
+                )
+            pending_lib = libraries[0]
+            event = await MediaEvent.create(
+                lib=pending_lib,
+                src_path=str(Path(pending_lib.dir) / "old.mkv"),
+                event_type="deleted",
+            )
+            healthy_event = await MediaEvent.create(
+                lib=libraries[1],
+                src_path=str(Path(libraries[1].dir) / "new.mkv"),
+                event_type="created",
+            )
+            journals = [
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(Path(lib.dir) / "old.mkv"),
+                    event_type="organize",
+                    payload={},
+                )
+                for lib in libraries
+            ]
+            item = await MediaItem.create(
+                lib=pending_lib,
+                dir=pending_lib.dir,
+                path=event.src_path,
+                name="old",
+            )
+            app = SimpleNamespace(
+                loop=asyncio.get_running_loop(),
+                add_task=lambda task, **kwargs: tasks.append(task),
+            )
+            monitor = watcher.LibWatcher(app)
+            monitor._watcher_lock = Mock()
+            monitor._observing_paths = []
+            monitor._scanning_paths = []
+            monitor._observers = {}
+            await monitor.start()
+
+            assert attempts == [lib.id for lib in libraries]
+            assert set(monitor._observing_paths) == {lib.dir for lib in libraries}
+            assert observer.call_count == 2
+            for lib, pending in zip(libraries, [event, healthy_event], strict=True):
+                _, events = monitor._observers[lib.dir]
+                queued = events.get_nowait()
+                assert queued.id == pending.id
+                assert queued.lib.id == lib.id
+                assert events.empty()
+            assert await MediaEvent.filter(id=journals[0].id).exists()
+            assert not await MediaEvent.filter(id=journals[1].id).exists()
+
+            # the pending library stays blocked without deleting its stale rows
+            with pytest.raises(watcher.OrganizePendingError):
+                await watcher.consume_event(event)
+            with pytest.raises(watcher.OrganizePendingError):
+                await monitor.scan_directory(pending_lib)
+            assert await MediaItem.filter(id=item.id).exists()
+            assert await MediaEvent.filter(id=event.id).exists()
+        finally:
+            for task in tasks:
+                task.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("action", [watcher.LibAction.SCAN, watcher.LibAction.REMOVE])
