@@ -520,3 +520,51 @@ def test_template_context():
     }
     assert metadata == {"title": "Episode", "year": None, "season": 0}
     assert organizer._context(metadata, None) == metadata
+
+
+@pytest.mark.parametrize("season", [None, 2])
+def test_reference_edits(tmp_path, season):
+    source = tmp_path / "Old" / "Old.nfo"
+    source.parent.mkdir()
+    artwork = source.parent / "cover.jpg"
+    artwork.write_bytes(b"cover")
+    _nfo(
+        source,
+        "Show",
+        "tvshow",
+        "<season>1</season><art><poster>cover.jpg</poster>"
+        "<thumb>https://example.com/image.jpg</thumb></art>",
+    )
+    original = source.read_bytes()
+    destination = tmp_path / "New" / "New.nfo"
+
+    edits = organizer._nfo_edits(
+        {str(source): str(destination)}, {str(destination): season}
+    )
+
+    assert len(edits) == 1
+    assert edits[0]["path"] == str(destination)
+    assert edits[0]["before"] == hashlib.sha256(original).hexdigest()
+    tree = etree.fromstring(edits[0]["content"])
+    assert tree.findtext("art/poster") == "../Old/cover.jpg"
+    assert tree.findtext("art/thumb") == "https://example.com/image.jpg"
+    assert tree.findtext("season") == (str(season) if season is not None else None)
+    assert source.read_bytes() == original
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_shared_references(tmp_path, invalid):
+    artwork = {tmp_path / "cover.jpg", tmp_path / "extra.jpg"}
+    for path in artwork:
+        path.write_bytes(b"picture")
+    source = tmp_path / "Movie.nfo"
+    _nfo(source, "Movie")
+    other = tmp_path / "Other.NFO"
+    other.write_text(
+        "<movie>" if invalid else "<movie><art><poster>cover.jpg</poster></art></movie>"
+    )
+
+    shared = organizer._shared_artwork(tmp_path, artwork, {source})
+
+    assert shared == (artwork if invalid else {tmp_path / "cover.jpg"})
