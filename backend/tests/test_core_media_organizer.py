@@ -2178,6 +2178,45 @@ def test_download_nfo(tmp_path, listed):
     asyncio.run(run())
 
 
+def test_indexed_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            media_event = await MediaEvent.create(
+                lib=lib,
+                src_path=item.path,
+                event_type="created",
+            )
+            nfo_event = await MediaEvent.create(
+                lib=lib,
+                src_path=item.nfo_path,
+                event_type="modified",
+            )
+            unknown_event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(tmp_path / "unknown.mkv"),
+                event_type="created",
+            )
+
+            await organizer.organize_items(lib, [item.id])
+            for pending in (media_event, nfo_event, unknown_event):
+                assert await MediaEvent.filter(id=pending.id).exists()
+                await consume_event(pending)
+
+            await item.refresh_from_db()
+            assert item.path == str(tmp_path / "New Movie.mkv")
+            assert item.nfo_path == str(tmp_path / "New Movie.nfo")
+            assert await MediaItem.filter(lib=lib).count() == 1
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_not_awaited()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("failure", [None, "before", "after"])
 def test_cancelled_writer(tmp_path, monkeypatch, failure):
     async def run():

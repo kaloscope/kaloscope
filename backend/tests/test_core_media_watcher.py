@@ -26,6 +26,7 @@ from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import get_handler
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
+from app.services.danmaku import DanmakuService
 from app.services.flow import FlowTriggerService
 
 
@@ -1629,6 +1630,203 @@ def test_ingest_paths(tmp_path, monkeypatch):
             assert (await MediaItem.get(lib_id=lib.id)).id == original_id
             assert fire.await_count == 1
             assert await MediaEvent.all().count() == 0
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("explicit_cache", [False, True])
+@pytest.mark.parametrize("arrival", ["moved", "created"])
+@pytest.mark.parametrize(
+    ("missing", "content", "preserved"),
+    [
+        ("hash", b"old video", True),
+        ("size", b"old video", True),
+        ("both", b"old video", True),
+        ("hash", b"a longer replacement video", False),
+        ("size", b"new video", False),
+    ],
+)
+def test_organized_cache(
+    tmp_path, monkeypatch, explicit_cache, arrival, missing, content, preserved
+):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    source = tmp_path / "old.mkv"
+    source.write_bytes(content)
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>New</title></movie>")
+    cache = tmp_path / ("custom.json" if explicit_cache else ".old.json")
+    cache_content = '[{"text":"Cached comment","start":1000}]'
+    cache.write_text(cache_content)
+    cached_meta = {"episode_id": 42}
+    destination = tmp_path / "New.mkv"
+    organized_cache = cache if explicit_cache else tmp_path / ".New.json"
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=lib.dir,
+                name=source.stem,
+                hash=(
+                    hashlib.md5(b"old video").hexdigest() if missing == "size" else None
+                ),
+                size=len(b"old video") if missing == "hash" else None,
+                nfo_path=str(nfo),
+                danmaku_path=str(cache) if explicit_cache else None,
+                danmaku_meta=cached_meta,
+            )
+            nfo_event = await MediaEvent.create(
+                lib=lib, src_path=str(nfo), event_type="modified"
+            )
+
+            await watcher.consume_event(nfo_event)
+            assert destination.read_bytes() == content
+            assert organized_cache.read_text() == cache_content
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(source if arrival == "moved" else destination),
+                dest_path=str(destination) if arrival == "moved" else None,
+                event_type=arrival,
+            )
+            await watcher.consume_event(event)
+
+            await item.refresh_from_db()
+            assert item.path == str(destination)
+            assert item.hash == hashlib.md5(content).hexdigest()
+            assert item.size == len(content)
+            if preserved:
+                assert organized_cache.read_text() == cache_content
+                assert item.danmaku_meta == cached_meta
+                assert item.danmaku_path == (str(cache) if explicit_cache else None)
+            else:
+                assert not organized_cache.exists()
+                assert item.danmaku_meta is None
+                assert item.danmaku_path is None
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("cache_name", "organized_cache"),
+    [(".old.json", ".New.json"), ("custom.json", "custom.json")],
+)
+def test_reused_cache(tmp_path, monkeypatch, cache_name, organized_cache):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"original movie")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>New</title></movie>")
+    cache = tmp_path / cache_name
+    cache.write_text('[{"text":"Original movie comment","start":1000}]')
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=lib.dir,
+                name=source.stem,
+                nfo_path=str(nfo),
+                danmaku_path=str(cache),
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(nfo), event_type="modified"
+            )
+
+            await watcher.consume_event(event)
+            await item.refresh_from_db()
+            source.write_bytes(b"another movie")
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(source), event_type="created"
+            )
+            await watcher.consume_event(event)
+            replacement = await MediaItem.get(lib=lib, path=str(source))
+            original_comments = await DanmakuService.match_danmakus(item.path)
+            replacement_comments = await DanmakuService.match_danmakus(replacement.path)
+
+            assert replacement.id != item.id
+            assert replacement_comments.comments == []
+            assert [comment.text for comment in original_comments.comments] == [
+                "Original movie comment"
+            ]
+            assert item.path == str(tmp_path / "New.mkv")
+            assert item.danmaku_path == str(tmp_path / organized_cache)
+            assert not (tmp_path / ".old.json").exists()
+            assert not await MediaEvent.filter(lib=lib).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_ingest_shared_nfo(tmp_path, monkeypatch):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"video")
+    source.with_suffix(".nfo").write_text(
+        "<movie><title>Film</title><year>2026</year></movie>"
+    )
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}} ({{year}})/{{title}}",
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(source), event_type="created"
+            )
+
+            await watcher.consume_event(event)
+
+            params = fire.call_args.kwargs["bootparams"]
+            folder = tmp_path / "Film (2026)"
+            assert params["item_path"] == str(folder / "Film.mkv")
+            assert params["nfo_path"] == str(folder / "Film (2026).nfo")
+            assert Path(params["nfo_path"]).is_file()
         finally:
             await Tortoise.close_connections()
 
