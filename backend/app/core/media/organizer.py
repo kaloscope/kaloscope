@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import mimetypes
 import os
 import tempfile
 from contextlib import suppress
@@ -13,6 +14,8 @@ from tortoise.transactions import in_transaction
 from app.models.download import DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.utils.disk import rename_exclusive
+
+_SUBTITLES = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".lrc"}
 
 
 class OrganizePendingError(RuntimeError):
@@ -90,6 +93,41 @@ def _fingerprint(path: Path) -> list[int]:
     """
     stat = path.lstat()
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
+def _companions(path: Path) -> list[Path]:
+    """Find the NFO and subtitle files associated with a video basename.
+
+    Args:
+        path: The video file path.
+
+    Returns:
+        The matching files and symlinks in the video's directory, accepting
+        case-insensitive extensions and excluding subtitles with a longer
+        matching video basename.
+    """
+    siblings = [
+        sibling
+        for sibling in path.parent.iterdir()
+        if sibling.is_file() or sibling.is_symlink()
+    ]
+    prefix = f"{path.stem}."
+    other_video_prefixes = tuple(
+        f"{sibling.stem}."
+        for sibling in siblings
+        if sibling.stem.startswith(prefix)
+        and (mimetypes.guess_file_type(sibling)[0] or "").startswith("video/")
+    )
+    return [
+        sibling
+        for sibling in siblings
+        if (sibling.stem == path.stem and sibling.suffix.lower() == ".nfo")
+        or (
+            sibling.suffix.lower() in _SUBTITLES
+            and sibling.name.startswith(prefix)
+            and not sibling.name.startswith(other_video_prefixes)
+        )
+    ]
 
 
 def _move_files(root: Path, payload: dict):
