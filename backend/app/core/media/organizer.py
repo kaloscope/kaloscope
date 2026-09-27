@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import mimetypes
 import os
+import re
 import tempfile
 import unicodedata
 from contextlib import suppress
@@ -628,3 +629,69 @@ async def recover_organizing(lib: MediaLib) -> dict[str, str]:
     for event in await MediaEvent.filter(lib_id=lib.id, event_type="organize"):
         mapping.update(await _finish(lib, event))
     return mapping
+
+
+async def _season_groups(
+    lib: MediaLib, group: list[MediaItem], parent: MediaItem | None
+):
+    """Group episodes by season when the directory template uses a season field.
+
+    Args:
+        lib: The media library containing the directory naming template.
+        group: The video items sharing the source directory.
+        parent: The directory item whose NFO and stored season supply fallback
+            metadata, if any.
+
+    Raises:
+        ValueError: If splitting requires unknown seasons or would leave
+            unindexed videos in the source directory.
+
+    Returns:
+        Pairs of season numbers and item lists, or one pair with a `None` season
+        when the template does not require grouping by season.
+    """
+    if (
+        lib.lib_type != LibType.TV_SHOW
+        or parent is None
+        or not re.search(r"{{\s*season\s*}}", lib.rename_template.rsplit("/", 1)[0])
+    ):
+        return [(None, group)]
+    parent_season = parent.season
+    try:
+        parent_metadata = await asyncio.to_thread(
+            _metadata,
+            Path(parent.nfo_path or Path(parent.path) / f"{parent.name}.nfo"),
+            lib.lib_type,
+            "tvshow",
+        )
+        if parent_metadata.get("season") is not None:
+            parent_season = parent_metadata["season"]
+    except (OSError, ValueError, etree.LxmlError):
+        pass
+    groups = {}
+    for item in group:
+        season = item.season if item.season is not None else parent_season
+        try:
+            metadata = await asyncio.to_thread(
+                _metadata,
+                Path(item.nfo_path or Path(item.path).with_suffix(".nfo")),
+                lib.lib_type,
+                "episodedetails",
+            )
+            if metadata.get("season") is not None:
+                season = metadata["season"]
+        except (OSError, ValueError, etree.LxmlError):
+            pass
+        groups.setdefault(season, []).append(item)
+    if len(groups) > 1:
+        if None in groups:
+            raise ValueError("cannot split episodes without a known season")
+        indexed = {item.path for item in group}
+        if any(
+            file.is_file()
+            and str(file) not in indexed
+            and (mimetypes.guess_file_type(file)[0] or "").startswith("video/")
+            for file in Path(parent.path).iterdir()
+        ):
+            raise ValueError("waiting for unindexed videos before splitting seasons")
+    return list(groups.items())

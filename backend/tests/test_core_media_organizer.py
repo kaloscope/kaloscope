@@ -15,6 +15,7 @@ from tortoise import Tortoise
 from app.core.config import KaloscopeConfig
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
+from app.core.media.shelver import update_metadata
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 
@@ -443,6 +444,59 @@ def test_journal_files(tmp_path, monkeypatch, mode):
     asyncio.run(run())
 
 
+async def _episode(root: Path):
+    """Create an indexed episode with existing NFO metadata.
+
+    Args:
+        root: The temporary media library root directory.
+
+    Returns:
+        The library, parent directory item, and episode item.
+    """
+    lib = await MediaLib.create(
+        name="Shows",
+        dir=str(root),
+        lib_type=LibType.TV_SHOW,
+        priority=1,
+        rename_template="{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}",
+    )
+    source = root / "Original"
+    source.mkdir()
+    parent_nfo = source / "Original.nfo"
+    _nfo(parent_nfo, "Show", "tvshow", "<season>1</season>")
+    parent = await MediaItem.create(
+        lib=lib,
+        path=str(source),
+        dir=str(source),
+        name=source.name,
+        nfo_path=str(parent_nfo),
+        season=1,
+    )
+    video = source / "old.mkv"
+    video.write_bytes(b"video")
+    nfo = video.with_suffix(".nfo")
+    _nfo(
+        nfo,
+        "Old title",
+        "episodedetails",
+        "<season>1</season><episode>1</episode>"
+        "<aired>2026-01-01</aired><rating>5.25</rating>"
+        "<art><poster>https://example.com/old-poster.jpg</poster>"
+        "<fanart>https://example.com/old-backdrop.jpg</fanart></art>",
+    )
+    item = await MediaItem.create(
+        lib=lib,
+        parent=parent,
+        path=str(video),
+        dir=str(source),
+        name=video.stem,
+        nfo_path=str(nfo),
+    )
+    await update_metadata(lib, nfo)
+    await item.refresh_from_db()
+    return lib, parent, item
+
+
 @pytest.mark.parametrize("reference", ["ancestor", "chained", "unrelated"])
 def test_directory_link_scope(tmp_path, reference):
     root = tmp_path / "library"
@@ -568,3 +622,33 @@ def test_shared_references(tmp_path, invalid):
     shared = organizer._shared_artwork(tmp_path, artwork, {source})
 
     assert shared == (artwork if invalid else {tmp_path / "cover.jpg"})
+
+
+def test_season_groups(tmp_path):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            _nfo(Path(item.nfo_path), "Special", "episodedetails", "<season>0</season>")
+            second_path = Path(parent.path) / "second.mkv"
+            second_path.write_bytes(b"second")
+            second = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(second_path),
+                dir=parent.path,
+                name=second_path.stem,
+                season=2,
+            )
+
+            groups = await organizer._season_groups(lib, [item, second], parent)
+
+            assert [(season, [row.id for row in rows]) for season, rows in groups] == [
+                (0, [item.id]),
+                (2, [second.id]),
+            ]
+            assert item.season == 1
+            (Path(parent.path) / "unindexed.mkv").write_bytes(b"unindexed")
+            with pytest.raises(ValueError, match="unindexed videos"):
+                await organizer._season_groups(lib, [item, second], parent)
+
+    asyncio.run(run())
