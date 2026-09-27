@@ -2730,3 +2730,151 @@ def test_transfer_template(tmp_path, suffix):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", list(TransferMethod))
+@pytest.mark.parametrize(
+    ("state", "attempted"),
+    [
+        (DownloadState.DOWNLOADING, False),
+        (DownloadState.COMPLETED, False),
+        (DownloadState.COMPLETED, True),
+    ],
+)
+def test_transfer_conflict_organization(tmp_path, method, state, attempted):
+    from app.core.media import organizer
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            task.state = state
+            await task.save()
+            library.rename_template = "{{title}}"
+            await library.save()
+            source = Path(task.dir) / "movie.mkv"
+            source.write_bytes(b"new video")
+            if state is DownloadState.DOWNLOADING:
+                source.unlink()
+            destination = Path(library.dir) / "movie.mkv"
+            destination.parent.mkdir()
+            destination.write_bytes(b"old video")
+            nfo = destination.with_suffix(".nfo")
+            nfo.write_text("<movie><title>Existing Film</title></movie>")
+            item = await MediaItem.create(
+                lib=library,
+                path=str(destination),
+                dir=library.dir,
+                name=destination.stem,
+                nfo_path=str(nfo),
+            )
+
+            if attempted:
+                await syncer.transfer_files(task, task.files)
+                await task.refresh_from_db()
+                assert task.transfer_targets is None
+                assert source.read_bytes() == b"new video"
+                assert destination.read_bytes() == b"old video"
+            async with syncer.library_lock(library.dir):
+                await organizer.organize_items(library, [item.id])
+            await task.refresh_from_db()
+            assert task.transfer_targets is None
+
+            source.write_bytes(b"new video")
+            task.state = DownloadState.COMPLETED
+            await task.save()
+            await syncer.transfer_files(task, task.files)
+
+            await task.refresh_from_db()
+            await item.refresh_from_db()
+            organized = Path(library.dir) / "Existing Film.mkv"
+            assert item.path == str(organized)
+            assert organized.read_bytes() == b"old video"
+            assert destination.read_bytes() == b"new video"
+            assert task.transfer_targets == {"movie.mkv": str(destination)}
+            assert source.exists() is (method is not TransferMethod.MOVE)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("pattern", "replacement"),
+    [("[", None), ("^", r"\2"), ("^", "{{ 1 / 0 }}")],
+)
+def test_transfer_backfill_invalid(tmp_path, pattern, replacement):
+    from app.core.media import organizer
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, ["movie.mkv"]
+            )
+            library.rename_template = "{{title}}"
+            await library.save()
+            root = Path(library.dir)
+            destination = root / "movie.mkv"
+            (Path(task.dir) / "movie.mkv").write_bytes(b"movie")
+            await syncer.transfer_files(task, task.files)
+            nfo = destination.with_suffix(".nfo")
+            nfo.write_text("<movie><title>Renamed</title></movie>")
+            item = await MediaItem.create(
+                lib=library,
+                path=str(destination),
+                dir=library.dir,
+                name="movie",
+                nfo_path=str(nfo),
+            )
+            source = root / "protected.mkv"
+            source.write_bytes(b"original download")
+            source_nfo = source.with_suffix(".nfo")
+            source_nfo.write_text("<movie><title>Do Not Rename</title></movie>")
+            protected = await MediaItem.create(
+                lib=library,
+                path=str(source),
+                dir=library.dir,
+                name="protected",
+                nfo_path=str(source_nfo),
+            )
+            invalid = await DownloadTask.create(
+                downloader_id=task.downloader_id,
+                name="invalid",
+                dir=library.dir,
+                files=[source.name],
+                state=DownloadState.COMPLETED,
+                transfer_lib=library,
+                transfer_method=TransferMethod.MOVE,
+                sub_pattern=pattern,
+                sub_repl=replacement,
+            )
+
+            async with syncer.library_lock(library.dir):
+                await organizer.organize_items(library, [protected.id, item.id])
+            await task.refresh_from_db()
+            await invalid.refresh_from_db()
+            await item.refresh_from_db()
+            await protected.refresh_from_db()
+
+            organized = root / "Renamed.mkv"
+            assert item.path == str(organized)
+            assert organized.read_bytes() == b"movie"
+            assert task.transfer_targets == {"movie.mkv": str(organized)}
+            assert invalid.transfer_targets is None
+            assert protected.path == str(source)
+            assert source.read_bytes() == b"original download"
+            assert source_nfo.read_text() == (
+                "<movie><title>Do Not Rename</title></movie>"
+            )
+            assert not (root / "Do Not Rename.mkv").exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
