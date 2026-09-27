@@ -652,3 +652,28 @@ def test_season_groups(tmp_path):
                 await organizer._season_groups(lib, [item, second], parent)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
+def test_plan(tmp_path, lib_type):
+    async def run():
+        async with _database():
+            if lib_type == LibType.TV_SHOW:
+                lib, parent, item = await _episode(tmp_path)
+            else:
+                lib, item = await _movie(tmp_path)
+                parent = None
+            original = item.path
+
+            payload = await organizer._plan(lib, [item], parent)
+
+            assert payload["mapping"][original] != original
+            assert payload["updates"][0]["id"] == item.id
+            assert any(move["src"] == original for move in payload["moves"])
+            assert Path(original).read_bytes() == b"video"
+            assert not Path(payload["mapping"][original]).exists()
+            await item.refresh_from_db()
+            assert item.path == original
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
