@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from lxml import etree
 from tortoise.transactions import in_transaction
@@ -15,6 +16,7 @@ from tortoise.transactions import in_transaction
 from app.models.download import DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.utils.disk import rename_exclusive
+from app.utils.xml import get_integer
 
 _SUBTITLES = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".lrc"}
 
@@ -201,6 +203,148 @@ def _validate_link_references(root: Path, moves: dict[str, str]):
                     )
             elif path.is_dir():
                 directories.append(path)
+
+
+def _relocate_reference(
+    value: str | None, old_nfo: Path, new_nfo: Path, moves: dict[str, str]
+) -> str | None:
+    """Update a local resource reference for the NFO's destination.
+
+    Args:
+        value: The resource path or URL stored in the NFO metadata.
+        old_nfo: The original NFO path used to resolve relative references.
+        new_nfo: The destination NFO path used to rebuild relative references.
+        moves: The mapping from source file paths to destination file paths.
+
+    Returns:
+        The adjusted local path or unchanged reference with surrounding whitespace
+        removed, or `None` if no reference was provided.
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or urlsplit(value).scheme or value.startswith("//"):
+        return value
+    original = Path(value)
+    source = original if original.is_absolute() else old_nfo.parent / original
+    destination = moves.get(os.path.normpath(source))
+    if destination is None:
+        if original.is_absolute() or not source.is_file():
+            return value
+        destination = str(source)
+    if os.path.normpath(new_nfo.parent / original) == os.path.normpath(destination):
+        return value
+    if original.is_absolute():
+        return destination
+    return os.path.relpath(destination, new_nfo.parent)
+
+
+def _shared_artwork(root: Path, artwork: set[Path], nfo_paths: set[Path]) -> set[Path]:
+    """Find artwork referenced by NFOs outside the organization plan.
+
+    Inspect files on disk so references from unindexed media are also preserved.
+    Keep all candidate artwork in place if another NFO cannot be read or parsed.
+
+    Args:
+        root: The media library root to search for other NFO files.
+        artwork: The local artwork paths proposed for movement.
+        nfo_paths: The NFO paths whose references are updated by the plan.
+
+    Returns:
+        The artwork paths that must remain at their original locations.
+    """
+    candidates = {path: path.resolve() for path in artwork}
+    shared = set()
+    for nfo in root.rglob("*.nfo", case_sensitive=False):
+        if nfo in nfo_paths or nfo.is_dir():
+            continue
+        try:
+            tree = etree.parse(
+                nfo,
+                etree.XMLParser(recover=False, resolve_entities=False, no_network=True),
+            )
+        except (OSError, etree.LxmlError):
+            return artwork
+        for element in tree.iter():
+            value = (element.text or "").strip()
+            if (
+                element.tag not in ("poster", "fanart", "thumb")
+                or not value
+                or urlsplit(value).scheme
+                or value.startswith("//")
+            ):
+                continue
+            reference = (nfo.parent / value).resolve()
+            shared.update(
+                path for path, resolved in candidates.items() if resolved == reference
+            )
+        if shared == artwork:
+            break
+    return shared
+
+
+def _nfo_edits(
+    moves: dict[str, str], seasons: dict[str, int | None] | None = None
+) -> list[dict]:
+    """Prepare NFO edits for resource references and season metadata.
+
+    Args:
+        moves: The mapping from source file paths to destination file paths.
+        seasons: Optional destination NFO paths mapped to their season numbers;
+            a `None` season removes the season element.
+
+    Raises:
+        OSError: If an NFO source cannot be read.
+
+    Returns:
+        The destination paths, original content hashes, and replacement XML for
+        changed NFO files, including symlinks so the caller can reject unsafe
+        moves. Invalid XML documents are skipped.
+    """
+    edits = []
+    for source, destination in moves.items():
+        if Path(source).suffix.lower() != ".nfo":
+            continue
+        original = Path(source).read_bytes()
+        try:
+            tree = etree.fromstring(
+                original,
+                etree.XMLParser(recover=False, resolve_entities=False, no_network=True),
+            )
+        except etree.XMLSyntaxError:
+            continue
+        changed = False
+        if seasons is not None and destination in seasons and tree.tag == "tvshow":
+            season = seasons[destination]
+            element = tree.find("season")
+            if season is None:
+                if element is not None:
+                    tree.remove(element)
+                    changed = True
+            elif element is None:
+                etree.SubElement(tree, "season").text = str(season)
+                changed = True
+            elif get_integer(tree, "season") != season:
+                element.text = str(season)
+                changed = True
+        for element in tree.iter():
+            if element.tag in ("poster", "fanart", "thumb") and element.text:
+                value = _relocate_reference(
+                    element.text, Path(source), Path(destination), moves
+                )
+                if value != element.text.strip():
+                    element.text = value
+                    changed = True
+        if changed:
+            content = etree.tostring(tree, encoding="unicode")
+            edits.append(
+                {
+                    "path": destination,
+                    "before": hashlib.sha256(original).hexdigest(),
+                    "content": content,
+                }
+            )
+    return edits
 
 
 def _context(metadata: dict, parent: dict | None) -> dict:
