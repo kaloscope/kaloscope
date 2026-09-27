@@ -348,6 +348,9 @@ class DLSyncer:
                     await asyncio.sleep(1)
                     continue
 
+                # resume local transfers without requiring a remote task or driver
+                await _resume_transfers()
+
                 # synchronize the download tasks in batch by downloader
                 active_states = [
                     DownloadState.PAUSED,
@@ -508,9 +511,30 @@ async def _complete_openlist_tasks(task_ids: list[int]):
             logger.error("Failed to complete OpenList task: %s", task.id, exc_info=True)
 
 
+async def _resume_transfers():
+    """Resume durable RPC transfers independently of remote download snapshots.
+
+    Keep incomplete, failed, or cancelled transfers pending for the next cycle.
+    Reuse persisted file destinations without repeating completion notifications.
+    """
+    tasks = await DownloadTask.filter(
+        state=DownloadState.COMPLETED, transfer_pending=True
+    )
+    for task in tasks:
+        try:
+            if await transfer_files(task, task.files):
+                await DownloadTask.filter(id=task.id).update(transfer_pending=False)
+        except Exception:
+            logger.error(
+                "Failed to resume transfer for task: %s", task.id, exc_info=True
+            )
+
+
 async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
     """Synchronize tasks through a local HTTP/RPC downloader.
 
+    Persist completion and pending local transfer work together so interrupted
+    or incomplete transfers can resume even after the remote task disappears.
     Preserve known files when a response omits a usable file list.
 
     Args:
@@ -641,6 +665,11 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
 
         # keep stored files and transfer inputs consistent
         files = files if isinstance(files, list) else task.files
+        transfer_pending = (
+            state == DownloadState.COMPLETED
+            and task.transfer_lib_id is not None
+            and bool(files)
+        )
         if completed_at is not None:
             await Notifications.send(NotificationTemplate.DOWNLOAD_COMPLETED, name=name)
 
@@ -659,12 +688,15 @@ async def _sync_rpc_tasks(driver: RpcDriver, tasks: list[DownloadTask]):
             total_size=total_size,
             completed_size=completed_size,
             completed_at=completed_at,
+            transfer_pending=transfer_pending,
         )
 
         # transfer files to media library after completion
         if state == DownloadState.COMPLETED:
             try:
-                await transfer_files(task, files)
+                transferred = await transfer_files(task, files)
+                if transfer_pending and transferred:
+                    await DownloadTask.filter(id=task.id).update(transfer_pending=False)
             except Exception:
                 logger.error(
                     "Failed to transfer files for task: %s",
