@@ -2314,6 +2314,264 @@ def test_season_merge(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("seasons", [(1, 2), (0, 2)])
+@pytest.mark.parametrize("existing_directory", [False, True])
+@pytest.mark.parametrize("source_first", [False, True])
+def test_season_split(tmp_path, seasons, existing_directory, source_first):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+            )
+            show_directory = tmp_path / "Show"
+            directory = (
+                show_directory / f"Season {seasons[0]:02d}"
+                if existing_directory
+                else show_directory
+            )
+            directory.mkdir(parents=True)
+            nfo = directory / f"{directory.name}.nfo"
+            _nfo(
+                nfo,
+                "Show",
+                "tvshow",
+                "<season>1</season><art><poster>poster.jpg</poster></art>",
+            )
+            nfo.chmod(0o640)
+            poster = directory / "poster.jpg"
+            poster.write_bytes(b"shared poster")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(directory),
+                dir=str(directory),
+                name=directory.name,
+                nfo_path=str(nfo),
+                season=1,
+            )
+            items = {}
+            # create the source season last when it should be processed first
+            creation_order = reversed(seasons) if source_first else seasons
+            for season in creation_order:
+                video = directory / f"old{season}.mkv"
+                video.write_bytes(b"video")
+                nfo = video.with_suffix(".nfo")
+                _nfo(
+                    nfo,
+                    "Episode",
+                    "episodedetails",
+                    f"<season>{season}</season><episode>1</episode>",
+                )
+                items[season] = await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(video),
+                    dir=str(directory),
+                    name=video.stem,
+                    nfo_path=str(nfo),
+                    season=1,
+                )
+
+            await organizer.organize_items(lib, [parent.id])
+
+            for season, item in items.items():
+                await item.refresh_from_db()
+                expected = show_directory / f"Season {season:02d}"
+                assert item.path == str(expected / f"S{season:02d}E01.mkv")
+                assert item.nfo_path == str(expected / f"S{season:02d}E01.nfo")
+                assert Path(item.path).read_bytes() == b"video"
+                assert Path(item.nfo_path).is_file()
+                assert not (directory / f"old{season}.mkv").exists()
+                assert not (directory / f"old{season}.nfo").exists()
+                assert item.season == season
+                target_parent = await MediaItem.get(id=item.parent_id)
+                assert target_parent.path == str(expected)
+                assert target_parent.nfo_path == str(expected / f"{expected.name}.nfo")
+                assert Path(target_parent.nfo_path).stat().st_mode & 0o777 == 0o640
+                assert target_parent.season == season
+                assert (expected / target_parent.poster).resolve() == poster
+                metadata = organizer._metadata(
+                    Path(target_parent.nfo_path), lib.lib_type, "tvshow"
+                )
+                assert metadata["season"] == season
+                assert metadata["poster"] == target_parent.poster
+            assert items[seasons[0]].parent_id != items[seasons[1]].parent_id
+            if existing_directory:
+                assert items[seasons[0]].parent_id == parent.id
+                await parent.refresh_from_db()
+                assert parent.season == seasons[0]
+            else:
+                assert not await MediaItem.filter(id=parent.id).exists()
+            assert poster.read_bytes() == b"shared poster"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+            assert (
+                await organizer.organize_items(
+                    lib, [item.id for item in items.values()]
+                )
+                == {}
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", [None, 0o640, 0o644])
+@pytest.mark.parametrize("published", [False, True])
+def test_split_nfo_permissions(tmp_path, monkeypatch, mode, published):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            parent_nfo = Path(parent.nfo_path)
+            parent_nfo.chmod(mode if mode is not None else 0o644)
+            payload = await organizer._plan(lib, [item], parent, season=1, split=True)
+            if mode is None:
+                for create in payload["creates"]:
+                    create.pop("mode", None)
+            event = await MediaEvent.create(
+                lib=lib, event_type="organize", src_path=parent.path, payload=payload
+            )
+            copied_nfo = Path(payload["parent"]["nfo_path"])
+            rename = organizer.rename_exclusive
+
+            def interrupt(source, destination):
+                """Interrupt publication of the copied parent NFO.
+
+                Args:
+                    source: The source file being published.
+                    destination: The final file path.
+
+                Raises:
+                    OSError: When the copied NFO reaches publication.
+                """
+                if destination == copied_nfo:
+                    if published:
+                        rename(source, destination)
+                    raise OSError("Interrupted NFO publication")
+                rename(source, destination)
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(organizer, "rename_exclusive", interrupt)
+                with pytest.raises(organizer.OrganizePendingError):
+                    await organizer._finish(lib, event)
+            parent_nfo.chmod(0o600)
+            await organizer.recover_organizing(lib)
+
+            assert copied_nfo.stat().st_mode & 0o777 == (
+                mode if mode is not None else 0o600
+            )
+            assert (
+                organizer._metadata(copied_nfo, lib.lib_type, "tvshow")["season"] == 1
+            )
+            await item.refresh_from_db()
+            assert Path(item.path).read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("source_first", "interrupted", "fallback_season"),
+    [(False, False, 1), (True, False, 1), (True, True, 1), (True, True, 0)],
+)
+def test_split_season_fallback(
+    tmp_path, monkeypatch, source_first, interrupted, fallback_season
+):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+            )
+            directory = tmp_path / "Show" / "Season 02"
+            directory.mkdir(parents=True)
+            nfo = directory / "Season 02.nfo"
+            _nfo(nfo, "Show", "tvshow", f"<season>{fallback_season}</season>")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(directory),
+                dir=str(directory),
+                name=directory.name,
+                nfo_path=str(nfo),
+                season=fallback_season,
+            )
+            items = {}
+            creation_order = (
+                (fallback_season, 2) if source_first else (2, fallback_season)
+            )
+            for season in creation_order:
+                video = directory / f"old{season}.mkv"
+                video.write_bytes(b"video")
+                nfo = video.with_suffix(".nfo")
+                season_element = "<season>2</season>" if season == 2 else ""
+                _nfo(
+                    nfo,
+                    "Episode",
+                    "episodedetails",
+                    f"{season_element}<episode>1</episode>",
+                )
+                items[season] = await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(video),
+                    dir=str(directory),
+                    name=video.stem,
+                    nfo_path=str(nfo),
+                    season=2 if season == 2 else None,
+                    episode=1,
+                )
+
+            if interrupted:
+                original_plan = organizer._plan
+                calls = 0
+
+                async def interrupt_second(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise RuntimeError(
+                            "simulated interruption before second season"
+                        )
+                    return await original_plan(*args, **kwargs)
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(organizer, "_plan", interrupt_second)
+                    with pytest.raises(RuntimeError, match="simulated interruption"):
+                        await organizer.organize_items(lib, [parent.id])
+
+            await organizer.organize_items(lib, [parent.id])
+
+            for season, item in items.items():
+                await item.refresh_from_db()
+                expected = tmp_path / "Show" / f"Season {season:02d}"
+                assert item.path == str(expected / f"S{season:02d}E01.mkv")
+                assert item.nfo_path == str(expected / f"S{season:02d}E01.nfo")
+                assert item.season == season
+                target_parent = await MediaItem.get(id=item.parent_id)
+                assert target_parent.season == season
+                assert (
+                    organizer._metadata(
+                        Path(target_parent.nfo_path), lib.lib_type, "tvshow"
+                    )["season"]
+                    == season
+                )
+            assert items[2].parent_id == parent.id
+            assert items[fallback_season].parent_id != parent.id
+            assert (
+                await organizer.organize_items(
+                    lib, [item.id for item in items.values()]
+                )
+                == {}
+            )
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 def test_shared_image(tmp_path):
     async def run():
         async with _database():
