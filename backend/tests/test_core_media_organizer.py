@@ -650,6 +650,38 @@ def test_episode_metadata(tmp_path, invalid):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("original_source", [False, True])
+def test_transfer_mapping(tmp_path, original_source):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            downloader = await Downloader.create(name="Test", config="{}", priority=1)
+            source = tmp_path if original_source else tmp_path / "downloads"
+            if not original_source:
+                source.mkdir()
+                (source / "original.mkv").hardlink_to(Path(item.path))
+            task = await DownloadTask.create(
+                downloader=downloader,
+                name="original",
+                dir=str(source),
+                files=["original.mkv"],
+                state=DownloadState.COMPLETED,
+                transfer_lib=lib,
+            )
+            result = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            await task.refresh_from_db()
+            if original_source:
+                assert result == {}
+                assert item.path == str(tmp_path / "original.mkv")
+            else:
+                assert item.path == str(tmp_path / "New Movie.mkv")
+                assert task.transfer_targets == {"original.mkv": item.path}
+                assert (source / "original.mkv").read_bytes() == b"video"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("reference", ["ancestor", "chained", "unrelated"])
 def test_directory_link_scope(tmp_path, reference):
     root = tmp_path / "library"
@@ -675,6 +707,93 @@ def test_directory_link_scope(tmp_path, reference):
 
     assert source.read_bytes() == b"video"
     assert alias.is_dir()
+
+
+@pytest.mark.parametrize("listed", [False, True])
+def test_download_nfo(tmp_path, listed):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/{{episode_code}}",
+            )
+            folder = tmp_path / "Show"
+            folder.mkdir()
+            nfo = folder / "Show.nfo"
+            _nfo(nfo, "Show", "tvshow")
+            original = nfo.read_bytes()
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(folder),
+                dir=str(folder),
+                name=folder.name,
+                nfo_path=str(nfo),
+                season=1,
+            )
+            video = folder / "S01E01.mkv"
+            video.write_bytes(b"video")
+            episode_nfo = video.with_suffix(".nfo")
+            _nfo(
+                episode_nfo,
+                "Pilot",
+                "episodedetails",
+                "<season>1</season><episode>1</episode>",
+            )
+            await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(folder),
+                name=video.stem,
+                nfo_path=str(episode_nfo),
+                season=1,
+                episode=1,
+            )
+            downloader = await Downloader.create(name="Test", config="{}", priority=1)
+            await DownloadTask.create(
+                downloader=downloader,
+                name="Show",
+                dir=str(tmp_path),
+                files=["Show/Show.nfo", "Show/S01E01.mkv", "Show/S01E01.nfo"]
+                if listed
+                else None,
+                state=DownloadState.COMPLETED,
+                transfer_lib=lib,
+            )
+
+            result = await organizer.organize_items(lib, [parent.id])
+
+            assert result == {}
+            assert nfo.read_bytes() == original
+            assert video.read_bytes() == b"video"
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_download_source_alias(tmp_path):
+    async def run():
+        async with _database():
+            root = tmp_path / "library"
+            root.mkdir()
+            lib, item = await _movie(root)
+            alias = tmp_path / "downloads"
+            alias.symlink_to(root, target_is_directory=True)
+            downloader = await Downloader.create(name="Test", config="{}", priority=1)
+            await DownloadTask.create(
+                downloader=downloader,
+                name="original",
+                dir=str(alias),
+                files=["original.mkv"],
+                state=DownloadState.COMPLETED,
+            )
+            assert await organizer.organize_items(lib, [item.id]) == {}
+            assert Path(item.path).read_bytes() == b"video"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("linked", [False, True])
