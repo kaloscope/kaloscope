@@ -1635,6 +1635,58 @@ def test_ingest_paths(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_persisted_event(tmp_path, monkeypatch):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            source = tmp_path / "Old.mkv"
+            source.write_bytes(b"video")
+            item = await MediaItem.create(
+                lib=lib, path=str(source), dir=lib.dir, name="Old"
+            )
+            assert await shelver.gen_nfo(
+                "movie",
+                str(source.with_suffix(".nfo")),
+                {"title": "New"},
+                item_id=item.id,
+                refresh=True,
+            )
+            consume = watcher.consume_event
+
+            async def finish(event):
+                await consume(event)
+                raise asyncio.CancelledError
+
+            monkeypatch.setattr(watcher, "consume_event", finish)
+            monitor = watcher.LibWatcher(None)
+            await asyncio.wait_for(monitor._event_consumer(lib.id, Queue()), 3)
+
+            await item.refresh_from_db()
+            assert item.path == str(tmp_path / "New.mkv")
+            assert Path(item.path).read_bytes() == b"video"
+            assert not source.exists()
+            assert not await MediaEvent.filter(lib=lib).exists()
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 def test_deferred_events(tmp_path, monkeypatch):
     attempts = []
     fire = AsyncMock()

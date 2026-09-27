@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import mimetypes
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,8 @@ from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
-from app.core.media import organizer, shelver
+from app.core.constants import NFO_MIME_TYPE
+from app.core.media import organizer, shelver, watcher
 from app.core.media.coordination import library_lock
 from app.models.media import (
     LibType,
@@ -23,6 +25,7 @@ from app.models.media import (
     MediaMetadata,
     NFOType,
 )
+from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService
 
 
@@ -559,6 +562,128 @@ def test_nfo_recovery(tmp_path, stage, refresh):
             assert not source.exists()
             assert not old_nfo.exists()
             assert not await MediaEvent.filter(id=event.id).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("recovery", ["restart", "watchdog", "published"])
+def test_metadata_recovery(tmp_path, monkeypatch, recovery):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    directory = tmp_path / "library"
+    directory.mkdir()
+    video = directory / "Old.mkv"
+    video.write_bytes(b"video")
+    nfo = video.with_suffix(".nfo")
+    db_url = f"sqlite://{tmp_path / 'media.sqlite'}"
+
+    async def run():
+        await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(directory),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(video), dir=str(directory), name=video.stem
+            )
+            body = {"title": "New"}
+
+            assert await shelver.gen_nfo(
+                NFOType.MOVIE,
+                str(nfo),
+                body,
+                overwrite=True,
+                item_id=item.id,
+                refresh=True,
+            )
+
+            await item.refresh_from_db()
+            assert item.title == "New"
+            assert item.nfo_mtime is not None
+            assert video.is_file()
+            assert await MediaEvent.all().count() == 1
+            pending = await MediaEvent.get()
+            assert pending.payload == {"bootparams": [], "organize_ids": [item.id]}
+
+            if recovery == "restart":
+                await Tortoise.close_connections()
+                await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+                lib = await MediaLib.get(id=lib.id)
+            elif recovery == "published":
+                await watcher.consume_event(pending)
+            if recovery != "restart":
+                await watcher.consume_event(
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(nfo), event_type="created"
+                    )
+                )
+            monitor = watcher.LibWatcher(None)
+            events = await monitor._create_events(lib)
+            while not events.empty():
+                await watcher.consume_event(events.get_nowait())
+
+            await item.refresh_from_db()
+            assert item.path == str(directory / "New.mkv")
+            assert Path(item.path).read_bytes() == b"video"
+            assert item.nfo_path == str(directory / "New.nfo")
+            assert not video.exists()
+            assert not await MediaEvent.all().exists()
+            fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_metadata_event_failure(tmp_path, monkeypatch):
+    create_event = AsyncMock(side_effect=RuntimeError("Event persistence failed"))
+    monkeypatch.setattr(shelver.MediaEvent, "create", create_event)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}",
+            )
+            video = tmp_path / "Old.mkv"
+            video.write_bytes(b"video")
+            item = await MediaItem.create(
+                lib=lib, path=str(video), dir=str(tmp_path), name=video.stem
+            )
+            nfo = video.with_suffix(".nfo")
+            body = {"title": "New"}
+
+            with pytest.raises(RuntimeError, match="Event persistence failed"):
+                await shelver.gen_nfo(
+                    NFOType.MOVIE,
+                    str(nfo),
+                    body,
+                    overwrite=True,
+                    item_id=item.id,
+                    refresh=True,
+                )
+
+            await item.refresh_from_db()
+            assert item.title is None
+            assert item.nfo_path is None
+            assert item.nfo_mtime is None
+            assert etree.parse(nfo).getroot().findtext("title") == "New"
+            assert not await MediaEvent.all().exists()
         finally:
             await Tortoise.close_connections()
 
