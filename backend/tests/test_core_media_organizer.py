@@ -21,7 +21,7 @@ from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
-from app.core.media.shelver import update_metadata
+from app.core.media.shelver import gen_nfo, update_metadata
 from app.core.media.watcher import LibWatcher, consume_event
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
@@ -721,6 +721,105 @@ def test_movie_destination(tmp_path, indexed, layout, filename):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("companion", ["nfo", "cache", "saved_cache"])
+@pytest.mark.parametrize("relocated", [False, True])
+@pytest.mark.parametrize("collision", [False, True])
+def test_companion_rename(tmp_path, monkeypatch, companion, relocated, collision):
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+
+    async def run():
+        async with _database():
+            target_name = "Renamed" if relocated else "Show"
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template=f"{target_name}/{{{{episode_code}}}} - {{{{title}}}}",
+            )
+            source = tmp_path / "Show"
+            source.mkdir()
+            parent_nfo = source / "Show.nfo"
+            _nfo(parent_nfo, "Show", "tvshow", "<season>1</season>")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(source),
+                name=source.name,
+                nfo_path=str(parent_nfo),
+                season=1,
+            )
+            video = source / "old.mkv"
+            video.write_bytes(b"video")
+            nfo = video.with_suffix(".NFO" if companion == "nfo" else ".nfo")
+            _nfo(
+                nfo,
+                "Pilot",
+                "episodedetails",
+                "<season>1</season><episode>1</episode>",
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(source),
+                name=video.stem,
+                nfo_path=str(nfo),
+            )
+            original = nfo
+            destination = tmp_path / target_name / "S01E01 - Pilot.mkv"
+            target = destination.with_suffix(".NFO")
+            if companion != "nfo":
+                original = source / ".old.json"
+                original.write_text('[{"text":"Local comment","start":1000}]')
+                target = destination.parent / f".{destination.stem}.json"
+                if companion == "saved_cache":
+                    item.danmaku_path = str(original)
+                    await item.save(update_fields=["danmaku_path"])
+                before = await DanmakuService.match_danmakus(item.path)
+                assert [comment.text for comment in before.comments] == [
+                    "Local comment"
+                ]
+            content = original.read_bytes()
+            if collision:
+                if relocated:
+                    destination.parent.mkdir()
+                    _nfo(
+                        destination.parent / f"{target_name}.nfo",
+                        "Show",
+                        "tvshow",
+                        "<season>1</season>",
+                    )
+                target.write_bytes(b"Existing companion")
+
+            mapping = await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            if collision:
+                assert mapping == {}
+                assert item.path == str(video)
+                assert original.read_bytes() == content
+                assert target.read_bytes() == b"Existing companion"
+                if companion == "saved_cache":
+                    assert item.danmaku_path == str(original)
+            else:
+                assert item.path == str(destination)
+                assert mapping[str(original)] == str(target)
+                assert target.read_bytes() == content
+                assert not original.exists()
+                if companion == "nfo":
+                    assert item.nfo_path == str(target)
+                else:
+                    after = await DanmakuService.match_danmakus(item.path)
+                    assert after.comments == before.comments
+                    assert item.danmaku_path == (
+                        str(target) if companion == "saved_cache" else None
+                    )
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "invalid", ["collision", "incomplete_nfo", "directory_symlink"]
 )
@@ -1042,6 +1141,87 @@ def test_tvshow_missing_nfo(tmp_path):
             assert items[1].path == str(target / "old2.mkv")
             assert items[1].parent_id == parent.id
             assert Path(parent.nfo_path).name == "Season 01.nfo"
+            assert not source.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("companion", ["nfo", "cache"])
+@pytest.mark.parametrize("recovery", [False, True])
+def test_missing_companion(tmp_path, monkeypatch, companion, recovery):
+    root = tmp_path / "library"
+    root.mkdir()
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
+
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(root)
+            source = Path(item.dir)
+            if companion == "nfo":
+                missing = Path(item.nfo_path)
+                missing.unlink()
+                (source / "poster.jpg").write_bytes(b"poster")
+                item.poster = "poster.jpg"
+                await item.save(update_fields=["poster"])
+            else:
+                missing = source / ".old.json"
+                item.danmaku_path = str(missing)
+                item.danmaku_meta = DanmakuMeta(
+                    anime_id="show", episode_id="episode", type="tvseries"
+                ).model_dump()
+                await item.save(update_fields=["danmaku_path", "danmaku_meta"])
+                lib.danmaku_server = "https://danmaku.example"
+                await lib.save(update_fields=["danmaku_server"])
+                comments = [Danmaku(text="Restored", start=1)]
+                monkeypatch.setattr(
+                    DanmakuService, "load_from_server", AsyncMock(return_value=comments)
+                )
+
+            async with library_lock(lib.dir):
+                if recovery:
+                    with monkeypatch.context() as patcher:
+                        patcher.setattr(
+                            organizer,
+                            "_finish",
+                            AsyncMock(side_effect=RuntimeError("interrupted")),
+                        )
+                        with pytest.raises(RuntimeError, match="interrupted"):
+                            await organizer.organize_items(lib, [item.id])
+                    await organizer.recover_organizing(lib)
+                else:
+                    await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            assert not source.exists()
+            assert Path(item.path).is_file()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+            if companion == "nfo":
+                assert item.nfo_path is None
+                assert item.nfo_mtime is None
+                assert (Path(item.dir) / item.poster).read_bytes() == b"poster"
+                assert await gen_nfo(
+                    "episode",
+                    str(missing),
+                    {"title": "Restored", "season": 1, "episode": 1},
+                    item_id=item.id,
+                )
+                current_nfo = Path(item.path).with_suffix(".nfo")
+                assert await update_metadata(lib, current_nfo) == [item.id]
+                await item.refresh_from_db()
+                assert item.nfo_path == str(current_nfo)
+                assert item.title == "Restored"
+            else:
+                assert item.danmaku_path is None
+                result = await DanmakuService.match_danmakus(item.path)
+                await item.refresh_from_db()
+                current_cache = Path(item.dir) / f".{item.name}.json"
+                assert item.danmaku_path == str(current_cache)
+                assert await DanmakuService.load_from_cache(current_cache) == comments
+                assert result.comments == comments
+                assert result.metadata.episode_id == "episode"
+            assert not missing.exists()
             assert not source.exists()
 
     asyncio.run(run())
@@ -1572,6 +1752,38 @@ def test_movie_artwork(tmp_path):
             assert item.poster == str(target)
             assert str(target) in Path(parent.nfo_path).read_text()
             assert not list(target.parent.glob(".organizing-*"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("suffix", [".srt", ".zh-Hans.forced.ass"])
+def test_subtitle_owner(tmp_path, linked, suffix):
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            other_video = tmp_path / "original.Extended.mkv"
+            if linked:
+                source = tmp_path / "extended.bin"
+                source.write_bytes(b"extended video")
+                other_video.symlink_to(source.name)
+            else:
+                other_video.write_bytes(b"extended video")
+            other_subtitle = other_video.with_suffix(suffix)
+            other_subtitle.write_text("extended subtitles")
+            subtitle = tmp_path / "original.en.forced.srt"
+            subtitle.write_text("original subtitles")
+
+            await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+
+            assert item.path == str(tmp_path / "New Movie.mkv")
+            assert Path(item.path).with_suffix(".en.forced.srt").read_text() == (
+                "original subtitles"
+            )
+            assert other_video.read_bytes() == b"extended video"
+            assert other_video.is_symlink() == linked
+            assert other_subtitle.read_text() == "extended subtitles"
 
     asyncio.run(run())
 
