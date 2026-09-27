@@ -773,12 +773,16 @@ async def transfer_files(
     """Publish completed download files under the media library lock.
 
     Skip tasks removed or detached while waiting for the lock.
-    Copy and move files atomically to keep partial copies out of the library.
+    Publish copies and moves in a worker without blocking the event loop.
+    Wait for the worker before releasing the lock on cancellation.
 
     Args:
         task: The download task.
         files: The relative file paths within the download directory.
         job_id: The offline job UUID enabling recoverable copy publication.
+
+    Raises:
+        asyncio.CancelledError: If cancelled, after the transfer worker stops.
     """
     if not task.transfer_lib_id or not files:
         return
@@ -793,6 +797,9 @@ async def transfer_files(
         # and no file name substitution is needed
         return
 
+    transfer_id = (
+        job_id or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
+    )
     async with library_lock(lib.dir):
         # recheck the library association after waiting for its lock
         if not await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).exists():
@@ -824,13 +831,32 @@ async def transfer_files(
         for name, new_name in zip(files, new_files, strict=True):
             src = src_dir / name
             dst = dst_dir / new_name
-            if job_id is not None and task.transfer_method in {
-                TransferMethod.COPY,
-                TransferMethod.MOVE,
-            }:
-                transfer_local_file(
-                    src, dst, job_id, move=task.transfer_method is TransferMethod.MOVE
+            if task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
+                if job_id is None and (not src.exists() or dst.exists()):
+                    continue
+                transfer = asyncio.create_task(
+                    asyncio.to_thread(
+                        transfer_local_file,
+                        src,
+                        dst,
+                        transfer_id,
+                        move=task.transfer_method is TransferMethod.MOVE,
+                    )
                 )
+                cancelled = False
+                try:
+                    while not transfer.done():
+                        try:
+                            await asyncio.shield(transfer)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    transfer.result()
+                except Exception as error:
+                    if cancelled:
+                        raise asyncio.CancelledError from error
+                    raise
+                if cancelled:
+                    raise asyncio.CancelledError
                 continue
             if not src.exists():
                 continue
@@ -851,16 +877,6 @@ async def transfer_files(
                         raise
             elif task.transfer_method == TransferMethod.SYMLINK:
                 os.symlink(src, dst)
-            elif task.transfer_method in {TransferMethod.COPY, TransferMethod.MOVE}:
-                transfer_id = hashlib.sha256(
-                    f"download:{task.id}".encode()
-                ).hexdigest()[:32]
-                transfer_local_file(
-                    src,
-                    dst,
-                    transfer_id,
-                    move=task.transfer_method is TransferMethod.MOVE,
-                )
 
 
 async def check_download_plans():

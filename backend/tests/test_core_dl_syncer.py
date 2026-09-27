@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1745,6 +1746,87 @@ def test_atomic_transfer(tmp_path, monkeypatch, method, cross_device):
             assert source.exists() is (method is TransferMethod.COPY)
             assert list(destination.parent.iterdir()) == [destination]
         finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", [TransferMethod.COPY, TransferMethod.MOVE])
+@pytest.mark.parametrize("job_id", [None, "offline-job"])
+@pytest.mark.parametrize(
+    ("cancel_count", "failure"),
+    [(0, False), (0, True), (1, False), (2, False), (2, True)],
+)
+def test_transfer_worker(tmp_path, monkeypatch, method, job_id, cancel_count, failure):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        started = threading.Event()
+        finish = threading.Event()
+        stopped = threading.Event()
+        running = None
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "movie.mkv"
+            lock_path = syncer.library_lock(library.dir).lock_file
+            transfer_file = syncer.transfer_local_file
+
+            def delayed_transfer(*args, **kwargs):
+                started.set()
+                try:
+                    assert finish.wait(5)
+                    if failure:
+                        raise OSError("Transfer interrupted")
+                    return transfer_file(*args, **kwargs)
+                finally:
+                    stopped.set()
+
+            monkeypatch.setattr(syncer, "transfer_local_file", delayed_transfer)
+            running = asyncio.create_task(
+                syncer.transfer_files(task, task.files, job_id=job_id)
+            )
+            assert await asyncio.to_thread(started.wait, 2)
+            assert not running.done()
+            assert source.read_bytes() == b"movie.mkv"
+            assert not destination.exists()
+            with pytest.raises(Timeout), FileLock(lock_path, timeout=0):
+                pass
+
+            for _ in range(cancel_count):
+                running.cancel()
+                await asyncio.sleep(0)
+                assert not stopped.is_set()
+                assert not running.done()
+                with pytest.raises(Timeout), FileLock(lock_path, timeout=0):
+                    pass
+
+            finish.set()
+            if cancel_count:
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(running, 2)
+            elif failure:
+                with pytest.raises(OSError, match="Transfer interrupted"):
+                    await asyncio.wait_for(running, 2)
+            else:
+                await asyncio.wait_for(running, 2)
+
+            assert stopped.is_set()
+            with FileLock(lock_path, timeout=0):
+                pass
+            if failure:
+                assert not destination.exists()
+                assert source.read_bytes() == b"movie.mkv"
+            else:
+                assert destination.read_bytes() == b"movie.mkv"
+                assert source.exists() is (method is TransferMethod.COPY)
+                assert list(destination.parent.iterdir()) == [destination]
+        finally:
+            finish.set()
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
             await Tortoise.close_connections()
 
     asyncio.run(run())
