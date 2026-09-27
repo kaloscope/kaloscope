@@ -1948,6 +1948,136 @@ def test_hidden_movie(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("operation", "has_comments"),
+    [("match", True), ("confirm", True), ("confirm", False)],
+    ids=["match", "confirm", "empty"],
+)
+def test_danmaku_response(tmp_path, monkeypatch, operation, has_comments):
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    root = tmp_path / "library"
+    root.mkdir()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
+
+    async def run():
+        async with _database():
+            lib, item = await _movie(root, "{{title}}/{{title}}")
+            async with library_lock(lib.dir):
+                await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            lib.danmaku_server = "https://danmaku.example"
+            lib.danmaku_ttl = 0
+            await lib.save(update_fields=["danmaku_server", "danmaku_ttl"])
+            metadata = DanmakuMeta(anime_id="1", episode_id="2", type="movie")
+            old_cache = Path(item.dir) / f".{item.name}.json"
+            old_cache.write_text("[]")
+            item.danmaku_path = str(old_cache)
+            item.danmaku_meta = metadata.model_dump()
+            await item.save(update_fields=["danmaku_path", "danmaku_meta"])
+            comments = [Danmaku(text="Updated", start=1)] if has_comments else []
+            loading = asyncio.Event()
+            release = asyncio.Event()
+            loaded = asyncio.Event()
+
+            async def load(*args):
+                loading.set()
+                await release.wait()
+                loaded.set()
+                return comments
+
+            monkeypatch.setattr(DanmakuService, "load_from_server", load)
+            request = asyncio.create_task(
+                DanmakuService.match_danmakus(item.path)
+                if operation == "match"
+                else DanmakuService.confirm_episode(item.path, metadata)
+            )
+            original_plan = organizer._plan
+
+            async def plan_with_response(*args, **kwargs):
+                payload = await original_plan(*args, **kwargs)
+                release.set()
+                await asyncio.wait_for(loaded.wait(), timeout=1)
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(request), timeout=0.1)
+                assert old_cache.read_text() == "[]"
+                return payload
+
+            try:
+                await asyncio.wait_for(loading.wait(), timeout=1)
+                monkeypatch.setattr(organizer, "_plan", plan_with_response)
+                lib.rename_template = "Renamed/{{title}}"
+                async with await library_lock(lib.dir).acquire(timeout=1):
+                    await organizer.organize_items(lib, [item.id])
+                result = await asyncio.wait_for(request, timeout=3)
+
+                await item.refresh_from_db()
+                new_cache = root / "Renamed" / old_cache.name
+                assert item.path == str(root / "Renamed" / "New Movie.mkv")
+                assert result.comments == comments
+                if has_comments:
+                    assert item.danmaku_path == str(new_cache)
+                    assert await DanmakuService.load_from_cache(new_cache) == comments
+                else:
+                    assert item.danmaku_path is None
+                    assert not new_cache.exists()
+                assert not old_cache.exists()
+                assert not await MediaEvent.filter(event_type="organize").exists()
+            finally:
+                release.set()
+                if not request.done():
+                    request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_danmaku_deletion(tmp_path, monkeypatch):
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    root = tmp_path / "library"
+    root.mkdir()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
+
+    async def run():
+        async with _database():
+            lib, item = await _movie(root, "{{title}}/{{title}}")
+            async with library_lock(lib.dir):
+                await organizer.organize_items(lib, [item.id])
+            await item.refresh_from_db()
+            old_cache = Path(item.dir) / f".{item.name}.json"
+            old_cache.write_text("[]")
+            item.danmaku_path = str(old_cache)
+            await item.save(update_fields=["danmaku_path"])
+            request = None
+
+            try:
+                async with library_lock(lib.dir):
+                    request = asyncio.create_task(
+                        DanmakuService.delete_danmakus(item.path)
+                    )
+                    with pytest.raises(TimeoutError):
+                        await asyncio.wait_for(asyncio.shield(request), timeout=0.1)
+                    assert old_cache.exists()
+                    lib.rename_template = "Renamed/{{title}}"
+                    await organizer.organize_items(lib, [item.id])
+                await asyncio.wait_for(request, timeout=3)
+
+                await item.refresh_from_db()
+                assert item.path == str(root / "Renamed" / "New Movie.mkv")
+                assert item.danmaku_path is None
+                assert not old_cache.exists()
+                assert not (root / "Renamed" / old_cache.name).exists()
+                assert not await MediaEvent.filter(event_type="organize").exists()
+            finally:
+                if request is not None:
+                    if not request.done():
+                        request.cancel()
+                    await asyncio.gather(request, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
     "operation", ["confirm_anime", "refresh_episodes", "confirm_episode"]
 )
 def test_danmaku_scope(tmp_path, monkeypatch, operation):
@@ -2099,6 +2229,63 @@ def test_danmaku_scope(tmp_path, monkeypatch, operation):
                     if not request.done():
                         request.cancel()
                     await asyncio.gather(request, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_danmaku_cancellation(tmp_path, monkeypatch):
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    root = tmp_path / "library"
+    root.mkdir()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    async def run():
+        async with _database():
+            lib, item = await _movie(root)
+            lib.danmaku_server = "https://danmaku.example"
+            await lib.save(update_fields=["danmaku_server"])
+            cache = root / f".{item.name}.json"
+            write_bytes = Path.write_bytes
+
+            def delayed_write(path, content):
+                if path != cache:
+                    return write_bytes(path, content)
+                started.set()
+                assert release.wait(timeout=5)
+                try:
+                    return write_bytes(path, content)
+                finally:
+                    finished.set()
+
+            comments = [Danmaku(text="Updated", start=1)]
+            monkeypatch.setattr(Path, "write_bytes", delayed_write)
+            monkeypatch.setattr(
+                DanmakuService, "load_from_server", AsyncMock(return_value=comments)
+            )
+            request = asyncio.create_task(
+                DanmakuService.confirm_episode(
+                    item.path, DanmakuMeta(anime_id="1", episode_id="2", type="movie")
+                )
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                request.cancel()
+                with pytest.raises(Timeout):
+                    async with await library_lock(lib.dir).acquire(timeout=0):
+                        pass
+                assert not finished.is_set()
+                assert not request.done()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(request, timeout=3)
+
+            assert finished.is_set()
+            async with await library_lock(lib.dir).acquire(timeout=1):
+                assert not cache.exists()
+                assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
 
