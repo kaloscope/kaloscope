@@ -478,11 +478,15 @@ def _ingest_params(info: MediaPathInfo) -> dict:
 async def consume_event(event: MediaEvent):
     """Consume a media event under its library lock.
 
-    Persist pending workflows with metadata, then fire them after releasing the
-    lock. Save progress after each successful trigger so failures can be retried.
+    Recover pending organization before handling the event. Persist pending
+    workflows with metadata, then fire them after releasing the lock. Save progress
+    after each successful trigger so failures can be retried.
 
     Args:
         event: The persisted media event to process.
+
+    Raises:
+        OrganizePendingError: If organization cannot finish safely.
     """
     lib = await MediaLib.get_or_none(id=event.lib_id)
     if lib is None:
@@ -492,6 +496,7 @@ async def consume_event(event: MediaEvent):
         lib = await MediaLib.get_or_none(id=lib.id)
         if lib is None:
             return
+        await recover_organizing(lib)
         event = await MediaEvent.get_or_none(id=event.id)
         if event is None:
             return

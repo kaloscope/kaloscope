@@ -554,6 +554,142 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("stage", ["pending", "published", "conflict"])
+@pytest.mark.parametrize("event_type", ["deleted", "ingest", "organize"])
+def test_event_recovery(tmp_path, monkeypatch, stage, event_type):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    source = tmp_path / "old.mkv"
+    source.write_bytes(b"video")
+    nfo = source.with_suffix(".nfo")
+    nfo.write_text("<movie><title>New</title></movie>")
+    destination = tmp_path / "New.mkv"
+    target_nfo = destination.with_suffix(".nfo")
+    mapping = {str(source): str(destination), str(nfo): str(target_nfo)}
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=lib.dir,
+                name=source.stem,
+                title="Old",
+                nfo_path=str(nfo),
+                hash=hashlib.md5(b"video").hexdigest(),
+                size=len(b"video"),
+            )
+            user = await User.create(
+                username="viewer", password="test", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user, rel_type=HistoryType.VIDEO, rel_id=item.id, position=42
+            )
+            journal = await MediaEvent.create(
+                lib=lib,
+                src_path=str(source),
+                event_type="organize",
+                payload={
+                    "moves": [
+                        {
+                            "src": old,
+                            "dst": new,
+                            "identity": organizer._fingerprint(Path(old)),
+                        }
+                        for old, new in mapping.items()
+                    ],
+                    "updates": [
+                        {
+                            "id": item.id,
+                            "path": str(destination),
+                            "name": destination.stem,
+                            "title": "New",
+                            "nfo_path": str(target_nfo),
+                        }
+                    ],
+                    "parent": None,
+                    "delete_parent": None,
+                    "mapping": mapping,
+                    "creates": [],
+                    "symlinks": [],
+                    "nfo_edits": [],
+                },
+            )
+            params = {
+                "item_id": item.id,
+                "item_path": str(source),
+                "item_name": source.stem,
+                "nfo_path": str(nfo),
+                "title": "Old",
+            }
+            event = journal
+            if event_type != "organize":
+                event = await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source),
+                    event_type=event_type,
+                    payload={"bootparams": [params]}
+                    if event_type == "ingest"
+                    else None,
+                )
+
+            if stage == "published":
+                for old, new in mapping.items():
+                    Path(old).rename(new)
+            elif stage == "conflict":
+                destination.write_bytes(b"unrelated")
+                with pytest.raises(organizer.OrganizePendingError):
+                    await watcher.consume_event(event)
+                await item.refresh_from_db()
+                assert item.path == str(source)
+                assert item.title == "Old"
+                assert source.read_bytes() == b"video"
+                assert destination.read_bytes() == b"unrelated"
+                assert await MediaEvent.filter(id=journal.id).exists()
+                assert await MediaEvent.filter(id=event.id).exists()
+                fire.assert_not_awaited()
+                destination.unlink()
+
+            await watcher.consume_event(event)
+            await watcher.consume_event(event)
+
+            await item.refresh_from_db()
+            await history.refresh_from_db()
+            assert item.path == str(destination)
+            assert item.nfo_path == str(target_nfo)
+            assert history.rel_id == item.id
+            assert history.position == 42
+            assert destination.read_bytes() == b"video"
+            assert target_nfo.read_text() == "<movie><title>New</title></movie>"
+            assert not source.exists()
+            assert not nfo.exists()
+            assert await MediaItem.filter(lib=lib).count() == 1
+            assert not await MediaEvent.filter(lib=lib).exists()
+            if event_type == "ingest":
+                fire.assert_awaited_once()
+                assert fire.call_args.kwargs["bootparams"] == {
+                    **params,
+                    "item_path": str(destination),
+                    "item_name": destination.stem,
+                    "nfo_path": str(target_nfo),
+                    "title": "New",
+                }
+            else:
+                fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("event_type", ["created", "modified"])
 @pytest.mark.parametrize("change", ["updated", "event_removed", "library_removed"])
 def test_event_lock(tmp_path, monkeypatch, event_type, change):
