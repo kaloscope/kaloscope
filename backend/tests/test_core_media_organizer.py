@@ -932,6 +932,211 @@ def test_legacy_episode_recovery(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("originaltitle", ["Original Show", None, ""])
+@pytest.mark.parametrize("directory", [False, True])
+def test_show_originaltitle(tmp_path, originaltitle, directory):
+    async def run():
+        async with _database():
+            lib, parent, item = await _episode(tmp_path)
+            source = Path(parent.path)
+            old_path = item.path
+            lib.rename_template = (
+                "{{show_originaltitle}}" if directory else "{{show_title}}"
+            ) + "/S{{season}}/{{show_originaltitle}} - {{originaltitle}}"
+            extra = (
+                f"<originaltitle>{originaltitle}</originaltitle>"
+                if originaltitle is not None
+                else ""
+            )
+            _nfo(
+                Path(parent.nfo_path),
+                "Localized Show",
+                "tvshow",
+                "<season>1</season>" + extra,
+            )
+            _nfo(
+                Path(item.nfo_path),
+                "Localized Episode",
+                "episodedetails",
+                "<season>1</season><episode>1</episode>"
+                "<originaltitle>Original Episode</originaltitle>",
+            )
+
+            mapping = await organizer.organize_items(lib, [parent.id])
+            await parent.refresh_from_db()
+            await item.refresh_from_db()
+
+            if originaltitle:
+                target = tmp_path / (originaltitle if directory else "Localized Show")
+                destination = target / "S01" / "Original Show - Original Episode.mkv"
+            elif directory:
+                destination = source / "old.mkv"
+                assert mapping == {}
+            else:
+                destination = tmp_path / "Localized Show" / "S01" / "old.mkv"
+            assert parent.path == str(destination.parent)
+            assert item.path == str(destination)
+            assert mapping.get(old_path, old_path) == item.path
+            assert destination.read_bytes() == b"video"
+            assert Path(item.nfo_path).is_file()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
+def test_tvshow_missing_nfo(tmp_path):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template=(
+                    "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}"
+                ),
+            )
+            source = tmp_path / "Original"
+            source.mkdir()
+            parent_nfo = source / "Original.nfo"
+            _nfo(parent_nfo, "Show", "tvshow")
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(source),
+                name=source.name,
+                nfo_path=str(parent_nfo),
+                season=1,
+            )
+            items = []
+            for number in (1, 2):
+                file = source / f"old{number}.mkv"
+                file.write_bytes(b"video")
+                nfo = file.with_suffix(".nfo")
+                if number == 1:
+                    _nfo(
+                        nfo,
+                        "Pilot",
+                        "episodedetails",
+                        "<season>1</season><episode>1</episode>",
+                    )
+                items.append(
+                    await MediaItem.create(
+                        lib=lib,
+                        parent=parent,
+                        path=str(file),
+                        dir=str(source),
+                        name=file.stem,
+                        season=1,
+                        episode=number,
+                        nfo_path=str(nfo) if number == 1 else None,
+                    )
+                )
+            await organizer.organize_items(lib, [parent.id])
+            await parent.refresh_from_db()
+            await items[0].refresh_from_db()
+            await items[1].refresh_from_db()
+            target = tmp_path / "Show" / "Season 01"
+            assert parent.path == str(target)
+            assert items[0].path == str(target / "S01E01 - Pilot.mkv")
+            assert items[1].path == str(target / "old2.mkv")
+            assert items[1].parent_id == parent.id
+            assert Path(parent.nfo_path).name == "Season 01.nfo"
+            assert not source.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("season_directory", [False, True])
+@pytest.mark.parametrize(
+    ("episode_season", "item_season", "nfo_season", "parent_season", "expected"),
+    [
+        (2, 3, 4, 5, 2),
+        (None, 2, 1, 1, 2),
+        (None, 0, 1, 1, 0),
+        (None, None, 2, 1, 2),
+        (None, None, 0, 1, 0),
+        (None, None, None, 2, 2),
+    ],
+)
+def test_season_fallback(
+    tmp_path,
+    season_directory,
+    episode_season,
+    item_season,
+    nfo_season,
+    parent_season,
+    expected,
+):
+    async def run():
+        async with _database():
+            template = "{{show_title}}/"
+            if season_directory:
+                template += "Season {{season}}/"
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template=template + "{{episode_code}}",
+            )
+            source = tmp_path / "Original"
+            source.mkdir()
+            parent_nfo = source / "Original.nfo"
+            _nfo(
+                parent_nfo,
+                "Show",
+                "tvshow",
+                f"<season>{nfo_season}</season>" if nfo_season is not None else "",
+            )
+            parent = await MediaItem.create(
+                lib=lib,
+                path=str(source),
+                dir=str(source),
+                name=source.name,
+                nfo_path=str(parent_nfo),
+                season=parent_season,
+            )
+            video = source / "old.mkv"
+            video.write_bytes(b"video")
+            nfo = video.with_suffix(".nfo")
+            season_element = (
+                f"<season>{episode_season}</season>"
+                if episode_season is not None
+                else ""
+            )
+            _nfo(
+                nfo,
+                "Episode",
+                "episodedetails",
+                season_element + "<episode>1</episode>",
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(video),
+                dir=str(source),
+                name=video.stem,
+                nfo_path=str(nfo),
+                season=item_season,
+                episode=1,
+            )
+
+            await organizer.organize_items(lib, [parent.id])
+
+            await item.refresh_from_db()
+            target = tmp_path / "Show"
+            if season_directory:
+                target /= f"Season {expected:02d}"
+            assert item.path == str(target / f"S{expected:02d}E01.mkv")
+            assert item.season == expected
+            assert Path(item.path).read_bytes() == b"video"
+            assert Path(item.nfo_path).is_file()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("original_source", [False, True])
 def test_transfer_mapping(tmp_path, original_source):
     async def run():
