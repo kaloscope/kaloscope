@@ -18,6 +18,12 @@ from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaMeta
 from app.routes import media as media_routes
 
 
+@pytest.fixture(autouse=True)
+def workspace(monkeypatch, tmp_path_factory):
+    directory = tmp_path_factory.mktemp("workspace-temp")
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
 @pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
 @pytest.mark.parametrize("written", [False, True])
 def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
@@ -153,12 +159,6 @@ def test_episode_scope(tmp_path, monkeypatch, change):
             await Tortoise.close_connections()
 
     asyncio.run(run())
-
-
-@pytest.fixture(autouse=True)
-def workspace(monkeypatch, tmp_path_factory):
-    directory = tmp_path_factory.mktemp("workspace-temp")
-    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
 
 
 def test_nfo_parent_recovery(tmp_path):

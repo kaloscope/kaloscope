@@ -424,7 +424,7 @@ async def _plan(
     *,
     season: int | None = None,
     split: bool = False,
-):
+) -> dict:
     """Build a recoverable organization plan while holding the library lock.
 
     Validate paths, metadata, references, and download ownership before any move.
@@ -1201,7 +1201,7 @@ async def recover_organizing(lib: MediaLib) -> dict[str, str]:
 
 async def _season_groups(
     lib: MediaLib, group: list[MediaItem], parent: MediaItem | None
-):
+) -> list[tuple[int | None, list[MediaItem]]]:
     """Group episodes by season when the directory template uses a season field.
 
     Args:

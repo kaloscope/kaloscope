@@ -17,6 +17,7 @@ from tortoise.fields import (
     ReverseRelation,
 )
 
+from app.core.media.naming import validate_template
 from app.core.transcode import (
     HWAccelType,
     QualityLevel,
@@ -161,8 +162,6 @@ class MediaLibUpsert(BaseModel):
         if not self.id and (not self.dir or not is_directory(self.dir)):
             raise ValueError(f"invalid directory: {self.dir}")
         if self.rename_template is not None:
-            from app.core.media.naming import validate_template
-
             self.rename_template = validate_template(
                 self.rename_template, self.lib_type
             )

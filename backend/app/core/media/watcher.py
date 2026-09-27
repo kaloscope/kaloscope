@@ -528,7 +528,7 @@ async def consume_event(event: MediaEvent):
     await event.delete()
 
 
-async def _consume_event(event: MediaEvent):
+async def _consume_event(event: MediaEvent) -> list[dict]:
     """Persist pending work before organizing outside the metadata transaction.
 
     The caller must hold the library lock and recover pending plans first.

@@ -12,6 +12,7 @@ from tortoise.transactions import atomic, in_transaction
 
 from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
 from app.core.media.coordination import library_lock
+from app.core.media.naming import validate_template
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata, NFOType
 from app.models.user import PermType, UserPermission
@@ -73,8 +74,6 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                     raise KaloscopeException(ErrorCode.DUPLICATE_DIRECTORY)
 
         if obj.id:
-            from app.core.media.naming import validate_template
-
             lib = await MediaLib.get(id=obj.id)
             extra = {}
             if "rename_template" in obj.model_fields_set:
