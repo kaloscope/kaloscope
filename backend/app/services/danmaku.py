@@ -135,15 +135,21 @@ class DanmakuService:
     @classmethod
     @contextlib.asynccontextmanager
     async def _locked_media(cls, media: MediaItem) -> AsyncIterator[MediaItem | None]:
-        """Reload a media item while holding its library lock.
+        """Recover organization and reload a media item under its library lock.
 
         Args:
             media: The media identity with its library already loaded.
 
         Yields:
             The current media item, or `None` if it was deleted while waiting.
+
+        Raises:
+            OrganizePendingError: If pending organization cannot finish safely.
         """
+        from app.core.media.organizer import recover_organizing
+
         async with library_lock(media.lib.dir):
+            await recover_organizing(media.lib)
             yield await MediaItem.get_or_none(id=media.id).select_related("lib")
 
     @classmethod
