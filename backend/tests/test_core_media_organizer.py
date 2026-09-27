@@ -441,3 +441,21 @@ def test_journal_files(tmp_path, monkeypatch, mode):
             assert not await MediaEvent.filter(id=journal.id).exists()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_companions(tmp_path, linked):
+    video = tmp_path / "Movie.mkv"
+    video.write_bytes(b"video")
+    names = {"Movie.NFO", "Movie.en.forced.SRT"}
+    for name in names | {"Movie.Extended.mkv", "Movie.Extended.en.srt", "Other.srt"}:
+        file = tmp_path / name
+        if linked and name in names:
+            file.symlink_to("missing-file")
+        else:
+            file.write_bytes(b"content")
+    (tmp_path / "Movie.fr.srt").mkdir()
+
+    companions = organizer._companions(video)
+
+    assert {file.name for file in companions} == names
