@@ -11,13 +11,14 @@ import aiofiles
 from lxml import etree
 from sanic.log import Colors, logger
 from tortoise.expressions import Q
+from tortoise.transactions import in_transaction
 
 from app.core.constants import ENCODING, NFO_MIME_TYPE
 from app.core.flow.context import RETVAL_KEY, Context
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.base import MediaMeta, get_handler
 from app.core.renderer import render
-from app.models.media import LibType, MediaItem, MediaLib, NFOType
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, NFOType
 from app.utils.disk import rename_exclusive
 from app.utils.extractor import extract_title
 
@@ -135,6 +136,9 @@ async def gen_nfo(
 
     Recover pending organization before writing for an indexed media item.
 
+    Persist pending organization with immediate metadata updates so a restart
+    cannot lose work before the filesystem observer records publication.
+
     Args:
         nfo_type: The type of the NFO file (e.g. `movie`, `tvshow`).
         nfo_path: The path to the NFO file to generate.
@@ -182,7 +186,17 @@ async def gen_nfo(
                 overwrite=overwrite,
             )
             if written and refresh:
-                await update_metadata(item.lib, current_nfo, fallback=data)
+                async with in_transaction("default"):
+                    affected = await update_metadata(
+                        item.lib, current_nfo, fallback=data
+                    )
+                    if affected and item.lib.rename_template:
+                        await MediaEvent.create(
+                            lib_id=item.lib_id,
+                            src_path=current_nfo,
+                            event_type="ingest",
+                            payload={"bootparams": [], "organize_ids": affected},
+                        )
             return written
     return await _write_nfo(nfo_type, nfo_path, data, overwrite=overwrite)
 
