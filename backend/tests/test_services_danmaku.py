@@ -1384,22 +1384,45 @@ def test_cached_match(library, tmp_path, monkeypatch, change):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("operation", ["read", "write", "delete"])
+@pytest.mark.parametrize(
+    ("operation", "during_request"),
+    [
+        ("read", False),
+        ("write", True),
+        ("delete", False),
+        ("confirm", False),
+        ("confirm", True),
+        ("empty", False),
+        ("empty", True),
+    ],
+)
 @pytest.mark.parametrize("stage", ["pending", "moved", "conflict"])
 @pytest.mark.parametrize("recorded_path", [False, True])
-def test_cache_recovery(library, tmp_path, operation, stage, recorded_path):
+def test_cache_recovery(
+    library, tmp_path, operation, during_request, stage, recorded_path
+):
     async def run():
         event = None
+        confirmed = operation in {"confirm", "empty"}
+        episode_id = "selected" if confirmed else "old-1"
+        meta = danmaku.DanmakuMeta(
+            anime_id="selected", episode_id="selected", type="tvseries"
+        )
 
         async def handler(request):
-            assert operation == "write"
-            assert request.url.path == "/api/v2/comment/old-1"
+            assert operation == "write" or confirmed
+            assert request.url.path == f"/api/v2/comment/{episode_id}"
             async with await library_lock(lib.dir).acquire(timeout=1):
-                await persist_plan()
-            return httpx.Response(
-                200,
-                json={"comments": [{"cid": 1, "p": "1,1,16777215,1", "m": "Fetched"}]},
+                if during_request:
+                    await persist_plan()
+                else:
+                    assert (await MediaItem.get(id=item.id)).path == str(destination)
+            comments = (
+                []
+                if operation == "empty"
+                else [{"cid": 1, "p": "1,1,16777215,1", "m": "Fetched"}]
             )
+            return httpx.Response(200, json={"comments": comments})
 
         async with library(handler) as lib:
             if operation == "write":
@@ -1457,20 +1480,22 @@ def test_cache_recovery(library, tmp_path, operation, stage, recorded_path):
                 elif stage == "conflict":
                     destination.write_bytes(b"unrelated")
 
-            if operation != "write":
+            if not during_request:
                 async with library_lock(lib.dir):
                     await persist_plan()
-            request = (
-                danmaku.DanmakuService.delete_danmakus(item.path)
-                if operation == "delete"
-                else danmaku.DanmakuService.match_danmakus(item.path)
-            )
+            if operation == "delete":
+                request = danmaku.DanmakuService.delete_danmakus(item.path)
+            elif confirmed:
+                request = danmaku.DanmakuService.confirm_episode(item.path, meta)
+            else:
+                request = danmaku.DanmakuService.match_danmakus(item.path)
 
             if stage == "conflict":
                 with pytest.raises(organizer.OrganizePendingError):
                     await asyncio.wait_for(request, timeout=3)
                 await item.refresh_from_db()
                 assert item.path == str(source)
+                assert item.danmaku_meta["episode_id"] == "old-1"
                 assert item.danmaku_path == (str(old_cache) if recorded_path else None)
                 assert old_cache.read_text() == original
                 assert not new_cache.exists()
@@ -1484,25 +1509,28 @@ def test_cache_recovery(library, tmp_path, operation, stage, recorded_path):
 
             await item.refresh_from_db()
             assert item.path == str(destination)
-            assert item.danmaku_meta["episode_id"] == "old-1"
+            assert item.danmaku_meta["episode_id"] == episode_id
             assert not source.exists()
             assert destination.read_bytes() == b"video"
             assert not old_cache.exists()
             assert event is not None
             assert not await MediaEvent.filter(id=event.id).exists()
-            if operation == "delete":
+            if operation in {"delete", "empty"}:
                 assert not new_cache.exists()
                 assert item.danmaku_path is None
+                if operation == "empty":
+                    assert result.metadata == meta
+                    assert result.comments == []
             else:
-                expected = "Fetched" if operation == "write" else "Cached"
-                assert result.metadata.episode_id == "old-1"
+                expected = "Cached" if operation == "read" else "Fetched"
+                assert result.metadata.episode_id == episode_id
                 assert [comment.text for comment in result.comments] == [expected]
                 assert (
                     await danmaku.DanmakuService.load_from_cache(new_cache)
                     == result.comments
                 )
                 assert item.danmaku_path == (
-                    str(new_cache) if recorded_path or operation == "write" else None
+                    str(new_cache) if recorded_path or operation != "read" else None
                 )
 
     asyncio.run(run())
