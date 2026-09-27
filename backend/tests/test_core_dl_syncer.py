@@ -29,6 +29,7 @@ from app.core.dl.driver import (
     DownloadRequest,
     DownloadSnapshot,
 )
+from app.core.dl.openlist import puller
 from app.core.dl.openlist.client import OpenListClient, OpenListClientError
 from app.core.dl.openlist.driver import OpenListDriver
 from app.core.dl.openlist.manifest import (
@@ -1682,6 +1683,68 @@ def test_transfer_lock(tmp_path, monkeypatch, method, job_id):
                 if not running.done():
                     running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("method", "cross_device"),
+    [
+        (TransferMethod.COPY, False),
+        (TransferMethod.MOVE, False),
+        (TransferMethod.MOVE, True),
+    ],
+)
+def test_atomic_transfer(tmp_path, monkeypatch, method, cross_device):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
+            source = Path(task.dir) / "movie.mkv"
+            destination = Path(library.dir) / "movie.mkv"
+            copy = puller.shutil.copy2
+            rename = puller.rename_exclusive
+            interrupted = True
+
+            def copy_file(old, new):
+                assert not destination.exists()
+                assert source.read_bytes() == b"movie.mkv"
+                if interrupted:
+                    Path(new).write_bytes(b"partial")
+                    raise OSError(errno.EIO, "Transfer interrupted")
+                result = copy(old, new)
+                assert not destination.exists()
+                return result
+
+            def rename_file(old, new):
+                if old == source:
+                    if cross_device:
+                        raise OSError(errno.EXDEV, "Different filesystem")
+                    if interrupted:
+                        raise OSError(errno.EIO, "Transfer interrupted")
+                return rename(old, new)
+
+            monkeypatch.setattr(puller.shutil, "copy2", copy_file)
+            monkeypatch.setattr(puller, "rename_exclusive", rename_file)
+
+            with pytest.raises(OSError, match="Transfer interrupted"):
+                await syncer.transfer_files(task, task.files)
+
+            assert not destination.exists()
+            assert source.read_bytes() == b"movie.mkv"
+
+            interrupted = False
+            task = await DownloadTask.get(id=task.id)
+            await syncer.transfer_files(task, task.files)
+
+            assert destination.read_bytes() == b"movie.mkv"
+            assert source.exists() is (method is TransferMethod.COPY)
+            assert list(destination.parent.iterdir()) == [destination]
+        finally:
             await Tortoise.close_connections()
 
     asyncio.run(run())
