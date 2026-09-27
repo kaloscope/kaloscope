@@ -3039,6 +3039,211 @@ def test_organization_transfer_recovery(tmp_path, monkeypatch, method, offline):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("interruption", ["copy", "cancel"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_partial_transfer_companions(
+    tmp_path, monkeypatch, offline, interruption, restart
+):
+    from app.core.media import organizer, watcher
+    from app.services.flow import FlowTriggerService
+
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        db_url = f"sqlite://{tmp_path / 'media.sqlite'}"
+        await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+        await Tortoise.generate_schemas()
+        started = threading.Event()
+        finish = threading.Event()
+        running = None
+        try:
+            files = ["movie.mkv", "movie.nfo", "movie.zh-CN.srt"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            library.rename_template = "{{title}}"
+            await library.save()
+            task.transfer_pending = not offline
+            await task.save()
+            job_id = "1" * 32 if offline else None
+            if offline:
+                await OfflineDownloadJob.create(
+                    download=task,
+                    job_uuid=job_id,
+                    source_fingerprint="a" * 64,
+                    remote_dir="/Kaloscope/test",
+                    completion_due_at=datetime.now(UTC),
+                )
+            source = Path(task.dir)
+            (source / "movie.nfo").write_text(
+                "<movie><title>Renamed Movie</title></movie>"
+            )
+            copy_file = puller.shutil.copy2
+            transfer_file = syncer.transfer_local_file
+
+            def interrupted_copy(old, new):
+                if Path(old).name == "movie.zh-CN.srt":
+                    raise OSError("Subtitle copy interrupted")
+                return copy_file(old, new)
+
+            def delayed_transfer(old, *args, **kwargs):
+                if Path(old).name == "movie.nfo":
+                    started.set()
+                    assert finish.wait(5)
+                return transfer_file(old, *args, **kwargs)
+
+            with monkeypatch.context() as patcher:
+                if interruption == "copy":
+                    patcher.setattr(puller.shutil, "copy2", interrupted_copy)
+                    with pytest.raises(OSError, match="Subtitle copy interrupted"):
+                        await syncer.transfer_files(task, files, job_id=job_id)
+                else:
+                    patcher.setattr(syncer, "transfer_local_file", delayed_transfer)
+                    running = asyncio.create_task(
+                        syncer.transfer_files(task, files, job_id=job_id)
+                    )
+                    assert await asyncio.to_thread(started.wait, 2)
+                    running.cancel()
+                    finish.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await running
+
+            root = Path(library.dir)
+            video = root / "movie.mkv"
+            nfo = root / "movie.nfo"
+            item = await MediaItem.create(
+                lib=library,
+                path=str(video),
+                dir=library.dir,
+                name="movie",
+                nfo_path=str(nfo),
+            )
+            event = await MediaEvent.create(
+                lib=library, src_path=str(nfo), event_type="modified"
+            )
+
+            with pytest.raises(organizer.OrganizeDeferredError):
+                await watcher.consume_event(event)
+
+            await task.refresh_from_db()
+            await item.refresh_from_db()
+            await event.refresh_from_db()
+            assert task.transfer_targets == {
+                "movie.mkv": str(video),
+                "movie.nfo": str(nfo),
+            }
+            assert item.path == str(video)
+            assert item.nfo_mtime is not None
+            assert event.event_type == "ingest"
+            assert video.exists() and nfo.exists()
+            assert not (root / "Renamed Movie.mkv").exists()
+            fire.assert_not_awaited()
+
+            if restart:
+                await Tortoise.close_connections()
+                await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+                task = await DownloadTask.get(id=task.id)
+                event = await MediaEvent.get(id=event.id)
+
+            assert await syncer.transfer_files(task, files, job_id=job_id)
+            await watcher.consume_event(event)
+            assert await syncer.transfer_files(task, files, job_id=job_id)
+
+            await task.refresh_from_db()
+            await item.refresh_from_db()
+            assert item.path == str(root / "Renamed Movie.mkv")
+            assert task.transfer_targets == {
+                name: str(root / name.replace("movie", "Renamed Movie", 1))
+                for name in files
+            }
+            assert sorted(path.name for path in root.iterdir()) == [
+                "Renamed Movie.mkv",
+                "Renamed Movie.nfo",
+                "Renamed Movie.zh-CN.srt",
+            ]
+            assert (root / "Renamed Movie.zh-CN.srt").read_bytes() == files[2].encode()
+            assert not await MediaEvent.filter(id=event.id).exists()
+            fire.assert_not_awaited()
+        finally:
+            finish.set()
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_partial_transfer_unrelated(tmp_path, pending):
+    from app.core.media import organizer
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            files = ["movie.mkv", "movie.nfo", "movie.zh-CN.srt"]
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            task.transfer_pending = pending
+            await task.save()
+            library.rename_template = "{{title}}"
+            await library.save()
+            source = Path(task.dir)
+            (source / "movie.nfo").write_text(
+                "<movie><title>Pending Movie</title></movie>"
+            )
+            (source / "movie.zh-CN.srt").unlink()
+            assert not await syncer.transfer_files(task, files)
+            root = Path(library.dir)
+            (root / "other.mkv").write_bytes(b"unrelated video")
+            (root / "other.nfo").write_text(
+                "<movie><title>Independent Movie</title></movie>"
+            )
+            items = [
+                await MediaItem.create(
+                    lib=library,
+                    path=str(root / f"{name}.mkv"),
+                    dir=library.dir,
+                    name=name,
+                    nfo_path=str(root / f"{name}.nfo"),
+                )
+                for name in ("movie", "other")
+            ]
+
+            async with syncer.library_lock(library.dir):
+                if pending:
+                    with pytest.raises(organizer.OrganizeDeferredError):
+                        await organizer.organize_items(
+                            library, [item.id for item in items]
+                        )
+                else:
+                    await organizer.organize_items(library, [item.id for item in items])
+
+            await items[0].refresh_from_db()
+            await items[1].refresh_from_db()
+            await task.refresh_from_db()
+            name = "movie" if pending else "Pending Movie"
+            assert items[0].path == str(root / f"{name}.mkv")
+            assert items[1].path == str(root / "Independent Movie.mkv")
+            assert (root / "Independent Movie.mkv").read_bytes() == b"unrelated video"
+            assert (root / "Independent Movie.nfo").exists()
+            assert (root / "Pending Movie.mkv").exists() is (not pending)
+            assert task.transfer_targets == {
+                "movie.mkv": str(root / f"{name}.mkv"),
+                "movie.nfo": str(root / f"{name}.nfo"),
+            }
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("method", "cross_device"),
     [
