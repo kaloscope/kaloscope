@@ -144,7 +144,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     async def delete(cls, id: int, local: bool = False):
         """Delete or hide a media item under its library lock.
 
-        Retain original children across parent changes and clean up empty parents.
+        Recover pending organization before resolving current paths. Retain original
+        children across parent changes and clean up empty parents.
 
         Args:
             id: The media item ID.
@@ -152,7 +153,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Raises:
             DoesNotExist: If the item is missing before a local deletion.
+            OrganizePendingError: If pending organization cannot finish safely.
         """
+        from app.core.media.organizer import recover_organizing
+
         items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related("lib")
         item = next((row for row in items if row.id == id), None)
         if item is None:
@@ -161,6 +165,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return
         child_ids = [row.id for row in items if row.id != id]
         async with library_lock(item.lib.dir):
+            await recover_organizing(item.lib)
             items = await MediaItem.filter(id__in=[id, *child_ids], lib_id=item.lib_id)
             parent_ids = {row.parent_id for row in items if row.parent_id is not None}
             # a surviving parent may have received children outside the requested scope

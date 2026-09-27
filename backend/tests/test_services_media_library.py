@@ -13,6 +13,7 @@ from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
+from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.core.media.watcher import LibWatcher
 from app.models.flow import GraphCategory
@@ -470,6 +471,96 @@ def test_item_delete_missing(local):
                     await MediaItemService.delete(1, local=True)
             else:
                 assert await MediaItemService.delete(1) is None
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("stage", ["pending", "moved", "conflict"])
+def test_item_delete_recovery(tmp_path, monkeypatch, local, stage):
+    removed = []
+
+    def remove(path):
+        removed.append(path)
+        path.unlink()
+
+    monkeypatch.setattr("app.services.media.delete_path", remove)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            source, destination = tmp_path / "old.mkv", tmp_path / "new.mkv"
+            source.write_bytes(b"video")
+            item = await MediaItem.create(
+                lib=lib, path=str(source), dir=str(tmp_path), name=source.stem
+            )
+            event = await MediaEvent.create(
+                lib=lib,
+                event_type="organize",
+                src_path=str(source),
+                payload={
+                    "moves": [
+                        {
+                            "src": str(source),
+                            "dst": str(destination),
+                            "identity": organizer._fingerprint(source),
+                        }
+                    ],
+                    "updates": [
+                        {
+                            "id": item.id,
+                            "path": str(destination),
+                            "dir": str(tmp_path),
+                            "name": destination.stem,
+                        }
+                    ],
+                    "parent": None,
+                    "delete_parent": None,
+                    "mapping": {str(source): str(destination)},
+                    "creates": [],
+                    "symlinks": [],
+                    "nfo_edits": [],
+                },
+            )
+            if stage == "moved":
+                source.rename(destination)
+            elif stage == "conflict":
+                destination.write_bytes(b"unrelated")
+
+            if stage == "conflict":
+                with pytest.raises(organizer.OrganizePendingError):
+                    await MediaItemService.delete(item.id, local=local)
+                await item.refresh_from_db()
+                assert item.path == str(source)
+                assert item.visible is True
+                assert source.read_bytes() == b"video"
+                assert destination.read_bytes() == b"unrelated"
+                assert await MediaEvent.filter(id=event.id).exists()
+                assert removed == []
+                return
+
+            await MediaItemService.delete(item.id, local=local)
+
+            assert not source.exists()
+            assert not await MediaEvent.filter(id=event.id).exists()
+            if local:
+                assert removed == [destination]
+                assert not destination.exists()
+                assert not await MediaItem.filter(id=item.id).exists()
+            else:
+                await item.refresh_from_db()
+                assert item.path == str(destination)
+                assert item.visible is False
+                assert destination.read_bytes() == b"video"
+                assert removed == []
         finally:
             await Tortoise.close_connections()
 
