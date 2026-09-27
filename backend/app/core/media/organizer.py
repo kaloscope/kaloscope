@@ -3,6 +3,7 @@ import hashlib
 import mimetypes
 import os
 import tempfile
+import unicodedata
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -141,6 +142,65 @@ def _companions(path: Path) -> list[Path]:
             and not sibling.name.startswith(other_video_prefixes)
         )
     ]
+
+
+def _reference_key(path: Path) -> str:
+    """Normalize a file reference without following its final symlink.
+
+    Args:
+        path: The file reference whose parent directory aliases are resolved.
+
+    Returns:
+        The absolute path normalized to `NFC` and case-folded for alias lookup,
+        preserving the final component to distinguish a link from its target.
+    """
+    return unicodedata.normalize(
+        "NFC", str(path.parent.resolve() / path.name)
+    ).casefold()
+
+
+def _validate_link_references(root: Path, moves: dict[str, str]):
+    """Reject moves referenced by library symlinks outside the plan.
+
+    Include unindexed links and directory aliases without traversing directory
+    symlinks. Normalize case and Unicode when matching references.
+
+    Args:
+        root: The absolute media library root to inspect.
+        moves: The planned source and destination paths, including retained links
+            whose targets the plan updates.
+
+    Raises:
+        OSError: If a directory or symlink cannot be inspected.
+        ValueError: If a library symlink outside the plan references a file that
+            would move, directly or through a directory alias.
+    """
+    sources = {
+        _reference_key(Path(source))
+        for source, destination in moves.items()
+        if source != destination
+    }
+    if not sources:
+        return
+    source_directories = {
+        str(parent) for source in sources for parent in Path(source).parents
+    }
+    directories = [root]
+    while directories:
+        for path in directories.pop().iterdir():
+            if path.is_symlink():
+                if str(path) in moves:
+                    continue
+                target = path.parent / os.readlink(path)
+                if _reference_key(target) in sources or (
+                    path.is_dir()
+                    and _reference_key(target.resolve()) in source_directories
+                ):
+                    raise ValueError(
+                        f"moving a file would break a symlink outside the group: {path}"
+                    )
+            elif path.is_dir():
+                directories.append(path)
 
 
 def _context(metadata: dict, parent: dict | None) -> dict:
