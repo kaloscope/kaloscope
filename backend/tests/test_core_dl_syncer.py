@@ -4,6 +4,7 @@ import asyncio
 import errno
 import hashlib
 import json
+import mimetypes
 import os
 import threading
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ from tortoise.exceptions import OperationalError
 from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
+from app.core.constants import NFO_MIME_TYPE
 from app.core.dl import syncer
 from app.core.dl.config import load_driver
 from app.core.dl.driver import (
@@ -3203,6 +3205,184 @@ def test_transfer_cancellation(tmp_path, monkeypatch, method):
             finish.set()
             pending = [task for task in (running, contender) if task is not None]
             await asyncio.gather(*pending, return_exceptions=True)
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("interruption", ["lock", "copy", "mapping"])
+def test_rpc_transfer_recovery(tmp_path, monkeypatch, interruption):
+    from app.core.media import organizer, watcher
+    from app.services.flow import FlowTriggerService
+
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        db_url = f"sqlite://{tmp_path / 'recovery.sqlite3'}"
+        await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+        await Tortoise.generate_schemas()
+        running = nfo_event = None
+        finish = threading.Event()
+        try:
+            files = (
+                ["first.mkv"]
+                if interruption == "lock"
+                else [
+                    "first.mkv",
+                    "second.mkv",
+                ]
+            )
+            task, library = await _create_transfer_task(
+                tmp_path, TransferMethod.COPY, files
+            )
+            task.state = DownloadState.DOWNLOADING
+            task.unique_id = "remote-task"
+            await task.save()
+            rpc_call = AsyncMock(
+                return_value=[
+                    {
+                        "unique_id": task.unique_id,
+                        "state": DownloadState.COMPLETED,
+                        "files": files,
+                    }
+                ]
+            )
+            driver = cast(
+                RpcDriver,
+                SimpleNamespace(
+                    client=SimpleNamespace(call=rpc_call),
+                    config=SimpleNamespace(methods={}),
+                ),
+            )
+
+            with monkeypatch.context() as patcher:
+                if interruption == "lock":
+                    requested = asyncio.Event()
+                    lock = syncer.library_lock
+
+                    def waiting_lock(directory):
+                        requested.set()
+                        return lock(directory)
+
+                    patcher.setattr(syncer, "library_lock", waiting_lock)
+                    async with lock(library.dir):
+                        running = asyncio.create_task(
+                            syncer._sync_rpc_tasks(driver, [task])
+                        )
+                        await asyncio.wait_for(requested.wait(), 2)
+                        running.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await running
+                elif interruption == "copy":
+                    started = threading.Event()
+                    transfer_file = syncer.transfer_local_file
+
+                    def delayed_transfer(*args, **kwargs):
+                        started.set()
+                        assert finish.wait(5)
+                        return transfer_file(*args, **kwargs)
+
+                    patcher.setattr(syncer, "transfer_local_file", delayed_transfer)
+                    running = asyncio.create_task(
+                        syncer._sync_rpc_tasks(driver, [task])
+                    )
+                    assert await asyncio.to_thread(started.wait, 2)
+                    running.cancel()
+                    finish.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await running
+                else:
+                    update = QuerySet.update
+
+                    def failed_update(query, **kwargs):
+                        if "transfer_targets" in kwargs:
+                            raise OperationalError("Transfer mapping interrupted")
+                        return update(query, **kwargs)
+
+                    patcher.setattr(QuerySet, "update", failed_update)
+                    await syncer._sync_rpc_tasks(driver, [task])
+
+            await task.refresh_from_db()
+            assert task.state is DownloadState.COMPLETED
+            assert task.transfer_pending is True
+            assert task.files == files
+            assert await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 1
+            root = Path(library.dir)
+            expected = {name: str(root / name) for name in files}
+            if interruption == "lock":
+                assert not (root / files[0]).exists()
+            else:
+                assert (root / files[0]).read_bytes() == files[0].encode()
+                assert not (root / files[1]).exists()
+                library.rename_template = "{{title}}"
+                await library.save()
+                nfo = root / "first.nfo"
+                nfo.write_text("<movie><title>Organized First</title></movie>")
+                item = await MediaItem.create(
+                    lib=library,
+                    path=str(root / files[0]),
+                    dir=library.dir,
+                    name="first",
+                    nfo_path=str(nfo),
+                )
+                nfo_event = await MediaEvent.create(
+                    lib=library, src_path=str(nfo), event_type="modified"
+                )
+
+                with pytest.raises(organizer.OrganizeDeferredError):
+                    await watcher.consume_event(nfo_event)
+
+                await nfo_event.refresh_from_db()
+                await item.refresh_from_db()
+                assert nfo_event.event_type == "ingest"
+                assert item.nfo_mtime is not None
+                assert item.path == str(root / files[0])
+                assert nfo.exists()
+                assert not (root / "Organized First.mkv").exists()
+
+            rpc_call.reset_mock()
+            rpc_call.side_effect = AssertionError("The remote task no longer exists")
+            await Tortoise.close_connections()
+            await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+            downloader = await Downloader.get(id=task.downloader_id)
+            runner = _openlist_runner(downloader, driver)
+            runner._drivers = {}
+            runner._driver_for = AsyncMock(
+                side_effect=AssertionError("Recovery must not load a remote driver")
+            )
+
+            async def stop_after_cycle(_seconds):
+                raise asyncio.CancelledError
+
+            monkeypatch.setattr(syncer.asyncio, "sleep", stop_after_cycle)
+            await runner.interval()
+            await runner.interval()
+
+            await task.refresh_from_db()
+            assert task.transfer_pending is False
+            assert task.transfer_targets == expected
+            if nfo_event is not None:
+                nfo_event = await MediaEvent.get(id=nfo_event.id)
+                await watcher.consume_event(nfo_event)
+                expected[files[0]] = str(root / "Organized First.mkv")
+                await task.refresh_from_db()
+                assert task.transfer_targets == expected
+                assert not await MediaEvent.filter(id=nfo_event.id).exists()
+            for name, destination in expected.items():
+                assert Path(destination).read_bytes() == name.encode()
+            if interruption != "lock":
+                assert not (root / files[0]).exists()
+            assert not list(root.glob("*.done"))
+            assert await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 1
+            rpc_call.assert_not_awaited()
+            runner._driver_for.assert_not_awaited()
+            fire.assert_not_awaited()
+        finally:
+            finish.set()
+            if running is not None:
+                await asyncio.gather(running, return_exceptions=True)
             await Tortoise.close_connections()
 
     asyncio.run(run())
