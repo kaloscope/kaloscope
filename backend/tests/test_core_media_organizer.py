@@ -443,6 +443,33 @@ def test_journal_files(tmp_path, monkeypatch, mode):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("reference", ["ancestor", "chained", "unrelated"])
+def test_directory_link_scope(tmp_path, reference):
+    root = tmp_path / "library"
+    source = root / "Original" / "Season 01" / "old.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    target = source.parent.parent
+    if reference == "chained":
+        target = tmp_path / "bridge"
+        target.symlink_to(source.parent, target_is_directory=True)
+    elif reference == "unrelated":
+        target = root / "Original Extra"
+        target.mkdir()
+    alias = root / "Alias"
+    alias.symlink_to(target, target_is_directory=True)
+    moves = {str(source): str(root / "Renamed" / source.name)}
+
+    if reference == "unrelated":
+        organizer._validate_link_references(root, moves)
+    else:
+        with pytest.raises(ValueError, match="symlink outside the group"):
+            organizer._validate_link_references(root, moves)
+
+    assert source.read_bytes() == b"video"
+    assert alias.is_dir()
+
+
 @pytest.mark.parametrize("linked", [False, True])
 def test_companions(tmp_path, linked):
     video = tmp_path / "Movie.mkv"
