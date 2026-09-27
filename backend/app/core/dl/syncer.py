@@ -864,9 +864,9 @@ async def transfer_files(
         # apply file name substitution if sub_pattern is specified
         new_files = files
         if task.sub_pattern:
-            repl = task.sub_repl or ""
             replaced = []
             for file in files:
+                repl = task.sub_repl or ""
                 # render the template with the extracted metadata
                 if is_template(repl):
                     stem = Path(file).stem
