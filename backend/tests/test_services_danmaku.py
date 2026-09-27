@@ -13,8 +13,9 @@ from filelock import Timeout
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
+from app.core.media import organizer
 from app.core.media.coordination import library_lock
-from app.models.media import LibType, MediaItem, MediaLib
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.services import danmaku
 
 
@@ -1379,5 +1380,129 @@ def test_cached_match(library, tmp_path, monkeypatch, change):
                     if not request.done():
                         request.cancel()
                     await asyncio.gather(request, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["read", "write", "delete"])
+@pytest.mark.parametrize("stage", ["pending", "moved", "conflict"])
+@pytest.mark.parametrize("recorded_path", [False, True])
+def test_cache_recovery(library, tmp_path, operation, stage, recorded_path):
+    async def run():
+        event = None
+
+        async def handler(request):
+            assert operation == "write"
+            assert request.url.path == "/api/v2/comment/old-1"
+            async with await library_lock(lib.dir).acquire(timeout=1):
+                await persist_plan()
+            return httpx.Response(
+                200,
+                json={"comments": [{"cid": 1, "p": "1,1,16777215,1", "m": "Fetched"}]},
+            )
+
+        async with library(handler) as lib:
+            if operation == "write":
+                await MediaLib.filter(id=lib.id).update(danmaku_ttl=0)
+            item = await media(lib, "old.mkv", episode=1)
+            source, destination = Path(item.path), tmp_path / "new.mkv"
+            source.write_bytes(b"video")
+            old_cache = tmp_path / ("cached.json" if recorded_path else ".old.mkv.json")
+            new_cache = tmp_path / (
+                "new-cache.json" if recorded_path else ".new.mkv.json"
+            )
+            original = '[{"text":"Cached"}]'
+            old_cache.write_text(original)
+            if recorded_path:
+                await MediaItem.filter(id=item.id).update(danmaku_path=str(old_cache))
+            moves = [(source, destination), (old_cache, new_cache)]
+
+            async def persist_plan():
+                nonlocal event
+                event = await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source),
+                    event_type="organize",
+                    payload={
+                        "moves": [
+                            {
+                                "src": str(old),
+                                "dst": str(new),
+                                "identity": organizer._fingerprint(old),
+                            }
+                            for old, new in moves
+                        ],
+                        "updates": [
+                            {
+                                "id": item.id,
+                                "path": str(destination),
+                                "dir": str(tmp_path),
+                                "name": destination.name,
+                                "danmaku_path": str(new_cache)
+                                if recorded_path
+                                else None,
+                            }
+                        ],
+                        "parent": None,
+                        "delete_parent": None,
+                        "mapping": {str(source): str(destination)},
+                        "creates": [],
+                        "symlinks": [],
+                        "nfo_edits": [],
+                    },
+                )
+                if stage == "moved":
+                    for old, new in moves:
+                        old.rename(new)
+                elif stage == "conflict":
+                    destination.write_bytes(b"unrelated")
+
+            if operation != "write":
+                async with library_lock(lib.dir):
+                    await persist_plan()
+            request = (
+                danmaku.DanmakuService.delete_danmakus(item.path)
+                if operation == "delete"
+                else danmaku.DanmakuService.match_danmakus(item.path)
+            )
+
+            if stage == "conflict":
+                with pytest.raises(organizer.OrganizePendingError):
+                    await asyncio.wait_for(request, timeout=3)
+                await item.refresh_from_db()
+                assert item.path == str(source)
+                assert item.danmaku_path == (str(old_cache) if recorded_path else None)
+                assert old_cache.read_text() == original
+                assert not new_cache.exists()
+                assert source.read_bytes() == b"video"
+                assert destination.read_bytes() == b"unrelated"
+                assert event is not None
+                assert await MediaEvent.filter(id=event.id).exists()
+                return
+
+            result = await asyncio.wait_for(request, timeout=3)
+
+            await item.refresh_from_db()
+            assert item.path == str(destination)
+            assert item.danmaku_meta["episode_id"] == "old-1"
+            assert not source.exists()
+            assert destination.read_bytes() == b"video"
+            assert not old_cache.exists()
+            assert event is not None
+            assert not await MediaEvent.filter(id=event.id).exists()
+            if operation == "delete":
+                assert not new_cache.exists()
+                assert item.danmaku_path is None
+            else:
+                expected = "Fetched" if operation == "write" else "Cached"
+                assert result.metadata.episode_id == "old-1"
+                assert [comment.text for comment in result.comments] == [expected]
+                assert (
+                    await danmaku.DanmakuService.load_from_cache(new_cache)
+                    == result.comments
+                )
+                assert item.danmaku_path == (
+                    str(new_cache) if recorded_path or operation == "write" else None
+                )
 
     asyncio.run(run())
