@@ -459,3 +459,37 @@ def test_companions(tmp_path, linked):
     companions = organizer._companions(video)
 
     assert {file.name for file in companions} == names
+
+
+@pytest.mark.parametrize("identity", [None, "", "10"])
+def test_identity(identity):
+    metadata = {"unique_id": identity, "nfo_source": "tmdb"}
+
+    result = organizer._identity(metadata)
+
+    assert result == (("tmdb", identity) if identity else None)
+
+
+def test_template_context():
+    metadata = {"title": "Episode", "year": None, "season": 0}
+    parent = {
+        "title": "Show",
+        "originaltitle": "Original",
+        "year": 2026,
+        "season": 1,
+        "nfo_source": "tmdb",
+    }
+
+    result = organizer._context(metadata, parent)
+
+    assert result == {
+        "title": "Episode",
+        "year": 2026,
+        "season": 0,
+        "show_title": "Show",
+        "show_originaltitle": "Original",
+        "show_year": 2026,
+        "nfo_source": "tmdb",
+    }
+    assert metadata == {"title": "Episode", "year": None, "season": 0}
+    assert organizer._context(metadata, None) == metadata
