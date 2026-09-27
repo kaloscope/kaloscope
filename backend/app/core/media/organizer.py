@@ -430,6 +430,7 @@ async def _plan(
 
     Validate destinations, metadata, companion references, and download ownership
     before recording filesystem changes. Preserve media IDs and shared resources.
+    Normalize case and Unicode when checking download source paths.
 
     Args:
         lib: The media library containing the naming template and root path.
@@ -912,12 +913,9 @@ async def _plan(
                 f"waiting for download task {task.id} to finish transferring"
             )
         download_dir = Path(task.dir).resolve()
-        sources = {
-            str((download_dir / name).parent.resolve() / Path(name).name)
-            for name in task.files or []
-        }
+        sources = {_reference_key(download_dir / name) for name in task.files or []}
         if any(
-            str(Path(path).parent.resolve() / Path(path).name) in sources
+            _reference_key(Path(path)) in sources
             or (
                 not task.files
                 and (Path(path).parent.resolve() / Path(path).name).is_relative_to(

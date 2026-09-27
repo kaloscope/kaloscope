@@ -2601,24 +2601,47 @@ def test_shared_image(tmp_path):
     asyncio.run(run())
 
 
-def test_download_source_alias(tmp_path):
+@pytest.mark.parametrize(
+    ("filename", "recorded"),
+    [
+        ("original.mkv", "original.mkv"),
+        ("original.mkv", "ORIGINAL.mkv"),
+        ("Café.mkv", "Cafe\u0301.mkv"),
+    ],
+)
+def test_download_source_alias(tmp_path, filename, recorded):
     async def run():
         async with _database():
             root = tmp_path / "library"
             root.mkdir()
             lib, item = await _movie(root)
+            if filename != "original.mkv":
+                video = Path(item.path).rename(root / filename)
+                nfo = Path(item.nfo_path).rename(video.with_suffix(".nfo"))
+                await MediaItem.filter(id=item.id).update(
+                    path=str(video), name=video.stem, nfo_path=str(nfo)
+                )
+                await item.refresh_from_db()
             alias = tmp_path / "downloads"
             alias.symlink_to(root, target_is_directory=True)
+            recorded_path = alias / recorded
+            if not recorded_path.exists():
+                pytest.skip("Filesystem does not support this filename alias")
             downloader = await Downloader.create(name="Test", config="{}", priority=1)
             await DownloadTask.create(
                 downloader=downloader,
                 name="original",
                 dir=str(alias),
-                files=["original.mkv"],
+                files=[recorded],
                 state=DownloadState.COMPLETED,
             )
+
             assert await organizer.organize_items(lib, [item.id]) == {}
+
             assert Path(item.path).read_bytes() == b"video"
+            assert recorded_path.read_bytes() == b"video"
+            assert Path(item.nfo_path).is_file()
+            assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
 
