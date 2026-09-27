@@ -841,3 +841,150 @@ def test_recreated_link(tmp_path, monkeypatch):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("interrupted_index", [0, 1])
+def test_workflow_retry(tmp_path, monkeypatch, restart, error, interrupted_index):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    video = tmp_path / "Series" / "Series S01E01.mkv"
+    video.parent.mkdir()
+    video.write_bytes(b"video")
+    video.parent.joinpath("Series.nfo").write_text(
+        "<tvshow><title>Series</title></tvshow>"
+    )
+    video.with_suffix(".nfo").write_text(
+        "<episodedetails><title>Pilot</title><season>1</season>"
+        "<episode>1</episode></episodedetails>"
+    )
+    index = AsyncMock(wraps=watcher._handle_created)
+    monkeypatch.setattr(watcher, "_handle_created", index)
+
+    async def run():
+        db_url = f"sqlite://{tmp_path / 'media.sqlite3'}"
+        await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(video), event_type="created"
+            )
+            fired = []
+            interrupted = False
+
+            async def fire(*_args, bootparams):
+                nonlocal interrupted
+                async with await library_lock(lib.dir).acquire(timeout=1):
+                    pending = await MediaEvent.get(id=event.id)
+                    assert pending.event_type == "ingest"
+                    assert (
+                        pending.payload["bootparams"][0]["item_id"]
+                        == bootparams["item_id"]
+                    )
+                if len(fired) == interrupted_index and not interrupted:
+                    interrupted = True
+                    raise error("workflow interrupted")
+                fired.append(bootparams["item_id"])
+
+            monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+            with pytest.raises(error, match="workflow interrupted"):
+                await watcher.consume_event(event)
+
+            items = await MediaItem.filter(lib_id=lib.id).order_by("id")
+            ids = [item.id for item in items]
+            assert len(ids) == 2
+            assert [item.title for item in items] == ["Series", "Pilot"]
+            assert all(item.nfo_path for item in items)
+            pending = await MediaEvent.get(id=event.id)
+            assert pending.event_type == "ingest"
+            assert [params["item_id"] for params in pending.payload["bootparams"]] == (
+                ids[interrupted_index:]
+            )
+            assert fired == ids[:interrupted_index]
+
+            if restart:
+                await Tortoise.close_connections()
+                await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
+                lib = await MediaLib.get(id=lib.id)
+                monitor = watcher.LibWatcher(None)
+                events = await monitor._create_events(lib)
+                assert events.qsize() == 1
+                pending = events.get_nowait()
+            else:
+                pending = event
+
+            await watcher.consume_event(pending)
+
+            assert fired == ids
+            assert index.await_count == 1
+            assert (
+                await MediaItem.filter(lib_id=lib.id)
+                .order_by("id")
+                .values_list("id", flat=True)
+                == ids
+            )
+            assert not await MediaEvent.filter(lib_id=lib.id).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+def test_ingest_persistence(tmp_path, monkeypatch, error):
+    mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
+    monkeypatch.setattr("app.services.media.create_task", lambda task: task.close())
+    video = tmp_path / "Movie.mkv"
+    video.write_bytes(b"video")
+    nfo = video.with_suffix(".nfo")
+    nfo.write_text("<movie><title>Updated</title></movie>")
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+    save = MediaEvent.save
+
+    async def interrupted(event, *args, **kwargs):
+        await save(event, *args, **kwargs)
+        if event.event_type == "ingest":
+            raise error("journal interrupted")
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            event = await MediaEvent.create(
+                lib=lib, src_path=str(video), event_type="created"
+            )
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(MediaEvent, "save", interrupted)
+                with pytest.raises(error, match="journal interrupted"):
+                    await watcher.consume_event(event)
+
+            pending = await MediaEvent.get(id=event.id)
+            assert pending.event_type == "created"
+            assert pending.payload is None
+            assert not await MediaItem.filter(lib_id=lib.id).exists()
+            fire.assert_not_awaited()
+
+            await watcher.consume_event(event)
+
+            item = await MediaItem.get(lib_id=lib.id)
+            assert item.title == "Updated"
+            assert item.nfo_path == str(nfo)
+            assert fire.await_count == 1
+            assert fire.call_args.kwargs["bootparams"]["item_id"] == item.id
+            assert not await MediaEvent.filter(id=event.id).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
