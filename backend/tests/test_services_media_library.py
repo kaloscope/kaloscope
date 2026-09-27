@@ -526,6 +526,196 @@ def test_hide_lock(tmp_path, monkeypatch, flatten, pending_recovery):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("merge", [False, True])
+def test_delete_split(tmp_path, monkeypatch, local, merge):
+    def remove(path):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    monkeypatch.setattr("app.services.media.delete_path", remove)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows",
+                dir=str(tmp_path),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+            )
+
+            async def create_parent(directory, season):
+                directory.mkdir(parents=True)
+                nfo = directory / f"{directory.name}.nfo"
+                nfo.write_text(
+                    "<tvshow><title>Show</title>"
+                    '<uniqueid type="tmdb" default="true">42</uniqueid>'
+                    f"<season>{season}</season></tvshow>"
+                )
+                return await MediaItem.create(
+                    lib=lib,
+                    path=str(directory),
+                    dir=str(directory),
+                    name=directory.name,
+                    nfo_path=str(nfo),
+                    season=season,
+                )
+
+            async def create_episode(parent, season, episode):
+                path = Path(parent.path) / f"S{season:02}E{episode:02}.mkv"
+                path.write_bytes(path.name.encode())
+                nfo = path.with_suffix(".nfo")
+                nfo.write_text(
+                    "<episodedetails><title>Episode</title>"
+                    f"<season>{season}</season><episode>{episode}</episode>"
+                    "</episodedetails>"
+                )
+                return await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(path),
+                    dir=parent.path,
+                    name=path.stem,
+                    nfo_path=str(nfo),
+                    season=season,
+                    episode=episode,
+                )
+
+            parent = await create_parent(tmp_path / "Show" / "Season 01", 1)
+            selected = [
+                await create_episode(parent, 1, 1),
+                await create_episode(parent, 2, 1),
+            ]
+            unrelated = []
+            incoming = None
+            if merge:
+                destination = await create_parent(tmp_path / "Show" / "Season 02", 2)
+                unrelated.append(await create_episode(destination, 2, 2))
+                incoming = await create_parent(tmp_path / "Incoming", 1)
+                unrelated.append(await create_episode(incoming, 1, 2))
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr("app.services.media.library_lock", waiting_lock)
+            async with library_lock(lib.dir):
+                task = asyncio.create_task(
+                    MediaItemService.delete(parent.id, local=local)
+                )
+                try:
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    await organizer.organize_items(lib, [parent.id])
+                    if incoming is not None:
+                        await organizer.organize_items(lib, [incoming.id])
+                    await parent.refresh_from_db()
+                    assert parent.path == str(tmp_path / "Show" / "Season 01")
+                    for child in selected:
+                        await child.refresh_from_db()
+                    assert selected[0].parent_id == parent.id
+                    assert selected[1].parent_id != parent.id
+                except BaseException:
+                    task.cancel()
+                    raise
+            await asyncio.wait_for(task, timeout=3)
+
+            for child in selected:
+                if local:
+                    assert not await MediaItem.filter(id=child.id).exists()
+                    assert not Path(child.path).exists()
+                else:
+                    await child.refresh_from_db()
+                    assert child.visible is False
+                    assert Path(child.path).is_file()
+            for parent_id in (parent.id, selected[1].parent_id):
+                current = await MediaItem.get_or_none(id=parent_id)
+                if local and not merge:
+                    assert current is None
+                else:
+                    assert current is not None
+                    assert current.visible is merge
+            for child in unrelated:
+                await child.refresh_from_db()
+                assert child.visible is True
+                assert Path(child.path).read_bytes() == Path(child.path).name.encode()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_delete_new_parent(tmp_path, monkeypatch, local):
+    monkeypatch.setattr("app.services.media.delete_path", lambda path: path.unlink())
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies",
+                dir=str(tmp_path),
+                lib_type=LibType.MOVIE,
+                priority=1,
+                rename_template="{{title}}/{{title}}",
+            )
+            path = tmp_path / "old.mkv"
+            path.write_bytes(b"video")
+            nfo = path.with_suffix(".nfo")
+            nfo.write_text("<movie><title>New</title></movie>")
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(path),
+                dir=str(tmp_path),
+                name=path.stem,
+                nfo_path=str(nfo),
+            )
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr("app.services.media.library_lock", waiting_lock)
+            async with library_lock(lib.dir):
+                task = asyncio.create_task(
+                    MediaItemService.delete(item.id, local=local)
+                )
+                try:
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    await organizer.organize_items(lib, [item.id])
+                    await item.refresh_from_db()
+                    assert item.parent_id is not None
+                except BaseException:
+                    task.cancel()
+                    raise
+            await asyncio.wait_for(task, timeout=3)
+
+            if local:
+                assert not await MediaItem.all().exists()
+                assert not Path(item.path).exists()
+            else:
+                parent = await MediaItem.get(id=item.parent_id)
+                await item.refresh_from_db()
+                assert item.visible is False
+                assert parent.visible is False
+                assert Path(item.path).is_file()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 def test_delete_wait(tmp_path, monkeypatch):
     async def run():
         await Tortoise.init(
