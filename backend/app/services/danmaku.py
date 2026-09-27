@@ -676,7 +676,8 @@ class DanmakuService:
     ) -> bool:
         """Refresh the danmaku metadata of the episodes under an anime.
 
-        Reload episodes under the library lock after fetching remote metadata.
+        Recover organization and reload episodes under the library lock after
+        fetching remote metadata.
 
         Args:
             item: The media item or a confirmed episode.
@@ -685,6 +686,9 @@ class DanmakuService:
 
         Returns:
             Whether the match was applied or already up to date.
+
+        Raises:
+            OrganizePendingError: If pending organization cannot finish safely.
         """
         if not (server := item.lib.danmaku_server):
             return False
@@ -759,7 +763,10 @@ class DanmakuService:
                     return False
                 ep_data[number] = ep
 
+            from app.core.media.organizer import recover_organizing
+
             async with library_lock(item.lib.dir):
+                await recover_organizing(item.lib)
                 # retain the original scope if organization split or merged a parent
                 current_episodes = await MediaItem.filter(
                     id__in=[episode.id for episode in db_episodes], lib_id=item.lib_id
