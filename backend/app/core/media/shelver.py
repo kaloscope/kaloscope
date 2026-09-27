@@ -234,8 +234,11 @@ async def _write_nfo(
             await asyncio.shield(publication)
         except asyncio.CancelledError:
             # wait for publication before removing the temporary file
-            with suppress(Exception):
-                await publication
+            while not publication.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(publication)
+            with suppress(asyncio.CancelledError, Exception):
+                publication.result()
             raise
     except asyncio.CancelledError:
         cancelled = True
