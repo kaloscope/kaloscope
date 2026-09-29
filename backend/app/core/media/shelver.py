@@ -15,7 +15,7 @@ from tortoise.transactions import in_transaction
 
 from app.core.constants import ENCODING, NFO_MIME_TYPE
 from app.core.flow.context import RETVAL_KEY, Context
-from app.core.media.coordination import library_lock
+from app.core.media.coordination import library_lock, notify_media_events
 from app.core.media.handlers.base import MediaMeta, get_handler
 from app.core.renderer import render
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, NFOType
@@ -135,7 +135,7 @@ async def gen_nfo(
     """Generate an NFO using the media item's current path when available.
 
     Recover organization before writing indexed media. When refreshing metadata,
-    persist any follow-up organization so it survives restarts.
+    persist any follow-up organization and notify its watcher after committing.
 
     Args:
         nfo_type: The type of the NFO file (e.g. `movie`, `tvshow`).
@@ -195,6 +195,8 @@ async def gen_nfo(
                             event_type="ingest",
                             payload={"bootparams": [], "organize_ids": affected},
                         )
+                if affected and item.lib.rename_template:
+                    notify_media_events(item.lib_id)
             return written
     return await _write_nfo(nfo_type, nfo_path, data, overwrite=overwrite)
 

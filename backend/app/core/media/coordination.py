@@ -2,8 +2,26 @@ import hashlib
 from pathlib import Path
 
 from filelock import AsyncFileLock
+from sanic import Sanic, SanicException
 
 from app.core.config import KaloscopeConfig
+
+
+def notify_media_events(lib_id: int):
+    """Notify the library owner after persisted events have committed.
+
+    Standalone callers without an application leave recovery to watcher startup.
+
+    Args:
+        lib_id: The library whose pending events need to be reloaded.
+    """
+    try:
+        shared = getattr(Sanic.get_app(), "shared_ctx", None)
+    except SanicException:
+        return
+    changes = getattr(shared, "lib_event_changes", None)
+    if changes is not None:
+        changes[lib_id] = True
 
 
 def library_lock(directory: str) -> AsyncFileLock:

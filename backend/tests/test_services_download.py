@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -362,6 +364,52 @@ def test_concurrent_rpc_add(monkeypatch):
             assert len(errors) == 1
             assert isinstance(errors[0], KaloscopeException)
             assert errors[0].message == ErrorCode.INFO_HASH_COLLISION
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_committed_notification(tmp_path, monkeypatch):
+    database = tmp_path / "downloads.sqlite"
+    observed = []
+    driver = RpcDriver(
+        RpcConfig(name="RPC", host="localhost", port=80, methods={"add_link": API()})
+    )
+    monkeypatch.setattr(
+        driver,
+        "client",
+        SimpleNamespace(call=AsyncMock(return_value={"unique_id": "remote"})),
+    )
+    monkeypatch.setattr(download_service, "load_driver", lambda _config: driver)
+
+    def notify():
+        with closing(
+            sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        ) as connection:
+            observed.append(
+                connection.execute("SELECT COUNT(*) FROM download_task").fetchone()[0]
+            )
+
+    monkeypatch.setattr(download_service, "notify_download_changes", notify)
+
+    async def run():
+        await Tortoise.init(
+            db_url=f"sqlite://{database}", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(config="rpc", name="RPC", priority=1)
+
+            await download_service.DownloadTaskService.add(
+                DownloadAdd(
+                    downloader_id=downloader.id,
+                    dir="/downloads",
+                    link="magnet:?xt=urn:btih:" + "1" * 40,
+                )
+            )
+
+            assert observed[-1] == 1
         finally:
             await Tortoise.close_connections()
 

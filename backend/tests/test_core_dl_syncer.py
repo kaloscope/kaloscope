@@ -69,16 +69,232 @@ from app.services import download as download_service
 
 
 def _openlist_runner(downloader, driver):
+    """Create a synchronizer sharing isolated notification state.
+
+    Args:
+        downloader: The downloader whose driver is cached.
+        driver: The cached driver used by the test.
+
+    Returns:
+        The synchronizer with initialized clocks and shared flags.
+    """
     runner = cast(Any, object.__new__(syncer.DLSyncer))
     runner._app = SimpleNamespace(
         shared_ctx=SimpleNamespace(
-            dl_task_actions={}, dl_sync_fast=SimpleNamespace(is_set=lambda: True)
+            dl_task_actions={},
+            dl_sync_fast=SimpleNamespace(is_set=lambda: True),
+            dl_sync_requested=threading.Event(),
         )
     )
     runner._last_sync_tasks = datetime.now()
     runner._last_check_plans = datetime.now()
     runner._drivers = {downloader.id: (downloader.config, driver)}
     return runner
+
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_idle_wakeup(monkeypatch, fast):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config="config", name="Downloader", priority=1
+            )
+            driver = SimpleNamespace(close=AsyncMock())
+            runner = _openlist_runner(downloader, driver)
+            runner._sync_fast = threading.Event()
+            if fast:
+                runner._sync_fast.set()
+            producer = SimpleNamespace(
+                shared_ctx=SimpleNamespace(dl_sync_requested=runner._sync_requested)
+            )
+            monkeypatch.setattr(syncer.Sanic, "get_app", lambda: producer)
+            actions = AsyncMock(wraps=runner._consume_actions)
+            runner._consume_actions = actions
+            transfers = AsyncMock(wraps=syncer._resume_transfers)
+            scans = []
+
+            async def complete(tasks, _driver):
+                for task in tasks:
+                    await DownloadTask.filter(id=task.id).update(
+                        state=DownloadState.COMPLETED
+                    )
+
+            async def pause(_seconds):
+                scans.append((actions.await_count, transfers.await_count))
+                if len(scans) == 3:
+                    await DownloadTask.create(
+                        downloader=downloader,
+                        dir="/downloads",
+                        name="New task",
+                        state=DownloadState.DOWNLOADING,
+                    )
+                    syncer.notify_download_changes()
+                if len(scans) == 5:
+                    raise asyncio.CancelledError
+
+            synchronize = AsyncMock(side_effect=complete)
+            monkeypatch.setattr(syncer, "decrypt_config", lambda value: value)
+            monkeypatch.setattr(syncer, "load_driver", lambda _config: driver)
+            monkeypatch.setattr(syncer, "sync_tasks", synchronize)
+            monkeypatch.setattr(syncer, "_resume_transfers", transfers)
+            monkeypatch.setattr(syncer.asyncio, "sleep", pause)
+
+            await runner.interval()
+
+            assert scans == [(1, 1), (1, 1), (1, 1), (2, 2), (2, 2)]
+            synchronize.assert_awaited_once()
+            assert await DownloadTask.filter(state=DownloadState.COMPLETED).count() == 1
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "deadline", ["delete_due_at", "completion_due_at", "next_poll_at"]
+)
+def test_future_work(monkeypatch, deadline):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        current = datetime.now(UTC)
+        monkeypatch.setattr(syncer.timezone, "now", lambda: current)
+        try:
+            downloader = await Downloader.create(
+                config="config", name="Downloader", priority=1
+            )
+            task = await DownloadTask.create(
+                downloader=downloader,
+                dir="/downloads",
+                name="Done",
+                state=DownloadState.COMPLETED,
+            )
+            job = await OfflineDownloadJob.create(
+                download=task,
+                job_uuid="1" * 32,
+                source_fingerprint="1" * 64,
+                remote_dir="/remote",
+                **{deadline: current + timedelta(seconds=30)},
+            )
+            driver = SimpleNamespace(
+                close=AsyncMock(),
+                delete=AsyncMock(),
+                capabilities=AsyncMock(return_value={DownloadAction.DELETE}),
+            )
+            runner = _openlist_runner(downloader, driver)
+            runner._sync_fast = threading.Event()
+            scans = []
+            transfers = AsyncMock(wraps=syncer._resume_transfers)
+
+            async def complete(_tasks, _driver):
+                await OfflineDownloadJob.filter(id=job.id).update(**{deadline: None})
+
+            async def pause(_seconds):
+                nonlocal current
+                scans.append(transfers.await_count)
+                if len(scans) == 3:
+                    current += timedelta(seconds=31)
+                    runner._last_sync_tasks = datetime.now() - timedelta(seconds=31)
+                if len(scans) == 5:
+                    raise asyncio.CancelledError
+
+            synchronize = AsyncMock(side_effect=complete)
+            monkeypatch.setattr(syncer, "decrypt_config", lambda value: value)
+            monkeypatch.setattr(syncer, "load_driver", lambda _config: driver)
+            monkeypatch.setattr(syncer, "sync_tasks", synchronize)
+            monkeypatch.setattr(syncer, "_resume_transfers", transfers)
+            monkeypatch.setattr(syncer.asyncio, "sleep", pause)
+
+            await runner.interval()
+
+            assert scans == [1, 1, 1, 2, 2]
+            if deadline == "delete_due_at":
+                driver.delete.assert_awaited_once()
+                assert not await DownloadTask.filter(id=task.id).exists()
+            else:
+                synchronize.assert_awaited_once()
+                await job.refresh_from_db()
+                assert getattr(job, deadline) is None
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_notification_during_sync(monkeypatch):
+    runner = cast(Any, object.__new__(syncer.DLSyncer))
+    runner._app = SimpleNamespace(
+        shared_ctx=SimpleNamespace(dl_sync_requested=threading.Event())
+    )
+    runner._last_sync_tasks = datetime.now()
+    runner._last_check_plans = datetime.now()
+    runner._drivers = {}
+    runner._consume_actions = AsyncMock(return_value=False)
+    runner._next_deletion = AsyncMock(return_value=None)
+    runner._has_pending_tasks = AsyncMock(return_value=False)
+    scans = []
+
+    async def transfer():
+        if not scans:
+            runner.publish(1, DownloadAction.RETRY, DownloadState.ERROR)
+
+    async def pause(_seconds):
+        scans.append(runner._consume_actions.await_count)
+        if len(scans) == 3:
+            raise asyncio.CancelledError
+
+    runner._task_actions = {}
+    monkeypatch.setattr(syncer, "_resume_transfers", transfer)
+    monkeypatch.setattr(
+        syncer, "DownloadTask", SimpleNamespace(filter=AsyncMock(return_value=[]))
+    )
+    monkeypatch.setattr(syncer.asyncio, "sleep", pause)
+
+    asyncio.run(runner.interval())
+
+    assert scans == [1, 2, 2]
+    assert runner._task_actions[1] == (DownloadAction.RETRY, DownloadState.ERROR, False)
+
+
+def test_idle_plans(monkeypatch):
+    runner = cast(Any, object.__new__(syncer.DLSyncer))
+    scheduled = []
+    runner._app = SimpleNamespace(
+        shared_ctx=SimpleNamespace(dl_sync_requested=threading.Event()),
+        add_task=scheduled.append,
+    )
+    runner._last_sync_tasks = datetime.now()
+    runner._last_check_plans = datetime.now()
+    runner._drivers = {}
+    runner._consume_actions = AsyncMock(return_value=False)
+    runner._next_deletion = AsyncMock(return_value=None)
+    runner._has_pending_tasks = AsyncMock(return_value=False)
+    scans = []
+
+    async def pause(_seconds):
+        scans.append(runner._consume_actions.await_count)
+        if len(scans) == 1:
+            runner._last_check_plans -= timedelta(hours=1)
+        else:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(syncer, "_resume_transfers", AsyncMock())
+    monkeypatch.setattr(
+        syncer, "DownloadTask", SimpleNamespace(filter=AsyncMock(return_value=[]))
+    )
+    monkeypatch.setattr(syncer.asyncio, "sleep", pause)
+    monkeypatch.setattr(syncer, "check_download_plans", lambda: "plans")
+
+    asyncio.run(runner.interval())
+
+    assert scans == [1, 1]
+    assert scheduled == ["plans"]
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -791,12 +1007,15 @@ def test_fast_sync(monkeypatch):
         shared_ctx=SimpleNamespace(
             dl_sync_fast=SimpleNamespace(is_set=lambda: True),
             dl_task_actions={},
+            dl_sync_requested=threading.Event(),
         )
     )
     runner._last_sync_tasks = datetime.now()
     runner._last_check_plans = datetime.now()
     runner._drivers = {}
     runner._consume_actions = AsyncMock(return_value=False)
+    runner._next_deletion = AsyncMock(return_value=None)
+    runner._has_pending_tasks = AsyncMock(return_value=True)
 
     downloader = SimpleNamespace(id=1, config="invalid")
     task = SimpleNamespace(downloader_id=1)
@@ -866,6 +1085,7 @@ def test_cleanup_retry(monkeypatch):
                 shared_ctx=SimpleNamespace(
                     dl_sync_fast=SimpleNamespace(is_set=lambda: True),
                     dl_task_actions={},
+                    dl_sync_requested=threading.Event(),
                 )
             )
             runner._last_sync_tasks = datetime.now()
@@ -967,7 +1187,9 @@ def test_actions():
             driver = ActionDriver()
             runner = cast(Any, object.__new__(syncer.DLSyncer))
             runner._app = SimpleNamespace(
-                shared_ctx=SimpleNamespace(dl_task_actions=actions)
+                shared_ctx=SimpleNamespace(
+                    dl_task_actions=actions, dl_sync_requested=threading.Event()
+                )
             )
             runner._drivers = {downloader.id: (downloader.config, driver)}
             requested = (
@@ -1018,21 +1240,33 @@ def test_slow_sync(monkeypatch):
 
     async def stop_after_wait(seconds):
         waits.append(seconds)
-        raise asyncio.CancelledError
+        if len(waits) == 3:
+            raise asyncio.CancelledError
 
     runner = cast(Any, object.__new__(syncer.DLSyncer))
     runner._app = SimpleNamespace(
         shared_ctx=SimpleNamespace(
             dl_sync_fast=SimpleNamespace(is_set=lambda: False),
+            dl_sync_requested=threading.Event(),
         )
     )
     runner._last_sync_tasks = datetime.now()
+    runner._last_check_plans = datetime.now()
+    runner._drivers = {}
     runner._consume_actions = AsyncMock(return_value=False)
+    runner._next_deletion = AsyncMock(return_value=None)
+    runner._has_pending_tasks = AsyncMock(return_value=True)
+    transfers = AsyncMock()
+    monkeypatch.setattr(syncer, "_resume_transfers", transfers)
+    monkeypatch.setattr(
+        syncer, "DownloadTask", SimpleNamespace(filter=AsyncMock(return_value=[]))
+    )
     monkeypatch.setattr(syncer.asyncio, "sleep", stop_after_wait)
     asyncio.run(runner.interval())
 
     runner._consume_actions.assert_awaited_once()
-    assert waits == [1]
+    transfers.assert_awaited_once()
+    assert waits == [1, 1, 1]
 
 
 @pytest.mark.parametrize(

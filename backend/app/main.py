@@ -109,6 +109,9 @@ async def init_shared_ctx(app: Sanic):
     """Initialize the shared context.
 
     See https://sanic.dev/en/guide/running/manager.html for more details.
+
+    Args:
+        app: The application receiving process-shared state.
     """
     shared = app.shared_ctx
     app.ctx.sync_manager = (sync_manager := multiprocessing.Manager())
@@ -129,12 +132,14 @@ async def init_shared_ctx(app: Sanic):
     # shared objects for the media library watcher
     shared.lib_watcher_lock = multiprocessing.Lock()
     shared.lib_watcher_actions = sync_manager.dict()
+    shared.lib_event_changes = sync_manager.dict()
     shared.lib_scanning_paths = sync_manager.list()
     shared.lib_observing_paths = sync_manager.list()
     # shared objects for the download synchronizer
     shared.dl_syncer_lock = multiprocessing.Lock()
     shared.dl_syncer_flag = multiprocessing.Event()
     shared.dl_sync_fast = multiprocessing.Event()
+    shared.dl_sync_requested = multiprocessing.Event()
     shared.dl_task_actions = sync_manager.dict()
     # shared objects for transcoding task monitoring
     shared.transcode_tasks = sync_manager.dict()
