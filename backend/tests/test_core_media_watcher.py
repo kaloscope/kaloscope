@@ -89,7 +89,8 @@ def test_idle_wakeup(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_pending_startup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scan_on_startup", [False, True])
+def test_pending_startup(tmp_path, monkeypatch, scan_on_startup):
     tasks = []
     attempts = []
     observer = Mock()
@@ -123,6 +124,7 @@ def test_pending_startup(tmp_path, monkeypatch):
                         dir=str(directory),
                         lib_type=LibType.MOVIE,
                         priority=priority,
+                        scan_on_startup=scan_on_startup,
                     )
                 )
             pending_lib = libraries[0]
@@ -184,6 +186,90 @@ def test_pending_startup(tmp_path, monkeypatch):
         finally:
             for task in tasks:
                 task.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("startup", [False, True])
+@pytest.mark.parametrize("scan_on_startup", [False, True])
+def test_initial_scan(tmp_path, monkeypatch, startup, scan_on_startup):
+    observer = Mock()
+    monkeypatch.setattr(watcher, "Observer", observer)
+    lib = MediaLib(
+        id=1,
+        name="Library",
+        dir=str(tmp_path),
+        lib_type=LibType.MOVIE,
+        priority=1,
+        scan_on_startup=scan_on_startup,
+    )
+    events = Queue()
+    tasks = []
+
+    async def run():
+        app = SimpleNamespace(
+            loop=asyncio.get_running_loop(),
+            add_task=lambda task, **kwargs: tasks.append(task),
+        )
+        monitor = watcher.LibWatcher(app)
+        monitor._watcher_lock = Mock()
+        monitor._observing_paths = []
+        monitor._observers = {}
+        monkeypatch.setattr(monitor, "_create_events", AsyncMock(return_value=events))
+        consumer = AsyncMock()
+        scan = AsyncMock()
+        monkeypatch.setattr(monitor, "_event_consumer", consumer)
+        monkeypatch.setattr(monitor, "_delay_scan", scan)
+
+        await monitor.add_observer(lib, startup=startup)
+        await asyncio.gather(*tasks)
+
+        observer.return_value.start.assert_called_once()
+        assert monitor._observing_paths == [lib.dir]
+        consumer.assert_awaited_once_with(lib.id, events)
+        if startup and not scan_on_startup:
+            scan.assert_not_awaited()
+        else:
+            scan.assert_awaited_once_with(
+                lib, delay=monitor._STARTUP_SCAN_DELAY if startup else 0
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("enabled", [False, True, None])
+def test_delayed_scan(tmp_path, monkeypatch, enabled):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            monitor = watcher.LibWatcher(None)
+            scan = AsyncMock()
+            monkeypatch.setattr(monitor, "scan_directory", scan)
+
+            async def change_setting(_delay):
+                if enabled is None:
+                    await lib.delete()
+                else:
+                    await MediaLib.filter(id=lib.id).update(scan_on_startup=enabled)
+
+            monkeypatch.setattr(watcher.asyncio, "sleep", change_setting)
+
+            await monitor._delay_scan(lib, delay=monitor._STARTUP_SCAN_DELAY)
+
+            if enabled:
+                scan.assert_awaited_once_with(
+                    lib, backfill_nfo_events=False, validate_request=True
+                )
+            else:
+                scan.assert_not_awaited()
+        finally:
             await Tortoise.close_connections()
 
     asyncio.run(run())
@@ -522,6 +608,7 @@ def test_hash_scan(tmp_path, monkeypatch, backfill_nfo_events, missing):
                 lib_type=LibType.MOVIE,
                 priority=1,
                 rename_template="{{title}}",
+                scan_on_startup=False,
             )
             item = await MediaItem.create(
                 lib=lib,
