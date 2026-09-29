@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { Menu, MenuRoute, Signpost } from '$lib/types';
+  import type { Snippet } from 'svelte';
 
   export type MenuProps = {
     /** List of menu items. */
@@ -8,6 +9,8 @@
     interpolation?: Record<string, string | number | (string | number)[]>;
     /** Whether route titles should be translated as i18n keys. */
     translate?: boolean;
+    /** Optional action displayed beside each route. */
+    action?: Snippet<[MenuRoute]>;
   };
 </script>
 
@@ -20,7 +23,7 @@
   import { freeze, signposts } from '$lib/stores';
   import { onMount } from 'svelte';
 
-  let { menus, interpolation = {}, translate = true }: MenuProps = $props();
+  let { menus, interpolation = {}, translate = true, action }: MenuProps = $props();
 
   /**
    * Hide the drawer when a menu item is clicked.
@@ -73,18 +76,18 @@
   {#each menus as menu (menu.title)}
     <li class="menu-title">{$_(menu.title)}</li>
     {#each menu.routes as route, i (i)}
-      <li>
+      {@const active = page.url.pathname === route.path}
+      <li class="group/menu justify-center">
         {#if route.path}
           {@const blank = route.path.toLowerCase().startsWith('http')}
-          {@const active = page.url.pathname === route.path}
           <a
             href={route.path}
             target={blank ? '_blank' : ''}
-            class="{blank ? 'group' : ''} {active ? 'menu-emphasis' : ''}"
+            class="{blank ? 'group' : ''} {active ? 'menu-emphasis' : 'group-hover/menu:bg-base-content/10'}"
             onclick={(event) => {
               if (!blank) {
                 event.preventDefault();
-                !active && hideDrawer(() => route.path && goto(route.path));
+                !active && hideDrawer(() => route.path && goto(route.path, { keepFocus: true }));
               }
             }}
           >
@@ -93,6 +96,13 @@
         {:else}
           <span class="pointer-events-none">
             {@render routeContent(route)}
+          </span>
+        {/if}
+        {#if action}
+          <span class="contents">
+            <span class="absolute right-3 {active ? 'text-neutral-content' : 'text-base-content'}">
+              {@render action(route)}
+            </span>
           </span>
         {/if}
       </li>
