@@ -50,6 +50,8 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
     async def upsert(cls, obj: MediaLibUpsert) -> MediaLib:
         """Create or update a media library.
 
+        Preserve startup scanning and rename settings omitted from updates.
+
         Args:
             obj: The media library data.
 
@@ -76,6 +78,8 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         if obj.id:
             lib = await MediaLib.get(id=obj.id)
             extra = {}
+            if "scan_on_startup" in obj.model_fields_set:
+                extra["scan_on_startup"] = obj.scan_on_startup
             if "rename_template" in obj.model_fields_set:
                 try:
                     extra["rename_template"] = validate_template(
@@ -100,6 +104,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                 dir=obj.dir,
                 name=obj.name,
                 language=obj.language or None,
+                scan_on_startup=obj.scan_on_startup,
                 danmaku_server=obj.danmaku_server,
                 danmaku_ttl=obj.danmaku_ttl,
                 rename_template=obj.rename_template,

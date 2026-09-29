@@ -8,6 +8,7 @@
     dir: string;
     name: string;
     language: string | null;
+    scan_on_startup: boolean;
     rename_template: string | null;
     danmaku_server: string | null;
     danmaku_ttl: number;
@@ -36,6 +37,7 @@
     dir,
     name,
     language = '',
+    scan_on_startup = true,
     rename_template = null,
     danmaku_server,
     danmaku_ttl = 24,
@@ -74,6 +76,7 @@
     loading.start();
     const json: Record<string, unknown> = Object.fromEntries(data);
     json.id = id;
+    json.scan_on_startup = data.has('scan_on_startup');
     json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
     json.danmaku_server = urlWrapper?.full(danmaku_server);
     json.triggers = triggers;
@@ -154,6 +157,16 @@
         />
         <input type="text" class="hidden" name="dir" value={dir} />
       </button>
+      <div class="flex items-center gap-3">
+        <Label class="grow">{$_('media.scan_on_startup')}</Label>
+        <input
+          type="checkbox"
+          name="scan_on_startup"
+          aria-label={$_('media.scan_on_startup')}
+          class="toggle mt-2 toggle-sm"
+          bind:checked={scan_on_startup}
+        />
+      </div>
       <Label tip={$_('media.rename.tip')}>{$_('media.rename.template')}</Label>
       <input
         aria-label={$_('media.rename.template')}

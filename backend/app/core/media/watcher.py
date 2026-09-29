@@ -208,6 +208,9 @@ class LibWatcher:
     async def add_observer(self, lib: MediaLib, *, startup: bool = False):
         """Add a directory observer to monitor the specified path.
 
+        Always recover pending events and scan newly added libraries. At startup,
+        schedule a full scan only when the library enables it.
+
         Args:
             lib: The media library that will be monitored.
             startup: Whether the observer is being added during application startup.
@@ -228,11 +231,12 @@ class LibWatcher:
                         self._event_consumer(lib.id, events), name=encrypt(path)
                     )
                     # schedule the initial scan for existing files
-                    self._app.add_task(
-                        self._delay_scan(
-                            lib, delay=self._STARTUP_SCAN_DELAY if startup else 0
+                    if not startup or lib.scan_on_startup:
+                        self._app.add_task(
+                            self._delay_scan(
+                                lib, delay=self._STARTUP_SCAN_DELAY if startup else 0
+                            )
                         )
-                    )
                     self._observing_paths.append(path)
             finally:
                 self._watcher_lock.release()
@@ -328,12 +332,17 @@ class LibWatcher:
     async def _delay_scan(self, lib: MediaLib, *, delay: int = 0):
         """Run the initial scan after an optional delay.
 
+        Recheck delayed startup scans in case the library was disabled or removed.
+
         Args:
             lib: The media library instance.
-            delay: Seconds to wait before scanning.
+            delay: Seconds to wait before a startup scan, or `0` for a new library.
         """
         if delay > 0:
             await asyncio.sleep(delay)
+            lib = await MediaLib.get_or_none(id=lib.id)
+            if lib is None or not lib.scan_on_startup:
+                return
         await self.scan_directory(lib, backfill_nfo_events=False, validate_request=True)
 
     async def scan_directory(

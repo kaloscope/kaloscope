@@ -248,6 +248,7 @@ export type MediaLib = {
   language: string | null;
   rename_template: string | null;
   priority: number;
+  scan_on_startup: boolean;
   danmaku_server: string | null;
   danmaku_ttl: number;
   triggers: FlowTrigger[];

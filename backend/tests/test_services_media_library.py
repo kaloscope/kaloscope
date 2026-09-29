@@ -39,6 +39,55 @@ def library_services(monkeypatch):
     return observer, bind
 
 
+@pytest.mark.parametrize("initial", [None, False, True])
+def test_startup_scan(tmp_path, library_services, initial):
+    observer, _ = library_services
+    settings = {} if initial is None else {"scan_on_startup": initial}
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            library = await MediaLibService.upsert(
+                MediaLibUpsert(
+                    dir=str(tmp_path),
+                    lib_type=LibType.MOVIE,
+                    name="Library",
+                    danmaku_ttl=24,
+                    **settings,
+                )
+            )
+            assert library.scan_on_startup is (initial is not False)
+            assert (await MediaLibService.dump(library))["scan_on_startup"] is (
+                library.scan_on_startup
+            )
+
+            enabled = not library.scan_on_startup
+            library = await MediaLibService.upsert(
+                MediaLibUpsert(
+                    id=library.id,
+                    name="Edited",
+                    danmaku_ttl=24,
+                    scan_on_startup=enabled,
+                )
+            )
+            await library.refresh_from_db()
+            assert library.scan_on_startup is enabled
+
+            library = await MediaLibService.upsert(
+                MediaLibUpsert(id=library.id, name="Legacy request", danmaku_ttl=24)
+            )
+            assert library.scan_on_startup is enabled
+            assert (await MediaLibService.dump(library))["scan_on_startup"] is enabled
+            observer.assert_awaited_once()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("relationship", ["same", "parent", "child"])
 @pytest.mark.parametrize("existing_alias", [False, True])
 def test_directory_alias(tmp_path, library_services, relationship, existing_alias):

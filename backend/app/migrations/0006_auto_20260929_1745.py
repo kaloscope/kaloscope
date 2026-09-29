@@ -30,4 +30,9 @@ class Migration(migrations.Migration):
             name='rename_template',
             field=fields.CharField(null=True, max_length=1024),
         ),
+        ops.AddField(
+            model_name='MediaLib',
+            name='scan_on_startup',
+            field=fields.BooleanField(default=True, db_default=True),
+        ),
     ]

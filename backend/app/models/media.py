@@ -61,6 +61,7 @@ class MediaLib(TortoiseModel):
     name = CharField(max_length=64, unique=True)
     language = CharEnumField(max_length=16, enum_type=Language, null=True)
     priority = IntField(unique=True)
+    scan_on_startup = BooleanField(default=True, db_default=True)
     danmaku_server = CharField(max_length=255, null=True)
     danmaku_ttl = IntField(default=24)
     rename_template = CharField(max_length=1024, null=True)
@@ -144,6 +145,7 @@ class MediaLibUpsert(BaseModel):
     dir: str | None = Field(min_length=1, max_length=4096, default=None)
     name: str = Field(min_length=1, max_length=64)
     language: str | None = None
+    scan_on_startup: bool = True
     danmaku_server: str | None = Field(max_length=255, default=None)
     danmaku_ttl: int | None = Field(ge=0, le=8760, default=None)
     rename_template: str | None = Field(max_length=1024, default=None)

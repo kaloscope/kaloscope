@@ -402,6 +402,7 @@
     }
   },
   "media": {
+    "scan_on_startup": "Full scan on startup",
     "rename": {
       "template": "Automatic rename template",
       "tip": "Automatically rename and organize media files using a template; leave blank to disable."
