@@ -3,6 +3,8 @@
 import asyncio
 import hashlib
 import json
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -1207,6 +1209,72 @@ def test_pull_error(tmp_path, monkeypatch):
         "name": "movie.mkv",
         "error": "OpenList request failed with HTTP 401",
     }
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError, asyncio.CancelledError])
+def test_failure_commit(tmp_path, monkeypatch, error):
+    database = tmp_path / "failure.sqlite"
+    observed = []
+    send = runtime_module.Notifications.send
+
+    async def notify(*args, **kwargs):
+        with closing(
+            sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        ) as connection:
+            observed.append(
+                connection.execute("SELECT state FROM download_task").fetchone()[0]
+            )
+        if error is not None:
+            raise error
+        await send(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.Notifications, "send", notify)
+
+    async def run():
+        await Tortoise.init(
+            db_url=f"sqlite://{database}", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            downloader = await Downloader.create(
+                config="unused", name="OpenList", priority=1
+            )
+            task = await DownloadTask.create(
+                downloader=downloader,
+                dir=str(tmp_path),
+                name="movie.mkv",
+                state=DownloadState.PULLING,
+            )
+            job = await OfflineDownloadJob.create(
+                download=task,
+                job_uuid="1" * 32,
+                source_fingerprint="1" * 64,
+                remote_dir="/remote",
+            )
+            failure = puller_module.PullError(
+                OfflineDownloadErrorKind.PULL_FAILED, "Pull failed"
+            )
+
+            if error is asyncio.CancelledError:
+                with pytest.raises(asyncio.CancelledError):
+                    await OpenListPullRuntime._fail_job(job, failure)
+            else:
+                await OpenListPullRuntime._fail_job(job, failure)
+
+            assert observed == [DownloadState.PULLING]
+            await task.refresh_from_db()
+            await job.refresh_from_db()
+            if error is asyncio.CancelledError:
+                assert task.state is DownloadState.PULLING
+                assert job.last_error_kind is None
+            else:
+                assert task.state is DownloadState.ERROR
+                assert job.last_error_kind is OfflineDownloadErrorKind.PULL_FAILED
+            assert await Notification.all().count() == (1 if error is None else 0)
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

@@ -208,6 +208,10 @@ class OpenListPullRuntime:
     async def _fail_job(job: OfflineDownloadJob, error: PullError):
         """Persist and notify a pull failure while the task is still active.
 
+        Commit the terminal state after attempting its notification so idle
+        synchronization cannot cancel notification storage by closing the driver.
+        Cancellation rolls back the failure and leaves the pull recoverable.
+
         Args:
             job: The persisted job whose pull failed.
             error: The classified failure exposed to the task.
@@ -229,20 +233,18 @@ class OpenListPullRuntime:
                     .using_db(connection)
                     .update(last_error_kind=error.kind)
                 )
-        if not updated:
-            return
-        try:
-            await Notifications.send(
-                NotificationTemplate.DOWNLOAD_FAILED,
-                name=task.name,
-                error=str(error),
-            )
-        except Exception:
-            # keep the persisted failure when notification storage is unavailable
-            logger.warning(
-                "Failed to send OpenList download failure notification",
-                exc_info=True,
-            )
+                try:
+                    await Notifications.send(
+                        NotificationTemplate.DOWNLOAD_FAILED,
+                        name=task.name,
+                        error=str(error),
+                    )
+                except Exception:
+                    # preserve the failure when notification storage is unavailable
+                    logger.warning(
+                        "Failed to send OpenList download failure notification",
+                        exc_info=True,
+                    )
 
     async def _pull_job(self, job: OfflineDownloadJob):
         """Pull every persisted manifest entry into local storage.

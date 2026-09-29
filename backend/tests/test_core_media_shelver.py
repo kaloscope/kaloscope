@@ -3,7 +3,9 @@
 import asyncio
 import hashlib
 import mimetypes
+import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -579,6 +581,20 @@ def test_metadata_recovery(tmp_path, monkeypatch, recovery):
     video.write_bytes(b"video")
     nfo = video.with_suffix(".nfo")
     db_url = f"sqlite://{tmp_path / 'media.sqlite'}"
+    notifications = []
+
+    def notify(lib_id):
+        with closing(
+            sqlite3.connect(f"file:{tmp_path / 'media.sqlite'}?mode=ro", uri=True)
+        ) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM media_event "
+                "WHERE lib_id = ? AND event_type = 'ingest'",
+                (lib_id,),
+            ).fetchone()[0]
+            notifications.append((lib_id, count))
+
+    monkeypatch.setattr(shelver, "notify_media_events", notify)
 
     async def run():
         await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
@@ -607,6 +623,7 @@ def test_metadata_recovery(tmp_path, monkeypatch, recovery):
 
             await item.refresh_from_db()
             assert item.title == "New"
+            assert notifications == [(lib.id, 1)]
             assert item.nfo_mtime is not None
             assert video.is_file()
             assert await MediaEvent.all().count() == 1

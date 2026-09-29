@@ -27,7 +27,12 @@ from app.core.dl.driver import (
 )
 from app.core.dl.openlist.state import retry_state
 from app.core.dl.rpc import RpcDriver
-from app.core.dl.syncer import execute_download_plan, resolve_details, submission_lock
+from app.core.dl.syncer import (
+    execute_download_plan,
+    notify_download_changes,
+    resolve_details,
+    submission_lock,
+)
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.download import (
     DownloadAdd,
@@ -409,7 +414,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
     @classmethod
     async def add(cls, add: DownloadAdd) -> DownloadTask:
-        """Add a download task.
+        """Add a download task and wake synchronization after committing.
 
         Args:
             add: The download task details.
@@ -449,7 +454,9 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         async with transaction:
             if await cls.hash_collision(identity.info_hash, identity.info_hash_v2):
                 raise KaloscopeException(ErrorCode.INFO_HASH_COLLISION)
-            return await cls.add_request(downloader.id, driver, request)
+            task = await cls.add_request(downloader.id, driver, request)
+        notify_download_changes()
+        return task
 
     @classmethod
     async def add_request(
@@ -458,7 +465,10 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         driver: DownloaderDriver,
         request: DownloadRequest,
     ) -> DownloadTask:
-        """Submit a normalized download request and persist its task.
+        """Submit a normalized download request and notify synchronization.
+
+        Callers wrapping this method in a transaction must also notify after their
+        outer transaction commits.
 
         Args:
             downloader_id: The downloader ID.
@@ -484,7 +494,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         # save the download directory
         await DownloadDirService.upsert(request.directory)
         # create the download task
-        return await DownloadTask.create(
+        task = await DownloadTask.create(
             **cls._task_values(downloader_id, request),
             unique_id=snapshot.identity.remote_id,
             magnet_link=(
@@ -496,6 +506,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 DownloadState.PAUSED if request.paused else DownloadState.DOWNLOADING
             ),
         )
+        notify_download_changes()
+        return task
 
     @classmethod
     async def _add_draft(
@@ -504,7 +516,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         driver: DownloaderDriver,
         draft: DownloadDraft,
     ) -> DownloadTask:
-        """Persist a driver draft before submitting its remote request.
+        """Persist a driver draft and notify recovery before remote submission.
 
         Args:
             downloader_id: The owning downloader ID.
@@ -537,6 +549,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                     remote_dir=job.remote_directory,
                     using_db=connection,
                 )
+        notify_download_changes()
 
         try:
             snapshot = await driver.add(
@@ -548,6 +561,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         except Exception:
             # remove the pre-submission task when the driver reports a definite failure
             await DownloadTask.filter(id=task.id).delete()
+            notify_download_changes()
             raise
         if snapshot.state is None:
             raise ValueError("Download result is missing its state")
@@ -566,15 +580,19 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                     .using_db(connection)
                     .update(last_error_kind=OfflineDownloadErrorKind.SUBMIT_UNKNOWN)
                 )
+        notify_download_changes()
         await DownloadDirService.upsert(request.directory)
         return task
 
     @classmethod
     async def pause(cls, id: int):
-        """Pause a download task.
+        """Pause a download task and notify synchronization after local changes.
 
         Args:
             id: The download task ID.
+
+        Returns:
+            A deferred command for offline jobs, or `None` for immediate actions.
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
@@ -587,13 +605,17 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         state = await driver.pause(identity)
         if state is not None:
             await DownloadTask.filter(id=id).update(state=state)
+            notify_download_changes()
 
     @classmethod
     async def start(cls, id: int):
-        """Start a download task.
+        """Start a download task and notify synchronization after local changes.
 
         Args:
             id: The download task ID.
+
+        Returns:
+            A deferred command for offline jobs, or `None` for immediate actions.
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
@@ -606,13 +628,17 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         state = await driver.resume(identity)
         if state is not None:
             await DownloadTask.filter(id=id).update(state=state)
+            notify_download_changes()
 
     @classmethod
     async def retry(cls, id: int):
-        """Retry a download task.
+        """Retry a download task and notify synchronization after local changes.
 
         Args:
             id: The download task ID.
+
+        Returns:
+            A deferred command for offline jobs, or `None` for immediate actions.
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
@@ -632,14 +658,18 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         state = await driver.retry(identity)
         if state is not None:
             await DownloadTask.filter(id=id).update(state=state)
+            notify_download_changes()
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):
-        """Delete a download task.
+        """Delete a download task and notify synchronization after committing.
 
         Args:
             id: The download task ID.
             local: Whether to delete the local files.
+
+        Returns:
+            A deferred command for offline jobs, or `None` for immediate actions.
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
@@ -650,6 +680,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         if await OfflineDownloadJob.filter(download_id=id).update(
             delete_due_at=timezone.now(), delete_local=local
         ):
+            notify_download_changes()
             return DownloadAction.DELETE, task.state
         unique = identity.rpc_variables
 
@@ -708,6 +739,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
         # delete the download task
         await DownloadTask.filter(id=id).delete()
+        notify_download_changes()
 
     @classmethod
     async def stats(cls) -> DownloadStats:

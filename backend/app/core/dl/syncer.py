@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from filelock import FileLock
-from sanic import Sanic
+from sanic import Sanic, SanicException
 from sanic.log import logger
 from tortoise import timezone
 from tortoise.expressions import F, Q, RawSQL
@@ -59,6 +59,31 @@ from app.utils.extractor import (
 )
 
 type _DownloadCommand = tuple[DownloadAction, DownloadState, bool]
+
+_SYNC_STATES = (
+    DownloadState.PAUSED,
+    DownloadState.DOWNLOADING,
+    DownloadState.SUBMITTING,
+    DownloadState.SUBMIT_UNKNOWN,
+    DownloadState.REMOTE,
+    DownloadState.SETTLING,
+    DownloadState.PULLING,
+    DownloadState.VERIFYING,
+)
+
+
+def notify_download_changes():
+    """Wake download synchronization after task changes have committed.
+
+    Standalone callers without an application leave recovery to syncer startup.
+    """
+    try:
+        shared = getattr(Sanic.get_app(), "shared_ctx", None)
+    except SanicException:
+        return
+    requested = getattr(shared, "dl_sync_requested", None)
+    if requested is not None:
+        requested.set()
 
 
 def submission_lock(job_uuid: str) -> FileLock:
@@ -134,6 +159,15 @@ class DLSyncer:
         return self._app.shared_ctx.dl_sync_fast
 
     @cached_property
+    def _sync_requested(self) -> Event:
+        """Get the shared notification for committed download changes.
+
+        Returns:
+            The process-shared synchronization request flag.
+        """
+        return self._app.shared_ctx.dl_sync_requested
+
+    @cached_property
     def _task_actions(self) -> DictProxy[int, _DownloadCommand]:
         """Get the shared pending task-action mapping.
 
@@ -158,7 +192,7 @@ class DLSyncer:
         *,
         local: bool = False,
     ):
-        """Publish a task action for the synchronizer owner.
+        """Publish a task action and wake the synchronizer owner.
 
         Args:
             task_id: The local download task ID.
@@ -167,6 +201,7 @@ class DLSyncer:
             local: Whether task deletion includes local files.
         """
         self._task_actions[task_id] = (action, state, local)
+        self._sync_requested.set()
 
     async def start(self):
         """Start the download synchronizer."""
@@ -336,69 +371,113 @@ class DLSyncer:
                     self._task_actions.pop(task_id, None)
         return processed
 
+    async def _next_deletion(self) -> datetime | None:
+        """Read the earliest durable deletion deadline after processing actions.
+
+        Returns:
+            The next deletion deadline, or `None` when no deletion is pending.
+        """
+        job = await (
+            OfflineDownloadJob.filter(delete_due_at__not_isnull=True)
+            .order_by("delete_due_at")
+            .only("delete_due_at")
+            .first()
+        )
+        return job.delete_due_at if job is not None else None
+
+    async def _has_pending_tasks(self) -> bool:
+        """Check whether synchronization or a durable retry still needs polling.
+
+        Returns:
+            `True` for active downloads, unfinished transfers, or pending completion
+            and cleanup work, including retries with future deadlines.
+        """
+        return await DownloadTask.filter(
+            Q(state__in=_SYNC_STATES)
+            | Q(
+                Q(transfer_pending=True)
+                | Q(offline_job__completion_due_at__not_isnull=True)
+                | Q(offline_job__next_poll_at__not_isnull=True)
+                | Q(
+                    offline_job__last_error_kind=OfflineDownloadErrorKind.CLEANUP_FAILED
+                ),
+                state=DownloadState.COMPLETED,
+            )
+        ).exists()
+
     async def interval(self):
-        """Synchronize the download tasks."""
+        """Synchronize pending downloads and skip database polling while idle.
+
+        Recover once on startup and after notifications. Retain deletion deadlines
+        in memory, and keep hourly download plans independent of idle downloads.
+        """
         slow_mode = 30
+        refresh = True
+        has_tasks = False
+        next_deletion = None
         while True:
             now = datetime.now()
             try:
-                processed_action = await self._consume_actions()
+                # clear before reading so concurrent committed changes remain visible
+                if self._sync_requested.is_set():
+                    self._sync_requested.clear()
+                    refresh = True
+                processed_action = False
+                if refresh or (
+                    next_deletion is not None and next_deletion <= timezone.now()
+                ):
+                    processed_action = await self._consume_actions()
+                    next_deletion = await self._next_deletion()
                 seconds = (now - self._last_sync_tasks).total_seconds()
                 if (
-                    not processed_action
-                    and not self._sync_fast.is_set()
-                    and seconds < slow_mode
-                ):
-                    await asyncio.sleep(1)
-                    continue
-
-                # resume local transfers without requiring a remote task or driver
-                await _resume_transfers()
-
-                # synchronize the download tasks in batch by downloader
-                active_states = [
-                    DownloadState.PAUSED,
-                    DownloadState.DOWNLOADING,
-                    DownloadState.SUBMITTING,
-                    DownloadState.SUBMIT_UNKNOWN,
-                    DownloadState.REMOTE,
-                    DownloadState.SETTLING,
-                    DownloadState.PULLING,
-                    DownloadState.VERIFYING,
-                ]
-                cleanup_due = Q(
-                    state=DownloadState.COMPLETED,
-                    offline_job__next_poll_at__lte=timezone.now(),
-                ) | Q(
-                    state=DownloadState.COMPLETED,
-                    offline_job__last_error_kind=(
-                        OfflineDownloadErrorKind.CLEANUP_FAILED
-                    ),
-                    offline_job__next_poll_at=None,
-                )
-                all = await DownloadTask.filter(
-                    Q(state__in=active_states)
-                    | cleanup_due
-                    | Q(
-                        state=DownloadState.COMPLETED,
-                        offline_job__completion_due_at__lte=timezone.now(),
+                    refresh
+                    or processed_action
+                    or (
+                        has_tasks and (self._sync_fast.is_set() or seconds >= slow_mode)
                     )
-                )
-                grouped: dict[int, list[DownloadTask]] = {}
-                for task in all:
-                    grouped.setdefault(task.downloader_id, []).append(task)
-                for downloader_id, tasks in grouped.items():
-                    try:
-                        downloader = await Downloader.get(id=downloader_id)
-                        driver = await self._driver_for(downloader)
-                        await sync_tasks(tasks, driver)
-                    except Exception:
-                        logger.error(
-                            "Failed to synchronize downloader: %s",
-                            downloader_id,
-                            exc_info=True,
+                ):
+                    # resume local transfers without requiring a remote task or driver
+                    await _resume_transfers()
+
+                    # synchronize the download tasks in batch by downloader
+                    cleanup_due = Q(
+                        state=DownloadState.COMPLETED,
+                        offline_job__next_poll_at__lte=timezone.now(),
+                    ) | Q(
+                        state=DownloadState.COMPLETED,
+                        offline_job__last_error_kind=(
+                            OfflineDownloadErrorKind.CLEANUP_FAILED
+                        ),
+                        offline_job__next_poll_at=None,
+                    )
+                    all = await DownloadTask.filter(
+                        Q(state__in=_SYNC_STATES)
+                        | cleanup_due
+                        | Q(
+                            state=DownloadState.COMPLETED,
+                            offline_job__completion_due_at__lte=timezone.now(),
                         )
-                await self._close_drivers(set(self._drivers) - set(grouped))
+                    )
+                    grouped: dict[int, list[DownloadTask]] = {}
+                    for task in all:
+                        grouped.setdefault(task.downloader_id, []).append(task)
+                    for downloader_id, tasks in grouped.items():
+                        try:
+                            downloader = await Downloader.get(id=downloader_id)
+                            driver = await self._driver_for(downloader)
+                            await sync_tasks(tasks, driver)
+                        except Exception:
+                            logger.error(
+                                "Failed to synchronize downloader: %s",
+                                downloader_id,
+                                exc_info=True,
+                            )
+                    await self._close_drivers(set(self._drivers) - set(grouped))
+                    has_tasks = await self._has_pending_tasks()
+                    if not has_tasks:
+                        await self._close_drivers()
+                    self._last_sync_tasks = now
+                    refresh = False
 
                 # check the download plans every hour
                 hours = (now - self._last_check_plans).total_seconds() / 3600
@@ -406,12 +485,12 @@ class DLSyncer:
                     self._last_check_plans = now
                     self._app.add_task(check_download_plans())
 
-                self._last_sync_tasks = now
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.error("Failed to synchronize the download tasks!", exc_info=True)
+                refresh = True
                 self._last_sync_tasks = now
                 await asyncio.sleep(1)
 

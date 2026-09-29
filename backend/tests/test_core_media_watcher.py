@@ -22,7 +22,7 @@ from app.core.flow.nodes.nfo.episode import EpisodeNode
 from app.core.flow.nodes.nfo.movie import MovieNode
 from app.core.flow.nodes.nfo.tvshow import TVShowNode
 from app.core.media import organizer, shelver, watcher
-from app.core.media.coordination import library_lock
+from app.core.media.coordination import library_lock, notify_media_events
 from app.core.media.handlers.base import get_handler
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
@@ -34,6 +34,59 @@ from app.services.flow import FlowTriggerService
 def workspace(monkeypatch, tmp_path_factory):
     directory = tmp_path_factory.mktemp("workspace-temp")
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
+def test_idle_wakeup(tmp_path, monkeypatch):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            changes = {}
+            monitor = watcher.LibWatcher(
+                SimpleNamespace(shared_ctx=SimpleNamespace(lib_event_changes=changes))
+            )
+            producer = SimpleNamespace(
+                shared_ctx=SimpleNamespace(lib_event_changes=changes)
+            )
+            monkeypatch.setattr(watcher.Sanic, "get_app", lambda: producer)
+            query = MediaEvent.filter
+            queries = Mock(side_effect=query)
+            scans = []
+
+            async def consume(event):
+                await event.delete()
+
+            async def pause(_seconds):
+                scans.append(queries.call_count)
+                if len(scans) == 3:
+                    await MediaEvent.create(
+                        lib=lib,
+                        src_path=str(tmp_path / "new.mkv"),
+                        event_type="created",
+                    )
+                    notify_media_events(lib.id)
+                if len(scans) == 5:
+                    raise asyncio.CancelledError
+
+            consumer = AsyncMock(side_effect=consume)
+            monkeypatch.setattr(MediaEvent, "filter", queries)
+            monkeypatch.setattr(watcher, "consume_event", consumer)
+            monkeypatch.setattr(watcher.asyncio, "sleep", pause)
+
+            await monitor._event_consumer(lib.id, Queue())
+
+            assert scans == [1, 1, 1, 2, 2]
+            consumer.assert_awaited_once()
+            assert not await query(lib_id=lib.id).exists()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
 
 
 def test_pending_startup(tmp_path, monkeypatch):
@@ -566,6 +619,7 @@ def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
             if delivery == "duplicate":
                 events.put(pending)
             monitor = watcher.LibWatcher(None)
+            monitor._event_changes = {}
 
             await asyncio.wait_for(monitor._event_consumer(lib.id, events), 3)
 
@@ -2330,6 +2384,7 @@ def test_persisted_event(tmp_path, monkeypatch):
 
             monkeypatch.setattr(watcher, "consume_event", finish)
             monitor = watcher.LibWatcher(None)
+            monitor._event_changes = {}
             await asyncio.wait_for(monitor._event_consumer(lib.id, Queue()), 3)
 
             await item.refresh_from_db()
@@ -2389,6 +2444,7 @@ def test_deferred_events(tmp_path, monkeypatch):
             monkeypatch.setattr(watcher, "organize_items", organize)
             monkeypatch.setattr(watcher, "consume_event", finish)
             monitor = watcher.LibWatcher(None)
+            monitor._event_changes = {}
             await asyncio.wait_for(monitor._event_consumer(lib.id, events), 5)
 
             await pending.refresh_from_db()

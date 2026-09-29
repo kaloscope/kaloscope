@@ -154,6 +154,15 @@ class LibWatcher:
     def _observing_paths(self) -> ListProxy[str]:
         return self._app.shared_ctx.lib_observing_paths
 
+    @cached_property
+    def _event_changes(self) -> DictProxy[int, bool]:
+        """Get pending reload notifications shared by all workers.
+
+        Returns:
+            The libraries with committed events to reload.
+        """
+        return self._app.shared_ctx.lib_event_changes
+
     async def start(self):
         """Start the watcher."""
         libs = await MediaLib.all()
@@ -279,19 +288,27 @@ class LibWatcher:
         return events
 
     async def _event_consumer(self, lib_id: int, events: Queue):
-        """Consume queued events and reload persisted work when the queue drains.
+        """Consume events and reload persisted work only when necessary.
+
+        Recover once on startup, after failures, and after committed-event
+        notifications. An empty queue otherwise stays idle without querying.
 
         Args:
             lib_id: The media library whose persisted events are consumed.
             events: The queue to store media events.
         """
+        reload = True
         while True:
             try:
                 if events.empty():
-                    for pending in await MediaEvent.filter(lib_id=lib_id).exclude(
-                        event_type="organize"
-                    ):
-                        events.put(pending)
+                    # clear before reading so concurrent writes trigger another reload
+                    reload = self._event_changes.pop(lib_id, False) or reload
+                    if reload:
+                        for pending in await MediaEvent.filter(lib_id=lib_id).exclude(
+                            event_type="organize"
+                        ):
+                            events.put(pending)
+                        reload = False
                 if not events.empty():
                     event: MediaEvent = events.get_nowait()
                     await consume_event(event)
@@ -301,8 +318,10 @@ class LibWatcher:
             except asyncio.CancelledError:
                 break
             except OrganizeDeferredError:
+                reload = True
                 await asyncio.sleep(1)
             except Exception:
+                reload = True
                 logger.error("Failed to consume the media event!", exc_info=True)
                 await asyncio.sleep(5)
 
