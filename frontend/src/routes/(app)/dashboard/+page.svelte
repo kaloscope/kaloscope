@@ -29,6 +29,7 @@
   import { aspectRatio, buildStreamUrl } from '$lib/utils';
   import { onMount, tick, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
+  import { SvelteSet } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import type { PageData } from './$types';
 
@@ -89,10 +90,26 @@
 
   let boards: Record<number, Board> = $state({});
   let watches: WatchHistory[] = $state([]);
+  let latestWatches = $derived.by(() => {
+    const mediaIds = new SvelteSet<number>();
+    // histories arrive newest first; keep the latest record for each parent
+    return watches.filter(({ media }) => {
+      if (!media) {
+        return false;
+      }
+      const parentId = media.parent?.id ?? 0;
+      const mediaId = parentId > 0 ? parentId : media.id;
+      if (mediaIds.has(mediaId)) {
+        return false;
+      }
+      mediaIds.add(mediaId);
+      return true;
+    });
+  });
   let searches: SearchHistory[] = $state([]);
   let loadWatches = $derived($user?.preferences?.recent_watches ?? false);
   let loadSearches = $derived($user?.preferences?.recent_searches ?? false);
-  let showWatches = $derived(loadWatches && watches.length > 0);
+  let showWatches = $derived(loadWatches && latestWatches.length > 0);
   let showSearches = $derived(loadSearches && searches.length > 0);
 
   // the player instance and playing state
@@ -388,7 +405,7 @@
           </div>
           <div class="divider mt-0 mb-1"></div>
           <ul class="history-list">
-            {#each watches as item (item.id)}
+            {#each latestWatches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
               <li
