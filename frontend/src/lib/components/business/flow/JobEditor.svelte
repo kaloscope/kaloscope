@@ -20,8 +20,9 @@
 
 <script lang="ts">
   import { enhance } from '$app/forms';
+  import { goto } from '$app/navigation';
   import { api } from '$lib/api';
-  import { alert, CodeMirror, Label, Modal, Select } from '$lib/components';
+  import { alert, Button, CodeMirror, Label, Modal, Select } from '$lib/components';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -45,6 +46,7 @@
 
   // the modal dialog instance
   let modal: Modal;
+  let creatingGraph = false;
   export const showModal = () => {
     if (id) {
       graphOptions = [{ value: graph_id, label: graph_name! }];
@@ -138,7 +140,17 @@
   });
 </script>
 
-<Modal icon={icons.clock} title={$_(id ? 'action.edit' : 'action.add', $_('entity.job'))} bind:this={modal}>
+<Modal
+  icon={icons.clock}
+  title={$_(id ? 'action.edit' : 'action.add', $_('entity.job'))}
+  bind:this={modal}
+  onclose={() => {
+    if (creatingGraph) {
+      creatingGraph = false;
+      goto('/settings/workflows/graphs', { state: { createScheduledGraph: true } });
+    }
+  }}
+>
   <form
     method="post"
     use:enhance={({ cancel }) => {
@@ -148,7 +160,21 @@
   >
     <fieldset class="fieldset">
       <Label required>{$_('field.graph')}</Label>
-      <Select options={graphOptions} bind:value={graph_id} name="graph_id" class="w-full" disabled={!!id} />
+      <div class="flex items-center gap-2">
+        <Select options={graphOptions} bind:value={graph_id} name="graph_id" class="min-w-0 flex-1" disabled={!!id} />
+        {#if !id}
+          <Button
+            size="md"
+            icon={icons.documentAdd}
+            text={$_('action.add', $_('entity.graph'))}
+            class="shrink-0"
+            onclick={() => {
+              creatingGraph = true;
+              modal.close();
+            }}
+          />
+        {/if}
+      </div>
       <Label>{$_('field.bootparams')}</Label>
       <CodeMirror
         darkMode
