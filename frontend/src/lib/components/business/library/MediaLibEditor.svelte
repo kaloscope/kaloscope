@@ -103,6 +103,7 @@
 <Modal
   icon={icons.videoClipMultiple}
   title={$_(id ? 'action.edit' : 'action.add', $_('entity.media_lib'))}
+  maxWidth="36rem"
   bind:this={modal}
 >
   <form

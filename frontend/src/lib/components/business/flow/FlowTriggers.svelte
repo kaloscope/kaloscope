@@ -12,7 +12,7 @@
 
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button } from '$lib/components';
+  import { Button, Image } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { onMount, tick } from 'svelte';
@@ -182,7 +182,15 @@
           />
           <span class="text-lg font-thin {triggerGraphId === trigger.graph_id ? '' : 'opacity-30'}">{index + 1}</span>
         </span>
-        <span class="font-semibold text-surface/80 list-col-grow">{trigger.graph_name}</span>
+        <div class="flex items-center gap-2 list-col-grow">
+          <Image
+            transparent
+            src={graphs.find((g) => g.id === trigger.graph_id)?.icon}
+            icon={icons.documentFlowchart}
+            width="1.25rem"
+          />
+          <span class="font-semibold text-surface/80">{trigger.graph_name}</span>
+        </div>
         <Button
           icon={trigger.asynchronous ? icons.arrowNarrowDownDashed : icons.arrowNarrowDown}
           text={trigger.asynchronous ? $_('flow.trigger.async_mode') : $_('flow.trigger.sync_mode')}
