@@ -27,6 +27,8 @@ const fluentUISystemIcons = {
   bookGlobe: 'fluent:book-globe-24-regular',
   bookQuestionMark: 'fluent:book-question-mark-24-regular',
   boxArrowUp: 'fluent:box-arrow-up-24-regular',
+  boxMultipleSearch: 'fluent:box-multiple-search-24-regular',
+  boxMultipleSearchFilled: 'fluent:box-multiple-search-24-filled',
   boxSearch: 'fluent:box-search-24-regular',
   bracesVariable: 'fluent:braces-variable-24-regular',
   calendar: 'fluent:calendar-24-regular',
