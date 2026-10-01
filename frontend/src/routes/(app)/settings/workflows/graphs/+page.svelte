@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { goto } from '$app/navigation';
+  import { goto, replaceState } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import {
@@ -25,12 +25,13 @@
   import { _, dateTime, milliseconds } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { FlowGraph, FlowTemplate, OptionValue, Page, Resp } from '$lib/types';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
 
   let graphs: FlowGraph[] = $state([]);
   let graphName: string = $state('');
   let graphState: OptionValue = $state(null);
   let graphCategory: OptionValue = $state(null);
+  let newGraphCategory: keyof typeof GraphCategory | undefined = $state();
   let graphEditor: GraphEditor;
   let headerCheckbox: Checkbox;
   let zipInput: HTMLInputElement;
@@ -172,6 +173,14 @@
       })
       .catch(() => loading.end());
   }
+
+  onMount(() => {
+    if (page.state.createScheduledGraph) {
+      newGraphCategory = 'schedule';
+      replaceState('', { ...page.state, createScheduledGraph: false });
+      graphEditor.showModal();
+    }
+  });
 
   $effect(() => {
     $ordering; // eslint-disable-line
@@ -337,6 +346,10 @@
   {/snippet}
 </DataView>
 
-<GraphEditor bind:this={graphEditor} onsave={(result) => goto(`${page.url.pathname}/${result.id}`)} />
+<GraphEditor
+  bind:this={graphEditor}
+  category={newGraphCategory}
+  onsave={(result) => goto(`${page.url.pathname}/${result.id}`)}
+/>
 
 <FlowLogs bind:this={flowLogs} />
