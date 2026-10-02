@@ -1,4 +1,4 @@
-"""Unit tests for TXT parsing, bounded caches and indexed chapter reads."""
+"""Unit tests for text indexing and bounded local content reads."""
 
 import codecs
 import io
@@ -8,15 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from app.core.media import content
-from app.core.media.content import (
+from app.core.media import text
+from app.core.media.handlers.base import get_handler
+from app.core.media.handlers.reading import ReadingSource
+from app.core.media.text import (
     ContentError,
     build_text_index,
     load_text_index,
     read_text_chapter,
 )
-from app.core.media.handlers.base import get_handler
-from app.core.media.handlers.reading import ReadingSource
 from app.models.media import LibType, MediaFormat
 
 _SIMPLIFIED = (
@@ -139,7 +139,7 @@ def test_text_headings(tmp_path):
 
 
 def test_text_sections(tmp_path, monkeypatch):
-    monkeypatch.setattr(content, "_SECTION_BYTES", 96)
+    monkeypatch.setattr(text, "_SECTION_BYTES", 96)
     body = (
         "第一章 长章\n" + ("😀" * 12 + "\n\n") * 5 + "中" * 100 + "\nChapter 2\nEnding."
     )
@@ -198,7 +198,7 @@ def test_uncertain_encoding(tmp_path, monkeypatch):
             """Return no reliable encoding candidate."""
             return None
 
-    monkeypatch.setattr(content, "from_bytes", lambda *args, **kwargs: NoMatches())
+    monkeypatch.setattr(text, "from_bytes", lambda *args, **kwargs: NoMatches())
     cache = tmp_path / "cache"
     with pytest.raises(ContentError, match="text_decode_failed"):
         build_text_index(_source(tmp_path, b"\xff\x81\xe1"), cache)
@@ -227,7 +227,7 @@ def test_bounded_reads():
             Returns:
                 The next bounded source bytes.
             """
-            assert 0 <= size <= content._READ_BYTES
+            assert 0 <= size <= text._READ_BYTES
             return super().read(size)
 
     class BoundedText(io.StringIO):
@@ -240,19 +240,19 @@ def test_bounded_reads():
             Returns:
                 The next bounded text fragment.
             """
-            assert 0 < size <= content._READ_CHARS
+            assert 0 < size <= text._READ_CHARS
             return super().readline(size)
 
     body = "文本😀" * 40_000
-    assert content._text_encoding(BoundedBytes(body.encode())) == "utf-8"
+    assert text._text_encoding(BoundedBytes(body.encode())) == "utf-8"
     output = io.BytesIO()
-    content._write_text(BoundedText(body), output)
+    text._write_text(BoundedText(body), output)
     assert output.getvalue().decode() == body
 
 
 @pytest.mark.parametrize("limit", ["_MAX_CHAPTERS", "_INDEX_BYTES"])
 def test_text_limits(tmp_path, monkeypatch, limit):
-    monkeypatch.setattr(content, limit, 1)
+    monkeypatch.setattr(text, limit, 1)
     cache = tmp_path / "cache"
     with pytest.raises(ContentError, match="media_limit_exceeded"):
         build_text_index(
@@ -309,7 +309,7 @@ def test_cache_write_failure(tmp_path, monkeypatch):
 @pytest.mark.parametrize("change", ["append", "replace", "delete"])
 def test_source_changed(tmp_path, monkeypatch, change):
     source = _source(tmp_path, b"Original content")
-    write_text = content._write_text
+    write_text = text._write_text
 
     def changed(text, output):
         """Mutate the source immediately after its content has been read.
@@ -335,7 +335,7 @@ def test_source_changed(tmp_path, monkeypatch, change):
             source.path.unlink()
         return chapters
 
-    monkeypatch.setattr(content, "_write_text", changed)
+    monkeypatch.setattr(text, "_write_text", changed)
     cache = tmp_path / "cache"
     with pytest.raises(ContentError, match="content_changed"):
         build_text_index(source, cache)
@@ -394,7 +394,7 @@ def test_cache_damage(tmp_path, damage):
     elif damage == "broken_json":
         index_path.write_text("{")
     elif damage == "oversize":
-        index_path.write_bytes(b" " * (content._INDEX_BYTES + 1))
+        index_path.write_bytes(b" " * (text._INDEX_BYTES + 1))
     elif damage == "utf8":
         body_path.write_bytes(b"\xff" * index.text_size)
     else:

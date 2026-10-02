@@ -1,4 +1,4 @@
-"""Build and read bounded local reading caches."""
+"""Build text indexes and read bounded local content."""
 
 import codecs
 import hashlib
