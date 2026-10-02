@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
 from sanic.request.form import File
@@ -27,6 +27,8 @@ class UserRole(StrEnum):
 class HistoryType(StrEnum):
     SEARCH = auto()
     VIDEO = auto()
+    TEXT = auto()
+    IMAGE = auto()
 
 
 class PermType(StrEnum):
@@ -95,6 +97,7 @@ class UserHistory(TortoiseModel):
     keyword = CharField(max_length=4096, null=True)
     position = IntField(null=True)
     percentage = IntField(null=True)
+    locator = JSONField[dict[str, Any] | None](null=True)
 
     class Meta:
         table = "user_history"
@@ -174,11 +177,12 @@ class FavoriteQuery(Pageable):
 
 
 class HistoryQuery(Pageable):
-    rel_type: HistoryType
+    # enable reading inputs together with retention and permission checks
+    rel_type: Literal[HistoryType.SEARCH, HistoryType.VIDEO]
 
 
 class HistoryEntry(BaseModel):
-    rel_type: HistoryType
+    rel_type: Literal[HistoryType.SEARCH, HistoryType.VIDEO]
     rel_id: NonNegativeInt
     keyword: str | None = Field(max_length=4096, default=None)
     position: NonNegativeInt | None = None

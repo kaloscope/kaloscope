@@ -270,6 +270,10 @@ export type MediaItem = {
   hash: string | null;
   size: number | null;
   visible: boolean;
+  format: 'txt' | 'epub' | 'dir' | 'cbz' | 'zip' | null;
+  index_version: string | null;
+  index_state: 'pending' | 'ready' | 'empty' | 'error' | null;
+  index_error: string | null;
   nfo_path: string | null;
   nfo_mtime: string | null;
   nfo_source: string | null;

@@ -16,6 +16,11 @@ def test_main_applies_patches():
                 "import app.main; "
                 "import sanic.mixins.startup as startup; "
                 "from sanic.worker.manager import WorkerManager; "
+                "from tortoise.migrations.schema_editor.base import BaseSchemaEditor; "
+                "from tortoise.migrations.schema_editor.sqlite import "
+                "SqliteSchemaEditor; "
+                "assert SqliteSchemaEditor.remove_field is "
+                "BaseSchemaEditor.remove_field; "
                 "print(startup.get_ssl_context.__module__); "
                 "print(WorkerManager.THRESHOLD)"
             ),

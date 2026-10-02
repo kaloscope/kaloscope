@@ -19,8 +19,8 @@ def apply_monkey_patches():
     # allow self-signed TLS in PROD mode
     startup.get_ssl_context = _patched_get_ssl_context  # type: ignore
 
-    # skip SQLite description rebuilds
-    _patch_tortoise_sqlite_descriptions()
+    # preserve SQLite rows and indexes during migrations
+    _patch_tortoise_sqlite_migrations()
 
     # patch hishel cache layer
     _patch_hishel_headers()
@@ -52,10 +52,13 @@ def _patched_get_ssl_context(app: Sanic, ssl: ssl.SSLContext | None) -> ssl.SSLC
     return context
 
 
-def _patch_tortoise_sqlite_descriptions():
-    """Skip SQLite table rebuilds for changes limited to `description`."""
+def _patch_tortoise_sqlite_migrations():
+    """Avoid SQLite table rebuilds for descriptions and column removal."""
+    from tortoise.migrations.schema_editor.base import BaseSchemaEditor
     from tortoise.migrations.schema_editor.sqlite import SqliteSchemaEditor
 
+    # native DROP COLUMN preserves self-referencing rows and existing indexes
+    SqliteSchemaEditor.remove_field = BaseSchemaEditor.remove_field
     original = SqliteSchemaEditor._alter_field
 
     async def _alter_field(self, model, old_field, new_field):

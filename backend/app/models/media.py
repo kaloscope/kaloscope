@@ -1,5 +1,5 @@
 from enum import StrEnum, auto
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, PositiveInt, model_validator
 from tortoise.fields import (
@@ -34,6 +34,8 @@ from app.utils.disk import is_directory
 class LibType(StrEnum):
     MOVIE = auto()
     TV_SHOW = auto()
+    NOVEL = auto()
+    COMIC = auto()
 
 
 class MediaType(StrEnum):
@@ -41,6 +43,21 @@ class MediaType(StrEnum):
     AUDIO = auto()
     IMAGE = auto()
     TEXT = auto()
+
+
+class MediaFormat(StrEnum):
+    TXT = auto()
+    EPUB = auto()
+    DIR = auto()
+    CBZ = auto()
+    ZIP = auto()
+
+
+class IndexState(StrEnum):
+    PENDING = auto()
+    READY = auto()
+    EMPTY = auto()
+    ERROR = auto()
 
 
 class NFOType(StrEnum):
@@ -94,6 +111,11 @@ class MediaItem(TortoiseModel):
     hash = CharField(max_length=32, null=True)
     size = BigIntField(null=True)
     visible = BooleanField(default=True)
+    format = CharEnumField(enum_type=MediaFormat, max_length=16, null=True)
+    extra = JSONField[dict[str, Any] | None](null=True)
+    index_version = CharField(max_length=64, null=True)
+    index_state = CharEnumField(enum_type=IndexState, max_length=16, null=True)
+    index_error = CharField(max_length=64, null=True)
     nfo_path = CharField(max_length=4096, null=True)
     nfo_mtime = DatetimeField(null=True)
     nfo_source = CharField(max_length=64, null=True)
@@ -121,6 +143,9 @@ class MediaItem(TortoiseModel):
             ("lib_id", "parent_id", "visible", "created_at"),
         )
 
+    class PydanticMeta:
+        exclude = ("extra",)
+
 
 class MediaEvent(TortoiseModel):
     lib_id: int
@@ -136,12 +161,14 @@ class MediaEvent(TortoiseModel):
     class Meta:
         table = "media_event"
         ordering = ["created_at"]
+        indexes = (("lib_id", "event_type"),)
 
 
 # -------------------- Pydantic Models --------------------
 class MediaLibUpsert(BaseModel):
     id: PositiveInt | None = None
-    lib_type: LibType | None = None
+    # enable additional library inputs when their handlers are available
+    lib_type: Literal[LibType.MOVIE, LibType.TV_SHOW] | None = None
     dir: str | None = Field(min_length=1, max_length=4096, default=None)
     name: str = Field(min_length=1, max_length=64)
     language: str | None = None
