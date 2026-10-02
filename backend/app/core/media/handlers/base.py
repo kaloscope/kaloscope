@@ -94,17 +94,45 @@ class MediaHandler(ABC):
     def accept(self) -> list[str]:
         raise NotImplementedError
 
-    @abstractmethod
     def hierarchies(self) -> list[int]:
-        raise NotImplementedError
+        """Return file depths for video scanning.
 
-    @abstractmethod
+        Returns:
+            The supported file depths.
+
+        Raises:
+            NotImplementedError: If the handler requires source discovery.
+        """
+        raise NotImplementedError("this handler requires source discovery")
+
     def extract_meta(self, data: etree._ElementTree) -> MediaMeta:
-        raise NotImplementedError
+        """Read video metadata from NFO XML.
 
-    @abstractmethod
+        Args:
+            data: The parsed NFO document.
+
+        Returns:
+            The video metadata.
+
+        Raises:
+            NotImplementedError: If the handler does not support NFO metadata.
+        """
+        raise NotImplementedError("this handler does not support NFO metadata")
+
     async def gen_items(self, lib: MediaLib, path: Path) -> list[MediaPathInfo]:
-        raise NotImplementedError
+        """Create video items from a source path.
+
+        Args:
+            lib: The owning media library.
+            path: The video source path.
+
+        Returns:
+            The generated video path information.
+
+        Raises:
+            NotImplementedError: If the handler requires content indexing.
+        """
+        raise NotImplementedError("this handler requires content indexing")
 
     def filter_event(
         self, event: FileSystemEvent, *, base_path: str

@@ -9,7 +9,12 @@ import pytest
 
 @pytest.mark.parametrize(
     "module",
-    ["app.services.media", "app.core.media.shelver", "app.core.flow.nodes.nfo"],
+    [
+        "app.services.media",
+        "app.core.media.shelver",
+        "app.core.flow.nodes.nfo",
+        "app.core.media.handlers.reading",
+    ],
 )
 def test_module(module):
     result = subprocess.run(
