@@ -14,6 +14,7 @@ import pytest
         "app.core.media.shelver",
         "app.core.flow.nodes.nfo",
         "app.core.media.handlers.reading",
+        "app.core.media.content",
     ],
 )
 def test_module(module):
