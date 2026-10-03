@@ -11,9 +11,11 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from app.core.media import epub, epub_cache
 from app.core.media.common import ContentError
-from app.core.media.epub_cache import EpubContent, EpubIndex
+from app.core.media.epub import cache as epub_cache
+from app.core.media.epub import package as epub_package
+from app.core.media.epub.cache import EpubContent, EpubIndex
+from app.core.media.epub.xhtml import ImageBlock, ListBlock, TextBlock
 from app.core.media.handlers.reading import ReadingSource
 from app.core.media.text import (
     build_text_index,
@@ -21,7 +23,6 @@ from app.core.media.text import (
     read_text_chapter,
     read_text_resource,
 )
-from app.core.media.xhtml import ImageBlock, ListBlock, TextBlock
 from app.models.media import MediaFormat
 
 _PNG = b"\x89PNG\r\n\x1a\nimage payload"
@@ -287,7 +288,7 @@ def test_navigation_external(tmp_path, monkeypatch):
 
 
 def test_navigation_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(epub, "_XML_BYTES", 2048)
+    monkeypatch.setattr(epub_package, "_XML_BYTES", 2048)
     source = _source(tmp_path, navigation=_NAV + " " * 2048)
     index = _index(source, tmp_path / "cache")
     assert index.chapters[0].title == "Fallback"

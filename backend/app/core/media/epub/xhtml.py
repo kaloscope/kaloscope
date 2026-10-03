@@ -12,7 +12,7 @@ from lxml import etree
 
 from app.core.media.archive import read_member
 from app.core.media.common import ContentError
-from app.core.media.epub import (
+from app.core.media.epub.package import (
     DOCUMENT_BYTES,
     EpubPackage,
     EpubResource,

@@ -8,10 +8,14 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from app.core.media import epub
 from app.core.media.archive import open_archive, read_member
 from app.core.media.common import ContentError
-from app.core.media.epub import EpubPackage, load_epub_package, resolve_epub_reference
+from app.core.media.epub import package as epub_package
+from app.core.media.epub.package import (
+    EpubPackage,
+    load_epub_package,
+    resolve_epub_reference,
+)
 
 _CONTAINER = (
     '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">'
@@ -166,7 +170,9 @@ def test_resource_locations(tmp_path):
         assert resource.path == "OEBPS/Text/章 一.xhtml"
         assert resource.member is not None
         assert resource.member.filename == "./OEBPS//Text/章 一.xhtml"
-        assert read_member(archive, resource.member, epub.DOCUMENT_BYTES) == _BODY
+        assert (
+            read_member(archive, resource.member, epub_package.DOCUMENT_BYTES) == _BODY
+        )
     assert result.resources["missing"].path == "OEBPS/Images/missing.png"
     assert result.resources["missing"].member is None
     assert result.resources["remote"].path is None
@@ -430,7 +436,7 @@ def test_encrypted_resources(tmp_path, target):
 )
 def test_package_limits(tmp_path, monkeypatch, limit):
     path = _source(tmp_path)
-    monkeypatch.setattr(epub, limit, 1)
+    monkeypatch.setattr(epub_package, limit, 1)
     with pytest.raises(ContentError, match="media_limit_exceeded"):
         _load(path)
 
@@ -438,7 +444,7 @@ def test_package_limits(tmp_path, monkeypatch, limit):
 def test_package_reads(tmp_path, monkeypatch):
     path = _source(tmp_path)
     calls = []
-    read = epub.read_member
+    read = epub_package.read_member
 
     def capture(archive, member, limit):
         """Record which resources are read during package inspection.
@@ -454,19 +460,19 @@ def test_package_reads(tmp_path, monkeypatch):
         calls.append((member.filename, limit))
         return read(archive, member, limit)
 
-    monkeypatch.setattr(epub, "read_member", capture)
+    monkeypatch.setattr(epub_package, "read_member", capture)
     _load(path)
     assert calls == [
         ("mimetype", 20),
-        ("META-INF/container.xml", epub._XML_BYTES),
-        ("OEBPS/book.opf", epub._XML_BYTES),
+        ("META-INF/container.xml", epub_package._XML_BYTES),
+        ("OEBPS/book.opf", epub_package._XML_BYTES),
     ]
 
 
 @pytest.mark.parametrize("change", ["replace", "delete"])
 def test_source_changed(tmp_path, monkeypatch, change):
     path = _source(tmp_path)
-    read = epub.read_member
+    read = epub_package.read_member
 
     def changed(archive, member, limit):
         """Change the source after reading the package XML.
@@ -491,7 +497,7 @@ def test_source_changed(tmp_path, monkeypatch, change):
                 path.unlink()
         return data
 
-    monkeypatch.setattr(epub, "read_member", changed)
+    monkeypatch.setattr(epub_package, "read_member", changed)
     with pytest.raises(ContentError, match="content_changed"):
         _load(path)
 
@@ -509,7 +515,7 @@ def test_package_crc(tmp_path):
 
 
 def test_xml_external_access(tmp_path, monkeypatch):
-    parser = epub.etree.XMLParser
+    parser = epub_package.etree.XMLParser
     calls = []
 
     class DenyResolver(etree.Resolver):
@@ -540,7 +546,7 @@ def test_xml_external_access(tmp_path, monkeypatch):
         result.resolvers.add(DenyResolver())
         return result
 
-    monkeypatch.setattr(epub.etree, "XMLParser", guarded)
+    monkeypatch.setattr(epub_package.etree, "XMLParser", guarded)
     declaration = (
         b'<!DOCTYPE package SYSTEM "https://invalid.example/book.dtd" ['
         b'<!ENTITY external SYSTEM "file:///must-not-be-read.txt">]>'

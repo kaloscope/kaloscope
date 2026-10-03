@@ -22,9 +22,12 @@ from pydantic import (
 
 from app.core.media.archive import normalize_member_path, open_archive, read_member
 from app.core.media.common import INDEX_BYTES, ContentError, FileSnapshot
-from app.core.media.epub import EpubResource, load_epub_package, read_epub_titles
-from app.core.media.raster import IMAGE_BYTES, ImageMime, image_mime
-from app.core.media.xhtml import (
+from app.core.media.epub.package import (
+    EpubResource,
+    load_epub_package,
+    read_epub_titles,
+)
+from app.core.media.epub.xhtml import (
     ContentBlock,
     ContentWarning,
     ImageBlock,
@@ -34,6 +37,7 @@ from app.core.media.xhtml import (
     WarningCode,
     read_xhtml_document,
 )
+from app.core.media.raster import IMAGE_BYTES, ImageMime, image_mime
 
 _SECTION_BYTES = 256 * 1024
 _MAX_CHAPTERS = 10_000

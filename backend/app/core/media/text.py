@@ -22,7 +22,7 @@ from pydantic import (
 )
 
 from app.core.media.common import INDEX_BYTES, ContentError, FileSnapshot, file_state
-from app.core.media.epub_cache import (
+from app.core.media.epub.cache import (
     EpubContent,
     EpubIndex,
     build_epub_index,

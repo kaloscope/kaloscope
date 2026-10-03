@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from app.core.media import xhtml
 from app.core.media.archive import open_archive
 from app.core.media.common import ContentError
-from app.core.media.epub import load_epub_package
-from app.core.media.xhtml import (
+from app.core.media.epub import xhtml
+from app.core.media.epub.package import load_epub_package
+from app.core.media.epub.xhtml import (
     ImageBlock,
     ListBlock,
     TextBlock,
