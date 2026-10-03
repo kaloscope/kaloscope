@@ -346,7 +346,7 @@ def test_package_unsupported(tmp_path, package):
 
 
 @pytest.mark.parametrize("member", ["META-INF/container.xml", "OEBPS/book.opf"])
-@pytest.mark.parametrize("kind", ["syntax", "namespace", "dtd", "base", "xinclude"])
+@pytest.mark.parametrize("kind", ["syntax", "namespace", "base", "xinclude"])
 def test_xml_boundary(tmp_path, member, kind):
     data = _CONTAINER.encode() if member.startswith("META-INF") else _package()
     code = "invalid_epub"
@@ -354,8 +354,6 @@ def test_xml_boundary(tmp_path, member, kind):
         data = data[:-5]
     elif kind == "namespace":
         data = data.replace(b"xmlns=", b"other=")
-    elif kind == "dtd":
-        data = b'<!DOCTYPE package SYSTEM "file:///must-not-be-read.dtd">' + data
     elif kind == "base":
         data = data.replace(b"xmlns=", b'xml:base="https://invalid.example/" xmlns=', 1)
         code = "unsupported_media_format"
@@ -368,6 +366,26 @@ def test_xml_boundary(tmp_path, member, kind):
         )
         code = "unsupported_media_format"
     with pytest.raises(ContentError, match=code):
+        _load(_source(tmp_path, {member: data}))
+
+
+@pytest.mark.parametrize("member", ["META-INF/container.xml", "OEBPS/book.opf"])
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "",
+        " []",
+        ' [<!ENTITY label "Book">]',
+        ' SYSTEM "file:///must-not-be-read.dtd"',
+        ' PUBLIC "-//EXAMPLE//DTD Book//EN" "https://invalid.example/book.dtd"',
+    ],
+)
+def test_xml_doctype(tmp_path, member, declaration):
+    is_container = member.startswith("META-INF")
+    name = "container" if is_container else "package"
+    data = _CONTAINER.encode() if is_container else _package()
+    data = f"<!DOCTYPE {name}{declaration}>".encode() + data
+    with pytest.raises(ContentError, match="invalid_epub"):
         _load(_source(tmp_path, {member: data}))
 
 

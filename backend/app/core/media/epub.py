@@ -135,7 +135,8 @@ def _read_xml(
         )
     except etree.XMLSyntaxError as error:
         raise ContentError("invalid_epub") from error
-    if root.tag != root_tag or root.getroottree().docinfo.doctype:
+    # internalDTD also covers empty and external-only declarations
+    if root.tag != root_tag or root.getroottree().docinfo.internalDTD is not None:
         raise ContentError("invalid_epub")
     for element in root.iter():
         if (

@@ -6,7 +6,7 @@ import stat
 import unicodedata
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -112,7 +112,7 @@ def _validate_members(archive: zipfile.ZipFile):
 @contextmanager
 def open_archive(
     path: Path, snapshot: FileSnapshot | None = None
-) -> Iterator[tuple[zipfile.ZipFile, FileSnapshot]]:
+) -> Generator[tuple[zipfile.ZipFile, FileSnapshot]]:
     """Open a stable ZIP source with bounded metadata and no extraction or writes.
 
     The caller validates the full library boundary and runs this synchronous work
