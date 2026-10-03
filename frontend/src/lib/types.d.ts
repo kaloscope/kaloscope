@@ -287,6 +287,14 @@ export type MediaItem = {
   rating: number | null;
   children?: MediaItem[];
   metadata?: MediaMeta | null;
+  lib_type?: keyof typeof LibType;
+  media_type?: 'video' | 'text' | 'image';
+  metadata_state?: 'ready' | 'missing' | 'error';
+  metadata_issues?: {
+    source: 'source' | 'external' | 'embedded' | 'parent';
+    error: string | null;
+    invalid_fields: string[];
+  }[];
 };
 
 /**
@@ -302,30 +310,42 @@ export type Actor = {
  * Descriptive metadata associated with a media item.
  */
 export type MediaMeta = {
-  nfo_path: string;
-  nfo_source: string | null;
-  unique_id: string | null;
+  nfo_path?: string;
+  nfo_source?: string | null;
+  unique_id?: string | null;
   title: string | null;
   originaltitle: string | null;
-  tagline: string | null;
+  tagline?: string | null;
   plot: string | null;
   rating: number | null;
   year: number | null;
-  aired: string | null;
-  season: number | null;
-  episode: number | null;
-  premiered: string | null;
-  country: string | null;
-  mpaa: string | null;
+  aired?: string | null;
+  season?: number | null;
+  episode?: number | null;
+  premiered?: string | null;
+  country?: string | null;
+  mpaa?: string | null;
   tags: string[] | null;
   genres: string[] | null;
-  studios: string[] | null;
-  directors: string[] | null;
-  writers: string[] | null;
-  credits: string[] | null;
-  actors: Actor[] | null;
+  studios?: string[] | null;
+  directors?: string[] | null;
+  writers?: string[] | null;
+  credits?: string[] | null;
+  actors?: Actor[] | null;
   poster: string | null;
-  backdrop: string | null;
+  backdrop?: string | null;
+  authors?: string[];
+  illustrators?: string[];
+  publisher?: string | null;
+  language?: string | null;
+  isbn?: string | null;
+  series?: string | null;
+  volume?: string | null;
+  number?: string | null;
+  month?: number | null;
+  day?: number | null;
+  page_count?: number | null;
+  black_and_white?: boolean | null;
 };
 
 /**

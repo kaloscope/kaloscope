@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import hashlib
-from asyncio import create_task
+import stat
+from asyncio import create_task, to_thread
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiofiles
 from sanic import Sanic
@@ -10,18 +13,202 @@ from tortoise.exceptions import DoesNotExist
 from tortoise.expressions import Q
 from tortoise.transactions import atomic, in_transaction
 
-from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
+from app.core.exceptions import (
+    BadRequestException,
+    ErrorCode,
+    ForbiddenException,
+    KaloscopeException,
+    NotFoundException,
+)
+from app.core.media.common import ContentError, file_state
 from app.core.media.coordination import library_lock
+from app.core.media.metadata import ReadingMetadata
 from app.core.media.naming import validate_template
 from app.models.flow import FlowTrigger, GraphCategory
-from app.models.media import MediaItem, MediaLib, MediaLibUpsert, MediaMetadata, NFOType
-from app.models.user import PermType, UserPermission
+from app.models.media import (
+    LibType,
+    MediaFormat,
+    MediaItem,
+    MediaLib,
+    MediaLibUpsert,
+    MediaMetadata,
+    NFOType,
+)
+from app.models.user import PermType, UserInfo, UserPermission, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
 from app.utils.disk import delete_path
 
 if TYPE_CHECKING:
+    from app.core.media.cover import CoverImage
     from app.core.media.handlers.base import MediaPathInfo
+    from app.core.media.metadata_reader import MetadataRead
+
+
+def _reading_identity(item: MediaItem) -> tuple:
+    """Identify the current database ownership used by a reading request.
+
+    Args:
+        item: An accessible item with its library and optional parent loaded.
+
+    Returns:
+        The source and parent attributes that must remain current during file I/O.
+    """
+    parent = item.parent if item.parent_id is not None else None
+    return (
+        item.lib_id,
+        item.lib.dir,
+        item.lib.lib_type,
+        item.path,
+        item.dir,
+        item.format,
+        item.parent_id,
+        parent.path if parent else None,
+        parent.format if parent else None,
+        parent.parent_id if parent else None,
+    )
+
+
+def _read_reading(
+    item: MediaItem, *, with_cover: bool
+) -> tuple[MetadataRead, CoverImage | None, str | None]:
+    """Validate current reading ownership and read files in a worker thread.
+
+    Args:
+        item: The permission-checked item with its library and parent loaded.
+        with_cover: Whether to read the selected cover bytes after metadata.
+
+    Returns:
+        Fresh metadata, optional cover bytes and an independent missing-source error.
+
+    Raises:
+        ContentError: If paths, layout, file access or source stability are invalid.
+    """
+    # handler registration imports this service through the video handlers
+    from app.core.media.cover import read_cover
+    from app.core.media.handlers.base import get_handler
+    from app.core.media.handlers.reading import (
+        ReadingMediaHandler,
+        ReadingSource,
+        is_ignored_name,
+    )
+    from app.core.media.metadata_reader import read_metadata
+
+    root, path = Path(item.lib.dir), Path(item.path)
+    parent = item.parent if item.parent_id is not None else None
+    if (
+        not root.is_absolute()
+        or not path.is_absolute()
+        or ".." in root.parts
+        or ".." in path.parts
+        or path == root
+        or not path.is_relative_to(root)
+    ):
+        raise ContentError("media_source_unavailable")
+    source = ReadingSource(path, item.format, Path(parent.path) if parent else None)
+    parts = source.directory.relative_to(root).parts
+    if (
+        not parts
+        or any(is_ignored_name(part) for part in path.relative_to(root).parts)
+        or item.dir != str(source.directory)
+        or len(parts) != (2 if parent else 1)
+        or (
+            parent is not None
+            and (
+                item.lib.lib_type != LibType.COMIC
+                or parent.format is not None
+                or parent.parent_id is not None
+                or Path(parent.path) != source.directory.parent
+            )
+        )
+        or (
+            item.lib.lib_type == LibType.NOVEL
+            and item.format not in (MediaFormat.TXT, MediaFormat.EPUB)
+        )
+        or (
+            item.lib.lib_type == LibType.COMIC
+            and item.format
+            not in (None, MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+        )
+        or (parent is not None and item.format is None)
+    ):
+        raise ContentError("unsupported_layout")
+    states = {}
+    source_missing = False
+    try:
+        # check all ancestors, but only snapshot directories inside this library
+        for directory in (*reversed(source.directory.parents), source.directory):
+            info = directory.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ContentError("media_source_unavailable")
+            if directory.is_relative_to(root):
+                states[directory] = file_state(info)
+        if source.path != source.directory:
+            try:
+                info = source.path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                source_missing = True
+            else:
+                if not stat.S_ISREG(info.st_mode):
+                    raise ContentError("media_source_unavailable")
+                states[source.path] = file_state(info)
+        try:
+            lib_type = item.lib.lib_type
+            if lib_type not in (LibType.NOVEL, LibType.COMIC):
+                raise ContentError("unsupported_media_format")
+            handler = get_handler(lib_type)
+            if not isinstance(handler, ReadingMediaHandler):
+                raise ContentError("unsupported_media_format")
+            scan = handler.scan_sources(str(root), work_path=root / parts[0])
+            for scope, error in scan.issues.items():
+                if source.directory.is_relative_to(scope):
+                    raise ContentError(error)
+            current = next(
+                (
+                    entry
+                    for entry in scan.sources
+                    if entry.directory == source.directory
+                ),
+                None,
+            )
+            if current is not None:
+                if (current.path, current.format, current.parent_path) != (
+                    source.path,
+                    source.format,
+                    source.parent_path,
+                ):
+                    raise ContentError("content_changed")
+            elif source.format not in (None, MediaFormat.DIR) and not source_missing:
+                raise ContentError("unsupported_layout")
+            # indexed empty image directories and collections can retain their metadata
+            metadata = read_metadata(source)
+            if with_cover and source_missing:
+                raise ContentError("media_source_unavailable")
+            cover = read_cover(source, metadata) if with_cover else None
+            return (
+                metadata,
+                cover,
+                "media_source_unavailable" if source_missing else None,
+            )
+        finally:
+            try:
+                changed = any(
+                    file_state(location.stat(follow_symlinks=False)) != before
+                    for location, before in states.items()
+                )
+            except FileNotFoundError as error:
+                raise ContentError("content_changed") from error
+            if changed:
+                raise ContentError("content_changed")
+            if source_missing:
+                try:
+                    source.path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ContentError("content_changed")
+    except OSError as error:
+        raise ContentError("media_source_unavailable") from error
 
 
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
@@ -145,6 +332,188 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
 
     @classmethod
+    async def get_accessible(cls, id: int, user: UserInfo) -> MediaItem:
+        """Get a visible item after checking its library and parent access.
+
+        Args:
+            id: The requested media item ID.
+            user: The authenticated user with permissions loaded by authorize.
+
+        Returns:
+            The item with its library and optional parent loaded.
+
+        Raises:
+            NotFoundException: If the item or its valid visible parent is missing.
+            ForbiddenException: If the user cannot access the library.
+        """
+        item = await MediaItem.get_or_none(id=id, visible=True).select_related(
+            "lib", "parent"
+        )
+        if item is None:
+            raise NotFoundException()
+        if user.role != UserRole.ADMIN and (
+            user.perms is None or item.lib_id not in user.perms.media_lib_ids
+        ):
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        if item.parent_id is not None and (
+            item.parent is None
+            or not item.parent.visible
+            or item.parent.lib_id != item.lib_id
+        ):
+            raise NotFoundException()
+        return item
+
+    @classmethod
+    async def _read_current(
+        cls, item: MediaItem, user: UserInfo, *, with_cover: bool
+    ) -> tuple[MediaItem, MetadataRead, CoverImage | None, str | None]:
+        """Read current metadata with one retry for source or ownership changes.
+
+        Args:
+            item: The initially accessible reading item.
+            user: The authenticated user used for access revalidation.
+            with_cover: Whether to include the current cover bytes.
+
+        Returns:
+            The current item, metadata, optional cover and missing-source error.
+
+        Raises:
+            ContentError: If source reading fails or changes repeatedly.
+            NotFoundException: If the item becomes hidden or is removed.
+            ForbiddenException: If library access is no longer allowed.
+        """
+        for attempt in range(2):
+            try:
+                metadata, cover, source_error = await to_thread(
+                    _read_reading, item, with_cover=with_cover
+                )
+            except ContentError as error:
+                if error.code != "content_changed" or attempt:
+                    raise
+            else:
+                current = await cls.get_accessible(item.id, user)
+                if _reading_identity(current) == _reading_identity(item):
+                    return current, metadata, cover, source_error
+            item = await cls.get_accessible(item.id, user)
+        raise ContentError("content_changed")
+
+    @classmethod
+    async def get_details(cls, id: int, user: UserInfo) -> dict[str, Any]:
+        """Build accessible details, reading current OPF or ComicInfo for reading media.
+
+        Args:
+            id: The media item ID.
+            user: The authenticated user with loaded library permissions.
+
+        Returns:
+            Details with current reading metadata and controlled source issues.
+
+        Raises:
+            NotFoundException: If the item or its parent is unavailable.
+            ForbiddenException: If library access is denied.
+        """
+        item = await cls.get_accessible(id, user)
+        reading = item.lib.lib_type in (LibType.NOVEL, LibType.COMIC)
+        metadata = None
+        source_error = None
+        if reading:
+            try:
+                item, metadata, _, source_error = await cls._read_current(
+                    item, user, with_cover=False
+                )
+            except ContentError as error:
+                source_error = error.code
+                item = await cls.get_accessible(id, user)
+        data = await cls.dump(item, exclude={"parent", "children"})
+        data["parent"] = (
+            await cls.dump(item.parent, exclude={"parent", "children", "lib"})
+            if item.parent_id is not None and item.parent is not None
+            else None
+        )
+        children = await MediaItem.filter(
+            parent_id=id, lib_id=item.lib_id, visible=True
+        )
+        data["children"] = await cls.dump_list(
+            children, exclude={"parent", "children", "lib"}
+        )
+        data["lib_type"] = item.lib.lib_type
+        data["media_type"] = (
+            "text"
+            if item.lib.lib_type == LibType.NOVEL
+            else "image"
+            if reading
+            else "video"
+        )
+        if not reading:
+            return data
+        path = Path(item.path)
+        fields = (
+            metadata.data
+            if metadata is not None
+            else ReadingMetadata(
+                title=path.name if item.format in (None, MediaFormat.DIR) else path.stem
+            )
+        ).model_dump(exclude={"cover"})
+        if fields["rating"] is not None:
+            fields["rating"] = float(fields["rating"])
+        # fixed local URLs resolve current covers without exposing source references
+        fields["poster"] = f"/_api/media/{item.id}/assets/cover"
+        data["metadata"] = fields
+        for key in ("title", "year", "rating", "poster"):
+            data[key] = fields[key]
+        data["backdrop"] = None
+        data["metadata_state"] = (
+            metadata.state if metadata is not None and source_error is None else "error"
+        )
+        data["metadata_issues"] = (
+            [
+                {
+                    "source": name,
+                    "error": origin.error,
+                    "invalid_fields": origin.parsed.invalid_fields
+                    if origin.parsed
+                    else (),
+                }
+                for name, origin in (
+                    ("external", metadata.external),
+                    ("embedded", metadata.embedded),
+                    ("parent", metadata.parent),
+                )
+                if origin is not None
+                and (origin.error or (origin.parsed and origin.parsed.invalid_fields))
+            ]
+            if metadata is not None
+            else []
+        )
+        if source_error is not None:
+            data["metadata_issues"].append(
+                {"source": "source", "error": source_error, "invalid_fields": []}
+            )
+        return data
+
+    @classmethod
+    async def get_cover(cls, id: int, user: UserInfo) -> CoverImage | None:
+        """Read a current cover for an accessible reading item.
+
+        Args:
+            id: The media item ID.
+            user: The authenticated user with loaded library permissions.
+
+        Returns:
+            Verified cover bytes, or None when a placeholder is needed.
+
+        Raises:
+            NotFoundException: If the item is unavailable or belongs to a video library.
+            ForbiddenException: If library access is denied.
+            ContentError: If source or image reading fails.
+        """
+        item = await cls.get_accessible(id, user)
+        if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+            raise NotFoundException()
+        _, _, cover, _ = await cls._read_current(item, user, with_cover=True)
+        return cover
+
+    @classmethod
     async def delete(cls, id: int, local: bool = False):
         """Delete or hide a media item under its library lock.
 
@@ -205,7 +574,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         cls,
         lib_id: int,
         *,
-        path_info: "MediaPathInfo",
+        path_info: MediaPathInfo,
         parent_id: int | None = None,
         default_title: str | None = None,
     ) -> MediaItem:

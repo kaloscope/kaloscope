@@ -87,6 +87,11 @@ export function proxyImage(url: string | null, policy: boolean | 'auto' | 'store
     return `/_api/${url}`;
   }
 
+  // local media assets use the current session and must bypass the remote proxy
+  if (url.startsWith('/_api/media/')) {
+    return url;
+  }
+
   // return the original URL
   if (policy === false) {
     return url;

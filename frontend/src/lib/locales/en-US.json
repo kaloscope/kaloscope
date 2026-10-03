@@ -854,6 +854,17 @@
     "import_items_failed": "Failed to import the items!",
     "import_items_success": "Successfully imported {0} items!",
     "upgrade_success": "Upgrade successful!",
-    "file_not_exists": "File does not exist!"
+    "file_not_exists": "File does not exist!",
+    "media_source_unavailable": "The media source is unavailable!",
+    "content_changed": "Media content changed. Please try again!",
+    "unsupported_layout": "The media directory layout is not supported!",
+    "ambiguous_layout": "The media directory contains conflicting content sources!",
+    "unsupported_media_format": "This media format is not supported!",
+    "media_limit_exceeded": "The media exceeds the reading limit!",
+    "invalid_archive": "The archive is damaged or invalid!",
+    "invalid_epub": "The EPUB structure is invalid!",
+    "invalid_image": "The image format is invalid!",
+    "invalid_metadata": "The metadata file is invalid!",
+    "ambiguous_metadata": "The metadata source is ambiguous!"
   }
 }

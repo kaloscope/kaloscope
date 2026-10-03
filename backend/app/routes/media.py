@@ -18,7 +18,9 @@ from app.core.exceptions import (
     ErrorCode,
     ForbiddenException,
     KaloscopeException,
+    NotFoundException,
 )
+from app.core.media.common import ContentError
 from app.core.media.shelver import (
     gen_nfo,
     get_nfo_path,
@@ -158,18 +160,75 @@ async def delete_items(_, body: MediaDel) -> HTTPResponse:
 
 
 @media.get("/<id:int>")
-async def get_item_details(_, id: int) -> HTTPResponse:
-    """Get the details of the media item."""
-    item = await MediaItemService.dump(await MediaItem.get(id=id))
+@authorize()
+async def get_item_details(request: Request, id: int) -> HTTPResponse:
+    """Get current file metadata for an accessible media item.
+
+    Args:
+        request: The authenticated request with loaded library permissions.
+        id: The requested media item ID.
+
+    Returns:
+        Details with current NFO, OPF or ComicInfo metadata.
+    """
+    item = await MediaItemService.get_details(id, request.ctx.user)
     if lib := item.get("lib"):
         # attach the triggers
         lib["triggers"] = await FlowTriggerService.get_triggers(
             GraphCategory.INGEST, lib["id"]
         )
         # attach the metadata
-        if nfo_path := item.get("nfo_path"):
+        if lib["lib_type"] in (LibType.MOVIE, LibType.TV_SHOW) and (
+            nfo_path := item.get("nfo_path")
+        ):
             item["metadata"] = parse_nfo(lib["lib_type"], nfo_path)
-    return json(item)
+    return json(item, headers={"Cache-Control": "private, no-store"})
+
+
+@media.get("/<id:int>/assets/cover")
+@authorize()
+async def get_item_cover(request: Request, id: int) -> HTTPResponse:
+    """Serve the current reading cover without accepting a client filesystem path.
+
+    Args:
+        request: The authenticated request with loaded library permissions.
+        id: The reading item whose server-selected cover is requested.
+
+    Returns:
+        Bounded image bytes with their verified MIME type and no browser caching.
+
+    Raises:
+        NotFoundException: If the item or an available cover is missing.
+        ForbiddenException: If library access is denied.
+        KaloscopeException: If source reading fails with a controlled error.
+    """
+    headers = {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    try:
+        cover = await MediaItemService.get_cover(id, request.ctx.user)
+    except ContentError as error:
+        status = (
+            409
+            if error.code == "content_changed"
+            else 503
+            if error.code == "media_source_unavailable"
+            else 422
+        )
+        raise KaloscopeException(
+            error.code, status_code=status, headers=headers
+        ) from error
+    except KaloscopeException as error:
+        error.headers = {**error.headers, **headers}
+        raise
+    if cover is None:
+        raise NotFoundException(headers=headers)
+    return HTTPResponse(
+        cover.data,
+        content_type=cover.mime_type,
+        headers=headers,
+    )
 
 
 @media.post("/<id:int>/gen_nfo")

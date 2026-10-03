@@ -854,6 +854,17 @@
     "import_items_failed": "导入数据失败！",
     "import_items_success": "成功导入 {0} 条数据！",
     "upgrade_success": "更新成功！",
-    "file_not_exists": "文件不存在！"
+    "file_not_exists": "文件不存在！",
+    "media_source_unavailable": "无法访问媒体源文件！",
+    "content_changed": "媒体内容已变化，请重试！",
+    "unsupported_layout": "媒体目录结构不受支持！",
+    "ambiguous_layout": "媒体目录包含冲突的正文来源！",
+    "unsupported_media_format": "媒体格式不受支持！",
+    "media_limit_exceeded": "媒体文件超过读取限制！",
+    "invalid_archive": "压缩包损坏或格式无效！",
+    "invalid_epub": "EPUB 文件结构无效！",
+    "invalid_image": "图片格式无效！",
+    "invalid_metadata": "元数据文件无效！",
+    "ambiguous_metadata": "存在多个无法确定归属的元数据文件！"
   }
 }
