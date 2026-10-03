@@ -224,7 +224,7 @@ def test_bounded_reads(tmp_path, monkeypatch):
 @pytest.mark.parametrize("change", ["append", "replace", "delete", "add"])
 def test_build_changed(tmp_path, monkeypatch, change):
     source = _source(tmp_path, {"1.png": _PNG})
-    read_image = image._read_image
+    read_image = image.read_image_file
 
     def changed(path, **kwargs):
         """Change the directory after reading the first image header.
@@ -251,7 +251,7 @@ def test_build_changed(tmp_path, monkeypatch, change):
             (source.path / "2.png").write_bytes(_PNG)
         return result
 
-    monkeypatch.setattr(image, "_read_image", changed)
+    monkeypatch.setattr(image, "read_image_file", changed)
     with pytest.raises(ContentError, match="content_changed"):
         build_image_index(source, tmp_path / "cache")
     assert not (tmp_path / "cache").exists()

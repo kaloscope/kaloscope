@@ -1,12 +1,12 @@
 """Build image indexes and read bounded local content."""
 
 import hashlib
-import os
 import secrets
 import shutil
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
+from zipfile import ZipFile, ZipInfo
 
 from pydantic import (
     BaseModel,
@@ -29,7 +29,12 @@ from app.core.media.handlers.reading import (
     list_source_entries,
     natural_key,
 )
-from app.core.media.raster import IMAGE_BYTES, ImageMime, image_mime
+from app.core.media.raster import (
+    IMAGE_BYTES,
+    ImageMime,
+    image_mime,
+    read_image_file,
+)
 from app.models.media import MediaFormat
 
 _IMAGE_BYTES = IMAGE_BYTES
@@ -159,56 +164,6 @@ def _directory_state(path: Path) -> tuple[int, ...]:
     return file_state(info)
 
 
-def _read_image(
-    path: Path,
-    *,
-    snapshot: FileSnapshot | ImageResource | None = None,
-    full: bool = False,
-) -> tuple[bytes, os.stat_result]:
-    """Read a stable regular file with a fixed bound and no final symlink following.
-
-    Args:
-        path: A validated direct image path.
-        snapshot: The indexed size and mtime, or None while building an index.
-        full: Whether to read the full image; False reads only its signature.
-
-    Returns:
-        The bounded bytes and the source attributes before reading.
-
-    Raises:
-        ContentError: If the file is unsafe, changes or exceeds the image limit.
-        OSError: If the source cannot be accessed.
-    """
-    before = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(before.st_mode):
-        raise ContentError("media_source_unavailable")
-    if snapshot and (before.st_size, before.st_mtime_ns) != (
-        snapshot.size,
-        snapshot.mtime_ns,
-    ):
-        raise ContentError("content_changed")
-    if before.st_size > _IMAGE_BYTES:
-        raise ContentError("media_limit_exceeded")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    with os.fdopen(os.open(path, flags), "rb") as file:
-        if file_state(os.fstat(file.fileno())) != file_state(before):
-            raise ContentError("content_changed")
-        data = file.read(_IMAGE_BYTES + 1 if full else 12)
-        if len(data) > _IMAGE_BYTES:
-            raise ContentError("media_limit_exceeded")
-        if file_state(os.fstat(file.fileno())) != file_state(before):
-            raise ContentError("content_changed")
-    try:
-        after = path.stat(follow_symlinks=False)
-    except FileNotFoundError as error:
-        raise ContentError("content_changed") from error
-    if file_state(after) != file_state(before) or (
-        full and len(data) != before.st_size
-    ):
-        raise ContentError("content_changed")
-    return data, before
-
-
 def _build_directory_index(source: ReadingSource) -> ImageIndex:
     """Build an image directory index while checking source stability.
 
@@ -254,7 +209,7 @@ def _build_directory_index(source: ReadingSource) -> ImageIndex:
         if path in cover_paths and cover is not None:
             continue
         try:
-            data, info = _read_image(path)
+            data, info = read_image_file(path, limit=_IMAGE_BYTES)
             mime_type = image_mime(data)
         except ContentError as error:
             if path in cover_paths and error.code in {
@@ -294,6 +249,29 @@ def _build_directory_index(source: ReadingSource) -> ImageIndex:
     return index
 
 
+def list_image_members(archive: ZipFile) -> list[ZipInfo]:
+    """List visible comic images in natural order, including named covers.
+
+    Args:
+        archive: A stable comic archive already validated by open_archive.
+
+    Returns:
+        Image members before named covers are excluded from the body page list.
+    """
+    return sorted(
+        (
+            info
+            for info in archive.infolist()
+            if not info.is_dir()
+            and not any(
+                is_ignored_name(part) for part in PurePosixPath(info.filename).parts
+            )
+            and PurePosixPath(info.filename).suffix.casefold() in IMAGE_EXTENSIONS
+        ),
+        key=lambda info: natural_key(normalize_member_path(info.filename)),
+    )
+
+
 def _build_archive_index(source: ReadingSource) -> ImageIndex:
     """Build a CBZ or ZIP page index without extracting members to disk.
 
@@ -308,23 +286,12 @@ def _build_archive_index(source: ReadingSource) -> ImageIndex:
         OSError: If the source cannot be inspected or read.
     """
     with open_archive(source.path) as (archive, snapshot):
-        members = [
+        members = list_image_members(archive)
+        body = [
             info
-            for info in archive.infolist()
-            if not info.is_dir()
-            and not any(
-                is_ignored_name(part) for part in PurePosixPath(info.filename).parts
-            )
-            and PurePosixPath(info.filename).suffix.casefold() in IMAGE_EXTENSIONS
+            for info in members
+            if PurePosixPath(info.filename).stem.casefold() not in COVER_NAMES
         ]
-        body = sorted(
-            (
-                info
-                for info in members
-                if PurePosixPath(info.filename).stem.casefold() not in COVER_NAMES
-            ),
-            key=lambda info: natural_key(normalize_member_path(info.filename)),
-        )
         if not body:
             raise ContentError("empty_content")
         if len(body) > MAX_PAGES:
@@ -461,8 +428,12 @@ def read_image_resource(
     try:
         if index.format == "dir":
             before = _directory_state(source_path)
-            data, _ = _read_image(
-                source_path / resource.relative_path, snapshot=resource, full=True
+            assert resource.mtime_ns is not None
+            data, _ = read_image_file(
+                source_path / resource.relative_path,
+                snapshot=FileSnapshot(size=resource.size, mtime_ns=resource.mtime_ns),
+                full=True,
+                limit=_IMAGE_BYTES,
             )
             if _directory_state(source_path) != before:
                 raise ContentError("content_changed")

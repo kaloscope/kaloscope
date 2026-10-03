@@ -285,7 +285,7 @@ def _parse_spine(
     return tuple(spine)
 
 
-def _locate_package(
+def locate_epub_package(
     archive: ZipFile,
 ) -> tuple[str, dict[str, ZipInfo], set[str]]:
     """Locate the first rendition without requiring a readable body.
@@ -351,7 +351,7 @@ def read_epub_opf(archive: ZipFile) -> tuple[str, bytes]:
             missing, or metadata exceeds its limit.
         OSError: If source bytes cannot be read.
     """
-    package_path, members, _ = _locate_package(archive)
+    package_path, members, _ = locate_epub_package(archive)
     member = members.get(package_path)
     if member is None:
         raise ContentError("invalid_epub")
@@ -376,7 +376,7 @@ def load_epub_package(archive: ZipFile) -> EpubPackage:
         ContentError: If required structure is missing, malformed, unsupported
             or over limits; open_archive also checks source stability on exit.
     """
-    package_path, members, encrypted = _locate_package(archive)
+    package_path, members, encrypted = locate_epub_package(archive)
     root = _read_xml(archive, members.get(package_path), f"{_OPF}package")
     if root.get("version") not in ("2.0", "3.0"):
         raise ContentError("unsupported_media_format")

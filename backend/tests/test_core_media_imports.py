@@ -25,6 +25,7 @@ import pytest
         "app.core.media.raster",
         "app.core.media.metadata",
         "app.core.media.metadata_reader",
+        "app.core.media.cover",
     ],
 )
 def test_module(module):
@@ -102,6 +103,13 @@ def test_module(module):
         "app.core.media.metadata_reader": (
             "app.core.media.text",
             "app.core.media.image",
+            "app.core.media.epub.xhtml",
+            "app.core.media.epub.cache",
+            "app.core.media.shelver",
+            "app.core.media.watcher",
+        ),
+        "app.core.media.cover": (
+            "app.core.media.text",
             "app.core.media.epub.xhtml",
             "app.core.media.epub.cache",
             "app.core.media.shelver",
