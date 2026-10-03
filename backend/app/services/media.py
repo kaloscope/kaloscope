@@ -39,6 +39,7 @@ from app.models.media import (
     MediaLibUpsert,
     MediaMetadata,
     NFOType,
+    ReadingMetadataSync,
 )
 from app.models.user import PermType, UserInfo, UserPermission, UserRole
 from app.services.base import BaseService
@@ -434,6 +435,69 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     """The service class for all media item related operations."""
 
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
+
+    @classmethod
+    async def sync_metadata(cls, id: int) -> MediaItem:
+        """Synchronize reading list summaries without rebuilding content or writing XML.
+
+        The library's single event consumer must await synchronization serially.
+        Read files outside the library lock, then recheck ownership before saving.
+        Failed item-owned reads preserve summaries; parent metadata stays read-only.
+
+        Args:
+            id: The internal reading item ID selected by the library consumer.
+
+        Returns:
+            The item with current list summaries or a recorded metadata read error.
+
+        Raises:
+            DoesNotExist: If the item was removed before synchronization starts.
+            ContentError: If the library type, source boundary or ownership is invalid.
+        """
+        item = await MediaItem.get(id=id).select_related("lib", "parent")
+        if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+            raise ContentError("unsupported_media_format")
+        metadata, _, source_error = await to_thread(
+            _read_reading, item, with_cover=False
+        )
+        external = metadata.external
+        error = source_error or next(
+            (
+                origin.error
+                for origin in (external, metadata.embedded)
+                if origin is not None and origin.error is not None
+            ),
+            None,
+        )
+        sync = ReadingMetadataSync(
+            state="error" if error else "ready" if external else "none",
+            format=("opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo")
+            if external
+            else None,
+            relative_path=external.path.relative_to(item.dir).as_posix()
+            if external and external.error != "ambiguous_metadata"
+            else None,
+            file_signature=external.signature if external and not error else None,
+            error=error,
+        )
+        async with library_lock(item.lib.dir):
+            current = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
+            if current is None or _reading_identity(item) != _reading_identity(current):
+                raise ContentError("content_changed")
+            fields = ["extra"]
+            if not error:
+                for name, value in metadata.summary().items():
+                    setattr(current, name, value)
+                    fields.append(name)
+                current.poster = f"/_api/media/{id}/assets/cover"
+                fields.append("poster")
+            current.extra = {
+                **(current.extra or {}),
+                "schema_version": 1,
+                "metadata_sync": sync.model_dump(),
+            }
+            await current.save(update_fields=fields)
+            return current
 
     @classmethod
     async def index_content(cls, id: int) -> MediaItem:

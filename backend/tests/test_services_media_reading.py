@@ -1,6 +1,7 @@
-"""Tests for current reading details, cover access and source boundaries."""
+"""Tests for reading details, summary synchronization, covers and source boundaries."""
 
 import asyncio
+import hashlib
 import os
 import threading
 import zipfile
@@ -15,10 +16,13 @@ import pytest
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
 from tortoise import Tortoise
+from tortoise.exceptions import DoesNotExist
 
+from app.core.config import KaloscopeConfig
 from app.core.exceptions import ForbiddenException, NotFoundException, error_handler
 from app.core.media import metadata_reader
 from app.core.media.common import ContentError
+from app.core.media.coordination import library_lock
 from app.core.middleware import on_request, on_response
 from app.models.media import IndexState, LibType, MediaFormat, MediaItem, MediaLib
 from app.models.user import (
@@ -35,6 +39,19 @@ from app.services.media import MediaItemService
 from app.utils.json import dumps
 
 _PNG = b"\x89PNG\r\n\x1a\nimage"
+
+
+@pytest.fixture(autouse=True)
+def workspace(tmp_path, monkeypatch):
+    """Keep synchronization locks outside the application's workspace.
+
+    Args:
+        tmp_path: The isolated test directory.
+        monkeypatch: The fixture restoring configuration after the test.
+    """
+    directory = tmp_path / "cache"
+    directory.mkdir()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
 
 
 @asynccontextmanager
@@ -158,6 +175,366 @@ async def _item(tmp_path: Path, format: MediaFormat | None) -> MediaItem:
         index_state=IndexState.PENDING,
         extra={"metadata_sync": {"state": "ready"}, "plot": "Old cached plot"},
     )
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_sync_metadata(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            await MediaItem.filter(id=item.id).update(
+                visible=False,
+                index_state=IndexState.READY,
+                index_version="a" * 64,
+                extra={"content": {"chapter_count": 2, "page_count": None}},
+            )
+            novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
+            xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
+            xml.write_bytes(
+                _opf(
+                    "文" * 300,
+                    "<dc:date>2024</dc:date><dc:description>Plot</dc:description>"
+                    "<dc:creator>Author</dc:creator>"
+                    "<meta name='calibre:rating' content='0'/>",
+                )
+                if novel
+                else (
+                    "<ComicInfo><Title>" + "文" * 300 + "</Title><Year>2024</Year>"
+                    "<CommunityRating>0</CommunityRating><Summary>Plot</Summary>"
+                    "<Writer>Author</Writer></ComicInfo>"
+                ).encode()
+            )
+            before = await MediaItem.get(id=item.id).values()
+            files = {
+                path: path.read_bytes()
+                for path in Path(item.lib.dir).rglob("*")
+                if path.is_file()
+            }
+            current = await MediaItemService.sync_metadata(item.id)
+            assert current.title == "文" * 255
+            assert current.year == 2024 and current.rating == 0
+            assert current.poster == f"/_api/media/{item.id}/assets/cover"
+            assert current.extra == {
+                "schema_version": 1,
+                "content": {"chapter_count": 2, "page_count": None},
+                "metadata_sync": {
+                    "state": "ready",
+                    "format": "opf" if novel else "comicinfo",
+                    "relative_path": xml.name,
+                    "file_signature": hashlib.sha256(xml.read_bytes()).hexdigest(),
+                    "error": None,
+                },
+            }
+            after = await MediaItem.get(id=item.id).values()
+            changed = {"title", "year", "rating", "poster", "extra", "updated_at"}
+            assert {
+                key: value for key, value in before.items() if key not in changed
+            } == {key: value for key, value in after.items() if key not in changed}
+            assert all(path.read_bytes() == data for path, data in files.items())
+            assert not (
+                Path(KaloscopeConfig.get_workspace("temp")) / "media_index"
+            ).exists()
+            dumped = await MediaItemService.dump(
+                current, exclude={"lib", "parent", "children"}
+            )
+            assert "extra" not in dumped and "metadata" not in dumped
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_sync_updates(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
+            xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
+            xml.write_bytes(
+                _opf("First")
+                if novel
+                else b"<ComicInfo><Title>First</Title></ComicInfo>"
+            )
+            first = await MediaItemService.sync_metadata(item.id)
+            assert first.title == "First" and first.year is first.rating is None
+            before = xml.stat()
+            xml.write_bytes(xml.read_bytes().replace(b"First", b"Other"))
+            os.utime(xml, ns=(before.st_atime_ns, before.st_mtime_ns))
+            current = await MediaItemService.sync_metadata(item.id)
+            assert current.title == "Other" and current.extra != first.extra
+            xml.unlink()
+            current = await MediaItemService.sync_metadata(item.id)
+            expected = (
+                "Embedded"
+                if format in (MediaFormat.EPUB, MediaFormat.CBZ, MediaFormat.ZIP)
+                else "Work"
+                if format in (None, MediaFormat.DIR)
+                else "Book"
+            )
+            assert current.title == expected and current.year is current.rating is None
+            assert current.extra is not None
+            assert current.extra["metadata_sync"] == {
+                "state": "none",
+                "format": None,
+                "relative_path": None,
+                "file_signature": None,
+                "error": None,
+            }
+            assert current.index_state == item.index_state
+            assert current.index_version is None and not xml.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("problem", "code"),
+    [
+        ("invalid", "invalid_metadata"),
+        ("ambiguous", "ambiguous_metadata"),
+        ("embedded", "invalid_archive"),
+        ("missing", "media_source_unavailable"),
+    ],
+)
+def test_sync_failure(tmp_path, monkeypatch, problem, code):
+    def ambiguous(directory, names):
+        """Simulate case-variant conflicts on case-insensitive test filesystems.
+
+        Args:
+            directory: The metadata container being searched.
+            names: The preferred metadata filenames.
+
+        Raises:
+            ContentError: To report multiple candidates at the same priority.
+        """
+        raise ContentError("ambiguous_metadata")
+
+    async def run():
+        async with _database():
+            item = await _item(
+                tmp_path, MediaFormat.EPUB if problem == "embedded" else MediaFormat.TXT
+            )
+            path = Path(item.path)
+            body = path.read_bytes()
+            xml = Path(item.dir) / "metadata.opf"
+            if problem in ("invalid", "ambiguous"):
+                xml.write_bytes(b"invalid" if problem == "invalid" else _opf("Current"))
+            elif problem == "embedded":
+                path.write_bytes(b"invalid")
+            else:
+                path.unlink()
+            with monkeypatch.context() as patcher:
+                if problem == "ambiguous":
+                    patcher.setattr(metadata_reader, "_find_external", ambiguous)
+                current = await MediaItemService.sync_metadata(item.id)
+            assert (current.title, current.year, current.rating, current.poster) == (
+                item.title,
+                item.year,
+                item.rating,
+                item.poster,
+            )
+            assert current.index_state == item.index_state
+            assert current.index_version == item.index_version
+            assert current.extra is not None
+            sync = current.extra["metadata_sync"]
+            assert sync["state"] == "error" and sync["error"] == code
+            assert sync["file_signature"] is None
+            if problem == "ambiguous":
+                assert sync["relative_path"] is None
+            if problem in ("invalid", "ambiguous"):
+                xml.write_bytes(_opf("Recovered"))
+            else:
+                path.write_bytes(body)
+            recovered = await MediaItemService.sync_metadata(item.id)
+            assert recovered.extra is not None
+            assert recovered.extra["metadata_sync"]["error"] is None
+            assert recovered.title != item.title
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("broken", [False, True])
+def test_sync_parent(tmp_path, external, broken):
+    async def run():
+        async with _database():
+            parent = await _item(tmp_path, None)
+            (Path(parent.path) / "ComicInfo.xml").write_bytes(
+                b"broken"
+                if broken
+                else b"<ComicInfo><Title>Parent</Title>"
+                b"<Writer>Author</Writer><Year>2000</Year></ComicInfo>"
+            )
+            directory = Path(parent.path) / "Chapter"
+            directory.mkdir()
+            (directory / "1.png").write_bytes(_PNG)
+            if external:
+                (directory / "ComicInfo.xml").write_bytes(
+                    b"<ComicInfo><Title>Current</Title></ComicInfo>"
+                )
+            child = await MediaItem.create(
+                lib_id=parent.lib_id,
+                parent=parent,
+                path=str(directory),
+                dir=str(directory),
+                name="Chapter",
+                format=MediaFormat.DIR,
+                year=1980,
+                rating=9,
+            )
+            before = await MediaItem.get(id=parent.id).values()
+            current = await MediaItemService.sync_metadata(child.id)
+            assert current.title == ("Current" if external else "Chapter")
+            assert current.year is current.rating is None
+            assert current.extra is not None
+            assert set(current.extra) == {"schema_version", "metadata_sync"}
+            assert current.extra["metadata_sync"]["state"] == (
+                "ready" if external else "none"
+            )
+            assert current.extra["metadata_sync"]["error"] is None
+            assert await MediaItem.get(id=parent.id).values() == before
+            details = await MediaItemService.get_details(child.id, _user())
+            assert details["metadata"]["authors"] == (() if broken else ("Author",))
+            assert details["metadata_state"] == ("error" if broken else "ready")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["move", "delete", "library", "state"])
+def test_sync_ownership(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            worker = media_service.to_thread
+
+            async def modify(function, *args, **kwargs):
+                """Change ownership or unrelated fields after the read completes.
+
+                Args:
+                    function: The reader dispatched to the worker.
+                    *args: The reader's positional arguments.
+                    **kwargs: The reader's keyword options.
+
+                Returns:
+                    The original read result before the concurrent change.
+                """
+                result = await worker(function, *args, **kwargs)
+                if change == "move":
+                    moved = Path(item.dir).with_name("Moved")
+                    Path(item.dir).rename(moved)
+                    await MediaItem.filter(id=item.id).update(
+                        path=str(moved / "Book.txt"), dir=str(moved)
+                    )
+                elif change == "delete":
+                    await item.delete()
+                elif change == "library":
+                    await MediaLib.filter(id=item.lib_id).update(dir=str(tmp_path))
+                else:
+                    await MediaItem.filter(id=item.id).update(
+                        visible=False,
+                        index_state=IndexState.ERROR,
+                        index_error="empty_content",
+                        extra={"content": {"chapter_count": 7}},
+                    )
+                return result
+
+            monkeypatch.setattr(media_service, "to_thread", modify)
+            if change == "state":
+                current = await MediaItemService.sync_metadata(item.id)
+                assert not current.visible
+                assert current.index_state == IndexState.ERROR
+                assert current.index_error == "empty_content"
+                assert current.extra is not None
+                assert current.extra["content"] == {"chapter_count": 7}
+            else:
+                with pytest.raises(ContentError, match="content_changed"):
+                    await MediaItemService.sync_metadata(item.id)
+                current = await MediaItem.get_or_none(id=item.id)
+                if change == "delete":
+                    assert current is None
+                else:
+                    assert current is not None
+                    assert current.extra == item.extra and current.title == item.title
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("problem", ["video", "missing", "outside", "symlink"])
+def test_sync_source(tmp_path, problem):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            if problem == "video":
+                await MediaLib.filter(id=item.lib_id).update(lib_type=LibType.MOVIE)
+            elif problem == "missing":
+                await item.delete()
+            elif problem == "outside":
+                await MediaItem.filter(id=item.id).update(
+                    path=str(tmp_path / "Book.txt")
+                )
+            else:
+                path = Path(item.path)
+                moved = path.with_name("Other.txt")
+                path.rename(moved)
+                path.symlink_to(moved)
+            before = await MediaItem.all().values()
+            with pytest.raises(DoesNotExist if problem == "missing" else ContentError):
+                await MediaItemService.sync_metadata(item.id)
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_sync_worker(tmp_path, monkeypatch, cancel):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            before = await MediaItem.get(id=item.id).values()
+            started, finish, stopped = (
+                threading.Event(),
+                threading.Event(),
+                threading.Event(),
+            )
+            loop_thread = threading.get_ident()
+            reader = media_service._read_reading
+
+            def blocked(*args, **kwargs):
+                """Keep a read active while checking cancellation and library locking.
+
+                Args:
+                    *args: The reader's positional arguments.
+                    **kwargs: The reader's keyword options.
+
+                Returns:
+                    The original reader result after the test releases the worker.
+                """
+                try:
+                    assert threading.get_ident() != loop_thread
+                    result = reader(*args, **kwargs)
+                    started.set()
+                    assert finish.wait(timeout=5)
+                    return result
+                finally:
+                    stopped.set()
+
+            monkeypatch.setattr(media_service, "_read_reading", blocked)
+            task = asyncio.create_task(MediaItemService.sync_metadata(item.id))
+            try:
+                assert await asyncio.to_thread(started.wait, 5)
+                async with await library_lock(item.lib.dir).acquire(timeout=0):
+                    assert await MediaItem.get(id=item.id).values() == before
+                if cancel:
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+            finally:
+                finish.set()
+                assert await asyncio.to_thread(stopped.wait, 5)
+            if cancel:
+                assert await MediaItem.get(id=item.id).values() == before
+            else:
+                assert (await task).title == "Book"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("format", [None, *MediaFormat])

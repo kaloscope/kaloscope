@@ -1,7 +1,7 @@
 from enum import StrEnum, auto
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, PositiveInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from tortoise.fields import (
     BigIntField,
     BooleanField,
@@ -165,6 +165,18 @@ class MediaEvent(TortoiseModel):
 
 
 # -------------------- Pydantic Models --------------------
+class ReadingMetadataSync(BaseModel):
+    """Validate item-owned metadata synchronization fields stored in extra."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    state: Literal["none", "pending", "ready", "error"]
+    format: Literal["opf", "comicinfo"] | None = None
+    relative_path: str | None = Field(default=None, min_length=1, max_length=4096)
+    file_signature: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    error: str | None = Field(default=None, min_length=1, max_length=64)
+
+
 class MediaLibUpsert(BaseModel):
     id: PositiveInt | None = None
     # enable additional library inputs when their handlers are available
