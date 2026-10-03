@@ -1,12 +1,14 @@
 """Unit tests for bounded ZIP reads and comic archive indexing."""
 
 import base64
+import binascii
 import io
 import json
 import os
 import stat
 import struct
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -30,7 +32,7 @@ _PNG = base64.b64decode(
 
 def _source(
     tmp_path: Path,
-    entries: list[tuple[str | zipfile.ZipInfo, bytes]],
+    entries: Sequence[tuple[str | zipfile.ZipInfo, bytes]],
     *,
     format: MediaFormat = MediaFormat.CBZ,
     compression: int = zipfile.ZIP_DEFLATED,
@@ -85,6 +87,8 @@ def test_archive_index(tmp_path, format, compression):
     index = build_image_index(source, cache)
 
     assert index.format == format.value
+    assert index.cover is not None
+    assert index.source_snapshot is not None
     assert [page.relative_path for page in index.pages] == [
         "包裹/page1.png",
         "./包裹//page2.png",
@@ -97,7 +101,7 @@ def test_archive_index(tmp_path, format, compression):
     assert list(cache.iterdir()) == [cache / "index.json"]
     assert str(tmp_path) not in (cache / "index.json").read_text()
     for resource in (*index.pages, index.cover):
-        assert resource.crc == zipfile.crc32(_PNG)
+        assert resource.crc == binascii.crc32(_PNG)
         assert resource.mtime_ns is None
         assert read_image_resource(source.path, cache, resource.id) == (
             _PNG,

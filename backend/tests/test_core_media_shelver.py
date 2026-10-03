@@ -8,11 +8,12 @@ import threading
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from filelock import Timeout
 from lxml import etree
+from sanic import Sanic
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -250,7 +251,9 @@ def test_current_path(tmp_path):
             assert item.nfo_path == str(current_nfo)
             # detail reads remain pure even when organization is configured
             lib.rename_template = "{{title}} ({{year}})"
-            assert shelver.parse_nfo(lib.lib_type, current_nfo).title == "New"
+            metadata = shelver.parse_nfo(lib.lib_type, current_nfo)
+            assert metadata is not None
+            assert metadata.title == "New"
             assert Path(item.path).is_file()
             async with library_lock(lib.dir):
                 await MediaItemService.refresh_hash_and_size(item)
@@ -642,7 +645,7 @@ def test_metadata_recovery(tmp_path, monkeypatch, recovery):
                         lib=lib, src_path=str(nfo), event_type="created"
                     )
                 )
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = await monitor._create_events(lib)
             while not events.empty():
                 await watcher.consume_event(events.get_nowait())
@@ -765,6 +768,7 @@ def test_movie_parent_wait(tmp_path, monkeypatch):
 
             await item.refresh_from_db()
             parent = await MediaItem.get(id=item.parent_id)
+            assert parent.nfo_path is not None
             assert parent.nfo_path == str(tmp_path / "Movie (2026)/Movie (2026).nfo")
             assert etree.parse(parent.nfo_path).getroot().findtext("title") == (
                 "Corrected"

@@ -3,7 +3,7 @@ import contextlib
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote, urlencode
 
 import aiofiles
@@ -626,12 +626,15 @@ class DanmakuService:
                 return result
             media = current
             if media.lib.lib_type == LibType.TV_SHOW:
-                episode_ids = await MediaItem.filter(
-                    lib_id=media.lib_id,
-                    parent_id=media.parent_id or media.id,
-                    id__not=media.id,
-                    episode__not_isnull=True,
-                ).values_list("id", flat=True)
+                episode_ids = cast(
+                    list[int],
+                    await MediaItem.filter(
+                        lib_id=media.lib_id,
+                        parent_id=media.parent_id or media.id,
+                        id__not=media.id,
+                        episode__not_isnull=True,
+                    ).values_list("id", flat=True),
+                )
 
         # load danmakus from the danmaku server
         danmakus = await cls.load_from_server(

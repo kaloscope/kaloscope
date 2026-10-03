@@ -646,6 +646,7 @@ def test_confirmation_scope(library, change):
 
             await first.refresh_from_db()
             assert result.metadata == meta
+            assert first.danmaku_meta is not None
             assert first.danmaku_meta["episode_id"] == "new-1"
             if second is not None:
                 if change == "removed":
@@ -653,6 +654,7 @@ def test_confirmation_scope(library, change):
                 else:
                     await second.refresh_from_db()
                     assert second.parent_id == other.id
+                    assert second.danmaku_meta is not None
                     assert second.danmaku_meta["episode_id"] == "new-2"
             for item in unrelated:
                 await item.refresh_from_db()
@@ -867,8 +869,10 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                 current = await MediaItem.get_or_none(id=item.id)
 
                 if change == "conflict":
+                    assert current is not None
                     assert current.path == item.path
                     assert current.parent_id == parent.id
+                    assert current.danmaku_meta is not None
                     assert current.danmaku_meta["episode_id"] == "old-1"
                     assert current.danmaku_path == (
                         str(cache) if recorded_path else None
@@ -881,11 +885,14 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                     assert current is None
                     assert cache.read_text() == "original"
                 elif change == "confirmed":
+                    assert current is not None
                     assert current.danmaku_meta == metadata
                     assert current.danmaku_path == str(cache)
                     assert cache.read_text() == "manual"
                 else:
+                    assert current is not None
                     assert current.parent_id == destination.id
+                    assert current.danmaku_meta is not None
                     assert current.danmaku_meta["episode_id"] == "new-2"
                     assert current.danmaku_path is None
                     assert not current_cache.exists()
@@ -902,6 +909,7 @@ def test_refresh_wait(library, tmp_path, monkeypatch, change, recorded_path):
                     )
                 for untouched in (other, added):
                     await untouched.refresh_from_db()
+                    assert untouched.danmaku_meta is not None
                     assert untouched.danmaku_meta["anime_id"] == "old"
             finally:
                 release.set()
@@ -1051,6 +1059,8 @@ def test_confirmation_wait(library, tmp_path, monkeypatch, change, has_comments)
                     assert cache.read_text() == '[{"text":"Original"}]'
                 else:
                     assert result.metadata == meta
+                    assert current is not None
+                    assert current.danmaku_meta is not None
                     assert current.danmaku_meta["episode_id"] == "selected"
                     assert cache.read_text() == '[{"text":"Replacement"}]'
                     if has_comments:
@@ -1149,7 +1159,9 @@ def test_cache_cancel_after_write(library, tmp_path, monkeypatch, operation):
 
     async def cancelled_write(media, comments):
         path = await write_cache(media, comments)
-        asyncio.current_task().cancel()
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
         return path
 
     monkeypatch.setattr(danmaku.DanmakuService, "_write_cache", cancelled_write)
@@ -1363,6 +1375,7 @@ def test_match_wait(library, tmp_path, monkeypatch, change, has_comments):
                     assert cache.read_text() == '[{"text":"Original"}]'
                 else:
                     assert result.metadata == metadata
+                    assert current is not None
                     assert current.danmaku_meta == metadata.model_dump()
                     assert current.danmaku_path == str(current_cache)
                     expected = (
@@ -1435,6 +1448,7 @@ def test_cached_match(library, tmp_path, monkeypatch, change):
                     assert result.comments == []
                     assert cache.read_text() == '[{"text":"Cached"}]'
                 else:
+                    assert result.metadata is not None
                     assert result.metadata.episode_id == "old-1"
                     assert [comment.text for comment in result.comments] == ["Cached"]
                     assert current_cache.read_text() == '[{"text":"Cached"}]'
@@ -1473,7 +1487,7 @@ def test_cache_recovery(
             anime_id="selected", episode_id="selected", type="tvseries"
         )
 
-        async def handler(request):
+        async def handler(request: httpx.Request) -> httpx.Response:
             assert operation == "write" or confirmed
             assert request.url.path == f"/api/v2/comment/{episode_id}"
             async with await library_lock(lib.dir).acquire(timeout=1):
@@ -1559,6 +1573,7 @@ def test_cache_recovery(
                     await asyncio.wait_for(request, timeout=3)
                 await item.refresh_from_db()
                 assert item.path == str(source)
+                assert item.danmaku_meta is not None
                 assert item.danmaku_meta["episode_id"] == "old-1"
                 assert item.danmaku_path == (str(old_cache) if recorded_path else None)
                 assert old_cache.read_text() == original
@@ -1573,6 +1588,7 @@ def test_cache_recovery(
 
             await item.refresh_from_db()
             assert item.path == str(destination)
+            assert item.danmaku_meta is not None
             assert item.danmaku_meta["episode_id"] == episode_id
             assert not source.exists()
             assert destination.read_bytes() == b"video"
@@ -1583,10 +1599,13 @@ def test_cache_recovery(
                 assert not new_cache.exists()
                 assert item.danmaku_path is None
                 if operation == "empty":
+                    assert result is not None
                     assert result.metadata == meta
                     assert result.comments == []
             else:
                 expected = "Cached" if operation == "read" else "Fetched"
+                assert result is not None
+                assert result.metadata is not None
                 assert result.metadata.episode_id == episode_id
                 assert [comment.text for comment in result.comments] == [expected]
                 assert (

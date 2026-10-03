@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import cast
 
 import httpx
 from aiofiles import os as async_os
@@ -185,7 +186,10 @@ async def generate_nfo(_, body: MediaMetadata, id: int) -> HTTPResponse:
     # overwrite the NFO file and update the metadata immediately
     lib = item.lib
     episode_ids = (
-        await MediaItem.filter(parent_id=item.id).values_list("id", flat=True)
+        cast(
+            list[int],
+            await MediaItem.filter(parent_id=item.id).values_list("id", flat=True),
+        )
         if lib.lib_type == LibType.TV_SHOW
         else None
     )

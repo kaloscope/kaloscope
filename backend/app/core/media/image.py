@@ -392,7 +392,7 @@ def _build_archive_index(source: ReadingSource) -> ImageIndex:
             else:
                 pages.append(resource)
         return ImageIndex(
-            format=source.format.value,
+            format="cbz" if source.format == MediaFormat.CBZ else "zip",
             index_version=secrets.token_hex(32),
             source_snapshot=snapshot,
             pages=tuple(pages),

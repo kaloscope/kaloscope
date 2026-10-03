@@ -150,7 +150,10 @@ def test_episode_scope(tmp_path, monkeypatch, change):
             response = await route(None, body, parent.id)
 
             assert response.status == 204
-            expected = [original.path] if change == "moved" else []
+            expected = []
+            if change == "moved":
+                assert original is not None
+                expected = [original.path]
             assert [
                 call.kwargs["bootparams"]["item_path"]
                 for call in execute.await_args_list

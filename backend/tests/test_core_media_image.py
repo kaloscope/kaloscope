@@ -63,6 +63,7 @@ def test_image_directory(tmp_path):
     cache = tmp_path / "cache"
     index = build_image_index(source, cache)
 
+    assert index.cover is not None
     assert [page.relative_path for page in index.pages] == [
         "page1.png",
         "page2.jpg",
@@ -123,6 +124,7 @@ def test_cover_fallback(tmp_path, fallback):
     index = build_image_index(source, tmp_path / "cache")
     assert len(index.pages) == 1
     if fallback:
+        assert index.cover is not None
         assert index.cover.relative_path == fallback
     else:
         assert index.cover is None

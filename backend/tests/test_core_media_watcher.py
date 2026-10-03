@@ -7,11 +7,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from filelock import Timeout
 from lxml import etree
+from sanic import Sanic
 from tortoise import Tortoise
 from watchdog.events import FileCreatedEvent, FileMovedEvent
 
@@ -48,7 +50,12 @@ def test_idle_wakeup(tmp_path, monkeypatch):
             )
             changes = {}
             monitor = watcher.LibWatcher(
-                SimpleNamespace(shared_ctx=SimpleNamespace(lib_event_changes=changes))
+                cast(
+                    Sanic,
+                    SimpleNamespace(
+                        shared_ctx=SimpleNamespace(lib_event_changes=changes)
+                    ),
+                )
             )
             producer = SimpleNamespace(
                 shared_ctx=SimpleNamespace(lib_event_changes=changes)
@@ -157,10 +164,10 @@ def test_pending_startup(tmp_path, monkeypatch, scan_on_startup):
                 loop=asyncio.get_running_loop(),
                 add_task=lambda task, **kwargs: tasks.append(task),
             )
-            monitor = watcher.LibWatcher(app)
+            monitor = watcher.LibWatcher(cast(Sanic, app))
             monitor._watcher_lock = Mock()
-            monitor._observing_paths = []
-            monitor._scanning_paths = []
+            monkeypatch.setitem(monitor.__dict__, "_observing_paths", [])
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
             monitor._observers = {}
             await monitor.start()
 
@@ -212,9 +219,9 @@ def test_initial_scan(tmp_path, monkeypatch, startup, scan_on_startup):
             loop=asyncio.get_running_loop(),
             add_task=lambda task, **kwargs: tasks.append(task),
         )
-        monitor = watcher.LibWatcher(app)
+        monitor = watcher.LibWatcher(cast(Sanic, app))
         monitor._watcher_lock = Mock()
-        monitor._observing_paths = []
+        monkeypatch.setitem(monitor.__dict__, "_observing_paths", [])
         monitor._observers = {}
         monkeypatch.setattr(monitor, "_create_events", AsyncMock(return_value=events))
         consumer = AsyncMock()
@@ -249,7 +256,7 @@ def test_delayed_scan(tmp_path, monkeypatch, enabled):
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             scan = AsyncMock()
             monkeypatch.setattr(monitor, "scan_directory", scan)
 
@@ -280,13 +287,21 @@ def test_pending_actions(tmp_path, monkeypatch, action):
     pending, healthy, removed = (
         str(tmp_path / name) for name in ("Pending", "Healthy", "Removed")
     )
-    monitor = watcher.LibWatcher(None)
-    monitor._watcher_actions = {
-        pending: action,
-        healthy: watcher.LibAction.SCAN,
-        removed: watcher.LibAction.REMOVE,
-    }
-    monitor._observers = {path: (None, Queue()) for path in monitor._watcher_actions}
+    monitor = watcher.LibWatcher(Mock(spec=Sanic))
+    monkeypatch.setitem(
+        monitor.__dict__,
+        "_watcher_actions",
+        {
+            pending: action,
+            healthy: watcher.LibAction.SCAN,
+            removed: watcher.LibAction.REMOVE,
+        },
+    )
+    monkeypatch.setitem(
+        monitor.__dict__,
+        "_observers",
+        {path: (None, Queue()) for path in monitor._watcher_actions},
+    )
     rounds = []
 
     async def handle(path):
@@ -317,7 +332,7 @@ def test_pending_actions(tmp_path, monkeypatch, action):
 
 @pytest.mark.parametrize("stage", ["pending", "published", "conflict"])
 @pytest.mark.parametrize("by_path", [False, True])
-def test_scan_recovery(tmp_path, stage, by_path):
+def test_scan_recovery(tmp_path, monkeypatch, stage, by_path):
     mimetypes.add_type(NFO_MIME_TYPE, ".nfo")
     source = tmp_path / "old.mkv"
     source.write_bytes(b"video")
@@ -374,10 +389,12 @@ def test_scan_recovery(tmp_path, stage, by_path):
                     "nfo_edits": [],
                 },
             )
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
             target = lib.dir if by_path else lib
 
             if stage == "published":
@@ -420,7 +437,7 @@ def test_scan_recovery(tmp_path, stage, by_path):
 
 def test_scan_retry(tmp_path, monkeypatch):
     enqueue = AsyncMock(side_effect=[RuntimeError("scan failed"), None])
-    monitor = watcher.LibWatcher(None)
+    monitor = watcher.LibWatcher(Mock(spec=Sanic))
     monkeypatch.setattr(monitor, "_enqueue_events", enqueue)
 
     async def run():
@@ -432,7 +449,7 @@ def test_scan_retry(tmp_path, monkeypatch):
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
-            monitor._scanning_paths = [lib.dir]
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [lib.dir])
 
             with pytest.raises(RuntimeError, match="scan failed"):
                 await monitor.scan_directory(lib)
@@ -453,9 +470,11 @@ def test_action_cancellation(tmp_path, monkeypatch):
         pending: watcher.LibAction.SCAN,
         removed: watcher.LibAction.REMOVE,
     }
-    monitor = watcher.LibWatcher(None)
-    monitor._watcher_actions = actions.copy()
-    monitor._observers = {path: (None, Queue()) for path in actions}
+    monitor = watcher.LibWatcher(Mock(spec=Sanic))
+    monkeypatch.setitem(monitor.__dict__, "_watcher_actions", actions.copy())
+    monkeypatch.setitem(
+        monitor.__dict__, "_observers", {path: (None, Queue()) for path in actions}
+    )
     scan_action = AsyncMock(side_effect=asyncio.CancelledError)
     remove_action = AsyncMock()
     pause = AsyncMock(side_effect=RuntimeError("unexpected retry"))
@@ -569,6 +588,7 @@ def test_move_source(tmp_path, monkeypatch, suffix, source_state, destination_ex
                     assert target.nfo_path == str(destination_nfo)
                     assert target.title == "Moved"
                 else:
+                    assert result is not None
                     assert [info.item_path for info in result] == [str(destination)]
             else:
                 assert result is None
@@ -621,10 +641,12 @@ def test_hash_scan(tmp_path, monkeypatch, backfill_nfo_events, missing):
                 danmaku_meta=cached_meta,
             )
             await shelver.update_metadata(lib, nfo)
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
 
             await monitor.scan_directory(lib, backfill_nfo_events=backfill_nfo_events)
             while not events.empty():
@@ -705,8 +727,8 @@ def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
                 events.put(pending)
             if delivery == "duplicate":
                 events.put(pending)
-            monitor = watcher.LibWatcher(None)
-            monitor._event_changes = {}
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
+            monkeypatch.setitem(monitor.__dict__, "_event_changes", {})
 
             await asyncio.wait_for(monitor._event_consumer(lib.id, events), 3)
 
@@ -1174,6 +1196,7 @@ def test_replaced_video(
                 event = watcher.get_handler(lib.lib_type).filter_event(
                     FileMovedEvent(str(temporary), str(source)), base_path=lib.dir
                 )
+                assert event is not None
                 events.append(
                     await MediaEvent.create(
                         lib=lib,
@@ -1362,6 +1385,7 @@ def test_workflow_retry(tmp_path, monkeypatch, restart, error, interrupted_index
                 async with await library_lock(lib.dir).acquire(timeout=1):
                     pending = await MediaEvent.get(id=event.id)
                     assert pending.event_type == "ingest"
+                    assert pending.payload is not None
                     assert (
                         pending.payload["bootparams"][0]["item_id"]
                         == bootparams["item_id"]
@@ -1383,6 +1407,7 @@ def test_workflow_retry(tmp_path, monkeypatch, restart, error, interrupted_index
             assert all(item.nfo_path for item in items)
             pending = await MediaEvent.get(id=event.id)
             assert pending.event_type == "ingest"
+            assert pending.payload is not None
             assert [params["item_id"] for params in pending.payload["bootparams"]] == (
                 ids[interrupted_index:]
             )
@@ -1392,7 +1417,7 @@ def test_workflow_retry(tmp_path, monkeypatch, restart, error, interrupted_index
                 await Tortoise.close_connections()
                 await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
                 lib = await MediaLib.get(id=lib.id)
-                monitor = watcher.LibWatcher(None)
+                monitor = watcher.LibWatcher(Mock(spec=Sanic))
                 events = await monitor._create_events(lib)
                 assert events.qsize() == 1
                 pending = events.get_nowait()
@@ -1557,6 +1582,7 @@ def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo):
             async def fire(*_args, bootparams):
                 async with await library_lock(lib.dir).acquire(timeout=1):
                     pending = await MediaEvent.get(id=event.id)
+                    assert pending.payload is not None
                     assert pending.payload["bootparams"] == [bootparams]
                     await item.refresh_from_db()
                     assert item.hash == hashlib.md5(b"current video").hexdigest()
@@ -1683,6 +1709,7 @@ def test_ingest_hash_retry(tmp_path, monkeypatch, error):
             item = await MediaItem.get(lib_id=lib.id)
             pending = await MediaEvent.get(id=event.id)
             assert pending.event_type == "ingest"
+            assert pending.payload is not None
             assert pending.payload["bootparams"][0]["item_id"] == item.id
             assert item.hash is None and item.size is None
             fire.assert_not_awaited()
@@ -2309,10 +2336,12 @@ def test_organization_rescan(
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
 
             async def scan():
                 await monitor.scan_directory(lib)
@@ -2396,10 +2425,12 @@ def test_unindexed_season(tmp_path, monkeypatch, season_nfo):
                 priority=1,
                 rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
             )
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
 
             async def scan():
                 await monitor.scan_directory(lib)
@@ -2470,8 +2501,8 @@ def test_persisted_event(tmp_path, monkeypatch):
                 raise asyncio.CancelledError
 
             monkeypatch.setattr(watcher, "consume_event", finish)
-            monitor = watcher.LibWatcher(None)
-            monitor._event_changes = {}
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
+            monkeypatch.setitem(monitor.__dict__, "_event_changes", {})
             await asyncio.wait_for(monitor._event_consumer(lib.id, Queue()), 3)
 
             await item.refresh_from_db()
@@ -2530,12 +2561,13 @@ def test_deferred_events(tmp_path, monkeypatch):
 
             monkeypatch.setattr(watcher, "organize_items", organize)
             monkeypatch.setattr(watcher, "consume_event", finish)
-            monitor = watcher.LibWatcher(None)
-            monitor._event_changes = {}
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
+            monkeypatch.setitem(monitor.__dict__, "_event_changes", {})
             await asyncio.wait_for(monitor._event_consumer(lib.id, events), 5)
 
             await pending.refresh_from_db()
             assert attempts == [[1], [1], [2]]
+            assert pending.payload is not None
             assert pending.payload["organize_ids"] == [1]
             assert await MediaEvent.filter(lib=lib).count() == 1
             fire.assert_not_awaited()
@@ -2610,7 +2642,7 @@ def test_ingest_recovery(tmp_path, monkeypatch, restart, interruption):
                 await watcher.consume_event(event)
 
             if restart:
-                monitor = watcher.LibWatcher(None)
+                monitor = watcher.LibWatcher(Mock(spec=Sanic))
                 events = await monitor._create_events(lib)
                 while not events.empty():
                     await watcher.consume_event(events.get_nowait())
@@ -2731,7 +2763,7 @@ def test_hash_recovery(tmp_path, monkeypatch, restart):
             fire.assert_not_awaited()
 
             blocked = False
-            monitor = watcher.LibWatcher(None)
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = await monitor._create_events(lib)
             while not events.empty():
                 await watcher.consume_event(events.get_nowait())

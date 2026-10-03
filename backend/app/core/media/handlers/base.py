@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, overload
 
 from lxml import etree
 from sanic.log import Colors, logger
@@ -17,6 +18,9 @@ from watchdog.events import (
 
 from app.core.constants import ENCODING, NFO_MIME_TYPE
 from app.models.media import Language, LibType, MediaLib, NFOType
+
+if TYPE_CHECKING:
+    from app.core.media.handlers.reading import ReadingMediaHandler
 
 
 @dataclass(kw_only=True)
@@ -338,6 +342,16 @@ class MediaHandler(ABC):
 
 
 _HANDLERS: dict[LibType, MediaHandler] = {}
+
+
+@overload
+def get_handler(
+    lib_type: Literal[LibType.NOVEL, LibType.COMIC],
+) -> "ReadingMediaHandler": ...
+
+
+@overload
+def get_handler(lib_type: LibType) -> MediaHandler: ...
 
 
 def get_handler(lib_type: LibType) -> MediaHandler:

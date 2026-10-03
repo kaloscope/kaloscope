@@ -73,7 +73,7 @@ def _safe_path(root: Path, path: Path):
         raise ValueError(f"directory symlink is not allowed: {path}")
 
 
-def _metadata(path: Path, lib_type: str, root_tag: str) -> dict:
+def _metadata(path: Path, lib_type: LibType, root_tag: str) -> dict:
     """Extract organization metadata from a complete NFO document.
 
     Args:
@@ -451,6 +451,8 @@ async def _plan(
     """
     root = Path(lib.dir).absolute()
     template = lib.rename_template
+    if not template:
+        raise ValueError("naming template is not configured")
     source_dir = Path(parent.path) if parent else Path(group[0].path).parent
     _safe_path(root, source_dir)
     is_tv = lib.lib_type == LibType.TV_SHOW
@@ -575,7 +577,7 @@ async def _plan(
         _safe_path(root, old)
         metadata = {} if is_tv else parent_meta
         own_nfo = Path(item.nfo_path or str(old.with_suffix(".nfo")))
-        if is_tv:
+        if is_tv and parent is not None:
             try:
                 _safe_path(root, own_nfo)
                 metadata = await asyncio.to_thread(
@@ -633,7 +635,7 @@ async def _plan(
             data["nfo_path"] = str(destination.with_suffix(".nfo"))
         elif not parent and target_dir != root:
             data["nfo_path"] = None
-        if is_tv:
+        if is_tv and parent is not None:
             if metadata:
                 for name in _METADATA:
                     value = metadata.get(name)
@@ -762,7 +764,11 @@ async def _plan(
     parent_data = None
     if target_dir != root:
         # keep stored metadata and modification time aligned with the retained NFO
-        stored_meta = target_meta if reuse_nfo else parent_meta
+        if reuse_nfo:
+            assert target_meta is not None
+            stored_meta = target_meta
+        else:
+            stored_meta = parent_meta
         parent_data = {
             "id": target_parent.id
             if target_parent
@@ -784,10 +790,10 @@ async def _plan(
                 parent_data[name] = (
                     str(value) if name == "rating" and value is not None else value
                 )
-        if is_tv:
+        if is_tv and parent is not None:
             parent_data["season"] = parent_context.get("season")
             if reuse_nfo:
-                existing_season = target_meta.get("season")
+                existing_season = stored_meta.get("season")
                 if existing_season is None and target_parent:
                     existing_season = target_parent.season
                 if existing_season != parent_data["season"]:
@@ -1106,6 +1112,8 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     """
     payload = event.payload
     try:
+        if payload is None:
+            raise ValueError("organization event has no payload")
         await _write_in_thread(_move_files, Path(lib.dir).absolute(), payload)
         async with in_transaction("default"):
             parent = payload["parent"]
@@ -1218,10 +1226,12 @@ async def _season_groups(
         Pairs of season numbers and item lists, or one pair with a `None` season
         when the template does not require grouping by season.
     """
+    template = lib.rename_template
     if (
         lib.lib_type != LibType.TV_SHOW
         or parent is None
-        or not re.search(r"{{\s*season\s*}}", lib.rename_template.rsplit("/", 1)[0])
+        or not template
+        or not re.search(r"{{\s*season\s*}}", template.rsplit("/", 1)[0])
     ):
         return [(None, group)]
     parent_season = parent.season

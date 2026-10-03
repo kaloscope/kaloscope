@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from lxml import etree
 from watchdog.events import (
     DirCreatedEvent,
     DirDeletedEvent,
@@ -334,6 +335,7 @@ def test_source_unavailable(tmp_path, monkeypatch, failed):
 )
 def test_file_events(tmp_path, event_type, lib_type, relative, unit):
     handler = get_handler(lib_type)
+    assert isinstance(handler, reading.ReadingMediaHandler)
     event = event_type(str(tmp_path / relative))
     assert handler.resolve_event_targets(event, base_path=str(tmp_path)) == {
         tmp_path / "Book": {tmp_path / unit}
@@ -347,9 +349,11 @@ def test_file_events(tmp_path, event_type, lib_type, relative, unit):
 def test_directory_events(tmp_path, event_type):
     event = event_type(str(tmp_path / "Book/Chapter"))
     for lib_type, unit in ((LibType.NOVEL, "Book"), (LibType.COMIC, "Book/Chapter")):
-        assert get_handler(lib_type).resolve_event_targets(
-            event, base_path=str(tmp_path)
-        ) == {tmp_path / "Book": {tmp_path / unit}}
+        handler = get_handler(lib_type)
+        assert isinstance(handler, reading.ReadingMediaHandler)
+        assert handler.resolve_event_targets(event, base_path=str(tmp_path)) == {
+            tmp_path / "Book": {tmp_path / unit}
+        }
 
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
@@ -430,6 +434,6 @@ def test_registered_handlers(tmp_path):
         with pytest.raises(NotImplementedError, match="source discovery"):
             handler.hierarchies()
         with pytest.raises(NotImplementedError, match="NFO"):
-            handler.extract_meta(None)
+            handler.extract_meta(etree.ElementTree())
         with pytest.raises(NotImplementedError, match="content indexing"):
             asyncio.run(handler.gen_items(MediaLib(lib_type=lib_type), tmp_path))

@@ -340,9 +340,10 @@ class LibWatcher:
         """
         if delay > 0:
             await asyncio.sleep(delay)
-            lib = await MediaLib.get_or_none(id=lib.id)
-            if lib is None or not lib.scan_on_startup:
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or not current.scan_on_startup:
                 return
+            lib = current
         await self.scan_directory(lib, backfill_nfo_events=False, validate_request=True)
 
     async def scan_directory(
@@ -541,9 +542,10 @@ async def consume_event(event: MediaEvent):
         if lib is None:
             return
         await recover_organizing(lib)
-        event = await MediaEvent.get_or_none(id=event.id)
-        if event is None:
+        current = await MediaEvent.get_or_none(id=event.id)
+        if current is None:
             return
+        event = current
         event.lib = lib
         pending = await _consume_event(event)
     # fire workflows after releasing the library lock they also use to write NFOs
@@ -642,10 +644,13 @@ async def _resume_ingest(event: MediaEvent) -> list[dict]:
         The remaining workflow parameters with current paths and parent metadata.
 
     Raises:
-        OrganizePendingError: If organization cannot finish safely.
+        OrganizePendingError: If the payload is missing or organization cannot
+            finish safely.
         OrganizeDeferredError: If a group is waiting for its remaining transfers.
     """
     payload = event.payload
+    if payload is None:
+        raise OrganizePendingError(f"ingest event {event.id} has no payload")
     if affected := payload.get("organize_ids"):
         await organize_items(event.lib, affected)
 

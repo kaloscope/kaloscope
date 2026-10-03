@@ -138,14 +138,14 @@ def test_content_index(tmp_path):
                 "INSERT INTO media_lib "
                 "(id, lib_type, dir, name, priority, danmaku_ttl, scan_on_startup) "
                 "VALUES (?, ?, ?, ?, ?, 24, 0)",
-                [(1, "movie", "/movies", "Movies", 1), (2, "tv_show", "/tv", "TV", 2)],
+                [[1, "movie", "/movies", "Movies", 1], [2, "tv_show", "/tv", "TV", 2]],
             )
             await connection.execute_many(
                 "INSERT INTO media_item "
                 "(id, lib_id, parent_id, dir, path, name, title, visible, nfo_path) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (
+                    [
                         1,
                         1,
                         None,
@@ -155,9 +155,9 @@ def test_content_index(tmp_path):
                         "Movie",
                         1,
                         "/movies/a.nfo",
-                    ),
-                    (2, 2, None, "/tv/a", "/tv/a", "a", "Show", 1, "/tv/a/tvshow.nfo"),
-                    (3, 2, 2, "/tv/a", "/tv/a/1.mkv", "1", "Episode", 0, "/tv/a/1.nfo"),
+                    ],
+                    [2, 2, None, "/tv/a", "/tv/a", "a", "Show", 1, "/tv/a/tvshow.nfo"],
+                    [3, 2, 2, "/tv/a", "/tv/a/1.mkv", "1", "Episode", 0, "/tv/a/1.nfo"],
                 ],
             )
             await connection.execute_many(
@@ -165,9 +165,9 @@ def test_content_index(tmp_path):
                 "(id, lib_id, src_path, event_type, is_directory, payload) "
                 "VALUES (?, 1, '/movies/a.mkv', ?, 0, ?)",
                 [
-                    (1, "created", None),
-                    (2, "ingest", '{"boot_params":[],"organize_ids":[1]}'),
-                    (3, "organize", '{"state":"pending"}'),
+                    [1, "created", None],
+                    [2, "ingest", '{"boot_params":[],"organize_ids":[1]}'],
+                    [3, "organize", '{"state":"pending"}'],
                 ],
             )
             await connection.execute_query(
@@ -180,8 +180,8 @@ def test_content_index(tmp_path):
                 "(id, user_id, rel_type, rel_id, position, percentage, keyword, "
                 "repetitions) VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
                 [
-                    (1, "video", 3, 123, 42, None, 2),
-                    (2, "search", 0, None, None, "Example", 4),
+                    [1, "video", 3, 123, 42, None, 2],
+                    [2, "search", 0, None, None, "Example", 4],
                 ],
             )
             snapshots = {
@@ -241,6 +241,7 @@ def test_content_index(tmp_path):
             assert reading.position is None
             assert (await UserHistory.get(id=1)).position == 123
             episode = await MediaItem.get(id=3)
+            assert episode.parent is not None
             assert (await episode.parent).id == 2
             with pytest.raises(IntegrityError):
                 await MediaItem.create(

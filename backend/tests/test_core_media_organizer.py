@@ -9,12 +9,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 from filelock import Timeout
 from lxml import etree
+from sanic import Sanic
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -26,7 +27,13 @@ from app.core.media.watcher import LibWatcher, consume_event
 from app.models.download import Downloader, DownloadState, DownloadTask
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
-from app.services.danmaku import Danmaku, DanmakuAnime, DanmakuMeta, DanmakuService
+from app.services.danmaku import (
+    Danmaku,
+    DanmakuAnime,
+    DanmakuMeta,
+    DanmakuService,
+    DanmakuWrapper,
+)
 from app.services.flow import FlowTriggerService
 
 
@@ -47,6 +54,22 @@ def _nfo(path: Path, title: str, tag="movie", extra=""):
         f"{extra}</{tag}>",
         encoding="utf-8",
     )
+
+
+def _path(value: str | None) -> Path:
+    """Require a persisted path before inspecting a test file.
+
+    Args:
+        value: The possibly unset path read from a test record.
+
+    Returns:
+        The path whose presence the test requires.
+
+    Raises:
+        AssertionError: If the record has no path.
+    """
+    assert value is not None
+    return Path(value)
 
 
 @pytest.mark.parametrize(
@@ -162,7 +185,7 @@ async def _journal(lib: MediaLib, item: MediaItem):
                 {
                     "src": source,
                     "dst": str(target),
-                    "identity": organizer._fingerprint(Path(source)),
+                    "identity": organizer._fingerprint(_path(source)),
                 }
                 for source, target in ((item.path, video), (item.nfo_path, nfo))
             ],
@@ -188,6 +211,45 @@ async def _journal(lib: MediaLib, item: MediaItem):
     )
 
 
+@pytest.mark.parametrize("event_type", ["organize", "ingest"])
+def test_empty_journal(tmp_path, monkeypatch, event_type):
+    """Retain incomplete journals without changing media or firing workflows.
+
+    Args:
+        tmp_path: The isolated media directory.
+        monkeypatch: The fixture replacing workflow dispatch.
+        event_type: The persisted journal type with a missing payload.
+    """
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        async with _database():
+            lib, item = await _movie(tmp_path)
+            original_path = item.path
+            nfo = _path(item.nfo_path)
+            content = nfo.read_bytes()
+            event = await MediaEvent.create(
+                lib=lib, src_path=item.path, event_type=event_type
+            )
+
+            with pytest.raises(organizer.OrganizePendingError):
+                await consume_event(event)
+
+            await item.refresh_from_db()
+            pending = await MediaEvent.get(id=event.id)
+            assert pending.event_type == event_type
+            assert pending.payload is None
+            assert item.path == original_path
+            assert item.nfo_path == str(nfo)
+            assert Path(item.path).read_bytes() == b"video"
+            assert nfo.read_bytes() == content
+            assert not (tmp_path / "New Movie.mkv").exists()
+            fire.assert_not_awaited()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("interruption", ["before", "move", "database"])
 def test_journal_recovery(tmp_path, monkeypatch, interruption):
     root = tmp_path / "library"
@@ -201,7 +263,7 @@ def test_journal_recovery(tmp_path, monkeypatch, interruption):
         try:
             lib, item = await _movie(root)
             journal = await _journal(lib, item)
-            original = {Path(path).name: path for path in (item.path, item.nfo_path)}
+            original = {_path(path).name: path for path in (item.path, item.nfo_path)}
             downloader = await Downloader.create(
                 config="config", name="RPC", priority=1
             )
@@ -260,14 +322,14 @@ def test_journal_recovery(tmp_path, monkeypatch, interruption):
             assert item.title == "New Movie" and item.year == 2026
             assert item.hash == "a" * 32
             assert item.nfo_mtime == datetime.fromtimestamp(
-                Path(item.nfo_path).stat().st_mtime, tz=UTC
+                _path(item.nfo_path).stat().st_mtime, tz=UTC
             )
             assert Path(item.path).read_bytes() == b"video"
             assert download.transfer_targets == {
                 "original.mkv": item.path,
                 "original.nfo": item.nfo_path,
             }
-            assert all(not Path(path).exists() for path in original.values())
+            assert all(not _path(path).exists() for path in original.values())
             assert await MediaItem.filter(lib=lib).count() == 1
             assert not await MediaEvent.filter(id=journal.id).exists()
             assert await MediaEvent.filter(id=notification.id).exists()
@@ -304,11 +366,12 @@ def test_journal_conflict(tmp_path, monkeypatch, conflict):
                     destination = root / "link" / destination.name
                 else:
                     destination = outside / destination.name
+                assert journal.payload is not None
                 journal.payload["moves"][0]["dst"] = str(destination)
                 await journal.save(update_fields=["payload"])
             contents = {
                 path: path.read_bytes() if path.exists() else None
-                for path in (source, destination, Path(item.nfo_path))
+                for path in (source, destination, _path(item.nfo_path))
             }
 
             async with library_lock(lib.dir):
@@ -401,13 +464,14 @@ def test_journal_files(tmp_path, monkeypatch, mode):
                 tmp_path / name for name in ("New Movie.nfo", "copy.nfo", "alias.mkv")
             )
             content = "<movie><title>New Movie</title></movie>"
-            Path(item.nfo_path).chmod(0o640)
+            _path(item.nfo_path).chmod(0o640)
             alias.symlink_to(Path(item.path).name)
+            assert journal.payload is not None
             journal.payload["nfo_edits"] = [
                 {
                     "path": str(nfo),
                     "before": hashlib.sha256(
-                        Path(item.nfo_path).read_bytes()
+                        _path(item.nfo_path).read_bytes()
                     ).hexdigest(),
                     "content": content,
                 }
@@ -529,7 +593,7 @@ def test_movie_rename(tmp_path):
             await history.refresh_from_db()
             assert history.rel_id == item.id and history.position == 42
             assert (tmp_path / "New Movie.zh-CN.srt").read_text() == "subtitles"
-            assert Path(item.nfo_path).is_file()
+            assert _path(item.nfo_path).is_file()
             assert mapping[str(tmp_path / "original.mkv")] == item.path
             assert await MediaItem.all().count() == 1
             assert await organizer.organize_items(lib, [item.id]) == {}
@@ -548,7 +612,7 @@ def test_movie_hierarchy(tmp_path):
             parent_id = item.parent_id
             parent = await MediaItem.get(id=parent_id)
             assert parent.path == str(tmp_path / "New Movie")
-            assert Path(parent.nfo_path).is_file()
+            assert _path(parent.nfo_path).is_file()
             assert item.nfo_path is None
             lib.rename_template = "{{title}}"
             await organizer.organize_items(lib, [item.id])
@@ -556,7 +620,7 @@ def test_movie_hierarchy(tmp_path):
             assert item.parent_id is None
             assert item.path == str(tmp_path / "New Movie.mkv")
             assert item.title == "New Movie"
-            assert Path(item.nfo_path).is_file()
+            assert _path(item.nfo_path).is_file()
             assert not await MediaItem.filter(id=parent_id).exists()
 
     asyncio.run(run())
@@ -600,7 +664,7 @@ def test_movie_flatten(tmp_path, conflict):
                 assert mapping == {}
                 assert item.path == original_path
                 assert item.parent_id == parent_id
-                assert Path(original_nfo).is_file()
+                assert _path(original_nfo).is_file()
                 assert (
                     destination.with_suffix(conflict).read_bytes() == b"existing file"
                 )
@@ -608,7 +672,7 @@ def test_movie_flatten(tmp_path, conflict):
                 assert item.path == str(destination)
                 assert item.parent_id is None
                 assert item.nfo_path == str(destination.with_suffix(".nfo"))
-                assert Path(item.nfo_path).is_file()
+                assert _path(item.nfo_path).is_file()
                 assert mapping[original_path] == item.path
                 assert not await MediaItem.filter(id=parent_id).exists()
             assert Path(item.path).read_bytes() == b"video"
@@ -653,7 +717,7 @@ def test_shared_movie_companions(tmp_path, indexed, template):
             for current in await MediaItem.filter(lib=lib):
                 assert Path(current.path).name in contents
                 assert current.nfo_path == str(tmp_path / "original.nfo")
-                assert Path(current.nfo_path).is_file()
+                assert _path(current.nfo_path).is_file()
             assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
@@ -714,7 +778,7 @@ def test_movie_destination(tmp_path, indexed, layout, filename):
             else:
                 assert item.path == str(tmp_path / "New Movie.mkv")
                 assert mapping[original_path] == item.path
-                assert Path(item.nfo_path).is_file()
+                assert _path(item.nfo_path).is_file()
             assert video.read_bytes() == b"existing video"
             assert not await MediaEvent.filter(event_type="organize").exists()
 
@@ -830,7 +894,7 @@ def test_unsafe_plan(tmp_path, invalid):
             if invalid == "collision":
                 (tmp_path / "New Movie.mkv").write_bytes(b"other")
             elif invalid == "incomplete_nfo":
-                Path(item.nfo_path).write_text("<movie><title>Partial</title>")
+                _path(item.nfo_path).write_text("<movie><title>Partial</title>")
             else:
                 real = tmp_path / "real"
                 real.mkdir()
@@ -867,8 +931,8 @@ def test_destination_ancestor(tmp_path, conflict):
                 blocker.write_bytes(b"existing file")
                 blocker.chmod(0o755)
             original_path = item.path
-            original_nfo = Path(item.nfo_path).read_bytes()
-            original_parent_nfo = Path(parent.nfo_path).read_bytes()
+            original_nfo = _path(item.nfo_path).read_bytes()
+            original_parent_nfo = _path(parent.nfo_path).read_bytes()
 
             mapping = await organizer.organize_items(lib, [item.id])
             await item.refresh_from_db()
@@ -876,8 +940,8 @@ def test_destination_ancestor(tmp_path, conflict):
             assert mapping == {}
             assert item.path == original_path
             assert Path(item.path).read_bytes() == b"video"
-            assert Path(item.nfo_path).read_bytes() == original_nfo
-            assert Path(parent.nfo_path).read_bytes() == original_parent_nfo
+            assert _path(item.nfo_path).read_bytes() == original_nfo
+            assert _path(parent.nfo_path).read_bytes() == original_parent_nfo
             assert artwork.read_bytes() == b"poster"
             if conflict == "existing_file":
                 assert blocker.read_bytes() == b"existing file"
@@ -915,7 +979,7 @@ def test_recovery(tmp_path, monkeypatch):
             await organizer.recover_organizing(lib)
             await item.refresh_from_db()
             assert item.path == str(tmp_path / "New Movie.mkv")
-            assert Path(item.nfo_path).is_file()
+            assert _path(item.nfo_path).is_file()
             assert (tmp_path / ".New Movie.json").read_text() == (
                 '[{"text":"Local comment"}]'
             )
@@ -931,7 +995,7 @@ def test_episode_recovery(tmp_path, monkeypatch, known_nfo, episode):
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
-            nfo = Path(item.nfo_path)
+            nfo = _path(item.nfo_path)
             shared = tmp_path / "shared"
             shared.mkdir()
             poster = shared / "poster.jpg"
@@ -980,16 +1044,18 @@ def test_episode_recovery(tmp_path, monkeypatch, known_nfo, episode):
             assert (expected / item.backdrop).read_bytes() == b"backdrop"
             assert not backdrop.exists()
             metadata = organizer._metadata(
-                Path(item.nfo_path), lib.lib_type, "episodedetails"
+                _path(item.nfo_path), lib.lib_type, "episodedetails"
             )
             assert metadata["poster"] == item.poster
             assert metadata["backdrop"] == item.backdrop
             assert item.nfo_mtime == datetime.fromtimestamp(
-                Path(item.nfo_path).stat().st_mtime, tz=UTC
+                _path(item.nfo_path).stat().st_mtime, tz=UTC
             )
             events = Queue()
-            watcher = LibWatcher(None)
-            watcher._observers = {lib.dir: (None, events)}
+            watcher = LibWatcher(Mock(spec=Sanic))
+            monkeypatch.setitem(
+                watcher.__dict__, "_observers", {lib.dir: (None, events)}
+            )
             await watcher._enqueue_events(lib, backfill_nfo_events=False)
             assert events.empty()
             assert not await MediaEvent.filter(event_type="organize").exists()
@@ -1004,7 +1070,7 @@ def test_episode_metadata(tmp_path, invalid):
             lib, parent, item = await _episode(tmp_path)
             original_path = item.path
             title = "x" * 256 if invalid else "New title"
-            Path(item.nfo_path).write_text(
+            _path(item.nfo_path).write_text(
                 f"<episodedetails><title>{title}</title></episodedetails>",
                 encoding="utf-8",
             )
@@ -1035,12 +1101,12 @@ def test_episode_metadata(tmp_path, invalid):
     asyncio.run(run())
 
 
-def test_legacy_episode_recovery(tmp_path):
+def test_legacy_episode_recovery(tmp_path, monkeypatch):
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
             _nfo(
-                Path(item.nfo_path),
+                _path(item.nfo_path),
                 "New title",
                 "episodedetails",
                 "<season>1</season><episode>1</episode>",
@@ -1063,8 +1129,10 @@ def test_legacy_episode_recovery(tmp_path):
 
             assert item.nfo_mtime is None
             events = Queue()
-            watcher = LibWatcher(None)
-            watcher._observers = {lib.dir: (None, events)}
+            watcher = LibWatcher(Mock(spec=Sanic))
+            monkeypatch.setitem(
+                watcher.__dict__, "_observers", {lib.dir: (None, events)}
+            )
             await watcher._enqueue_events(lib, backfill_nfo_events=False)
             assert events.qsize() == 1
             event = events.get_nowait()
@@ -1094,13 +1162,13 @@ def test_show_originaltitle(tmp_path, originaltitle, directory):
                 else ""
             )
             _nfo(
-                Path(parent.nfo_path),
+                _path(parent.nfo_path),
                 "Localized Show",
                 "tvshow",
                 "<season>1</season>" + extra,
             )
             _nfo(
-                Path(item.nfo_path),
+                _path(item.nfo_path),
                 "Localized Episode",
                 "episodedetails",
                 "<season>1</season><episode>1</episode>"
@@ -1123,7 +1191,7 @@ def test_show_originaltitle(tmp_path, originaltitle, directory):
             assert item.path == str(destination)
             assert mapping.get(old_path, old_path) == item.path
             assert destination.read_bytes() == b"video"
-            assert Path(item.nfo_path).is_file()
+            assert _path(item.nfo_path).is_file()
             assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
@@ -1186,7 +1254,7 @@ def test_tvshow_missing_nfo(tmp_path):
             assert items[0].path == str(target / "S01E01 - Pilot.mkv")
             assert items[1].path == str(target / "old2.mkv")
             assert items[1].parent_id == parent.id
-            assert Path(parent.nfo_path).name == "Season 01.nfo"
+            assert _path(parent.nfo_path).name == "Season 01.nfo"
             assert not source.exists()
 
     asyncio.run(run())
@@ -1203,7 +1271,7 @@ def test_pending_episode_nfo(tmp_path, show_title, basename, indexed):
             lib, parent, item = await _episode(tmp_path)
             lib.rename_template = "{{show_title}}/{{episode_code}} - {{title}}"
             source = Path(parent.path)
-            parent_nfo = Path(parent.nfo_path)
+            parent_nfo = _path(parent.nfo_path)
             _nfo(parent_nfo, show_title, "tvshow", "<season>1</season>")
             original_nfo = parent_nfo.read_bytes()
             pending_video = source / f"{basename}.mkv"
@@ -1254,7 +1322,7 @@ def test_pending_episode_nfo(tmp_path, show_title, basename, indexed):
             assert destination.read_bytes() == b"pending episode"
             assert pending_item.nfo_path == str(destination.with_suffix(".nfo"))
             assert parent.nfo_path != pending_item.nfo_path
-            assert Path(parent.nfo_path).read_bytes() == original_nfo
+            assert _path(parent.nfo_path).read_bytes() == original_nfo
             assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
@@ -1274,7 +1342,7 @@ def test_missing_companion(tmp_path, monkeypatch, companion, recovery):
             lib, parent, item = await _episode(root)
             source = Path(item.dir)
             if companion == "nfo":
-                missing = Path(item.nfo_path)
+                missing = _path(item.nfo_path)
                 missing.unlink()
                 (source / "poster.jpg").write_bytes(b"poster")
                 item.poster = "poster.jpg"
@@ -1314,6 +1382,7 @@ def test_missing_companion(tmp_path, monkeypatch, companion, recovery):
             if companion == "nfo":
                 assert item.nfo_path is None
                 assert item.nfo_mtime is None
+                assert item.poster is not None
                 assert (Path(item.dir) / item.poster).read_bytes() == b"poster"
                 assert await gen_nfo(
                     "episode",
@@ -1334,6 +1403,7 @@ def test_missing_companion(tmp_path, monkeypatch, companion, recovery):
                 assert item.danmaku_path == str(current_cache)
                 assert await DanmakuService.load_from_cache(current_cache) == comments
                 assert result.comments == comments
+                assert result.metadata is not None
                 assert result.metadata.episode_id == "episode"
             assert not missing.exists()
             assert not source.exists()
@@ -1425,7 +1495,7 @@ def test_season_fallback(
             assert item.path == str(target / f"S{expected:02d}E01.mkv")
             assert item.season == expected
             assert Path(item.path).read_bytes() == b"video"
-            assert Path(item.nfo_path).is_file()
+            assert _path(item.nfo_path).is_file()
             assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
@@ -1521,10 +1591,12 @@ def test_external_symlink(tmp_path, monkeypatch, absolute, chained, target_name)
             )
 
             mapping = await organizer.organize_items(lib, [item.id])
-            monitor = LibWatcher(None)
+            monitor = LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
             await monitor.scan_directory(lib, backfill_nfo_events=False)
             while not events.empty():
                 await consume_event(events.get_nowait())
@@ -1565,7 +1637,7 @@ def test_external_directory_symlink(tmp_path, monkeypatch, absolute, relocated):
                 path=str(alias),
                 dir=str(alias),
                 name=alias.name,
-                nfo_path=str(alias / Path(parent.nfo_path).name),
+                nfo_path=str(alias / _path(parent.nfo_path).name),
                 season=1,
             )
             linked_path = alias / Path(item.path).name
@@ -1591,10 +1663,12 @@ def test_external_directory_symlink(tmp_path, monkeypatch, absolute, relocated):
             original_path = item.path
 
             mapping = await organizer.organize_items(lib, [parent.id])
-            monitor = LibWatcher(None)
+            monitor = LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
             await monitor.scan_directory(lib, backfill_nfo_events=False)
             while not events.empty():
                 await consume_event(events.get_nowait())
@@ -1726,10 +1800,12 @@ def test_retained_symlink(tmp_path, monkeypatch, absolute, interruption, target_
             else:
                 await organizer.organize_items(lib, [parent.id])
 
-            monitor = LibWatcher(None)
+            monitor = LibWatcher(Mock(spec=Sanic))
             events = Queue()
-            monitor._observers = {lib.dir: (None, events)}
-            monitor._scanning_paths = []
+            monkeypatch.setitem(
+                monitor.__dict__, "_observers", {lib.dir: (None, events)}
+            )
+            monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
             await monitor.scan_directory(lib)
             while not events.empty():
                 await consume_event(events.get_nowait())
@@ -1763,7 +1839,7 @@ def test_symlink_target_alias(tmp_path, reference, relocated):
             source = Path(item.path)
             if reference == "unicode":
                 source = source.rename(source.with_name("Café.mkv"))
-                nfo = Path(item.nfo_path).rename(source.with_suffix(".nfo"))
+                nfo = _path(item.nfo_path).rename(source.with_suffix(".nfo"))
                 await MediaItem.filter(id=item.id).update(
                     path=str(source), name=source.stem, nfo_path=str(nfo)
                 )
@@ -1851,7 +1927,7 @@ def test_movie_artwork(tmp_path):
             artwork = tmp_path / "poster.jpg"
             artwork.write_bytes(b"picture")
             _nfo(
-                Path(item.nfo_path),
+                _path(item.nfo_path),
                 "New Movie",
                 extra=f"<art><poster>{artwork}</poster></art>",
             )
@@ -1864,7 +1940,7 @@ def test_movie_artwork(tmp_path):
             assert target.read_bytes() == b"picture"
             assert parent.poster == str(target)
             assert item.poster == str(target)
-            assert str(target) in Path(parent.nfo_path).read_text()
+            assert str(target) in _path(parent.nfo_path).read_text()
             assert not list(target.parent.glob(".organizing-*"))
 
     asyncio.run(run())
@@ -1913,9 +1989,9 @@ def test_shared_artwork(tmp_path, nested, indexed, absolute):
                 await organizer.organize_items(lib, [item.id])
                 await item.refresh_from_db()
                 parent = await MediaItem.get(id=item.parent_id)
-                nfo = Path(parent.nfo_path)
+                nfo = _path(parent.nfo_path)
             else:
-                nfo = Path(item.nfo_path)
+                nfo = _path(item.nfo_path)
             artwork = nfo.parent / "cover.jpg"
             artwork.write_bytes(b"shared cover")
             _nfo(nfo, "New Movie", extra="<art><poster>cover.jpg</poster></art>")
@@ -1946,10 +2022,13 @@ def test_shared_artwork(tmp_path, nested, indexed, absolute):
             parent = await MediaItem.get(id=item.parent_id)
             assert item.path == str(tmp_path / "Renamed" / "New Movie.mkv")
             assert artwork.read_bytes() == b"shared cover"
-            assert (Path(parent.nfo_path).parent / parent.poster).resolve() == artwork
-            metadata = organizer._metadata(Path(parent.nfo_path), lib.lib_type, "movie")
+            assert parent.poster is not None
+            assert (_path(parent.nfo_path).parent / parent.poster).resolve() == artwork
+            metadata = organizer._metadata(
+                _path(parent.nfo_path), lib.lib_type, "movie"
+            )
             assert (
-                Path(parent.nfo_path).parent / metadata["poster"]
+                _path(parent.nfo_path).parent / metadata["poster"]
             ).resolve() == artwork
             assert other_nfo.read_bytes() == other_content
             assert not (tmp_path / "Renamed" / "cover.jpg").exists()
@@ -1967,7 +2046,7 @@ def test_whitespace_artwork(tmp_path, absolute):
             artwork.write_bytes(b"shared poster")
             reference = str(artwork) if absolute else artwork.name
             _nfo(
-                Path(item.nfo_path),
+                _path(item.nfo_path),
                 "New Movie",
                 extra=f"<art><poster>\n  {reference}\n</poster></art>",
             )
@@ -1981,11 +2060,12 @@ def test_whitespace_artwork(tmp_path, absolute):
             await organizer.organize_items(lib, [item.id])
             await item.refresh_from_db()
             parent = await MediaItem.get(id=item.parent_id)
-            await update_metadata(lib, parent.nfo_path)
+            await update_metadata(lib, _path(parent.nfo_path))
             await parent.refresh_from_db()
 
             expected = tmp_path / "New Movie" / artwork.name if absolute else artwork
-            assert (Path(parent.nfo_path).parent / parent.poster).resolve() == expected
+            assert parent.poster is not None
+            assert (_path(parent.nfo_path).parent / parent.poster).resolve() == expected
             assert expected.read_bytes() == b"shared poster"
             assert not await MediaEvent.filter(event_type="organize").exists()
 
@@ -2018,7 +2098,7 @@ def test_nfo_symlink(tmp_path, template, reference, organized):
                 extra=f"<art><poster>\n  {value}\n</poster></art>",
             )
             original_content = external_nfo.read_bytes()
-            nfo = Path(item.nfo_path)
+            nfo = _path(item.nfo_path)
             nfo.unlink()
             nfo.symlink_to("../source.nfo")
             original_path = item.path
@@ -2029,13 +2109,14 @@ def test_nfo_symlink(tmp_path, template, reference, organized):
             assert bool(mapping) == organized
             assert (item.path != original_path) == organized
             owner = await MediaItem.get(id=item.parent_id) if item.parent_id else item
-            current_nfo = Path(owner.nfo_path)
+            current_nfo = _path(owner.nfo_path)
             assert current_nfo.is_symlink()
             assert current_nfo.resolve() == external_nfo
             assert external_nfo.read_bytes() == original_content
             await update_metadata(lib, current_nfo)
             await owner.refresh_from_db()
             if not reference.startswith("https://"):
+                assert owner.poster is not None
                 assert (current_nfo.parent / owner.poster).resolve() == artwork
             assert artwork.read_bytes() == b"poster"
             assert not await MediaEvent.filter(event_type="organize").exists()
@@ -2104,8 +2185,8 @@ def test_season_nfo_symlink(tmp_path, season, organized):
 
             assert bool(mapping) == organized
             assert (item.path != str(video)) == organized
-            assert Path(parent.nfo_path).is_symlink()
-            assert Path(parent.nfo_path).resolve() == external_nfo
+            assert _path(parent.nfo_path).is_symlink()
+            assert _path(parent.nfo_path).resolve() == external_nfo
             assert external_nfo.read_bytes() == original_content
             assert Path(item.path).read_bytes() == b"video"
             assert not await MediaEvent.filter(event_type="organize").exists()
@@ -2308,7 +2389,7 @@ def test_season_merge(tmp_path):
             assert items[0].parent_id == items[1].parent_id
             parent = await MediaItem.get(id=items[0].parent_id)
             assert parent.season is None
-            assert Path(parent.nfo_path).is_file()
+            assert _path(parent.nfo_path).is_file()
             assert (tmp_path / "Old Show" / "Season 2" / "Season 2.nfo").is_file()
 
     asyncio.run(run())
@@ -2390,11 +2471,11 @@ def test_season_split(tmp_path, seasons, existing_directory, source_first):
                 target_parent = await MediaItem.get(id=item.parent_id)
                 assert target_parent.path == str(expected)
                 assert target_parent.nfo_path == str(expected / f"{expected.name}.nfo")
-                assert Path(target_parent.nfo_path).stat().st_mode & 0o777 == 0o640
+                assert _path(target_parent.nfo_path).stat().st_mode & 0o777 == 0o640
                 assert target_parent.season == season
                 assert (expected / target_parent.poster).resolve() == poster
                 metadata = organizer._metadata(
-                    Path(target_parent.nfo_path), lib.lib_type, "tvshow"
+                    _path(target_parent.nfo_path), lib.lib_type, "tvshow"
                 )
                 assert metadata["season"] == season
                 assert metadata["poster"] == target_parent.poster
@@ -2423,7 +2504,7 @@ def test_split_nfo_permissions(tmp_path, monkeypatch, mode, published):
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
-            parent_nfo = Path(parent.nfo_path)
+            parent_nfo = _path(parent.nfo_path)
             parent_nfo.chmod(mode if mode is not None else 0o644)
             payload = await organizer._plan(lib, [item], parent, season=1, split=True)
             if mode is None:
@@ -2555,7 +2636,7 @@ def test_split_season_fallback(
                 assert target_parent.season == season
                 assert (
                     organizer._metadata(
-                        Path(target_parent.nfo_path), lib.lib_type, "tvshow"
+                        _path(target_parent.nfo_path), lib.lib_type, "tvshow"
                     )["season"]
                     == season
                 )
@@ -2583,7 +2664,7 @@ def test_shared_image(tmp_path):
             shared.mkdir()
             (shared / "cover.jpg").write_bytes(b"cover")
             _nfo(
-                Path(parent.nfo_path),
+                _path(parent.nfo_path),
                 "New Movie",
                 extra="<art><poster>../shared/cover.jpg</poster></art>",
             )
@@ -2594,7 +2675,7 @@ def test_shared_image(tmp_path):
             await item.refresh_from_db()
             assert item.poster == "shared/cover.jpg"
             assert (
-                "<poster>shared/cover.jpg</poster>" in Path(item.nfo_path).read_text()
+                "<poster>shared/cover.jpg</poster>" in _path(item.nfo_path).read_text()
             )
             assert (shared / "cover.jpg").is_file()
 
@@ -2617,7 +2698,7 @@ def test_download_source_alias(tmp_path, filename, recorded):
             lib, item = await _movie(root)
             if filename != "original.mkv":
                 video = Path(item.path).rename(root / filename)
-                nfo = Path(item.nfo_path).rename(video.with_suffix(".nfo"))
+                nfo = _path(item.nfo_path).rename(video.with_suffix(".nfo"))
                 await MediaItem.filter(id=item.id).update(
                     path=str(video), name=video.stem, nfo_path=str(nfo)
                 )
@@ -2640,7 +2721,7 @@ def test_download_source_alias(tmp_path, filename, recorded):
 
             assert Path(item.path).read_bytes() == b"video"
             assert recorded_path.read_bytes() == b"video"
-            assert Path(item.nfo_path).is_file()
+            assert _path(item.nfo_path).is_file()
             assert not await MediaEvent.filter(event_type="organize").exists()
 
     asyncio.run(run())
@@ -2721,7 +2802,7 @@ def test_metadata_length(tmp_path):
             artwork.write_bytes(b"picture")
             title = "a" * 230
             _nfo(
-                Path(item.nfo_path),
+                _path(item.nfo_path),
                 title,
                 extra=f"<art><poster>{artwork}</poster></art>",
             )
@@ -2834,10 +2915,11 @@ def test_parent_merge(tmp_path, visible, different_visibility):
                 return
             parent = await MediaItem.get(id=items[1].parent_id)
             metadata = organizer._metadata(
-                Path(parent.nfo_path), lib.lib_type, "tvshow"
+                _path(parent.nfo_path), lib.lib_type, "tvshow"
             )
             assert parent.title == metadata["title"] == "First Title"
-            assert parent.poster == metadata["poster"] == "poster1.jpg"
+            assert parent.poster == "poster1.jpg"
+            assert parent.poster == metadata["poster"]
             assert parent.season == metadata["season"] is None
             assert parent.visible == visible
             assert (Path(parent.path) / parent.poster).read_bytes() == b"poster"
@@ -3179,6 +3261,7 @@ def test_danmaku_scope(tmp_path, monkeypatch, operation):
                     assert items[0].danmaku_meta["episode_id"] == "new-1"
                     new_cache = root / "Merged" / ".S01E01.json"
                     if operation == "confirm_episode":
+                        assert isinstance(result, DanmakuWrapper)
                         assert result.comments == comments
                         assert items[0].danmaku_path == str(new_cache)
                         assert (
@@ -3364,7 +3447,9 @@ def test_season_groups(tmp_path):
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
-            _nfo(Path(item.nfo_path), "Special", "episodedetails", "<season>0</season>")
+            _nfo(
+                _path(item.nfo_path), "Special", "episodedetails", "<season>0</season>"
+            )
             second_path = Path(parent.path) / "second.mkv"
             second_path.write_bytes(b"second")
             second = await MediaItem.create(

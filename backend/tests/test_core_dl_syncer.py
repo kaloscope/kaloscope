@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import threading
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -175,13 +176,14 @@ def test_future_work(monkeypatch, deadline):
                 name="Done",
                 state=DownloadState.COMPLETED,
             )
-            job = await OfflineDownloadJob.create(
+            job = OfflineDownloadJob(
                 download=task,
                 job_uuid="1" * 32,
                 source_fingerprint="1" * 64,
                 remote_dir="/remote",
-                **{deadline: current + timedelta(seconds=30)},
             )
+            setattr(job, deadline, current + timedelta(seconds=30))
+            await job.save()
             driver = SimpleNamespace(
                 close=AsyncMock(),
                 delete=AsyncMock(),
@@ -1766,10 +1768,11 @@ def test_rpc_file_retention(
                 if source == "list"
                 else [[item], {"files": files}]
             )
+            call = AsyncMock(side_effect=responses)
             driver = cast(
                 RpcDriver,
                 SimpleNamespace(
-                    client=SimpleNamespace(call=AsyncMock(side_effect=responses)),
+                    client=SimpleNamespace(call=call),
                     config=SimpleNamespace(
                         methods={"details": None} if source == "details" else {}
                     ),
@@ -1785,7 +1788,7 @@ def test_rpc_file_retention(
                 transfer_files.assert_awaited_once_with(task, expected_files)
             else:
                 transfer_files.assert_not_awaited()
-            assert driver.client.call.await_count == (2 if source == "details" else 1)
+            assert call.await_count == (2 if source == "details" else 1)
         finally:
             await Tortoise.close_connections()
 
@@ -1852,6 +1855,7 @@ def test_transfer_detach(tmp_path, monkeypatch, change):
             if change == "task_removed":
                 assert current is None
             else:
+                assert current is not None
                 assert current.transfer_lib_id is None
                 assert current.transfer_targets is None
             assert not (Path(library.dir) / "movie.mkv").exists()
@@ -2166,6 +2170,7 @@ def test_transfer_retry(tmp_path, method, stage):
             assert organizer._fingerprint(organized) == identity
             assert not original.exists()
             if event is not None:
+                assert item is not None
                 await item.refresh_from_db()
                 assert item.path == str(organized)
                 assert not await MediaEvent.filter(id=event.id).exists()
@@ -3642,7 +3647,9 @@ def test_transfer_cancellation(tmp_path, monkeypatch, method):
             assert not destination.exists()
         finally:
             finish.set()
-            pending = [task for task in (running, contender) if task is not None]
+            pending: list[Awaitable[object]] = [
+                task for task in (running, contender) if task is not None
+            ]
             await asyncio.gather(*pending, return_exceptions=True)
             await Tortoise.close_connections()
 
