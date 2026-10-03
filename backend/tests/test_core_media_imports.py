@@ -20,6 +20,8 @@ import pytest
         "app.core.media.archive",
         "app.core.media.epub",
         "app.core.media.xhtml",
+        "app.core.media.epub_cache",
+        "app.core.media.raster",
     ],
 )
 def test_module(module):
@@ -31,6 +33,8 @@ def test_module(module):
             "app.core.media.archive",
             "app.core.media.epub",
             "app.core.media.xhtml",
+            "app.core.media.epub_cache",
+            "app.core.media.raster",
         ),
         "app.core.media.archive": (
             "app.core.media.handlers",
@@ -38,20 +42,39 @@ def test_module(module):
             "app.core.media.image",
             "app.core.media.epub",
             "app.core.media.xhtml",
+            "app.core.media.epub_cache",
+            "app.core.media.raster",
         ),
         "app.core.media.epub": (
             "app.core.media.handlers",
             "app.core.media.text",
             "app.core.media.image",
             "app.core.media.xhtml",
+            "app.core.media.epub_cache",
+            "app.core.media.raster",
         ),
         "app.core.media.xhtml": (
             "app.core.media.handlers",
             "app.core.media.text",
             "app.core.media.image",
+            "app.core.media.epub_cache",
         ),
         "app.core.media.text": ("app.core.media.handlers", "app.core.media.image"),
         "app.core.media.image": ("app.core.media.text",),
+        "app.core.media.epub_cache": (
+            "app.core.media.handlers",
+            "app.core.media.text",
+            "app.core.media.image",
+        ),
+        "app.core.media.raster": (
+            "app.core.media.handlers",
+            "app.core.media.text",
+            "app.core.media.image",
+            "app.core.media.epub",
+            "app.core.media.xhtml",
+            "app.core.media.archive",
+            "app.core.media.epub_cache",
+        ),
     }.get(module, ())
     code = (
         "import sys\n"

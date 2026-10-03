@@ -9,12 +9,26 @@ import secrets
 import shutil
 import stat
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Literal, Self, TextIO
+from typing import TYPE_CHECKING, Annotated, BinaryIO, Literal, Self, TextIO
 
 from charset_normalizer import from_bytes
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from app.core.media.common import INDEX_BYTES, ContentError, FileSnapshot, file_state
+from app.core.media.epub_cache import (
+    EpubContent,
+    EpubIndex,
+    build_epub_index,
+    read_epub_chapter,
+    read_epub_resource,
+)
 from app.models.media import MediaFormat
 
 if TYPE_CHECKING:
@@ -81,6 +95,9 @@ class TextIndex(BaseModel):
         if offset != self.text_size:
             raise ValueError("text cache size does not match chapter ranges")
         return self
+
+
+_INDEX = TypeAdapter(Annotated[TextIndex | EpubIndex, Field(discriminator="format")])
 
 
 def _text_encoding(file: BinaryIO) -> str:
@@ -239,25 +256,27 @@ def _write_text(text: TextIO, output: BinaryIO) -> tuple[TextChapter, ...]:
     return tuple(chapters)
 
 
-def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex:
-    """Build a TXT cache in a new caller-owned staging directory.
+def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex | EpubIndex:
+    """Build a TXT or EPUB cache in a new caller-owned staging directory.
 
     Run this synchronous operation in a worker thread. The caller validates the
     library boundary and publishes the completed directory under the library lock.
     Existing directories are never overwritten; failed new builds are removed.
 
     Args:
-        source: The TXT reading source discovered by its library handler.
+        source: The novel reading source discovered by its library handler.
         cache_dir: A nonexistent cache directory whose parent already exists.
 
     Returns:
-        The index also saved as index.json alongside content.txt.
+        The index saved beside content.txt for TXT or content.jsonl for EPUB.
 
     Raises:
         ContentError: If the source is unsafe, unsupported, empty, unstable,
             undecodable or over limits.
         OSError: If files cannot be accessed, or the cache directory already exists.
     """
+    if source.format == MediaFormat.EPUB:
+        return build_epub_index(source.path, cache_dir)
     if source.format != MediaFormat.TXT:
         raise ContentError("unsupported_media_format")
     cache_dir.mkdir()
@@ -309,8 +328,8 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex:
         raise
 
 
-def load_text_index(cache_dir: Path) -> TextIndex:
-    """Validate a persisted TXT index and the size of its complete text cache.
+def load_text_index(cache_dir: Path) -> TextIndex | EpubIndex:
+    """Validate a persisted novel index and the size of its complete body cache.
 
     Args:
         cache_dir: A completed internal cache directory selected by the caller.
@@ -326,28 +345,36 @@ def load_text_index(cache_dir: Path) -> TextIndex:
             data = file.read(INDEX_BYTES + 1)
         if len(data) > INDEX_BYTES:
             raise ContentError("content_not_ready")
-        index = TextIndex.model_validate_json(data)
-        if (cache_dir / "content.txt").stat().st_size != index.text_size:
+        index = _INDEX.validate_json(data)
+        filename, size = (
+            ("content.txt", index.text_size)
+            if isinstance(index, TextIndex)
+            else ("content.jsonl", index.content_size)
+        )
+        if (cache_dir / filename).stat().st_size != size:
             raise ContentError("content_not_ready")
         return index
     except (OSError, ValidationError) as error:
         raise ContentError("content_not_ready") from error
 
 
-def read_text_chapter(cache_dir: Path, chapter_id: str) -> list[str]:
-    """Read one indexed section as paragraphs without interpreting its ID as a path.
+def read_text_chapter(cache_dir: Path, chapter_id: str) -> list[str] | EpubContent:
+    """Read one indexed novel section without interpreting its ID as a path.
 
     Args:
         cache_dir: A completed internal cache directory selected by the caller.
         chapter_id: An exact chapter ID from that cache's index.
 
     Returns:
-        Paragraph strings preserving the section when joined with two newlines.
+        TXT paragraph strings, joined losslessly with two newlines, or validated
+        EPUB blocks and warnings. Neither form contains resource URLs.
 
     Raises:
         ContentError: If the chapter is unknown or the cache is no longer readable.
     """
     index = load_text_index(cache_dir)
+    if isinstance(index, EpubIndex):
+        return read_epub_chapter(cache_dir, index, chapter_id)
     chapter = next((entry for entry in index.chapters if entry.id == chapter_id), None)
     if chapter is None:
         raise ContentError("not_found")
@@ -360,3 +387,25 @@ def read_text_chapter(cache_dir: Path, chapter_id: str) -> list[str]:
         return data.decode("utf-8").split("\n\n")
     except (OSError, UnicodeDecodeError) as error:
         raise ContentError("content_not_ready") from error
+
+
+def read_text_resource(
+    source_path: Path, cache_dir: Path, resource_id: str
+) -> tuple[bytes, str]:
+    """Read a novel's indexed raster image in a caller-authorized worker.
+
+    Args:
+        source_path: The current source inside the validated library boundary.
+        cache_dir: The completed internal cache directory for that source version.
+        resource_id: An exact image ID from the current EPUB index.
+
+    Returns:
+        Image bytes and their validated MIME type.
+
+    Raises:
+        ContentError: If the source has no such image, changed or cannot be read.
+    """
+    index = load_text_index(cache_dir)
+    if not isinstance(index, EpubIndex):
+        raise ContentError("not_found")
+    return read_epub_resource(source_path, index, resource_id)

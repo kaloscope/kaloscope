@@ -13,6 +13,7 @@ from app.core.media.common import ContentError
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingSource
 from app.core.media.text import (
+    TextIndex,
     build_text_index,
     load_text_index,
     read_text_chapter,
@@ -60,8 +61,23 @@ def _cached_text(cache: Path) -> str:
     """
     index = load_text_index(cache)
     return "".join(
-        "\n\n".join(read_text_chapter(cache, chapter.id)) for chapter in index.chapters
+        "\n\n".join(_paragraphs(cache, chapter.id)) for chapter in index.chapters
     )
+
+
+def _paragraphs(cache: Path, chapter_id: str) -> list[str]:
+    """Read TXT through the shared novel entry point and verify its result type.
+
+    Args:
+        cache: The completed TXT cache directory.
+        chapter_id: The requested fixture chapter ID.
+
+    Returns:
+        The unchanged TXT paragraph representation.
+    """
+    content = read_text_chapter(cache, chapter_id)
+    assert isinstance(content, list)
+    return content
 
 
 @pytest.mark.parametrize(
@@ -154,7 +170,7 @@ def test_text_sections(tmp_path, monkeypatch):
     assert parts == list(range(1, len(parts) + 1))
     assert index.chapters[-1].part == 1
     assert index.chapters[-1].title == "Chapter 2"
-    assert "\n\n".join(read_text_chapter(cache, index.chapters[0].id)).endswith("\n\n")
+    assert "\n\n".join(_paragraphs(cache, index.chapters[0].id)).endswith("\n\n")
 
 
 def test_long_line(tmp_path):
@@ -384,6 +400,7 @@ def test_cache_damage(tmp_path, damage):
     index = build_text_index(
         _source(tmp_path, b"Chapter 1\nFirst\nChapter 2\nSecond"), cache
     )
+    assert isinstance(index, TextIndex)
     index_path, body_path = cache / "index.json", cache / "content.txt"
     if damage == "missing_index":
         index_path.unlink()
@@ -426,6 +443,6 @@ def test_source_format(tmp_path):
     source = _source(tmp_path, b"Content")
     with pytest.raises(ContentError, match="unsupported_media_format"):
         build_text_index(
-            ReadingSource(source.path, MediaFormat.EPUB), tmp_path / "cache"
+            ReadingSource(source.path, MediaFormat.CBZ), tmp_path / "cache"
         )
     assert not (tmp_path / "cache").exists()

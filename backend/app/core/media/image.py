@@ -29,10 +29,10 @@ from app.core.media.handlers.reading import (
     list_source_entries,
     natural_key,
 )
+from app.core.media.raster import IMAGE_BYTES, ImageMime, image_mime
 from app.models.media import MediaFormat
 
-_IMAGE_BYTES = 64 * 1024 * 1024
-_ImageMime = Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
+_IMAGE_BYTES = IMAGE_BYTES
 
 
 class ImageResource(BaseModel):
@@ -42,7 +42,7 @@ class ImageResource(BaseModel):
 
     id: str = Field(pattern=r"^[0-9a-f]{32}$")
     relative_path: str = Field(min_length=1, max_length=4096)
-    mime_type: _ImageMime
+    mime_type: ImageMime
     size: int = Field(gt=0, le=_IMAGE_BYTES)
     mtime_ns: int | None = None
     crc: int | None = Field(default=None, ge=0, le=0xFFFFFFFF)
@@ -138,29 +138,6 @@ class ImageIndex(BaseModel):
             An ID readable through the same resource lookup as body pages.
         """
         return (self.cover or self.pages[0]).id
-
-
-def _image_type(data: bytes) -> _ImageMime:
-    """Recognize supported raster signatures without decoding pixels.
-
-    Args:
-        data: At least the available leading 12 bytes of an image.
-
-    Returns:
-        The MIME type identified from bytes rather than the filename suffix.
-
-    Raises:
-        ContentError: If no supported image signature is present.
-    """
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    raise ContentError("invalid_image")
 
 
 def _directory_state(path: Path) -> tuple[int, ...]:
@@ -278,7 +255,7 @@ def _build_directory_index(source: ReadingSource) -> ImageIndex:
             continue
         try:
             data, info = _read_image(path)
-            mime_type = _image_type(data)
+            mime_type = image_mime(data)
         except ContentError as error:
             if path in cover_paths and error.code in {
                 "invalid_image",
@@ -370,7 +347,7 @@ def _build_archive_index(source: ReadingSource) -> ImageIndex:
                 continue
             try:
                 data = read_member(archive, info, _IMAGE_BYTES, prefix_bytes=12)
-                mime_type = _image_type(data)
+                mime_type = image_mime(data)
             except ContentError as error:
                 if is_cover and error.code in {
                     "invalid_image",
@@ -498,7 +475,7 @@ def read_image_resource(
                 if (member.file_size, member.CRC) != (resource.size, resource.crc):
                     raise ContentError("content_changed")
                 data = read_member(archive, member, _IMAGE_BYTES)
-        if _image_type(data) != resource.mime_type:
+        if image_mime(data) != resource.mime_type:
             raise ContentError("content_changed")
         return data, resource.mime_type
     except FileNotFoundError as error:

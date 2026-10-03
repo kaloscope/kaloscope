@@ -65,6 +65,8 @@ type WarningCode = Literal[
     "invalid_image_reference",
     "encrypted_image",
     "unsupported_image",
+    "invalid_image",
+    "image_limit_exceeded",
     "unsupported_content",
     "simplified_layout",
 ]

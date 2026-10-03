@@ -1,4 +1,4 @@
-"""Read EPUB package structure and resolve bounded local resources."""
+"""Read EPUB package structure, navigation and bounded resource references."""
 
 import re
 from dataclasses import dataclass
@@ -102,14 +102,19 @@ def resolve_epub_reference(base_path: str, reference: str) -> str | None:
 
 
 def _read_xml(
-    archive: ZipFile, member: ZipInfo | None, root_tag: str
+    archive: ZipFile,
+    member: ZipInfo | None,
+    root_tag: str,
+    *,
+    navigation: bool = False,
 ) -> etree._Element:
-    """Read a required package XML member with external resolution disabled.
+    """Read a bounded EPUB XML member with external resolution disabled.
 
     Args:
         archive: The archive yielded by open_archive.
         member: The selected member, or None when a required file is missing.
         root_tag: The expected namespace-qualified document element.
+        navigation: Allow an unloaded navigation DOCTYPE; false for descriptors.
 
     Returns:
         The validated XML root, without loading DTDs, entities or external files.
@@ -136,12 +141,19 @@ def _read_xml(
     except etree.XMLSyntaxError as error:
         raise ContentError("invalid_epub") from error
     # internalDTD also covers empty and external-only declarations
-    if root.tag != root_tag or root.getroottree().docinfo.internalDTD is not None:
+    if root.tag != root_tag or (
+        not navigation and root.getroottree().docinfo.internalDTD is not None
+    ):
         raise ContentError("invalid_epub")
     for element in root.iter():
         if (
-            element.get("{http://www.w3.org/XML/1998/namespace}base") is not None
+            not isinstance(element.tag, str)
+            or element.get("{http://www.w3.org/XML/1998/namespace}base") is not None
             or element.tag == "{http://www.w3.org/2001/XInclude}include"
+            or (
+                element.tag == "{http://www.w3.org/1999/xhtml}base"
+                and element.get("href") is not None
+            )
         ):
             raise ContentError("unsupported_media_format")
     return root
@@ -361,3 +373,82 @@ def load_epub_package(archive: ZipFile) -> EpubPackage:
         else resources.get(spines[0].get("toc", "")),
         cover=covers[0] if covers else resources.get(legacy_cover),
     )
+
+
+def read_epub_titles(archive: ZipFile, package: EpubPackage) -> dict[str, str]:
+    """Read optional EPUB 3 navigation or EPUB 2 NCX titles in a stable archive.
+
+    Navigation supplies labels only; spine order and chapter boundaries remain
+    authoritative. Missing, unsupported or malformed navigation falls back to
+    document headings. Archive corruption and I/O failures still propagate.
+
+    Args:
+        archive: The archive yielded by open_archive after caller access checks.
+        package: The package loaded from the same archive.
+
+    Returns:
+        The first usable title for each referenced spine member path.
+
+    Raises:
+        ContentError: If a member read detects archive corruption.
+        OSError: If navigation bytes cannot be read.
+    """
+    resource = package.navigation
+    if (
+        resource is None
+        or resource.path is None
+        or resource.member is None
+        or resource.encrypted
+    ):
+        return {}
+    xhtml = "{http://www.w3.org/1999/xhtml}"
+    ncx = "{http://www.daisy.org/z3986/2005/ncx/}"
+    if resource.media_type not in (_XHTML_MIME, "application/x-dtbncx+xml"):
+        return {}
+    try:
+        root = _read_xml(
+            archive,
+            resource.member,
+            f"{xhtml}html" if resource.media_type == _XHTML_MIME else f"{ncx}ncx",
+            navigation=True,
+        )
+    except ContentError as error:
+        if error.code not in (
+            "invalid_epub",
+            "unsupported_media_format",
+            "media_limit_exceeded",
+        ):
+            raise
+        return {}
+    references: list[tuple[str, str]] = []
+    if resource.media_type == _XHTML_MIME:
+        for element in root.iter(f"{xhtml}script", f"{xhtml}style"):
+            tail = element.tail
+            element.clear()
+            element.tail = tail
+        for nav in root.iter(f"{xhtml}nav"):
+            if "toc" not in nav.get("{http://www.idpf.org/2007/ops}type", "").split():
+                continue
+            references.extend(
+                (link.get("href", ""), "".join(map(str, link.itertext())))
+                for link in nav.iter(f"{xhtml}a")
+            )
+    else:
+        for point in root.iter(f"{ncx}navPoint"):
+            content = point.find(f"{ncx}content")
+            label = point.find(f"{ncx}navLabel/{ncx}text")
+            if content is not None and label is not None:
+                references.append(
+                    (content.get("src", ""), "".join(map(str, label.itertext())))
+                )
+    paths = {item.path for item in package.spine}
+    titles = {}
+    for reference, label in references:
+        try:
+            path = resolve_epub_reference(resource.path, reference)
+        except ContentError:
+            continue
+        title = " ".join(label.split())[:120]
+        if path is not None and path in paths and title:
+            titles.setdefault(path, title)
+    return titles
