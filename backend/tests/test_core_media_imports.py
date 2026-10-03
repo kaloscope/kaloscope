@@ -18,6 +18,7 @@ import pytest
         "app.core.media.text",
         "app.core.media.image",
         "app.core.media.archive",
+        "app.core.media.epub",
     ],
 )
 def test_module(module):
@@ -27,8 +28,15 @@ def test_module(module):
             "app.core.media.text",
             "app.core.media.image",
             "app.core.media.archive",
+            "app.core.media.epub",
         ),
         "app.core.media.archive": (
+            "app.core.media.handlers",
+            "app.core.media.text",
+            "app.core.media.image",
+            "app.core.media.epub",
+        ),
+        "app.core.media.epub": (
             "app.core.media.handlers",
             "app.core.media.text",
             "app.core.media.image",
