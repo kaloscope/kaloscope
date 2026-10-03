@@ -325,6 +325,8 @@ def test_source_unavailable(tmp_path, monkeypatch, failed):
         (LibType.NOVEL, "Book/story.TXT", "Book"),
         (LibType.NOVEL, "Book/metadata.opf", "Book"),
         (LibType.NOVEL, "Book/content.opf", "Book"),
+        (LibType.NOVEL, "Book/Novel.opf", "Book"),
+        (LibType.NOVEL, "Book/Novel.OPF", "Book"),
         (LibType.NOVEL, "Book/cover.jpg", "Book"),
         (LibType.COMIC, "Book/1.jpg", "Book"),
         (LibType.COMIC, "Book/ComicInfo.XML", "Book"),

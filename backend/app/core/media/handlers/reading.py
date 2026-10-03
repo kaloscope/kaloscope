@@ -347,8 +347,8 @@ class ReadingMediaHandler(MediaHandler):
                     continue
                 if self.lib_type == LibType.NOVEL:
                     accepted = (
-                        path.suffix.casefold() in _NOVEL_EXTENSIONS | IMAGE_EXTENSIONS
-                        or path.name.casefold() in {"metadata.opf", "content.opf"}
+                        path.suffix.casefold()
+                        in _NOVEL_EXTENSIONS | IMAGE_EXTENSIONS | {".opf"}
                     )
                 else:
                     accepted = (

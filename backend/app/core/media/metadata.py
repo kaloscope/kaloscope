@@ -24,7 +24,7 @@ METADATA_BYTES = 2 * 1024 * 1024
 _MAX_NODES = 100_000
 _OPF = "{http://www.idpf.org/2007/opf}"
 _DC = "{http://purl.org/dc/elements/1.1/}"
-_PARENT_FIELDS = {"authors", "illustrators", "publisher", "genres"}
+PARENT_FIELDS = frozenset({"authors", "illustrators", "publisher", "genres"})
 type _ShortText = Annotated[str, Field(min_length=1, max_length=4096)]
 type _Names = Annotated[tuple[_ShortText, ...], Field(max_length=256)]
 
@@ -506,7 +506,7 @@ def merge_metadata(
     """
     values = {}
     for name in ReadingMetadata.model_fields:
-        for source in (external, embedded, parent if name in _PARENT_FIELDS else None):
+        for source in (external, embedded, parent if name in PARENT_FIELDS else None):
             if source is not None:
                 value = getattr(source, name)
                 if value is not None and value != ():

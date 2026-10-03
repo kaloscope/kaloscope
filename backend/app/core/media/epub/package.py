@@ -285,23 +285,19 @@ def _parse_spine(
     return tuple(spine)
 
 
-def load_epub_package(archive: ZipFile) -> EpubPackage:
-    """Read EPUB 2 or 3 package structure from a validated, stable archive.
-
-    Call inside open_archive so source changes and ZIP failures retain its error
-    handling. Run this synchronous operation in a worker. It reads package
-    descriptors only, without validating XHTML bodies, publishing content caches
-    or persisting descriptive metadata.
+def _locate_package(
+    archive: ZipFile,
+) -> tuple[str, dict[str, ZipInfo], set[str]]:
+    """Locate the first rendition without requiring a readable body.
 
     Args:
-        archive: The archive yielded by open_archive after caller access checks.
+        archive: A stable archive already validated by open_archive.
 
     Returns:
-        The first declared rendition's resource manifest and reading order.
+        The package path, normalized member map and encrypted member paths.
 
     Raises:
-        ContentError: If required structure is missing, malformed, unsupported
-            or over limits; open_archive also checks source stability on exit.
+        ContentError: If container descriptors are invalid, unsafe or over limits.
     """
     members = {
         normalize_member_path(member.filename): member
@@ -338,6 +334,49 @@ def load_epub_package(archive: ZipFile) -> EpubPackage:
         package_path,
     }:
         raise ContentError("unsupported_media_format")
+    return package_path, members, encrypted
+
+
+def read_epub_opf(archive: ZipFile) -> tuple[str, bytes]:
+    """Read the declared OPF without parsing the manifest, spine or body.
+
+    Args:
+        archive: A stable archive yielded by open_archive after caller access checks.
+
+    Returns:
+        The exact package member name and bounded XML bytes for metadata parsing.
+
+    Raises:
+        ContentError: If descriptors are invalid or encrypted, the package is
+            missing, or metadata exceeds its limit.
+        OSError: If source bytes cannot be read.
+    """
+    package_path, members, _ = _locate_package(archive)
+    member = members.get(package_path)
+    if member is None:
+        raise ContentError("invalid_epub")
+    return member.filename, read_member(archive, member, _XML_BYTES)
+
+
+def load_epub_package(archive: ZipFile) -> EpubPackage:
+    """Read EPUB 2 or 3 package structure from a validated, stable archive.
+
+    Call inside open_archive so source changes and ZIP failures retain its error
+    handling. Run this synchronous operation in a worker. It reads package
+    descriptors only, without validating XHTML bodies, publishing content caches
+    or persisting descriptive metadata.
+
+    Args:
+        archive: The archive yielded by open_archive after caller access checks.
+
+    Returns:
+        The first declared rendition's resource manifest and reading order.
+
+    Raises:
+        ContentError: If required structure is missing, malformed, unsupported
+            or over limits; open_archive also checks source stability on exit.
+    """
+    package_path, members, encrypted = _locate_package(archive)
     root = _read_xml(archive, members.get(package_path), f"{_OPF}package")
     if root.get("version") not in ("2.0", "3.0"):
         raise ContentError("unsupported_media_format")
