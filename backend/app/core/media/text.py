@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, BinaryIO, Literal, Self, TextIO
 from charset_normalizer import from_bytes
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.core.media.common import INDEX_BYTES, ContentError, FileSnapshot, file_state
 from app.models.media import MediaFormat
 
 if TYPE_CHECKING:
@@ -23,7 +24,6 @@ _READ_BYTES = 64 * 1024
 _READ_CHARS = 8192
 _SECTION_BYTES = 256 * 1024
 _MAX_CHAPTERS = 10_000
-_INDEX_BYTES = 8 * 1024 * 1024
 _HEADING = re.compile(
     r"^(?:第[0-9零〇一二三四五六七八九十百千万两壹贰叁肆伍陆柒捌玖拾佰仟]+[章节回卷部篇]"
     r"(?:\s.*|[：:、.．].*)?|(?:chapter|book|part)\s+(?:[0-9]+|[ivxlcdm]+)"
@@ -31,28 +31,6 @@ _HEADING = re.compile(
     re.IGNORECASE,
 )
 _BINARY_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-
-class ContentError(ValueError):
-    """Carry a stable reading error without coupling parsers to HTTP."""
-
-    def __init__(self, code: str):
-        """Store the error code for the caller's indexing or response handling.
-
-        Args:
-            code: The stable content failure code.
-        """
-        super().__init__(code)
-        self.code = code
-
-
-class FileSnapshot(BaseModel):
-    """Keep path-independent source attributes for later reconciliation."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    size: int = Field(ge=0)
-    mtime_ns: int
 
 
 class TextChapter(BaseModel):
@@ -103,18 +81,6 @@ class TextIndex(BaseModel):
         if offset != self.text_size:
             raise ValueError("text cache size does not match chapter ranges")
         return self
-
-
-def _file_state(info: os.stat_result) -> tuple[int, ...]:
-    """Compare file identity and writes without treating reads as modifications.
-
-    Args:
-        info: The filesystem attributes to compare during a single build.
-
-    Returns:
-        Identity, size and write timestamps, excluding access time and path.
-    """
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 def _text_encoding(file: BinaryIO) -> str:
@@ -288,7 +254,8 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex:
         The index also saved as index.json alongside content.txt.
 
     Raises:
-        ContentError: If the source is unsupported, changes or cannot be decoded.
+        ContentError: If the source is unsafe, unsupported, empty, unstable,
+            undecodable or over limits.
         OSError: If files cannot be accessed, or the cache directory already exists.
     """
     if source.format != MediaFormat.TXT:
@@ -302,7 +269,7 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex:
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         )
         with os.fdopen(os.open(source.path, flags), "rb") as file:
-            if _file_state(os.fstat(file.fileno())) != _file_state(before):
+            if file_state(os.fstat(file.fileno())) != file_state(before):
                 raise ContentError("content_changed")
             encoding = _text_encoding(file)
             file.seek(0)
@@ -321,7 +288,7 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex:
             current = source.path.stat(follow_symlinks=False)
         except FileNotFoundError as error:
             raise ContentError("content_changed") from error
-        if _file_state(current) != _file_state(before):
+        if file_state(current) != file_state(before):
             raise ContentError("content_changed")
         index = TextIndex(
             index_version=secrets.token_hex(32),
@@ -333,7 +300,7 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex:
             chapters=chapters,
         )
         data = index.model_dump_json().encode("utf-8")
-        if len(data) > _INDEX_BYTES:
+        if len(data) > INDEX_BYTES:
             raise ContentError("media_limit_exceeded")
         (cache_dir / "index.json").write_bytes(data)
         return index
@@ -356,8 +323,8 @@ def load_text_index(cache_dir: Path) -> TextIndex:
     """
     try:
         with (cache_dir / "index.json").open("rb") as file:
-            data = file.read(_INDEX_BYTES + 1)
-        if len(data) > _INDEX_BYTES:
+            data = file.read(INDEX_BYTES + 1)
+        if len(data) > INDEX_BYTES:
             raise ContentError("content_not_ready")
         index = TextIndex.model_validate_json(data)
         if (cache_dir / "content.txt").stat().st_size != index.text_size:

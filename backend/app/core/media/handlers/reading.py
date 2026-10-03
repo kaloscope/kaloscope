@@ -1,4 +1,4 @@
-"""Discover reading sources without parsing content or changing files."""
+"""Discover reading sources and resolve filesystem event ownership."""
 
 import os
 import re
@@ -18,10 +18,13 @@ from watchdog.events import (
 from app.core.media.handlers.base import _HANDLERS, MediaHandler
 from app.models.media import LibType, MediaFormat
 
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+# preferred cover basenames, in fallback order
+COVER_NAMES = ("cover", "folder", "poster")
+MAX_PAGES = 10_000
+
 _NOVEL_EXTENSIONS = {".txt", ".epub"}
 _COMIC_EXTENSIONS = {".cbz", ".zip"}
-_COVER_NAMES = {"cover", "folder", "poster"}
 _IGNORED_NAMES = {
     "__macosx",
     "$recycle.bin",
@@ -36,7 +39,6 @@ _EVENT_TYPES = {
     EVENT_TYPE_DELETED,
     EVENT_TYPE_MOVED,
 }
-_MAX_PAGES = 10_000
 
 
 @dataclass(frozen=True)
@@ -81,8 +83,8 @@ def natural_key(name: str) -> tuple:
     ), name
 
 
-def _ignored(name: str) -> bool:
-    """Check names excluded from both discovery and event ownership.
+def is_ignored_name(name: str) -> bool:
+    """Check names excluded from discovery, content indexes and event ownership.
 
     Args:
         name: A single path component.
@@ -97,7 +99,7 @@ def _ignored(name: str) -> bool:
     )
 
 
-def _entries(directory: Path) -> tuple[list[Path], list[Path]]:
+def list_source_entries(directory: Path) -> tuple[list[Path], list[Path]]:
     """List regular files and directories without following symbolic links.
 
     Args:
@@ -114,7 +116,7 @@ def _entries(directory: Path) -> tuple[list[Path], list[Path]]:
     files, directories = [], []
     with os.scandir(directory) as entries:
         for entry in entries:
-            if _ignored(entry.name):
+            if is_ignored_name(entry.name):
                 continue
             mode = entry.stat(follow_symlinks=False).st_mode
             if stat.S_ISREG(mode):
@@ -126,7 +128,7 @@ def _entries(directory: Path) -> tuple[list[Path], list[Path]]:
     return files, directories
 
 
-def _comic_source(
+def identify_comic_source(
     directory: Path, files: list[Path], *, parent_path: Path | None = None
 ) -> ReadingSource | None:
     """Identify one comic reading unit from its direct files.
@@ -145,8 +147,8 @@ def _comic_source(
     pages = tuple(
         path
         for path in files
-        if path.suffix.casefold() in _IMAGE_EXTENSIONS
-        and path.stem.casefold() not in _COVER_NAMES
+        if path.suffix.casefold() in IMAGE_EXTENSIONS
+        and path.stem.casefold() not in COVER_NAMES
     )
     archives = [path for path in files if path.suffix.casefold() in _COMIC_EXTENSIONS]
     if len(archives) > 1 or (archives and pages):
@@ -154,7 +156,7 @@ def _comic_source(
     if archives:
         path = archives[0]
         return ReadingSource(path, MediaFormat(path.suffix[1:].lower()), parent_path)
-    if len(pages) > _MAX_PAGES:
+    if len(pages) > MAX_PAGES:
         raise ValueError("media_limit_exceeded")
     if pages:
         return ReadingSource(directory, MediaFormat.DIR, parent_path, pages)
@@ -209,17 +211,17 @@ class ReadingMediaHandler(MediaHandler):
         if not root.is_absolute() or ".." in root.parts:
             raise ValueError("library root must be an absolute normalized path")
         if work_path is not None and (
-            work_path.parent != root or _ignored(work_path.name)
+            work_path.parent != root or is_ignored_name(work_path.name)
         ):
             raise ValueError("work must be a visible direct child of the library")
         result = SourceScan()
         try:
             if work_path is None:
-                files, works = _entries(root)
+                files, works = list_source_entries(root)
                 extensions = (
                     _NOVEL_EXTENSIONS
                     if self.lib_type == LibType.NOVEL
-                    else _COMIC_EXTENSIONS | _IMAGE_EXTENSIONS
+                    else _COMIC_EXTENSIONS | IMAGE_EXTENSIONS
                 )
                 result.issues.update(
                     (path, "unsupported_layout")
@@ -256,7 +258,7 @@ class ReadingMediaHandler(MediaHandler):
             OSError: If the work cannot be inspected completely.
             ValueError: With a stable code if the work's layout is invalid.
         """
-        files, directories = _entries(work)
+        files, directories = list_source_entries(work)
         if self.lib_type == LibType.NOVEL:
             bodies = [
                 path for path in files if path.suffix.casefold() in _NOVEL_EXTENSIONS
@@ -270,12 +272,12 @@ class ReadingMediaHandler(MediaHandler):
                 raise ValueError("unsupported_layout")
             return []
 
-        source = _comic_source(work, files)
+        source = identify_comic_source(work, files)
         chapters, chapter_issues = [], {}
         for directory in directories:
             try:
-                child_files, child_dirs = _entries(directory)
-                child = _comic_source(directory, child_files, parent_path=work)
+                child_files, child_dirs = list_source_entries(directory)
+                child = identify_comic_source(directory, child_files, parent_path=work)
                 if child:
                     chapters.append(child)
                 elif child_dirs:
@@ -334,19 +336,23 @@ class ReadingMediaHandler(MediaHandler):
                 parts = path.relative_to(root).parts
             except ValueError:
                 continue
-            if not parts or ".." in parts or any(_ignored(part) for part in parts):
+            if (
+                not parts
+                or ".." in parts
+                or any(is_ignored_name(part) for part in parts)
+            ):
                 continue
             if not event.is_directory:
                 if len(parts) < 2:
                     continue
                 if self.lib_type == LibType.NOVEL:
                     accepted = (
-                        path.suffix.casefold() in _NOVEL_EXTENSIONS | _IMAGE_EXTENSIONS
+                        path.suffix.casefold() in _NOVEL_EXTENSIONS | IMAGE_EXTENSIONS
                         or path.name.casefold() in {"metadata.opf", "content.opf"}
                     )
                 else:
                     accepted = (
-                        path.suffix.casefold() in _COMIC_EXTENSIONS | _IMAGE_EXTENSIONS
+                        path.suffix.casefold() in _COMIC_EXTENSIONS | IMAGE_EXTENSIONS
                         or path.name.casefold() == "comicinfo.xml"
                     )
                 if not accepted:

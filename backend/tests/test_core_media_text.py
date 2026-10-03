@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 
 from app.core.media import text
+from app.core.media.common import ContentError
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingSource
 from app.core.media.text import (
-    ContentError,
     build_text_index,
     load_text_index,
     read_text_chapter,
@@ -250,7 +250,7 @@ def test_bounded_reads():
     assert output.getvalue().decode() == body
 
 
-@pytest.mark.parametrize("limit", ["_MAX_CHAPTERS", "_INDEX_BYTES"])
+@pytest.mark.parametrize("limit", ["_MAX_CHAPTERS", "INDEX_BYTES"])
 def test_text_limits(tmp_path, monkeypatch, limit):
     monkeypatch.setattr(text, limit, 1)
     cache = tmp_path / "cache"
@@ -394,7 +394,7 @@ def test_cache_damage(tmp_path, damage):
     elif damage == "broken_json":
         index_path.write_text("{")
     elif damage == "oversize":
-        index_path.write_bytes(b" " * (text._INDEX_BYTES + 1))
+        index_path.write_bytes(b" " * (text.INDEX_BYTES + 1))
     elif damage == "utf8":
         body_path.write_bytes(b"\xff" * index.text_size)
     else:

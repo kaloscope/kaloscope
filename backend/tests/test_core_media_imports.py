@@ -1,4 +1,4 @@
-"""Unit tests for media and NFO module imports."""
+"""Unit tests for independent media and NFO module imports."""
 
 import subprocess
 import sys
@@ -14,13 +14,36 @@ import pytest
         "app.core.media.shelver",
         "app.core.flow.nodes.nfo",
         "app.core.media.handlers.reading",
+        "app.core.media.common",
         "app.core.media.text",
         "app.core.media.image",
+        "app.core.media.archive",
     ],
 )
 def test_module(module):
+    excluded = {
+        "app.core.media.common": (
+            "app.core.media.handlers",
+            "app.core.media.text",
+            "app.core.media.image",
+            "app.core.media.archive",
+        ),
+        "app.core.media.archive": (
+            "app.core.media.handlers",
+            "app.core.media.text",
+            "app.core.media.image",
+        ),
+        "app.core.media.text": ("app.core.media.handlers", "app.core.media.image"),
+        "app.core.media.image": ("app.core.media.text",),
+    }.get(module, ())
+    code = (
+        "import sys\n"
+        f"import {module}\n"
+        f"unexpected = set({excluded!r}).intersection(sys.modules)\n"
+        "assert not unexpected, sorted(unexpected)\n"
+    )
     result = subprocess.run(
-        [sys.executable, "-c", f"import {module}"],
+        [sys.executable, "-c", code],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,

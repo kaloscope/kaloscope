@@ -5,69 +5,80 @@ import os
 import secrets
 import shutil
 import stat
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+from app.core.media.archive import normalize_member_path, open_archive, read_member
+from app.core.media.common import INDEX_BYTES, ContentError, FileSnapshot, file_state
 from app.core.media.handlers.reading import (
-    _COVER_NAMES,
-    _IMAGE_EXTENSIONS,
-    _MAX_PAGES,
+    COVER_NAMES,
+    IMAGE_EXTENSIONS,
+    MAX_PAGES,
     ReadingSource,
-    _comic_source,
-    _entries,
-    _ignored,
+    identify_comic_source,
+    is_ignored_name,
+    list_source_entries,
     natural_key,
 )
-from app.core.media.text import _INDEX_BYTES, ContentError, FileSnapshot, _file_state
 from app.models.media import MediaFormat
 
 _IMAGE_BYTES = 64 * 1024 * 1024
 _ImageMime = Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
 
 
-class ImageResource(FileSnapshot):
-    """Locate one direct image file with a snapshot and an opaque resource ID."""
+class ImageResource(BaseModel):
+    """Locate one image file or archive member with an opaque resource ID."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     id: str = Field(pattern=r"^[0-9a-f]{32}$")
     relative_path: str = Field(min_length=1, max_length=4096)
     mime_type: _ImageMime
     size: int = Field(gt=0, le=_IMAGE_BYTES)
+    mtime_ns: int | None = None
+    crc: int | None = Field(default=None, ge=0, le=0xFFFFFFFF)
 
     @field_validator("relative_path")
     @classmethod
-    def check_name(cls, name: str) -> str:
-        """Accept only a visible, supported filename directly inside the source.
+    def check_path(cls, path: str) -> str:
+        """Accept only a visible, supported relative image path inside the source.
 
         Args:
-            name: The relative resource filename from an index.
+            path: The relative resource filename or member path from an index.
 
         Returns:
-            The unchanged filename.
+            The unchanged path for exact filesystem or member lookup.
 
         Raises:
-            ValueError: If the name could escape the directory or is unsupported.
+            ValueError: If the path could escape the source or is unsupported.
         """
-        if (
-            any(char in name for char in "/\\\0")
-            or PureWindowsPath(name).drive
-            or _ignored(name)
-            or Path(name).suffix.casefold() not in _IMAGE_EXTENSIONS
+        normalized = PurePosixPath(normalize_member_path(path))
+        if any(is_ignored_name(part) for part in normalized.parts) or (
+            normalized.suffix.casefold() not in IMAGE_EXTENSIONS
         ):
             raise ValueError("invalid image filename")
-        return name
+        return path
 
 
 class ImageIndex(BaseModel):
     """Keep ordered pages and an optional separate cover without image copies."""
 
-    model_config = FileSnapshot.model_config
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1] = 1
-    format: Literal["dir"] = "dir"
+    format: Literal["dir", "cbz", "zip"] = "dir"
     index_version: str = Field(pattern=r"^[0-9a-f]{64}$")
-    pages: tuple[ImageResource, ...] = Field(min_length=1, max_length=_MAX_PAGES)
+    source_snapshot: FileSnapshot | None = None
+    pages: tuple[ImageResource, ...] = Field(min_length=1, max_length=MAX_PAGES)
     cover: ImageResource | None = None
 
     @model_validator(mode="after")
@@ -78,22 +89,43 @@ class ImageIndex(BaseModel):
             The validated index.
 
         Raises:
-            ValueError: If identities, ordering or cover ownership are invalid.
+            ValueError: If snapshots, identities, ordering or cover ownership
+                are invalid.
         """
         resources = (*self.pages, *((self.cover,) if self.cover else ()))
+        archived = self.format != "dir"
+        if archived != (self.source_snapshot is not None):
+            raise ValueError("invalid image source snapshot")
+        for entry in resources:
+            if archived:
+                valid = entry.crc is not None and entry.mtime_ns is None
+            else:
+                valid = (
+                    entry.crc is None
+                    and entry.mtime_ns is not None
+                    and "/" not in entry.relative_path
+                )
+            if not valid:
+                raise ValueError("invalid image resource snapshot")
+        names = [
+            normalize_member_path(entry.relative_path)
+            if archived
+            else entry.relative_path
+            for entry in resources
+        ]
         if (
             len({entry.id for entry in resources}) != len(resources)
-            or len({entry.relative_path for entry in resources}) != len(resources)
+            or len(set(names)) != len(resources)
             or any(
-                Path(entry.relative_path).stem.casefold() in _COVER_NAMES
+                Path(entry.relative_path).stem.casefold() in COVER_NAMES
                 for entry in self.pages
             )
             or (
                 self.cover is not None
-                and Path(self.cover.relative_path).stem.casefold() not in _COVER_NAMES
+                and Path(self.cover.relative_path).stem.casefold() not in COVER_NAMES
             )
-            or list(self.pages)
-            != sorted(self.pages, key=lambda entry: natural_key(entry.relative_path))
+            or names[: len(self.pages)]
+            != sorted(names[: len(self.pages)], key=natural_key)
         ):
             raise ValueError("invalid image resource list")
         return self
@@ -141,17 +173,20 @@ def _directory_state(path: Path) -> tuple[int, ...]:
         The directory identity and modification attributes for one operation.
 
     Raises:
-        ContentError: If the container or its direct parent is a symbolic link.
+        ContentError: If the container is not a directory or its parent is a symlink.
         OSError: If the directory cannot be inspected.
     """
     info = path.stat(follow_symlinks=False)
     if not stat.S_ISDIR(info.st_mode) or path.parent.is_symlink():
         raise ContentError("media_source_unavailable")
-    return _file_state(info)
+    return file_state(info)
 
 
 def _read_image(
-    path: Path, *, snapshot: FileSnapshot | None = None, full: bool = False
+    path: Path,
+    *,
+    snapshot: FileSnapshot | ImageResource | None = None,
+    full: bool = False,
 ) -> tuple[bytes, os.stat_result]:
     """Read a stable regular file with a fixed bound and no final symlink following.
 
@@ -179,117 +214,221 @@ def _read_image(
         raise ContentError("media_limit_exceeded")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as file:
-        if _file_state(os.fstat(file.fileno())) != _file_state(before):
+        if file_state(os.fstat(file.fileno())) != file_state(before):
             raise ContentError("content_changed")
         data = file.read(_IMAGE_BYTES + 1 if full else 12)
         if len(data) > _IMAGE_BYTES:
             raise ContentError("media_limit_exceeded")
-        if _file_state(os.fstat(file.fileno())) != _file_state(before):
+        if file_state(os.fstat(file.fileno())) != file_state(before):
             raise ContentError("content_changed")
     try:
         after = path.stat(follow_symlinks=False)
     except FileNotFoundError as error:
         raise ContentError("content_changed") from error
-    if _file_state(after) != _file_state(before) or (
+    if file_state(after) != file_state(before) or (
         full and len(data) != before.st_size
     ):
         raise ContentError("content_changed")
     return data, before
 
 
-def build_image_index(source: ReadingSource, cache_dir: Path) -> ImageIndex:
-    """Build a staging index from the current direct files of an image directory.
-
-    The caller validates library ownership, runs this synchronous work in a worker
-    and revalidates the source before publishing under the library lock. Discovery
-    pages are rescanned so an outdated candidate cannot omit newly added pages.
+def _build_directory_index(source: ReadingSource) -> ImageIndex:
+    """Build an image directory index while checking source stability.
 
     Args:
-        source: An image-directory reading unit discovered by its library handler.
+        source: The directory reading unit whose current direct files are indexed.
+
+    Returns:
+        The complete index without writing cache files or copying images.
+
+    Raises:
+        ContentError: If the directory is empty, ambiguous, unstable or over limits.
+        OSError: If the source cannot be inspected or read.
+    """
+    directory_state = _directory_state(source.path)
+    files, _ = list_source_entries(source.path)
+    try:
+        current = identify_comic_source(source.path, files)
+    except ValueError as error:
+        raise ContentError(str(error)) from error
+    if current is None:
+        raise ContentError("empty_content")
+    if current.format != MediaFormat.DIR:
+        raise ContentError("content_changed")
+    covers = sorted(
+        (
+            path
+            for path in files
+            if path.suffix.casefold() in IMAGE_EXTENSIONS
+            and path.stem.casefold() in COVER_NAMES
+        ),
+        key=lambda path: (
+            COVER_NAMES.index(path.stem.casefold()),
+            natural_key(path.name),
+        ),
+    )
+    snapshots = {
+        path: file_state(path.stat(follow_symlinks=False))
+        for path in (*current.pages, *covers)
+    }
+    cover_paths = set(covers)
+    pages, cover = [], None
+    for path in (*current.pages, *covers):
+        if path in cover_paths and cover is not None:
+            continue
+        try:
+            data, info = _read_image(path)
+            mime_type = _image_type(data)
+        except ContentError as error:
+            if path in cover_paths and error.code in {
+                "invalid_image",
+                "media_limit_exceeded",
+            }:
+                continue
+            raise
+        if file_state(info) != snapshots[path]:
+            raise ContentError("content_changed")
+        try:
+            resource = ImageResource(
+                id=hashlib.sha256(f"image:{path.name}".encode()).hexdigest()[:32],
+                relative_path=path.name,
+                mime_type=mime_type,
+                size=info.st_size,
+                mtime_ns=info.st_mtime_ns,
+            )
+        except ValidationError as error:
+            raise ContentError("unsupported_media_format") from error
+        if path in cover_paths:
+            cover = resource
+        else:
+            pages.append(resource)
+    try:
+        changed = _directory_state(source.path) != directory_state or any(
+            file_state(path.stat(follow_symlinks=False)) != snapshot
+            for path, snapshot in snapshots.items()
+        )
+    except FileNotFoundError as error:
+        raise ContentError("content_changed") from error
+    if changed:
+        raise ContentError("content_changed")
+    index = ImageIndex(
+        index_version=secrets.token_hex(32), pages=tuple(pages), cover=cover
+    )
+    return index
+
+
+def _build_archive_index(source: ReadingSource) -> ImageIndex:
+    """Build a CBZ or ZIP page index without extracting members to disk.
+
+    Args:
+        source: The independently contained CBZ or ZIP reading unit.
+
+    Returns:
+        Ordered member resources and an archive snapshot, with a fallback cover.
+
+    Raises:
+        ContentError: If the source is unsafe, empty, corrupt, unstable or over limits.
+        OSError: If the source cannot be inspected or read.
+    """
+    with open_archive(source.path) as (archive, snapshot):
+        members = [
+            info
+            for info in archive.infolist()
+            if not info.is_dir()
+            and not any(
+                is_ignored_name(part) for part in PurePosixPath(info.filename).parts
+            )
+            and PurePosixPath(info.filename).suffix.casefold() in IMAGE_EXTENSIONS
+        ]
+        body = sorted(
+            (
+                info
+                for info in members
+                if PurePosixPath(info.filename).stem.casefold() not in COVER_NAMES
+            ),
+            key=lambda info: natural_key(normalize_member_path(info.filename)),
+        )
+        if not body:
+            raise ContentError("empty_content")
+        if len(body) > MAX_PAGES:
+            raise ContentError("media_limit_exceeded")
+        covers = sorted(
+            (
+                info
+                for info in members
+                if PurePosixPath(info.filename).stem.casefold() in COVER_NAMES
+            ),
+            key=lambda info: (
+                COVER_NAMES.index(PurePosixPath(info.filename).stem.casefold()),
+                natural_key(normalize_member_path(info.filename)),
+            ),
+        )
+        pages, cover = [], None
+        for info in (*body, *covers):
+            is_cover = PurePosixPath(info.filename).stem.casefold() in COVER_NAMES
+            if is_cover and cover is not None:
+                continue
+            try:
+                data = read_member(archive, info, _IMAGE_BYTES, prefix_bytes=12)
+                mime_type = _image_type(data)
+            except ContentError as error:
+                if is_cover and error.code in {
+                    "invalid_image",
+                    "media_limit_exceeded",
+                }:
+                    continue
+                raise
+            resource = ImageResource(
+                id=hashlib.sha256(
+                    f"image:{normalize_member_path(info.filename)}".encode()
+                ).hexdigest()[:32],
+                relative_path=info.filename,
+                mime_type=mime_type,
+                size=info.file_size,
+                crc=info.CRC,
+            )
+            if is_cover:
+                cover = resource
+            else:
+                pages.append(resource)
+        return ImageIndex(
+            format=source.format.value,
+            index_version=secrets.token_hex(32),
+            source_snapshot=snapshot,
+            pages=tuple(pages),
+            cover=cover,
+        )
+
+
+def build_image_index(source: ReadingSource, cache_dir: Path) -> ImageIndex:
+    """Build a staging index from an image directory, CBZ or ZIP archive.
+
+    The caller validates library ownership, runs this synchronous work in a worker
+    and revalidates the source before publishing under the library lock.
+
+    Args:
+        source: The directory or archive reading unit discovered by its handler.
         cache_dir: A nonexistent staging directory whose parent already exists.
 
     Returns:
         The index also saved as index.json, without copying source images.
 
     Raises:
-        ContentError: If the source is empty, unsupported, unstable or over limits.
+        ContentError: If the source is unsafe, empty, unsupported, corrupt,
+            unstable or over limits.
         OSError: If files cannot be accessed, or the staging directory exists.
     """
-    if source.format != MediaFormat.DIR:
+    if source.format not in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP):
         raise ContentError("unsupported_media_format")
     cache_dir.mkdir()
     try:
-        directory_state = _directory_state(source.path)
-        files, _ = _entries(source.path)
-        try:
-            current = _comic_source(source.path, files)
-        except ValueError as error:
-            raise ContentError(str(error)) from error
-        if current is None:
-            raise ContentError("empty_content")
-        if current.format != MediaFormat.DIR:
-            raise ContentError("content_changed")
-        covers = sorted(
-            (
-                path
-                for path in files
-                if path.suffix.casefold() in _IMAGE_EXTENSIONS
-                and path.stem.casefold() in _COVER_NAMES
-            ),
-            key=lambda path: (
-                ("cover", "folder", "poster").index(path.stem.casefold()),
-                natural_key(path.name),
-            ),
-        )
-        snapshots = {
-            path: _file_state(path.stat(follow_symlinks=False))
-            for path in (*current.pages, *covers)
-        }
-        cover_paths = set(covers)
-        pages, cover = [], None
-        for path in (*current.pages, *covers):
-            if path in cover_paths and cover is not None:
-                continue
-            try:
-                data, info = _read_image(path)
-                mime_type = _image_type(data)
-            except ContentError as error:
-                if path in cover_paths and error.code in {
-                    "invalid_image",
-                    "media_limit_exceeded",
-                }:
-                    continue
-                raise
-            if _file_state(info) != snapshots[path]:
-                raise ContentError("content_changed")
-            try:
-                resource = ImageResource(
-                    id=hashlib.sha256(f"image:{path.name}".encode()).hexdigest()[:32],
-                    relative_path=path.name,
-                    mime_type=mime_type,
-                    size=info.st_size,
-                    mtime_ns=info.st_mtime_ns,
-                )
-            except ValidationError as error:
-                raise ContentError("unsupported_media_format") from error
-            if path in cover_paths:
-                cover = resource
-            else:
-                pages.append(resource)
-        try:
-            changed = _directory_state(source.path) != directory_state or any(
-                _file_state(path.stat(follow_symlinks=False)) != snapshot
-                for path, snapshot in snapshots.items()
-            )
-        except FileNotFoundError as error:
-            raise ContentError("content_changed") from error
-        if changed:
-            raise ContentError("content_changed")
-        index = ImageIndex(
-            index_version=secrets.token_hex(32), pages=tuple(pages), cover=cover
+        index = (
+            _build_directory_index(source)
+            if source.format == MediaFormat.DIR
+            else _build_archive_index(source)
         )
         data = index.model_dump_json().encode("utf-8")
-        if len(data) > _INDEX_BYTES:
+        if len(data) > INDEX_BYTES:
             raise ContentError("media_limit_exceeded")
         (cache_dir / "index.json").write_bytes(data)
         return index
@@ -312,8 +451,8 @@ def load_image_index(cache_dir: Path) -> ImageIndex:
     """
     try:
         with (cache_dir / "index.json").open("rb") as file:
-            data = file.read(_INDEX_BYTES + 1)
-        if len(data) > _INDEX_BYTES:
+            data = file.read(INDEX_BYTES + 1)
+        if len(data) > INDEX_BYTES:
             raise ContentError("content_not_ready")
         return ImageIndex.model_validate_json(data)
     except (OSError, ValidationError) as error:
@@ -321,12 +460,12 @@ def load_image_index(cache_dir: Path) -> ImageIndex:
 
 
 def read_image_resource(
-    source_dir: Path, cache_dir: Path, resource_id: str
+    source_path: Path, cache_dir: Path, resource_id: str
 ) -> tuple[bytes, str]:
     """Read one indexed page or cover after checking its current source snapshot.
 
     Args:
-        source_dir: The current directory, with library access checked by the caller.
+        source_path: The current directory or archive after the caller checks access.
         cache_dir: The completed cache for the caller-validated content version.
         resource_id: An exact opaque page or cover ID from the index.
 
@@ -343,12 +482,22 @@ def read_image_resource(
     if resource is None:
         raise ContentError("not_found")
     try:
-        before = _directory_state(source_dir)
-        data, _ = _read_image(
-            source_dir / resource.relative_path, snapshot=resource, full=True
-        )
-        if _directory_state(source_dir) != before:
-            raise ContentError("content_changed")
+        if index.format == "dir":
+            before = _directory_state(source_path)
+            data, _ = _read_image(
+                source_path / resource.relative_path, snapshot=resource, full=True
+            )
+            if _directory_state(source_path) != before:
+                raise ContentError("content_changed")
+        else:
+            with open_archive(source_path, index.source_snapshot) as (archive, _):
+                try:
+                    member = archive.getinfo(resource.relative_path)
+                except KeyError as error:
+                    raise ContentError("content_changed") from error
+                if (member.file_size, member.CRC) != (resource.size, resource.crc):
+                    raise ContentError("content_changed")
+                data = read_member(archive, member, _IMAGE_BYTES)
         if _image_type(data) != resource.mime_type:
             raise ContentError("content_changed")
         return data, resource.mime_type

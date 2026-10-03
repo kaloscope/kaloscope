@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.core.media import image
+from app.core.media.common import ContentError
 from app.core.media.handlers import reading
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingSource
@@ -17,7 +18,6 @@ from app.core.media.image import (
     load_image_index,
     read_image_resource,
 )
-from app.core.media.text import ContentError
 from app.models.media import LibType, MediaFormat
 
 _PNG = base64.b64decode(
@@ -157,10 +157,10 @@ def test_changed_layout(tmp_path, layout):
 def test_image_limits(tmp_path, monkeypatch, limit):
     source = _source(tmp_path, {"1.png": _PNG, "2.png": _PNG})
     if limit == "pages":
-        monkeypatch.setattr(reading, "_MAX_PAGES", 1)
+        monkeypatch.setattr(reading, "MAX_PAGES", 1)
     else:
         monkeypatch.setattr(
-            image, "_IMAGE_BYTES" if limit == "image" else "_INDEX_BYTES", 1
+            image, "_IMAGE_BYTES" if limit == "image" else "INDEX_BYTES", 1
         )
     with pytest.raises(ContentError, match="media_limit_exceeded"):
         build_image_index(source, tmp_path / "cache")
@@ -356,7 +356,7 @@ def test_index_damage(tmp_path, damage):
     elif damage == "json":
         path.write_text("{")
     elif damage == "oversize":
-        path.write_bytes(b" " * (image._INDEX_BYTES + 1))
+        path.write_bytes(b" " * (image.INDEX_BYTES + 1))
     else:
         if damage == "schema":
             data["schema_version"] = 2
@@ -404,7 +404,7 @@ def test_preserve_index(tmp_path):
 def test_source_format(tmp_path):
     with pytest.raises(ContentError, match="unsupported_media_format"):
         build_image_index(
-            ReadingSource(tmp_path / "comic.zip", MediaFormat.ZIP), tmp_path / "cache"
+            ReadingSource(tmp_path / "book.epub", MediaFormat.EPUB), tmp_path / "cache"
         )
     assert not (tmp_path / "cache").exists()
 

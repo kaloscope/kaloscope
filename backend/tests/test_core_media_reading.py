@@ -236,7 +236,7 @@ def test_natural_order():
 
 def test_source_limit(tmp_path, monkeypatch):
     _files(tmp_path, "Work/1.jpg", "Work/2.jpg", "Work/3.jpg")
-    monkeypatch.setattr(reading, "_MAX_PAGES", 2)
+    monkeypatch.setattr(reading, "MAX_PAGES", 2)
     result = get_handler(LibType.COMIC).scan_sources(str(tmp_path))
 
     assert not result.sources
