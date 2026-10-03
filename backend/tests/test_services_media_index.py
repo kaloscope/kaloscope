@@ -1,4 +1,4 @@
-"""Tests for reading index publication, failure recovery and cancellation."""
+"""Tests for reading source registration, index publication and recovery."""
 
 import asyncio
 import os
@@ -6,6 +6,7 @@ import threading
 import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from app.core.config import KaloscopeConfig
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.epub.cache import EpubContent
+from app.core.media.handlers.base import get_handler
+from app.core.media.handlers.reading import ReadingMediaHandler, ReadingSource
 from app.core.media.image import load_image_index, read_image_resource
 from app.core.media.text import load_text_index, read_text_chapter
 from app.models.media import IndexState, LibType, MediaFormat, MediaItem, MediaLib
@@ -54,10 +57,10 @@ async def _database() -> AsyncGenerator[None]:
         await Tortoise.close_connections()
 
 
-async def _item(
+async def _source(
     tmp_path: Path, format: MediaFormat, *, chapter: bool = False
-) -> MediaItem:
-    """Create a real reading source and a pending row without running the watcher.
+) -> tuple[MediaLib, ReadingSource]:
+    """Create a library and real reading files without registering media items.
 
     Args:
         tmp_path: The isolated filesystem root.
@@ -65,7 +68,7 @@ async def _item(
         chapter: Whether to create a comic chapter; defaults to a standalone work.
 
     Returns:
-        The pending item with its library assigned.
+        The library and source, with a parent path for a comic chapter.
     """
     root = tmp_path / "Library"
     work = root / "Work"
@@ -78,13 +81,6 @@ async def _item(
         lib_type=LibType.NOVEL
         if format in (MediaFormat.TXT, MediaFormat.EPUB)
         else LibType.COMIC,
-    )
-    parent = (
-        await MediaItem.create(
-            lib=lib, path=str(work), dir=str(work), name="Work", format=None
-        )
-        if chapter
-        else None
     )
     path = directory if format == MediaFormat.DIR else directory / f"Book.{format}"
     if format == MediaFormat.TXT:
@@ -108,6 +104,8 @@ async def _item(
                 archive.writestr(
                     "book.opf",
                     '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                    '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                    "<dc:title>Embedded</dc:title></metadata>"
                     '<manifest><item id="body" href="body.xhtml" '
                     'media-type="application/xhtml+xml"/></manifest>'
                     '<spine><itemref idref="body"/></spine></package>',
@@ -117,11 +115,39 @@ async def _item(
                     '<html xmlns="http://www.w3.org/1999/xhtml">'
                     "<body><p>Body</p></body></html>",
                 )
+    return lib, ReadingSource(path, format, work if chapter else None)
+
+
+async def _item(
+    tmp_path: Path, format: MediaFormat, *, chapter: bool = False
+) -> MediaItem:
+    """Create a reading source and a directly seeded row for publication tests.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        format: The body format to construct.
+        chapter: Whether to create a comic chapter; defaults to a standalone work.
+
+    Returns:
+        The pending item with its library assigned.
+    """
+    lib, source = await _source(tmp_path, format, chapter=chapter)
+    parent = (
+        await MediaItem.create(
+            lib=lib,
+            path=str(source.parent_path),
+            dir=str(source.parent_path),
+            name="Work",
+            format=None,
+        )
+        if chapter
+        else None
+    )
     return await MediaItem.create(
         lib=lib,
         parent=parent,
-        path=str(path),
-        dir=str(directory),
+        path=str(source.path),
+        dir=str(source.directory),
         name="Book",
         format=format,
         title="Saved title",
@@ -147,6 +173,314 @@ def _cache(item: MediaItem) -> Path:
         / str(item.id)
         / item.index_version
     )
+
+
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat]
+    + [
+        (format, True) for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+    ],
+)
+def test_create_reading(tmp_path, format, chapter):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            before = {
+                path: path.read_bytes()
+                for path in Path(lib.dir).rglob("*")
+                if path.is_file()
+            }
+            handler = get_handler(lib.lib_type)
+            assert isinstance(handler, ReadingMediaHandler)
+            scan = await asyncio.to_thread(handler.scan_sources, lib.dir)
+            assert not scan.issues
+            items = [
+                await MediaItemService.create_reading(lib.id, candidate)
+                for candidate in scan.sources
+            ]
+            assert len(items) == await MediaItem.all().count() == (2 if chapter else 1)
+            item = items[-1]
+            assert item.path == str(source.path) and item.dir == str(source.directory)
+            assert item.format == format
+            assert item.name == (
+                source.path.name if format == MediaFormat.DIR else source.path.stem
+            )
+            assert item.parent_id == (items[0].id if chapter else None)
+            assert item.lib.id == lib.id
+            for current in items:
+                assert current.index_state == IndexState.PENDING and current.visible
+                assert current.hash is current.nfo_path is current.index_version is None
+                assert current.title is current.extra is current.size is None
+                await MediaItemService.sync_metadata(current.id)
+            assert not (
+                Path(KaloscopeConfig.get_workspace("temp")) / "media_index"
+            ).exists()
+            current = await MediaItemService.index_content(item.id)
+            assert current.index_state == IndexState.READY and current.title is not None
+            assert current.id == item.id and current.parent_id == item.parent_id
+            cache = _cache(current)
+            if format in (MediaFormat.TXT, MediaFormat.EPUB):
+                index = load_text_index(cache)
+                content = read_text_chapter(cache, index.chapters[0].id)
+                assert (
+                    content == ["Body"]
+                    if format == MediaFormat.TXT
+                    else isinstance(content, EpubContent)
+                )
+            else:
+                index = load_image_index(cache)
+                assert read_image_resource(source.path, cache, index.pages[0].id) == (
+                    _PNG,
+                    "image/png",
+                )
+            assert all(path.read_bytes() == data for path, data in before.items())
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", list(IndexState))
+def test_create_preserves(tmp_path, state):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR)
+            item = await MediaItemService.create_reading(lib.id, source)
+            await MediaItem.filter(id=item.id).update(
+                visible=False,
+                title="Saved title",
+                year=2020,
+                poster="/_api/media/1/assets/cover",
+                index_state=state,
+                index_version="a" * 64,
+                index_error="empty_content" if state == IndexState.EMPTY else None,
+                extra={"schema_version": 1, "content": {"page_count": 1}},
+            )
+            if state == IndexState.EMPTY:
+                (source.path / "1.png").unlink()
+            before = await MediaItem.all().values()
+            current = await MediaItemService.create_reading(lib.id, source)
+            assert current.id == item.id
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["format", "dir", "parent"])
+def test_create_conflict(tmp_path, field):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR)
+            item = await MediaItemService.create_reading(lib.id, source)
+            if field == "format":
+                await MediaItem.filter(id=item.id).update(format=None)
+            elif field == "dir":
+                await MediaItem.filter(id=item.id).update(dir=lib.dir)
+            else:
+                parent = await MediaItem.create(
+                    lib=lib,
+                    path=str(Path(lib.dir) / "Other"),
+                    dir=lib.dir,
+                    name="Other",
+                )
+                await MediaItem.filter(id=item.id).update(parent=parent)
+            before = await MediaItem.all().values()
+            with pytest.raises(ContentError, match="ambiguous_layout"):
+                await MediaItemService.create_reading(lib.id, source)
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", ["missing", "foreign", "format", "nested", "hidden"])
+def test_create_parent(tmp_path, state):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            assert source.parent_path is not None
+            parent = None
+            if state != "missing":
+                parent = await MediaItemService.create_reading(
+                    lib.id, ReadingSource(source.parent_path, None)
+                )
+                if state == "foreign":
+                    other = await MediaLib.create(
+                        dir=str(tmp_path / "Other"),
+                        name="Other",
+                        lib_type=LibType.COMIC,
+                        priority=2,
+                    )
+                    await MediaItem.filter(id=parent.id).update(lib_id=other.id)
+                elif state == "format":
+                    await MediaItem.filter(id=parent.id).update(format=MediaFormat.DIR)
+                elif state == "nested":
+                    ancestor = await MediaItem.create(
+                        lib=lib, path=lib.dir, dir=lib.dir, name="Root"
+                    )
+                    await MediaItem.filter(id=parent.id).update(parent=ancestor)
+                else:
+                    await MediaItem.filter(id=parent.id).update(visible=False)
+            before = await MediaItem.all().values()
+            if state == "hidden":
+                item = await MediaItemService.create_reading(lib.id, source)
+                assert parent is not None and item.parent_id == parent.id
+                assert item.parent is not None and not item.parent.visible
+            else:
+                with pytest.raises(ContentError, match="unsupported_layout"):
+                    await MediaItemService.create_reading(lib.id, source)
+                assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "outside",
+        "root",
+        "symlink",
+        "ancestor",
+        "ambiguous",
+        "format",
+        "missing",
+        "empty",
+        "collection",
+    ],
+)
+def test_create_source(tmp_path, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(
+                tmp_path,
+                MediaFormat.DIR
+                if problem in ("empty", "collection")
+                else MediaFormat.TXT,
+            )
+            if problem == "outside":
+                source = replace(source, path=tmp_path / "Book.txt")
+            elif problem == "root":
+                source = replace(source, path=Path(lib.dir))
+            elif problem in ("symlink", "ancestor"):
+                path = source.path if problem == "symlink" else Path(lib.dir)
+                moved = path.with_name(path.name + "-moved")
+                path.rename(moved)
+                path.symlink_to(moved, target_is_directory=problem == "ancestor")
+            elif problem == "ambiguous":
+                (source.directory / "Other.txt").write_text("Other")
+            elif problem == "format":
+                source = replace(source, format=MediaFormat.EPUB)
+            elif problem == "missing":
+                source.path.unlink()
+            else:
+                (source.path / "1.png").unlink()
+                if problem == "collection":
+                    source = replace(source, format=None)
+            with pytest.raises(ContentError):
+                await MediaItemService.create_reading(lib.id, source)
+            assert await MediaItem.all().count() == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.CBZ])
+def test_create_invalid_body(tmp_path, format):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format)
+            source.path.write_bytes(b"\x00invalid")
+            item = await MediaItemService.create_reading(lib.id, source)
+            assert item.index_state == IndexState.PENDING
+            with pytest.raises(ContentError):
+                await MediaItemService.index_content(item.id)
+            current = await MediaItem.get(id=item.id)
+            assert current.index_state == IndexState.ERROR
+            assert current.index_error == (
+                "text_decode_failed" if format == MediaFormat.TXT else "invalid_archive"
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_create_library(tmp_path, missing):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            if missing:
+                await lib.delete()
+            else:
+                await MediaLib.filter(id=lib.id).update(lib_type=LibType.MOVIE)
+            with pytest.raises(DoesNotExist if missing else ContentError):
+                await MediaItemService.create_reading(lib.id, source)
+            assert await MediaItem.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_create_concurrent(tmp_path):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            first, second = await asyncio.gather(
+                MediaItemService.create_reading(lib.id, source),
+                MediaItemService.create_reading(lib.id, source),
+            )
+            assert first.id == second.id
+            assert await MediaItem.all().count() == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_create_worker(tmp_path, monkeypatch, cancel):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            started, finish, stopped = (
+                threading.Event(),
+                threading.Event(),
+                threading.Event(),
+            )
+            operation = media_service._validate_reading_source
+            loop_thread = threading.get_ident()
+
+            def blocked(*args, **kwargs):
+                """Keep validation active while inspecting locks and cancellation.
+
+                Args:
+                    *args: The proposed item passed to source validation.
+                    **kwargs: The candidate requirement passed to validation.
+                """
+                try:
+                    assert threading.get_ident() != loop_thread
+                    operation(*args, **kwargs)
+                    started.set()
+                    assert finish.wait(timeout=5)
+                finally:
+                    stopped.set()
+
+            monkeypatch.setattr(media_service, "_validate_reading_source", blocked)
+            task = asyncio.create_task(MediaItemService.create_reading(lib.id, source))
+            try:
+                assert await asyncio.to_thread(started.wait, 5)
+                assert await MediaItem.all().count() == 0
+                with pytest.raises(Timeout):
+                    async with await library_lock(lib.dir).acquire(timeout=0):
+                        pass
+                if cancel:
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                    async with await library_lock(lib.dir).acquire(timeout=0):
+                        pass
+            finally:
+                finish.set()
+                assert await asyncio.to_thread(stopped.wait, 5)
+            if cancel:
+                assert await MediaItem.all().count() == 0
+            else:
+                assert (await task).path == str(source.path)
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

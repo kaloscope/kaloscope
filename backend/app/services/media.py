@@ -85,12 +85,14 @@ def _reading_identity(item: MediaItem) -> tuple:
 
 @contextmanager
 def _reading_source(
-    item: MediaItem,
+    item: MediaItem, *, require_candidate: bool = False
 ) -> Generator[tuple[ReadingSource, _SourceStates, bool]]:
     """Validate reading ownership and guard filesystem stability for one operation.
 
     Args:
         item: The owned reading item with its library and optional parent loaded.
+        require_candidate: Whether discovery must find the source; defaults to False
+            so already indexed empty sources can retain their identity and metadata.
 
     Yields:
         The current source, mutable stability checks and whether its body is missing.
@@ -191,6 +193,14 @@ def _reading_source(
                     source.parent_path,
                 ):
                     raise ContentError("content_changed")
+            elif require_candidate:
+                raise ContentError(
+                    "media_source_unavailable"
+                    if source_missing
+                    else "empty_content"
+                    if source.format in (None, MediaFormat.DIR)
+                    else "unsupported_layout"
+                )
             elif source.format not in (None, MediaFormat.DIR) and not source_missing:
                 raise ContentError("unsupported_layout")
             # indexed empty image directories and collections can retain their metadata
@@ -214,6 +224,20 @@ def _reading_source(
                     raise ContentError("content_changed")
     except OSError as error:
         raise ContentError("media_source_unavailable") from error
+
+
+def _validate_reading_source(item: MediaItem, *, require_candidate: bool):
+    """Check source ownership and discovery in a worker without reading its body.
+
+    Args:
+        item: The proposed reading item with its library and optional parent loaded.
+        require_candidate: Whether discovery must still find this new source.
+
+    Raises:
+        ContentError: If source ownership, discovery or stability is invalid.
+    """
+    with _reading_source(item, require_candidate=require_candidate):
+        pass
 
 
 def _read_reading(
@@ -435,6 +459,66 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     """The service class for all media item related operations."""
 
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
+
+    @classmethod
+    async def create_reading(cls, lib_id: int, source: ReadingSource) -> MediaItem:
+        """Get or register a discovered reading source without parsing its content.
+
+        Register comic collections before their chapters. Validate current paths
+        under the library lock, then insert only the missing pending item. Existing
+        items keep their visibility, summaries and index state; ownership changes
+        require reconciliation instead of silently overwriting another source.
+
+        Args:
+            lib_id: The reading library containing the discovered source.
+            source: The candidate from the reading handler, revalidated before saving.
+
+        Returns:
+            The existing item or a new pending item with its library and parent loaded.
+
+        Raises:
+            DoesNotExist: If the library no longer exists.
+            ContentError: If the type, source, parent or existing ownership is invalid.
+        """
+        original = await MediaLib.get(id=lib_id)
+        async with library_lock(original.dir):
+            lib = await MediaLib.get(id=lib_id)
+            if lib.dir != original.dir:
+                raise ContentError("content_changed")
+            if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+                raise ContentError("unsupported_media_format")
+            parent = None
+            if source.parent_path is not None:
+                parent = await MediaItem.get_or_none(
+                    lib_id=lib_id, path=str(source.parent_path)
+                )
+                if parent is None:
+                    raise ContentError("unsupported_layout")
+            candidate = MediaItem(
+                lib=lib,
+                parent=parent,
+                path=str(source.path),
+                dir=str(source.directory),
+                name=source.path.name
+                if source.format in (None, MediaFormat.DIR)
+                else source.path.stem,
+                format=source.format,
+                index_state=IndexState.PENDING,
+            )
+            current = await MediaItem.get_or_none(
+                lib_id=lib_id, path=candidate.path
+            ).select_related("lib", "parent")
+            if current is not None and _reading_identity(current) != _reading_identity(
+                candidate
+            ):
+                raise ContentError("ambiguous_layout")
+            await to_thread(
+                _validate_reading_source, candidate, require_candidate=current is None
+            )
+            if current is not None:
+                return current
+            await candidate.save(force_create=True)
+            return candidate
 
     @classmethod
     async def sync_metadata(cls, id: int) -> MediaItem:
