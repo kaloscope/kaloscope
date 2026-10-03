@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
+import shutil
 import stat
 from asyncio import create_task, to_thread
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +17,7 @@ from tortoise.exceptions import DoesNotExist
 from tortoise.expressions import Q
 from tortoise.transactions import atomic, in_transaction
 
+from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
     ErrorCode,
@@ -21,11 +26,12 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.media.common import ContentError, file_state
-from app.core.media.coordination import library_lock
+from app.core.media.coordination import library_lock, write_in_thread
 from app.core.media.metadata import ReadingMetadata
 from app.core.media.naming import validate_template
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import (
+    IndexState,
     LibType,
     MediaFormat,
     MediaItem,
@@ -37,12 +43,18 @@ from app.models.media import (
 from app.models.user import PermType, UserInfo, UserPermission, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
-from app.utils.disk import delete_path
+from app.utils.disk import delete_path, rename_exclusive
 
 if TYPE_CHECKING:
     from app.core.media.cover import CoverImage
+    from app.core.media.epub.cache import EpubIndex
     from app.core.media.handlers.base import MediaPathInfo
+    from app.core.media.handlers.reading import ReadingSource
+    from app.core.media.image import ImageIndex
     from app.core.media.metadata_reader import MetadataRead
+    from app.core.media.text import TextIndex
+
+type _SourceStates = dict[Path, tuple[int, ...]]
 
 
 def _reading_identity(item: MediaItem) -> tuple:
@@ -63,36 +75,35 @@ def _reading_identity(item: MediaItem) -> tuple:
         item.dir,
         item.format,
         item.parent_id,
+        parent.lib_id if parent else None,
         parent.path if parent else None,
         parent.format if parent else None,
         parent.parent_id if parent else None,
     )
 
 
-def _read_reading(
-    item: MediaItem, *, with_cover: bool
-) -> tuple[MetadataRead, CoverImage | None, str | None]:
-    """Validate current reading ownership and read files in a worker thread.
+@contextmanager
+def _reading_source(
+    item: MediaItem,
+) -> Generator[tuple[ReadingSource, _SourceStates, bool]]:
+    """Validate reading ownership and guard filesystem stability for one operation.
 
     Args:
-        item: The permission-checked item with its library and parent loaded.
-        with_cover: Whether to read the selected cover bytes after metadata.
+        item: The owned reading item with its library and optional parent loaded.
 
-    Returns:
-        Fresh metadata, optional cover bytes and an independent missing-source error.
+    Yields:
+        The current source, mutable stability checks and whether its body is missing.
 
     Raises:
         ContentError: If paths, layout, file access or source stability are invalid.
     """
     # handler registration imports this service through the video handlers
-    from app.core.media.cover import read_cover
     from app.core.media.handlers.base import get_handler
     from app.core.media.handlers.reading import (
         ReadingMediaHandler,
         ReadingSource,
         is_ignored_name,
     )
-    from app.core.media.metadata_reader import read_metadata
 
     root, path = Path(item.lib.dir), Path(item.path)
     parent = item.parent if item.parent_id is not None else None
@@ -116,6 +127,7 @@ def _read_reading(
             parent is not None
             and (
                 item.lib.lib_type != LibType.COMIC
+                or parent.lib_id != item.lib_id
                 or parent.format is not None
                 or parent.parent_id is not None
                 or Path(parent.path) != source.directory.parent
@@ -181,15 +193,7 @@ def _read_reading(
             elif source.format not in (None, MediaFormat.DIR) and not source_missing:
                 raise ContentError("unsupported_layout")
             # indexed empty image directories and collections can retain their metadata
-            metadata = read_metadata(source)
-            if with_cover and source_missing:
-                raise ContentError("media_source_unavailable")
-            cover = read_cover(source, metadata) if with_cover else None
-            return (
-                metadata,
-                cover,
-                "media_source_unavailable" if source_missing else None,
-            )
+            yield source, states, source_missing
         finally:
             try:
                 changed = any(
@@ -209,6 +213,106 @@ def _read_reading(
                     raise ContentError("content_changed")
     except OSError as error:
         raise ContentError("media_source_unavailable") from error
+
+
+def _read_reading(
+    item: MediaItem, *, with_cover: bool
+) -> tuple[MetadataRead, CoverImage | None, str | None]:
+    """Read current metadata and optional cover bytes in a worker thread.
+
+    Args:
+        item: The permission-checked item with its library and parent loaded.
+        with_cover: Whether to read the selected cover bytes after metadata.
+
+    Returns:
+        Fresh metadata, optional cover bytes and an independent missing-source error.
+
+    Raises:
+        ContentError: If source ownership, file reading or stability is invalid.
+    """
+    from app.core.media.cover import read_cover
+    from app.core.media.metadata_reader import read_metadata
+
+    with _reading_source(item) as (source, _, missing):
+        metadata = read_metadata(source)
+        if with_cover and missing:
+            raise ContentError("media_source_unavailable")
+        cover = read_cover(source, metadata) if with_cover else None
+        return metadata, cover, "media_source_unavailable" if missing else None
+
+
+def _build_content(
+    item: MediaItem, staging: Path
+) -> tuple[TextIndex | EpubIndex | ImageIndex, _SourceStates]:
+    """Build a private content cache while retaining publication stability checks.
+
+    Args:
+        item: The reading item whose source ownership is checked before parsing.
+        staging: A new internal cache directory owned by this build.
+
+    Returns:
+        The validated index and source identities to recheck before publication.
+
+    Raises:
+        ContentError: If the source cannot be indexed or staging cannot be written.
+    """
+    from app.core.media.handlers.reading import IMAGE_EXTENSIONS, list_source_entries
+    from app.core.media.image import build_image_index
+    from app.core.media.text import build_text_index
+
+    with _reading_source(item) as (source, states, missing):
+        if missing:
+            raise ContentError("media_source_unavailable")
+        if source.format == MediaFormat.DIR:
+            files, _ = list_source_entries(source.directory)
+            states.update(
+                (path, file_state(path.stat(follow_symlinks=False)))
+                for path in files
+                if path.suffix.casefold() in IMAGE_EXTENSIONS
+            )
+        try:
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            build = (
+                build_text_index
+                if item.lib.lib_type == LibType.NOVEL
+                else build_image_index
+            )
+            index = build(source, staging)
+        except OSError as error:
+            raise ContentError("content_not_ready") from error
+    return index, states
+
+
+def _publish_content(
+    item: MediaItem, staging: Path, version: str, states: _SourceStates
+):
+    """Publish a completed cache after revalidating the source under the library lock.
+
+    Args:
+        item: The current database item with its library and parent loaded.
+        staging: The complete private cache directory.
+        version: The validated index version used as the final directory name.
+        states: Source identities captured during the build.
+
+    Raises:
+        ContentError: If ownership or source identities changed, or publication fails.
+    """
+    with _reading_source(item) as (_, current_states, missing):
+        try:
+            changed = any(
+                file_state(path.stat(follow_symlinks=False)) != before
+                for path, before in states.items()
+            )
+        except FileNotFoundError as error:
+            raise ContentError("content_changed") from error
+        if missing or changed:
+            raise ContentError("content_changed")
+        # retain page checks until the exclusive rename finishes
+        current_states.update(states)
+        try:
+            rename_exclusive(staging, staging.parent / version)
+        except OSError as error:
+            raise ContentError("content_not_ready") from error
 
 
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
@@ -330,6 +434,125 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     """The service class for all media item related operations."""
 
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
+
+    @classmethod
+    async def index_content(cls, id: int) -> MediaItem:
+        """Rebuild and publish content for one persisted reading unit.
+
+        The library's single event consumer must await builds serially and decide
+        when rebuilding is required. Scan, watch and retry paths must enqueue work
+        for that consumer. Collections derive their state from children and cannot
+        be indexed as a body. Cache directories publish before the database pointer;
+        old and orphaned versions are retained for separate cleanup. Cancellation
+        leaves pending work safe to retry.
+
+        Args:
+            id: The internal reading item ID selected by the library consumer.
+
+        Returns:
+            The item with a ready version, source size and bounded content counts.
+
+        Raises:
+            DoesNotExist: If the item was removed before indexing starts.
+            ContentError: If the source is unsupported, empty, unstable or invalid,
+                ownership changes or publication fails.
+            asyncio.CancelledError: After active writers stop, leaving pending work.
+        """
+        from app.core.media.image import ImageIndex
+
+        original = await MediaItem.get(id=id).select_related("lib")
+        directory = original.lib.dir
+        async with library_lock(directory):
+            item = await MediaItem.get(id=id, lib_id=original.lib_id).select_related(
+                "lib", "parent"
+            )
+            if item.lib.dir != directory:
+                raise ContentError("content_changed")
+            if (
+                item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC)
+                or item.format is None
+            ):
+                raise ContentError("unsupported_media_format")
+            item.index_state = IndexState.PENDING
+            item.index_error = None
+            await item.save(update_fields=["index_state", "index_error"])
+
+        staging = (
+            Path(KaloscopeConfig.get_workspace("temp"))
+            / "media_index"
+            / str(id)
+            / f"building_{secrets.token_hex(16)}.tmp"
+        )
+        try:
+            index, states = await write_in_thread(_build_content, item, staging)
+            async with library_lock(directory):
+                current = await MediaItem.get_or_none(id=id).select_related(
+                    "lib", "parent"
+                )
+                if current is None or _reading_identity(item) != _reading_identity(
+                    current
+                ):
+                    raise ContentError("content_changed")
+                await write_in_thread(
+                    _publish_content, current, staging, index.index_version, states
+                )
+                extra = dict(current.extra or {})
+                extra["schema_version"] = 1
+                extra["content"] = {
+                    "chapter_count": None
+                    if isinstance(index, ImageIndex)
+                    else len(index.chapters),
+                    "page_count": len(index.pages)
+                    if isinstance(index, ImageIndex)
+                    else None,
+                }
+                current.extra = extra
+                current.size = (
+                    index.source_snapshot.size
+                    if index.source_snapshot is not None
+                    else sum(page.size for page in index.pages)
+                    if isinstance(index, ImageIndex)
+                    else None
+                )
+                current.index_version = index.index_version
+                current.index_state = IndexState.READY
+                current.index_error = None
+                async with in_transaction():
+                    await current.save(
+                        update_fields=[
+                            "extra",
+                            "size",
+                            "index_version",
+                            "index_state",
+                            "index_error",
+                        ]
+                    )
+                return current
+        except ContentError as error:
+            async with library_lock(directory):
+                current = await MediaItem.get_or_none(id=id).select_related(
+                    "lib", "parent"
+                )
+                if current is not None and _reading_identity(item) == _reading_identity(
+                    current
+                ):
+                    current.index_state = (
+                        IndexState.EMPTY
+                        if error.code == "empty_content"
+                        else IndexState.PENDING
+                        if error.code
+                        in {
+                            "content_changed",
+                            "media_source_unavailable",
+                            "content_not_ready",
+                        }
+                        else IndexState.ERROR
+                    )
+                    current.index_error = error.code
+                    await current.save(update_fields=["index_state", "index_error"])
+            raise
+        finally:
+            await write_in_thread(shutil.rmtree, staging, ignore_errors=True)
 
     @classmethod
     async def get_accessible(cls, id: int, user: UserInfo) -> MediaItem:

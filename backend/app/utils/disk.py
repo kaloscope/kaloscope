@@ -121,10 +121,10 @@ def format_bytes(size_bytes: int) -> str:
 
 
 def rename_exclusive(source: Path, destination: Path):
-    """Rename a file atomically without overwriting an existing destination.
+    """Rename a file or directory atomically without overwriting the destination.
 
     Args:
-        source: The file to rename.
+        source: The file or directory to rename.
         destination: The final path, which must not already exist.
 
     Raises:

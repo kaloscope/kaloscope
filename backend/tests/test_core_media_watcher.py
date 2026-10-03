@@ -1846,14 +1846,14 @@ def test_organization_arrival(tmp_path, monkeypatch, arrival, recovery):
                 with monkeypatch.context() as patcher:
                     patcher.setattr(
                         organizer,
-                        "_write_in_thread",
+                        "write_in_thread",
                         AsyncMock(side_effect=OSError("interrupted organization")),
                     )
                     with pytest.raises(organizer.OrganizePendingError):
                         await watcher.consume_event(event)
             events = Queue()
             handler = watcher.EventHandler(lib, asyncio.get_running_loop(), events)
-            write = organizer._write_in_thread
+            write = organizer.write_in_thread
             arrived = False
 
             async def write_and_arrive(function, *args):
@@ -1876,7 +1876,7 @@ def test_organization_arrival(tmp_path, monkeypatch, arrival, recovery):
                 return result
 
             with monkeypatch.context() as patcher:
-                patcher.setattr(organizer, "_write_in_thread", write_and_arrive)
+                patcher.setattr(organizer, "write_in_thread", write_and_arrive)
                 await watcher.consume_event(event)
             while not events.empty():
                 await watcher.consume_event(events.get_nowait())

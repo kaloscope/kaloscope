@@ -1,10 +1,42 @@
+import asyncio
 import hashlib
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 from filelock import AsyncFileLock
 from sanic import Sanic, SanicException
 
 from app.core.config import KaloscopeConfig
+
+
+async def write_in_thread[**P, R](
+    function: Callable[P, R], *args: P.args, **kwargs: P.kwargs
+) -> R:
+    """Wait for a filesystem writer before releasing locks or cleaning staging files.
+
+    Args:
+        function: The synchronous filesystem operation to run in a worker thread.
+        *args: The positional arguments passed to the operation.
+        **kwargs: The keyword arguments passed to the operation.
+
+    Returns:
+        The result of the filesystem operation.
+
+    Raises:
+        asyncio.CancelledError: After the worker stops, even if writing fails.
+    """
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # wait for the writer before releasing locks or removing its files
+        while not task.done():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(task)
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
+        raise
 
 
 def notify_media_events(lib_id: int):

@@ -16,6 +16,7 @@ from sanic.log import logger
 from tortoise.exceptions import ValidationError
 from tortoise.transactions import in_transaction
 
+from app.core.media.coordination import write_in_thread
 from app.core.media.naming import render_directory, render_filename, render_path
 from app.models.download import DownloadTask, OfflineDownloadJob
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
@@ -1064,35 +1065,6 @@ def _move_files(root: Path, payload: dict):
             temporary.unlink(missing_ok=True)
 
 
-async def _write_in_thread(function, *args):
-    """Run a filesystem writer to completion, even when cancelled.
-
-    The caller must hold the library lock until this function exits.
-
-    Args:
-        function: The synchronous filesystem operation to run in a worker thread.
-        *args: The positional arguments passed to the operation.
-
-    Raises:
-        asyncio.CancelledError: If cancelled, after the worker has stopped, even
-            if its filesystem operation fails.
-
-    Returns:
-        The result of the filesystem operation.
-    """
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        # wait for the writer before releasing the caller's lock
-        while not task.done():
-            with suppress(asyncio.CancelledError, Exception):
-                await asyncio.shield(task)
-        with suppress(asyncio.CancelledError, Exception):
-            task.result()
-        raise
-
-
 async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     """Finish a journal's filesystem and database updates under the library lock.
 
@@ -1114,7 +1086,7 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     try:
         if payload is None:
             raise ValueError("organization event has no payload")
-        await _write_in_thread(_move_files, Path(lib.dir).absolute(), payload)
+        await write_in_thread(_move_files, Path(lib.dir).absolute(), payload)
         async with in_transaction("default"):
             parent = payload["parent"]
             parent_id = None
@@ -1165,7 +1137,7 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
             await event.delete()
         cleanup = payload.get("cleanup")
         if cleanup:
-            await _write_in_thread(_remove_empty_directories, Path(cleanup))
+            await write_in_thread(_remove_empty_directories, Path(cleanup))
         return payload["mapping"]
     except Exception as error:
         raise OrganizePendingError(
