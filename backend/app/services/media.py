@@ -7,7 +7,7 @@ import shutil
 import stat
 from asyncio import create_task, to_thread
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -258,6 +258,37 @@ def _validate_reading_source(
                     or file_state(info) != states[source.path]
                 ):
                     raise ContentError("content_changed")
+
+
+def _validate_reading_work_rename(
+    items: list[MediaItem], src_path: Path, dest_path: Path
+):
+    """Validate a renamed work and retain all source guards until checks finish.
+
+    Args:
+        items: The nonempty list of proposed items with library and parents loaded.
+        src_path: The previous work directory from the persisted move.
+        dest_path: The new work directory containing the same registered sources.
+
+    Raises:
+        ContentError: If sources are invalid, unstable or the old directory is reused.
+    """
+    with ExitStack() as stack:
+        states: _SourceStates = {}
+        # ponytail: per-item discovery is quadratic; share scans for large works
+        for item in items:
+            _, current, _ = stack.enter_context(_reading_source(item))
+            states.update(current)
+        try:
+            info = src_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        # case-only directory renames may still resolve through the old spelling
+        if (
+            src_path.name.casefold() != dest_path.name.casefold()
+            or file_state(info) != states[dest_path]
+        ):
+            raise ContentError("content_changed")
 
 
 def _read_reading(
@@ -847,6 +878,114 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 update_fields=["path", "name", "index_state", "index_error"]
             )
             return item
+
+    @classmethod
+    async def rename_reading_work(
+        cls, lib_id: int, src_path: Path, dest_path: Path
+    ) -> list[MediaItem]:
+        """Apply an observed work-directory rename and retain all registered IDs.
+
+        Call from the serial library consumer before destination ingestion. Rebase
+        the work and its chapters in one transaction after checking source ownership.
+        Keep histories, summaries and previous caches; mark indexes pending for the
+        subsequent ingestion. This operation does not rename files on disk.
+
+        Args:
+            lib_id: The novel or comic library containing the renamed work.
+            src_path: The absolute previous work directory from a persisted move.
+            dest_path: The absolute new work directory directly below the same root.
+
+        Returns:
+            Updated items with their original IDs and parents loaded, or an empty
+            list if no source records remain, including an already applied move.
+
+        Raises:
+            DoesNotExist: If the library no longer exists.
+            ValueError: If paths are not distinct visible works in the same library.
+            ContentError: If ownership, layout or stability is invalid, the source
+                directory is reused, or any item already occupies the destination.
+        """
+        from app.core.media.handlers.reading import is_ignored_name
+
+        original = await MediaLib.get(id=lib_id)
+        root = Path(original.dir)
+        if (
+            not root.is_absolute()
+            or ".." in root.parts
+            or src_path == dest_path
+            or any(
+                path.parent != root or is_ignored_name(path.name)
+                for path in (src_path, dest_path)
+            )
+        ):
+            raise ValueError("rename paths must select distinct visible works")
+        async with library_lock(original.dir):
+            lib = await MediaLib.get(id=lib_id)
+            if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
+                raise ContentError("content_changed")
+            if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+                raise ContentError("unsupported_media_format")
+            candidates = await MediaItem.filter(
+                Q(path=str(src_path))
+                | Q(path__startswith=f"{src_path}/")
+                | Q(dir=str(src_path))
+                | Q(dir__startswith=f"{src_path}/"),
+                lib_id=lib_id,
+            ).select_related("lib", "parent")
+            # SQLite prefix matching may also return differently cased directories
+            items = [
+                item
+                for item in candidates
+                if Path(item.path).is_relative_to(src_path)
+                or Path(item.dir).is_relative_to(src_path)
+            ]
+            if not items:
+                return []
+            by_id = {item.id: item for item in items}
+            if (
+                await MediaItem.filter(parent_id__in=by_id)
+                .exclude(id__in=by_id)
+                .exists()
+            ):
+                raise ContentError("unsupported_layout")
+            occupied = await MediaItem.filter(
+                Q(path=str(dest_path))
+                | Q(path__startswith=f"{dest_path}/")
+                | Q(dir=str(dest_path))
+                | Q(dir__startswith=f"{dest_path}/"),
+                lib_id=lib_id,
+            ).exclude(id__in=by_id)
+            if any(
+                Path(item.path).is_relative_to(dest_path)
+                or Path(item.dir).is_relative_to(dest_path)
+                for item in occupied
+            ):
+                raise ContentError("ambiguous_layout")
+            for item in items:
+                if (
+                    not Path(item.path).is_relative_to(src_path)
+                    or not Path(item.dir).is_relative_to(src_path)
+                    or (item.parent_id is not None and item.parent_id not in by_id)
+                ):
+                    raise ContentError("unsupported_layout")
+                item.path = str(dest_path / Path(item.path).relative_to(src_path))
+                item.dir = str(dest_path / Path(item.dir).relative_to(src_path))
+                item.name = (
+                    Path(item.path).name
+                    if item.format in (None, MediaFormat.DIR)
+                    else Path(item.path).stem
+                )
+                if item.parent_id is not None:
+                    item.parent = by_id[item.parent_id]
+                item.index_state = IndexState.PENDING
+                item.index_error = None
+            await to_thread(_validate_reading_work_rename, items, src_path, dest_path)
+            async with in_transaction():
+                await MediaItem.bulk_update(
+                    items,
+                    fields=["path", "dir", "name", "index_state", "index_error"],
+                )
+            return items
 
     @classmethod
     async def sync_metadata(cls, id: int) -> MediaItem:
