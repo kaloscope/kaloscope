@@ -1,5 +1,7 @@
-"""Discover reading sources and resolve filesystem event ownership."""
+"""Discover reading sources, observe stability and resolve event ownership."""
 
+import hashlib
+import json
 import os
 import re
 import stat
@@ -12,9 +14,12 @@ from watchdog.events import (
     EVENT_TYPE_DELETED,
     EVENT_TYPE_MODIFIED,
     EVENT_TYPE_MOVED,
+    DirModifiedEvent,
+    FileModifiedEvent,
     FileSystemEvent,
 )
 
+from app.core.media.common import ContentError, file_state
 from app.core.media.handlers.base import _HANDLERS, MediaHandler
 from app.models.media import LibType, MediaFormat
 
@@ -301,6 +306,98 @@ class ReadingMediaHandler(MediaHandler):
         if chapters:
             return [ReadingSource(work, None), *chapters]
         return []
+
+    def snapshot_sources(
+        self,
+        base_path: str,
+        *,
+        work_path: Path,
+        targets: set[Path] | None = None,
+    ) -> str:
+        """Fingerprint selected source attributes without opening body files.
+
+        Run in a worker thread. Include work-level files and directory identities
+        for layout checks, but only inspect selected chapters' files. Absence is
+        an observation, never authorization to delete an indexed item.
+
+        Args:
+            base_path: The absolute library root without symbolic-link ancestors.
+            work_path: The visible work directory directly below the root.
+            targets: Work or direct comic chapter containers; None selects the work.
+
+        Returns:
+            A digest of relevant paths, identities, sizes and write timestamps.
+
+        Raises:
+            ValueError: If the work or targets are outside the supported layout.
+            ContentError: If a source cannot be inspected safely or changes type.
+        """
+        root = Path(base_path)
+        selected = {work_path} if targets is None else targets
+        if (
+            work_path.parent != root
+            or not selected
+            or any(
+                self.resolve_event_targets(
+                    DirModifiedEvent(str(target)), base_path=base_path
+                )
+                != {work_path: {target}}
+                for target in selected | {work_path}
+            )
+        ):
+            raise ValueError("targets must select a work or its direct comic chapters")
+
+        entries: list[tuple] = []
+
+        def capture(directory: Path) -> list[Path]:
+            """Record one container and return its visible child directories.
+
+            Args:
+                directory: The work or a selected chapter container.
+
+            Returns:
+                Child directories, or an empty list for a missing container.
+
+            Raises:
+                OSError: If the container cannot be enumerated or stat fails.
+                ContentError: If an entry changes type while being inspected.
+            """
+            try:
+                info = directory.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                entries.append((str(directory), None))
+                return []
+            if not stat.S_ISDIR(info.st_mode):
+                raise ContentError("media_source_unavailable")
+            # directory write times include ignored files and unrelated chapter writes
+            entries.append((str(directory), *file_state(info)[:2]))
+            files, directories = list_source_entries(directory)
+            for child in directories:
+                info = child.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ContentError("content_changed")
+                entries.append((str(child), *file_state(info)[:2]))
+            for path in files:
+                if self.filter_event(FileModifiedEvent(str(path)), base_path=base_path):
+                    info = path.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise ContentError("content_changed")
+                    entries.append((str(path), *file_state(info)))
+            return directories
+
+        try:
+            for directory in (*reversed(root.parents), root):
+                info = directory.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ContentError("media_source_unavailable")
+                entries.append((str(directory), *file_state(info)[:2]))
+            chapters = capture(work_path)
+            if self.lib_type == LibType.COMIC:
+                for chapter in sorted(chapters if work_path in selected else selected):
+                    capture(chapter)
+        except OSError as error:
+            raise ContentError("media_source_unavailable") from error
+        return hashlib.sha256(json.dumps(entries).encode()).hexdigest()
 
     def resolve_event_targets(
         self, event: FileSystemEvent, *, base_path: str

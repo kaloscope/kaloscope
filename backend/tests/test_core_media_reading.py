@@ -1,6 +1,7 @@
-"""Unit tests for reading source discovery and filesystem event ownership."""
+"""Tests for reading source discovery, stability and filesystem event ownership."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from watchdog.events import (
     FileOpenedEvent,
 )
 
+from app.core.media.common import ContentError
 from app.core.media.handlers import reading
 from app.core.media.handlers.base import get_handler
 from app.models.media import LibType, MediaFormat, MediaLib
@@ -270,6 +272,195 @@ def test_scoped_scan(tmp_path):
             handler.resolve_event_targets(
                 FileCreatedEvent(str(tmp_path / "Book1/1.txt")), base_path=root
             )
+
+
+@pytest.mark.parametrize(
+    ("lib_type", "filename"),
+    [
+        (LibType.NOVEL, "Book.txt"),
+        (LibType.NOVEL, "Book.epub"),
+        (LibType.COMIC, "Book.cbz"),
+        (LibType.COMIC, "Book.zip"),
+        (LibType.COMIC, "1.png"),
+    ],
+)
+def test_source_snapshot(tmp_path, monkeypatch, lib_type, filename):
+    """Observe body attributes without parsing bytes, including same-size edits.
+
+    Args:
+        tmp_path: The isolated library directory.
+        monkeypatch: The fixture preventing body reads during observation.
+        lib_type: The reading library type.
+        filename: The body filename to observe.
+    """
+    _files(tmp_path, f"Work/{filename}")
+    handler = get_handler(lib_type)
+    assert isinstance(handler, reading.ReadingMediaHandler)
+    work = tmp_path / "Work"
+    path = work / filename
+    before = path.stat()
+    first = handler.snapshot_sources(str(tmp_path), work_path=work)
+    path.write_bytes(b"edited")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    def forbidden(*args, **kwargs):
+        """Reject any attempt to open a body file.
+
+        Args:
+            *args: Positional arguments supplied to Path.open.
+            **kwargs: Keyword arguments supplied to Path.open.
+        """
+        raise AssertionError("source observation must not open body files")
+
+    monkeypatch.setattr(Path, "open", forbidden)
+    second = handler.snapshot_sources(str(tmp_path), work_path=work)
+    assert len(first) == 64
+    assert second != first
+    assert handler.snapshot_sources(str(tmp_path), work_path=work) == second
+
+
+def test_snapshot_scopes(tmp_path):
+    """Ignore unrelated writes but include selected pages and work-level layout.
+
+    Args:
+        tmp_path: The isolated library directory.
+    """
+    _files(tmp_path, "Work/A/1.png", "Work/B/1.png", "Work/ComicInfo.xml")
+    handler = get_handler(LibType.COMIC)
+    work = tmp_path / "Work"
+    targets = {work / "A"}
+
+    def snapshot():
+        """Return the selected chapter's current source digest."""
+        return handler.snapshot_sources(str(tmp_path), work_path=work, targets=targets)
+
+    first = snapshot()
+    whole = handler.snapshot_sources(str(tmp_path), work_path=work)
+    _files(tmp_path, "Work/B/2.png", "Work/.temporary", "Other/1.png")
+    (work / "B/1.png").write_bytes(b"changed")
+    assert snapshot() == first
+    assert handler.snapshot_sources(str(tmp_path), work_path=work) != whole
+    (work / "ComicInfo.xml").write_bytes(b"changed metadata")
+    metadata = snapshot()
+    assert metadata != first
+    _files(tmp_path, "Work/C/1.png")
+    assert snapshot() != metadata
+    layout = snapshot()
+    (work / "A/1.png").unlink()
+    assert snapshot() != layout
+
+
+def test_snapshot_absence(tmp_path):
+    """Distinguish missing, empty and populated containers without deleting anything.
+
+    Args:
+        tmp_path: The isolated library directory.
+    """
+    handler = get_handler(LibType.COMIC)
+    work = tmp_path / "Work"
+    missing = handler.snapshot_sources(str(tmp_path), work_path=work)
+    assert handler.snapshot_sources(str(tmp_path), work_path=work) == missing
+    work.mkdir()
+    empty = handler.snapshot_sources(str(tmp_path), work_path=work)
+    assert empty != missing
+    _files(tmp_path, "Work/A/1.png")
+    assert handler.snapshot_sources(str(tmp_path), work_path=work) != empty
+    chapter = handler.snapshot_sources(
+        str(tmp_path), work_path=work, targets={work / "Missing"}
+    )
+    (work / "Missing").mkdir()
+    assert (
+        handler.snapshot_sources(
+            str(tmp_path), work_path=work, targets={work / "Missing"}
+        )
+        != chapter
+    )
+
+
+@pytest.mark.parametrize("scope", ["root", "work", "chapter", "ancestor"])
+def test_snapshot_symlink(tmp_path, scope):
+    """Reject symlinks on every selected directory boundary.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        scope: The directory boundary replaced by a symlink.
+    """
+    original = tmp_path / "Original"
+    _files(original, "Library/Work/A/1.png")
+    root = original / "Library"
+    target = root / "Work/A"
+    if scope == "ancestor":
+        alias = tmp_path / "Alias"
+        alias.symlink_to(original, target_is_directory=True)
+        root = alias / "Library"
+        target = root / "Work/A"
+    else:
+        link = {"root": root, "work": root / "Work", "chapter": target}[scope]
+        moved = tmp_path / "Moved"
+        link.rename(moved)
+        link.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(ContentError, match="media_source_unavailable"):
+        get_handler(LibType.COMIC).snapshot_sources(
+            str(root), work_path=root / "Work", targets={target}
+        )
+
+
+@pytest.mark.parametrize("scope", ["", "Work", "Work/A"])
+def test_snapshot_unavailable(tmp_path, monkeypatch, scope):
+    """Report stat permission errors rather than a stable missing source.
+
+    Args:
+        tmp_path: The isolated library directory.
+        monkeypatch: The fixture injecting a stat failure.
+        scope: The inaccessible directory relative to the library.
+    """
+    _files(tmp_path, "Work/A/1.png")
+    original = Path.stat
+
+    def denied(path, **kwargs):
+        """Reject stat calls for the selected inaccessible directory.
+
+        Args:
+            path: The path whose attributes are requested.
+            **kwargs: Options forwarded to Path.stat for accessible paths.
+
+        Returns:
+            The original filesystem attributes when the path is accessible.
+
+        Raises:
+            PermissionError: For the selected inaccessible directory.
+        """
+        if path == tmp_path / scope:
+            raise PermissionError(str(path))
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    with pytest.raises(ContentError, match="media_source_unavailable"):
+        get_handler(LibType.COMIC).snapshot_sources(
+            str(tmp_path), work_path=tmp_path / "Work"
+        )
+
+
+@pytest.mark.parametrize(
+    "targets", [set(), {"Other"}, {"Work/.Hidden"}, {"Work/A/Deep"}, {"Work/../Other"}]
+)
+def test_snapshot_targets(tmp_path, targets):
+    """Reject invalid selections before accessing their sources.
+
+    Args:
+        tmp_path: The isolated library directory.
+        targets: Invalid relative target paths.
+    """
+    with pytest.raises(ValueError):
+        get_handler(LibType.COMIC).snapshot_sources(
+            str(tmp_path),
+            work_path=tmp_path / "Work",
+            targets={tmp_path / target for target in targets},
+        )
+    with pytest.raises(ValueError):
+        get_handler(LibType.NOVEL).snapshot_sources(
+            str(tmp_path), work_path=tmp_path / "Work", targets={tmp_path / "Work/A"}
+        )
 
 
 @pytest.mark.parametrize(
