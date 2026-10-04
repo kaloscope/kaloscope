@@ -1,4 +1,4 @@
-"""Tests for reading registration, index publication and collection summaries."""
+"""Tests for reading ingestion, index publication and collection summaries."""
 
 import asyncio
 import json
@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from filelock import Timeout
@@ -175,6 +176,337 @@ def _cache(item: MediaItem) -> Path:
         / str(item.id)
         / item.index_version
     )
+
+
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat]
+    + [
+        (format, True) for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+    ],
+)
+def test_ingest_work(tmp_path, format, chapter):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            before = {
+                path: path.read_bytes() for path in work.rglob("*") if path.is_file()
+            }
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            items = await MediaItem.filter(lib_id=lib.id).order_by("id")
+            assert len(items) == (2 if chapter else 1)
+            assert all(item.index_state == IndexState.READY for item in items)
+            item = items[-1]
+            assert item.path == str(source.path) and item.format == format
+            assert item.title is not None and item.extra is not None
+            if chapter:
+                assert item.parent_id == items[0].id
+                assert items[0].index_version is None
+                assert items[0].extra is not None
+                assert items[0].extra["content"]["chapter_count"] == 1
+            cache = _cache(item)
+            if format in (MediaFormat.TXT, MediaFormat.EPUB):
+                index = load_text_index(cache)
+                body = read_text_chapter(cache, index.chapters[0].id)
+                assert (
+                    body == ["Body"]
+                    if format == MediaFormat.TXT
+                    else isinstance(body, EpubContent)
+                )
+            else:
+                index = load_image_index(cache)
+                assert read_image_resource(source.path, cache, index.pages[0].id) == (
+                    _PNG,
+                    "image/png",
+                )
+            assert all(path.read_bytes() == data for path, data in before.items())
+            saved = await MediaItem.all().values()
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            assert await MediaItem.all().values() == saved
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", list(MediaFormat))
+def test_ingest_metadata(tmp_path, format):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            first = await MediaItem.get(lib_id=lib.id, path=str(source.path))
+            await MediaItem.filter(id=first.id).update(visible=False)
+            novel = lib.lib_type == LibType.NOVEL
+            metadata = source.directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            metadata.write_text(
+                '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                "<metadata><dc:title>Current</dc:title></metadata></package>"
+                if novel
+                else "<ComicInfo><Title>Current</Title></ComicInfo>"
+            )
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, source.directory
+            )
+            current = await MediaItem.get(id=first.id)
+            assert current.title == "Current" and not current.visible
+            assert current.index_version == first.index_version
+            assert current.extra is not None
+            assert current.extra["metadata_sync"]["state"] == "ready"
+            metadata.write_text("<broken")
+            assert await MediaItemService.ingest_reading_work(
+                lib.id, source.directory
+            ) == {source.path: "invalid_metadata"}
+            current = await MediaItem.get(id=first.id)
+            assert (
+                current.title == "Current" and current.index_state == IndexState.READY
+            )
+            assert current.index_version == first.index_version
+            metadata.unlink()
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, source.directory
+            )
+            current = await MediaItem.get(id=first.id)
+            assert current.title == first.title and not current.visible
+            assert current.index_version == first.index_version
+            assert current.extra is not None
+            assert current.extra["metadata_sync"]["state"] == "none"
+
+    asyncio.run(run())
+
+
+def test_ingest_chapter_errors(tmp_path):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.parent_path
+            assert work is not None
+            ambiguous, broken, archived = [work / name for name in ("0", "1", "2")]
+            for directory in (ambiguous, broken, archived):
+                directory.mkdir()
+            (ambiguous / "1.cbz").write_bytes(b"broken")
+            (ambiguous / "2.cbz").write_bytes(b"broken")
+            body = broken / "Book.cbz"
+            body.write_bytes(b"broken")
+            with zipfile.ZipFile(archived / "Book.zip", "w") as archive:
+                archive.writestr("1.png", _PNG)
+            metadata = work / "ComicInfo.xml"
+            metadata.write_text("<broken")
+            issues = await MediaItemService.ingest_reading_work(lib.id, work)
+            assert issues == {
+                ambiguous: "ambiguous_layout",
+                work: "invalid_metadata",
+                body: "invalid_archive",
+            }
+            collection = await MediaItem.get(lib_id=lib.id, path=str(work))
+            assert collection.index_state == IndexState.READY
+            assert collection.extra is not None
+            assert collection.extra["metadata_sync"]["state"] == "error"
+            assert collection.extra["content"]["chapter_count"] == 3
+            failed = await MediaItem.get(lib_id=lib.id, path=str(body))
+            assert failed.index_state == IndexState.ERROR
+            assert failed.index_error == "invalid_archive"
+            assert await MediaItem.filter(index_state=IndexState.READY).count() == 3
+            assert not await MediaItem.filter(dir=str(ambiguous)).exists()
+            metadata.unlink()
+            (ambiguous / "1.cbz").unlink()
+            (ambiguous / "2.cbz").unlink()
+            with zipfile.ZipFile(body, "w") as archive:
+                archive.writestr("1.png", _PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            recovered = await MediaItem.get(id=failed.id)
+            assert (
+                recovered.index_state == IndexState.READY
+                and recovered.index_error is None
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("whole_work", [False, True])
+def test_ingest_targets(tmp_path, whole_work):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.parent_path
+            assert work is not None
+            other = work / "Other"
+            other.mkdir()
+            (other / "1.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, work, targets={source.directory}
+            )
+            assert await MediaItem.all().count() == 2
+            assert not await MediaItem.filter(path=str(other)).exists()
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            before = {item.path: item.index_version for item in await MediaItem.all()}
+            target = work if whole_work else source.directory
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, work, targets={target}, force=True
+            )
+            after = {item.path: item.index_version for item in await MediaItem.all()}
+            assert after[str(source.path)] != before[str(source.path)]
+            assert (after[str(other)] != before[str(other)]) == whole_work
+            assert after[str(work)] is None
+            # unrelated layout failures must not fail a selected chapter update
+            (other / "Book.zip").write_bytes(b"broken")
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, work, targets={source.directory}
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem", ["empty", "missing", "ambiguous", "symlink", "target"]
+)
+def test_ingest_undiscovered(tmp_path, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            before = await MediaItem.all().values()
+            if problem == "empty":
+                source.path.unlink()
+            elif problem == "missing":
+                shutil.rmtree(source.directory)
+            elif problem == "ambiguous":
+                (source.directory / "Other.txt").write_text("Body")
+            elif problem == "symlink":
+                moved = tmp_path / "Moved"
+                source.directory.rename(moved)
+                source.directory.symlink_to(moved, target_is_directory=True)
+            else:
+                await MediaLib.filter(id=lib.id).update(lib_type=LibType.COMIC)
+                chapter = source.directory / "Unselected"
+                chapter.mkdir()
+                (chapter / "1.png").write_bytes(_PNG)
+            issues = await MediaItemService.ingest_reading_work(
+                lib.id,
+                source.directory,
+                targets={source.directory / "Missing"} if problem == "target" else None,
+            )
+            assert issues == (
+                {source.directory: "ambiguous_layout"}
+                if problem == "ambiguous"
+                else {source.directory: "media_source_unavailable"}
+                if problem in ("missing", "symlink")
+                else {}
+            )
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "root",
+        "outside",
+        "hidden",
+        "nested",
+        "empty_targets",
+        "foreign_target",
+        "novel_chapter",
+        "video",
+        "missing_library",
+    ],
+)
+def test_ingest_invalid(tmp_path, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            work, targets = source.directory, None
+            if problem == "root":
+                work = Path(lib.dir)
+            elif problem == "outside":
+                work = tmp_path / "Other"
+            elif problem == "hidden":
+                work = Path(lib.dir) / ".hidden"
+            elif problem == "nested":
+                work /= "Nested"
+            elif problem == "empty_targets":
+                targets = set()
+            elif problem == "foreign_target":
+                targets = {Path(lib.dir) / "Other"}
+            elif problem == "novel_chapter":
+                targets = {work / "Chapter"}
+            elif problem == "video":
+                await MediaLib.filter(id=lib.id).update(lib_type=LibType.MOVIE)
+            else:
+                await lib.delete()
+            with pytest.raises(
+                DoesNotExist
+                if problem == "missing_library"
+                else ContentError
+                if problem == "video"
+                else ValueError
+            ):
+                await MediaItemService.ingest_reading_work(
+                    lib.id, work, targets=targets
+                )
+            assert not await MediaItem.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_ingest_interrupted(tmp_path, monkeypatch, cancel):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.parent_path
+            assert work is not None
+            error = asyncio.CancelledError if cancel else RuntimeError
+            with monkeypatch.context() as patcher:
+                patcher.setattr(
+                    MediaItemService, "index_content", AsyncMock(side_effect=error)
+                )
+                with pytest.raises(error):
+                    await MediaItemService.ingest_reading_work(lib.id, work)
+            before = await MediaItem.all().values_list("id", flat=True)
+            assert len(before) == 2
+            assert await MediaItem.filter(index_state=IndexState.PENDING).count() == 2
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            assert await MediaItem.all().values_list("id", flat=True) == before
+            assert await MediaItem.filter(index_state=IndexState.READY).count() == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["directory", "type", "delete"])
+def test_ingest_library_changed(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            worker = media_service.to_thread
+
+            async def changed(function, *args, **kwargs):
+                """Change library ownership after discovery finishes in its worker.
+
+                Args:
+                    function: The discovery function being dispatched.
+                    *args: The positional discovery arguments.
+                    **kwargs: The selected work passed to discovery.
+
+                Returns:
+                    The completed discovery result from the original library.
+                """
+                result = await worker(function, *args, **kwargs)
+                if change == "directory":
+                    await MediaLib.filter(id=lib.id).update(dir=str(tmp_path / "Moved"))
+                elif change == "type":
+                    await MediaLib.filter(id=lib.id).update(lib_type=LibType.COMIC)
+                else:
+                    await lib.delete()
+                return result
+
+            monkeypatch.setattr(media_service, "to_thread", changed)
+            with pytest.raises(DoesNotExist if change == "delete" else ContentError):
+                await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            assert not await MediaItem.all().exists()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

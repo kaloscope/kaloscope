@@ -535,6 +535,121 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
 
     @classmethod
+    async def ingest_reading_work(
+        cls,
+        lib_id: int,
+        work_path: Path,
+        *,
+        targets: set[Path] | None = None,
+        force: bool = False,
+    ) -> dict[Path, str]:
+        """Ingest currently discoverable sources in one reading work serially.
+
+        The library consumer must call this outside the library lock. Each service
+        step revalidates ownership and manages its own lock. Missing or ambiguous
+        sources require separate reconciliation; discovery never implies deletion.
+
+        Args:
+            lib_id: The novel or comic library containing the work.
+            work_path: The absolute work directory directly below the library root.
+            targets: Work or direct comic chapter directories to process; None
+                processes the whole work. A chapter selection includes its collection.
+            force: Whether to rebuild selected bodies unconditionally; defaults to
+                False for incremental scans. Body modification events must use True.
+
+        Returns:
+            Selected source or scope paths mapped to discovery, metadata or body
+            errors. Body errors take precedence for a source with multiple failures.
+
+        Raises:
+            DoesNotExist: If the library no longer exists.
+            ValueError: If the work or selected targets are outside the allowed layout.
+            ContentError: If the library type is unsupported or changes while scanning.
+        """
+        from app.core.media.handlers.base import get_handler
+        from app.core.media.handlers.reading import is_ignored_name
+
+        lib = await MediaLib.get(id=lib_id)
+        if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+            raise ContentError("unsupported_media_format")
+        if targets is not None and (
+            not targets
+            or any(
+                target != work_path
+                and (
+                    lib.lib_type != LibType.COMIC
+                    or target.parent != work_path
+                    or is_ignored_name(target.name)
+                )
+                for target in targets
+            )
+        ):
+            raise ValueError("targets must select the work or direct comic chapters")
+
+        def selected(path: Path) -> bool:
+            """Include selected containers and their discovery scopes.
+
+            Args:
+                path: A source container or discovery issue scope.
+
+            Returns:
+                Whether the path intersects the requested targets.
+            """
+            return targets is None or any(
+                path.is_relative_to(target) or target.is_relative_to(path)
+                for target in targets
+            )
+
+        handler = get_handler(lib.lib_type)
+        scan = await to_thread(handler.scan_sources, lib.dir, work_path=work_path)
+        current = await MediaLib.get(id=lib_id)
+        if (current.dir, current.lib_type) != (lib.dir, lib.lib_type):
+            raise ContentError("content_changed")
+        issues = {path: error for path, error in scan.issues.items() if selected(path)}
+        sources = [source for source in scan.sources if selected(source.directory)]
+        if not any(source.format is not None for source in sources):
+            return issues
+        collection = None
+        for source in sources:
+            try:
+                item = await cls.create_reading(lib_id, source)
+            except ContentError as error:
+                issues[source.path] = error.code
+                continue
+            try:
+                item = await cls.sync_metadata(item.id)
+                if item.extra is not None:
+                    sync = ReadingMetadataSync.model_validate(
+                        item.extra["metadata_sync"]
+                    )
+                    if sync.error is not None:
+                        issues[source.path] = sync.error
+            except DoesNotExist:
+                issues[source.path] = "content_changed"
+                continue
+            except ContentError as error:
+                issues[source.path] = error.code
+                if item.format is None:
+                    continue
+            if item.format is None:
+                collection = item
+                continue
+            try:
+                await cls.index_content(item.id, force=force)
+            except ContentError as error:
+                issues[source.path] = error.code
+            except DoesNotExist:
+                issues[source.path] = "content_changed"
+        if collection is not None:
+            try:
+                await cls.sync_collection(collection.id)
+            except ContentError as error:
+                issues[Path(collection.path)] = error.code
+            except DoesNotExist:
+                issues[Path(collection.path)] = "content_changed"
+        return issues
+
+    @classmethod
     async def create_reading(cls, lib_id: int, source: ReadingSource) -> MediaItem:
         """Get or register a discovered reading source without parsing its content.
 
