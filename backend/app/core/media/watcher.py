@@ -545,6 +545,9 @@ async def consume_event(event: MediaEvent):
         current = await MediaEvent.get_or_none(id=event.id)
         if current is None:
             return
+        # retain reading tasks until their dedicated consumer is connected
+        if current.event_type == "reconcile":
+            return
         event = current
         event.lib = lib
         pending = await _consume_event(event)
