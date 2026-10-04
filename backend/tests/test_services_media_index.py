@@ -1,4 +1,4 @@
-"""Tests for reading source registration, index publication and recovery."""
+"""Tests for reading registration, index publication and collection summaries."""
 
 import asyncio
 import os
@@ -219,6 +219,15 @@ def test_create_reading(tmp_path, format, chapter):
             current = await MediaItemService.index_content(item.id)
             assert current.index_state == IndexState.READY and current.title is not None
             assert current.id == item.id and current.parent_id == item.parent_id
+            if chapter:
+                collection = await MediaItemService.sync_collection(items[0].id)
+                assert collection.index_state == IndexState.READY
+                assert collection.index_version is collection.size is None
+                assert collection.extra is not None
+                assert collection.extra["content"] == {
+                    "chapter_count": 1,
+                    "page_count": None,
+                }
             cache = _cache(current)
             if format in (MediaFormat.TXT, MediaFormat.EPUB):
                 index = load_text_index(cache)
@@ -807,5 +816,311 @@ def test_unindexable_item(tmp_path, kind):
             assert await MediaItem.all().values() == before
             root = Path(KaloscopeConfig.get_workspace("temp")) / "media_index"
             assert not root.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ([], IndexState.EMPTY),
+        ([IndexState.EMPTY, IndexState.EMPTY], IndexState.EMPTY),
+        ([IndexState.PENDING], IndexState.PENDING),
+        ([IndexState.READY], IndexState.READY),
+        ([IndexState.ERROR], IndexState.ERROR),
+        ([None], IndexState.PENDING),
+        ([IndexState.EMPTY, None], IndexState.PENDING),
+        ([IndexState.EMPTY, IndexState.PENDING], IndexState.PENDING),
+        ([IndexState.EMPTY, IndexState.ERROR], IndexState.ERROR),
+        ([IndexState.PENDING, IndexState.ERROR], IndexState.ERROR),
+        ([None, IndexState.ERROR], IndexState.ERROR),
+        ([IndexState.READY, IndexState.EMPTY], IndexState.READY),
+        ([IndexState.READY, IndexState.PENDING], IndexState.READY),
+        ([IndexState.READY, IndexState.ERROR], IndexState.READY),
+        ([None, IndexState.READY], IndexState.READY),
+        (list(IndexState), IndexState.READY),
+    ],
+)
+def test_collection_state(tmp_path, states, expected):
+    async def run():
+        async with _database():
+            child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
+            collection = await MediaItem.get(id=child.parent_id)
+            await child.delete()
+            await MediaItem.filter(id=collection.id).update(
+                title="Saved title",
+                visible=False,
+                index_state=IndexState.ERROR,
+                index_error="old_error",
+                extra={
+                    "metadata_sync": {"state": "ready"},
+                    "content": {"chapter_count": 99, "page_count": 99},
+                },
+            )
+            for number, state in enumerate(states):
+                path = str(Path(collection.path) / str(number))
+                await MediaItem.create(
+                    lib_id=collection.lib_id,
+                    parent=collection,
+                    path=path,
+                    dir=path,
+                    name=str(number),
+                    format=MediaFormat.DIR,
+                    index_state=state,
+                    index_error="invalid_archive"
+                    if state == IndexState.ERROR
+                    else None,
+                    index_version="a" * 64,
+                    extra={"content": {"chapter_count": None, "page_count": 10}},
+                )
+            before = await MediaItem.filter(parent_id=collection.id).values()
+            current = await MediaItemService.sync_collection(collection.id)
+            assert current.index_state == expected
+            assert current.index_error == (
+                "invalid_archive"
+                if expected == IndexState.ERROR
+                else "empty_content"
+                if expected == IndexState.EMPTY
+                else None
+            )
+            assert not current.visible and current.title == "Saved title"
+            assert current.index_version is current.size is None
+            assert current.extra == {
+                "schema_version": 1,
+                "metadata_sync": {"state": "ready"},
+                "content": {"chapter_count": len(states), "page_count": None},
+            }
+            assert await MediaItem.filter(parent_id=collection.id).values() == before
+            saved = await MediaItem.filter(id=current.id).values()
+            await MediaItemService.sync_collection(collection.id)
+            assert await MediaItem.filter(id=current.id).values() == saved
+            assert not (
+                Path(KaloscopeConfig.get_workspace("temp")) / "media_index"
+            ).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "kind", ["hidden", "foreign", "unrelated", "text", "collection"]
+)
+def test_collection_children(tmp_path, kind):
+    async def run():
+        async with _database():
+            child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
+            collection = await MediaItem.get(id=child.parent_id)
+            await MediaItem.filter(id=child.id).update(
+                index_state=IndexState.ERROR, index_error="invalid_image"
+            )
+            lib_id = child.lib_id
+            if kind == "foreign":
+                other = await MediaLib.create(
+                    name="Other",
+                    dir=str(tmp_path / "Other"),
+                    priority=2,
+                    lib_type=LibType.COMIC,
+                )
+                lib_id = other.id
+            await MediaItem.create(
+                lib_id=lib_id,
+                parent_id=None if kind == "unrelated" else collection.id,
+                path=str(Path(collection.path) / "Other"),
+                dir=str(Path(collection.path) / "Other"),
+                name="Other",
+                format=MediaFormat.TXT
+                if kind == "text"
+                else None
+                if kind == "collection"
+                else MediaFormat.CBZ,
+                visible=kind != "hidden",
+                index_state=IndexState.READY,
+                index_version="a" * 64,
+            )
+            before = await MediaItem.exclude(id=collection.id).values()
+            current = await MediaItemService.sync_collection(collection.id)
+            assert current.index_state == IndexState.ERROR
+            assert current.index_error == "invalid_image"
+            assert current.extra is not None
+            assert current.extra["content"]["chapter_count"] == 1
+            assert await MediaItem.exclude(id=collection.id).values() == before
+
+    asyncio.run(run())
+
+
+def test_collection_recovery(tmp_path):
+    async def run():
+        async with _database():
+            child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
+            assert child.parent_id is not None
+            page = Path(child.path) / "1.png"
+            await MediaItemService.index_content(child.id)
+            current = await MediaItemService.sync_collection(child.parent_id)
+            assert current.index_state == IndexState.READY
+            for visible in (False, True):
+                await MediaItem.filter(id=child.id).update(visible=visible)
+                current = await MediaItemService.sync_collection(child.parent_id)
+                assert current.index_state == (
+                    IndexState.READY if visible else IndexState.EMPTY
+                )
+                assert current.extra is not None
+                assert current.extra["content"]["chapter_count"] == int(visible)
+            page.unlink()
+            with pytest.raises(ContentError, match="empty_content"):
+                await MediaItemService.index_content(child.id)
+            current = await MediaItemService.sync_collection(child.parent_id)
+            assert current.index_state == IndexState.EMPTY
+            assert current.index_error == "empty_content"
+            page.write_bytes(b"broken image")
+            with pytest.raises(ContentError):
+                await MediaItemService.index_content(child.id)
+            current = await MediaItemService.sync_collection(child.parent_id)
+            failed = await MediaItem.get(id=child.id)
+            assert current.index_state == IndexState.ERROR
+            assert current.index_error == failed.index_error
+            page.write_bytes(_PNG)
+            await MediaItemService.index_content(child.id)
+            current = await MediaItemService.sync_collection(child.parent_id)
+            assert (
+                current.index_state == IndexState.READY and current.index_error is None
+            )
+            await child.delete()
+            current = await MediaItemService.sync_collection(child.parent_id)
+            assert current.index_state == IndexState.EMPTY
+            assert current.extra is not None
+            assert current.extra["content"] == {"chapter_count": 0, "page_count": None}
+            assert current.index_version is current.size is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["video", "novel", "body", "nested", "missing"])
+def test_invalid_collection(tmp_path, kind):
+    async def run():
+        async with _database():
+            child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
+            assert child.parent_id is not None
+            if kind in ("video", "novel"):
+                await MediaLib.filter(id=child.lib_id).update(
+                    lib_type=LibType.MOVIE if kind == "video" else LibType.NOVEL
+                )
+            elif kind == "body":
+                await MediaItem.filter(id=child.parent_id).update(
+                    format=MediaFormat.DIR
+                )
+            elif kind == "nested":
+                await MediaItem.filter(id=child.parent_id).update(parent_id=child.id)
+            else:
+                await MediaItem.filter(id=child.parent_id).delete()
+            before = await MediaItem.all().values()
+            with pytest.raises(DoesNotExist if kind == "missing" else ContentError):
+                await MediaItemService.sync_collection(child.parent_id)
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+def test_collection_errors(tmp_path):
+    async def run():
+        async with _database():
+            child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
+            assert child.parent_id is not None
+            await MediaItem.filter(id=child.id).update(
+                index_state=IndexState.ERROR, index_error="invalid_image"
+            )
+            path = str(Path(child.dir).with_name("Another"))
+            other = await MediaItem.create(
+                lib_id=child.lib_id,
+                parent_id=child.parent_id,
+                path=path,
+                dir=path,
+                name="Another",
+                format=MediaFormat.DIR,
+                index_state=IndexState.ERROR,
+                index_error="invalid_archive",
+            )
+            current = await MediaItemService.sync_collection(child.parent_id)
+            assert current.index_state == IndexState.ERROR
+            assert current.index_error == "invalid_archive"
+            await MediaItem.filter(id=other.id).update(index_error=None)
+            current = await MediaItemService.sync_collection(child.parent_id)
+            assert current.index_error == "invalid_image"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change", ["chapter", "directory", "library", "remove", "cancel"]
+)
+def test_collection_lock(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
+            assert child.parent_id is not None
+            lock = media_service.library_lock
+            started = asyncio.Event()
+
+            @asynccontextmanager
+            async def observed(directory: str) -> AsyncGenerator[None]:
+                """Signal that the initial lookup has completed before acquiring.
+
+                Args:
+                    directory: The library directory identifying the shared lock.
+
+                Yields:
+                    Control while the real library lock is held.
+                """
+                started.set()
+                async with lock(directory):
+                    yield
+
+            monkeypatch.setattr(media_service, "library_lock", observed)
+            before = await MediaItem.filter(id=child.parent_id).values()
+            async with lock(child.lib.dir):
+                task = asyncio.create_task(
+                    MediaItemService.sync_collection(child.parent_id)
+                )
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=5)
+                    assert not task.done()
+                    assert await MediaItem.filter(id=child.parent_id).values() == before
+                    if change == "chapter":
+                        await MediaItem.filter(id=child.id).update(
+                            index_state=IndexState.ERROR, index_error="invalid_image"
+                        )
+                    elif change == "directory":
+                        await MediaLib.filter(id=child.lib_id).update(
+                            dir=str(tmp_path / "Moved")
+                        )
+                    elif change == "library":
+                        other = await MediaLib.create(
+                            name="Other",
+                            dir=str(tmp_path / "Other"),
+                            priority=2,
+                            lib_type=LibType.COMIC,
+                        )
+                        await MediaItem.filter(id=child.parent_id).update(lib=other)
+                    elif change == "remove":
+                        await MediaItem.filter(id=child.parent_id).delete()
+                    else:
+                        task.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await task
+                except BaseException:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise
+            if change == "chapter":
+                current = await task
+                assert current.index_state == IndexState.ERROR
+                assert current.index_error == "invalid_image"
+            else:
+                before = await MediaItem.all().values()
+                if change == "remove":
+                    with pytest.raises(DoesNotExist):
+                        await task
+                elif change != "cancel":
+                    with pytest.raises(ContentError, match="content_changed"):
+                        await task
+                assert await MediaItem.all().values() == before
 
     asyncio.run(run())

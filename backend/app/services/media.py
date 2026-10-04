@@ -584,6 +584,74 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return current
 
     @classmethod
+    async def sync_collection(cls, id: int) -> MediaItem:
+        """Summarize a comic collection from its current visible chapters.
+
+        The library consumer calls this after registering or reconciling chapters,
+        including failed builds, removals and visibility changes. Readiness follows
+        published chapter states; source and cache validation stay with the reader.
+        Collections have chapter counts but no body index or combined page count.
+
+        Args:
+            id: The internal ID of a top-level comic collection.
+
+        Returns:
+            The collection with its aggregate state and current chapter count.
+
+        Raises:
+            DoesNotExist: If the collection was removed before synchronization.
+            ContentError: If the library changes or the item is not a collection.
+        """
+        original = await MediaItem.get(id=id).select_related("lib")
+        async with library_lock(original.lib.dir):
+            item = await MediaItem.get(id=id).select_related("lib")
+            if item.lib_id != original.lib_id or item.lib.dir != original.lib.dir:
+                raise ContentError("content_changed")
+            if (
+                item.lib.lib_type != LibType.COMIC
+                or item.format is not None
+                or item.parent_id is not None
+            ):
+                raise ContentError("unsupported_media_format")
+            chapters = (
+                await MediaItem.filter(
+                    lib_id=item.lib_id,
+                    parent_id=id,
+                    visible=True,
+                    format__in=(MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP),
+                )
+                .order_by("path", "id")
+                .only("id", "index_state", "index_error")
+            )
+            states = {chapter.index_state for chapter in chapters}
+            if IndexState.READY in states:
+                state, error = IndexState.READY, None
+            elif IndexState.ERROR in states:
+                state = IndexState.ERROR
+                error = next(
+                    (
+                        chapter.index_error
+                        for chapter in chapters
+                        if chapter.index_state == IndexState.ERROR
+                        and chapter.index_error is not None
+                    ),
+                    None,
+                )
+            elif states - {IndexState.EMPTY}:
+                state, error = IndexState.PENDING, None
+            else:
+                state, error = IndexState.EMPTY, "empty_content"
+            item.extra = {
+                **(item.extra or {}),
+                "schema_version": 1,
+                "content": {"chapter_count": len(chapters), "page_count": None},
+            }
+            item.index_state = state
+            item.index_error = error
+            await item.save(update_fields=["extra", "index_state", "index_error"])
+            return item
+
+    @classmethod
     async def index_content(cls, id: int) -> MediaItem:
         """Rebuild and publish content for one persisted reading unit.
 
