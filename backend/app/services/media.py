@@ -227,18 +227,37 @@ def _reading_source(
         raise ContentError("media_source_unavailable") from error
 
 
-def _validate_reading_source(item: MediaItem, *, require_candidate: bool):
+def _validate_reading_source(
+    item: MediaItem, *, require_candidate: bool, previous_path: Path | None = None
+):
     """Check source ownership and discovery in a worker without reading its body.
 
     Args:
         item: The proposed reading item with its library and optional parent loaded.
         require_candidate: Whether discovery must still find this new source.
+        previous_path: The old filename in the same container for an observed rename;
+            None skips checking that the previous path has disappeared.
 
     Raises:
         ContentError: If source ownership, discovery or stability is invalid.
     """
-    with _reading_source(item, require_candidate=require_candidate):
-        pass
+    with _reading_source(item, require_candidate=require_candidate) as (
+        source,
+        states,
+        _,
+    ):
+        if previous_path is not None:
+            try:
+                info = previous_path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                # case-only renames can still resolve through the old spelling
+                if (
+                    previous_path.name.casefold() != source.path.name.casefold()
+                    or file_state(info) != states[source.path]
+                ):
+                    raise ContentError("content_changed")
 
 
 def _read_reading(
@@ -747,6 +766,87 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 return current
             await candidate.save(force_create=True)
             return candidate
+
+    @classmethod
+    async def rename_reading_file(
+        cls, lib_id: int, src_path: Path, dest_path: Path
+    ) -> MediaItem | None:
+        """Apply an observed body-file rename within the same reading container.
+
+        Call from the serial library consumer before ingesting the renamed source,
+        using a persisted filesystem move. Only update the registered identity;
+        files and histories stay untouched. The existing cache remains available for
+        cleanup, while pending state requires indexing at the new path.
+
+        Args:
+            lib_id: The novel or comic library containing the renamed file.
+            src_path: The absolute previous body path from the move event.
+            dest_path: The absolute new body path in the same work or chapter.
+
+        Returns:
+            The updated item with its original ID, or None if the previous path is
+            not registered, including when this move was already applied.
+
+        Raises:
+            DoesNotExist: If the library no longer exists.
+            ValueError: If paths are hidden, outside the library or change containers.
+            ContentError: If ownership, format, layout or source stability is invalid,
+                the previous path is reused, or another item owns the destination.
+        """
+        from app.core.media.handlers.reading import is_ignored_name
+
+        original = await MediaLib.get(id=lib_id)
+        root = Path(original.dir)
+        if (
+            not root.is_absolute()
+            or ".." in root.parts
+            or src_path == dest_path
+            or src_path.parent != dest_path.parent
+            or any(
+                not path.is_relative_to(root)
+                or ".." in path.parts
+                or any(is_ignored_name(part) for part in path.relative_to(root).parts)
+                for path in (src_path, dest_path)
+            )
+        ):
+            raise ValueError("rename paths must share a visible reading container")
+        async with library_lock(original.dir):
+            lib = await MediaLib.get(id=lib_id)
+            if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
+                raise ContentError("content_changed")
+            if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+                raise ContentError("unsupported_media_format")
+            item = await MediaItem.get_or_none(
+                lib_id=lib_id, path=str(src_path)
+            ).select_related("lib", "parent")
+            if item is None:
+                return None
+            if item.format not in (
+                MediaFormat.TXT,
+                MediaFormat.EPUB,
+                MediaFormat.CBZ,
+                MediaFormat.ZIP,
+            ) or any(
+                path.suffix.casefold() != f".{item.format}"
+                for path in (src_path, dest_path)
+            ):
+                raise ContentError("unsupported_media_format")
+            if await MediaItem.filter(lib_id=lib_id, path=str(dest_path)).exists():
+                raise ContentError("ambiguous_layout")
+            item.path = str(dest_path)
+            item.name = dest_path.stem
+            await to_thread(
+                _validate_reading_source,
+                item,
+                require_candidate=True,
+                previous_path=src_path,
+            )
+            item.index_state = IndexState.PENDING
+            item.index_error = None
+            await item.save(
+                update_fields=["path", "name", "index_state", "index_error"]
+            )
+            return item
 
     @classmethod
     async def sync_metadata(cls, id: int) -> MediaItem:
