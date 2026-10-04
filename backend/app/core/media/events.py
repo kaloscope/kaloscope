@@ -1,4 +1,4 @@
-"""Coalesce reading events and defer tasks until their sources are stable."""
+"""Coalesce reading events and check source stability with bounded retries."""
 
 from asyncio import to_thread
 from pathlib import Path
@@ -16,6 +16,7 @@ from app.models.media import LibType, MediaEvent, MediaLib
 
 _SOURCE_EVENTS = ("created", "modified", "deleted", "moved")
 _STABILITY_SECONDS = 2
+_RETRY_DELAYS = (2, 5, 15, 30)
 
 
 class ReadingMove(BaseModel):
@@ -30,7 +31,7 @@ class ReadingMove(BaseModel):
 
 
 class ReadingReconcile(BaseModel):
-    """Validate reading task scopes, moves and stability observations."""
+    """Validate reading task scopes, moves, observations and retry state."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -43,6 +44,9 @@ class ReadingReconcile(BaseModel):
     moves: list[ReadingMove] = Field(default_factory=list)
     observed_snapshot: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     not_before: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    state: Literal["pending", "deferred", "failed"] = "pending"
+    attempts: int = Field(default=0, ge=0, le=len(_RETRY_DELAYS) + 1)
+    error_code: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
@@ -138,7 +142,7 @@ async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
                     is_directory=True,
                 )
             )
-            # new events invalidate any previous stability observation and deadline
+            # new events reset observations, deadlines and exhausted retries
             task.payload = batch.model_dump(mode="json", exclude_none=True)
             await task.save()
             tasks.append(task)
@@ -158,22 +162,24 @@ async def prepare_reading_event(event_id: int) -> bool:
     """Check a saved task's sources twice across a persisted quiet interval.
 
     The serial library consumer calls this outside its lock. Filesystem work runs
-    outside locks and transactions; future-dated tasks return immediately. New
-    events merged during observation invalidate its result. Readiness neither
-    executes nor acknowledges a task, and does not establish source ownership.
+    outside locks and transactions; future-dated and failed tasks return immediately.
+    Source errors retry after 2, 5, 15 and 30 seconds, stopping at the fifth failure.
+    New events reset retries and invalidate any in-flight observation. Readiness
+    neither executes nor acknowledges a task, and does not establish source ownership.
 
     Args:
         event_id: The persisted reconcile event to inspect, reloaded on every call.
 
     Returns:
         True for two matching observations at least two seconds apart. False for
-        deferred, removed, replaced or non-reconcile events. Deferred tasks retain
-        their next check time in the existing payload, including across restarts.
+        deferred, failed, removed, replaced or non-reconcile events. Retry state and
+        deadlines persist in the existing payload, including across restarts.
 
     Raises:
         ValueError: If the library, saved payload or selected scope is invalid.
         ContentError: If sources are unavailable or the library changes. Source
-            failures clear the observation and persist a delay before propagating.
+            failures clear the observation and save retry or failed state before
+            propagating. Failed tasks need a new event before checking again.
     """
     event = await MediaEvent.get_or_none(id=event_id).select_related("lib")
     if event is None or event.event_type != "reconcile":
@@ -182,7 +188,9 @@ async def prepare_reading_event(event_id: int) -> bool:
     if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
         raise ValueError("unsupported reading library type")
     payload = ReadingReconcile.model_validate(event.payload)
-    if payload.not_before is not None and time() < payload.not_before:
+    if payload.state == "failed" or (
+        payload.not_before is not None and time() < payload.not_before
+    ):
         return False
 
     snapshot = None
@@ -223,7 +231,22 @@ async def prepare_reading_event(event_id: int) -> bool:
         ):
             return True
         payload.observed_snapshot = snapshot
-        payload.not_before = time() + _STABILITY_SECONDS
+        if failure is None:
+            payload.state = "pending"
+            payload.attempts = 0
+            payload.error_code = None
+            payload.not_before = time() + _STABILITY_SECONDS
+        else:
+            payload.attempts = min(payload.attempts + 1, len(_RETRY_DELAYS) + 1)
+            payload.error_code = failure.code
+            payload.state = (
+                "failed" if payload.attempts > len(_RETRY_DELAYS) else "deferred"
+            )
+            payload.not_before = (
+                None
+                if payload.state == "failed"
+                else time() + _RETRY_DELAYS[payload.attempts - 1]
+            )
         current.payload = payload.model_dump(mode="json", exclude_none=True)
         await current.save(update_fields=["payload", "updated_at"])
 

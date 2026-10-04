@@ -1,4 +1,4 @@
-"""Tests for durable reading event coalescing and source stability checks."""
+"""Tests for durable reading events, source stability and bounded retries."""
 
 import asyncio
 from collections.abc import AsyncGenerator
@@ -179,6 +179,8 @@ def test_coalesce_scopes(tmp_path):
                 "targets": [str(work / "A"), str(work / "B")],
                 "force_targets": [str(work / "A"), str(work / "B")],
                 "moves": [],
+                "state": "pending",
+                "attempts": 0,
             }
             unchanged = await MediaEvent.get(id=tasks[1].id)
             duplicate = await MediaEvent.create(
@@ -281,9 +283,10 @@ def test_coalesce_legacy(tmp_path, legacy):
             payload = {"targets": [str(work)], "moves": [], "schema_version": 1}
             if not legacy:
                 payload["force_targets"] = []
-            assert ReadingReconcile.model_validate(payload).force_targets == (
-                [str(work)] if legacy else []
-            )
+            original = ReadingReconcile.model_validate(payload)
+            assert original.force_targets == ([str(work)] if legacy else [])
+            assert original.state == "pending" and original.attempts == 0
+            assert original.error_code is None
             task = await MediaEvent.create(
                 lib=lib,
                 src_path=str(work),
@@ -482,6 +485,12 @@ def test_coalesce_transaction(tmp_path, monkeypatch, failure):
         None,
         {},
         {"schema_version": 2, "targets": []},
+        {"targets": [], "state": "running"},
+        {"targets": [], "attempts": -1},
+        {"targets": [], "attempts": 6},
+        {"targets": [], "attempts": True},
+        {"targets": [], "error_code": ""},
+        {"targets": [], "error_code": "x" * 65},
         {
             "schema_version": 1,
             "targets": [],
@@ -766,13 +775,130 @@ def test_prepare_unavailable(tmp_path, monkeypatch, moment):
             )
             assert payload.observed_snapshot is None
             assert payload.not_before == 104.0
+            assert payload.state == "deferred" and payload.attempts == 1
+            assert payload.error_code == "media_source_unavailable"
             assert not await prepare_reading_event(task.id)
             assert denied.call_count == 1
-            monkeypatch.setattr(handler, "snapshot_sources", observe)
             moment[0] = 104.0
+            with pytest.raises(ContentError, match="media_source_unavailable"):
+                await prepare_reading_event(task.id)
+            payload = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert payload.attempts == 2 and payload.not_before == 109.0
+            monkeypatch.setattr(handler, "snapshot_sources", observe)
+            moment[0] = 109.0
             assert not await prepare_reading_event(task.id)
-            moment[0] = 106.0
+            payload = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert payload.state == "pending" and payload.attempts == 0
+            assert payload.error_code is None and payload.observed_snapshot is not None
+            assert payload.not_before == 111.0
+            moment[0] = 111.0
             assert await prepare_reading_event(task.id)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_prepare_backoff(tmp_path, monkeypatch, moment, lib_type):
+    """Persist backoff across calls and stop observing after five source failures.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture injecting source failures and counting observations.
+        moment: The controllable task clock.
+        lib_type: The reading library type whose failed task will be retried.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path, lib_type)
+            initial = ReadingReconcile.model_validate(task.payload)
+            handler = get_handler(lib_type)
+            assert isinstance(handler, ReadingMediaHandler)
+            denied = Mock(side_effect=ContentError("media_source_unavailable"))
+            deadlines = (102.0, 107.0, 122.0, 152.0, None)
+            with monkeypatch.context() as patcher:
+                patcher.setattr(handler, "snapshot_sources", denied)
+                for attempt, deadline in enumerate(deadlines, 1):
+                    with pytest.raises(ContentError, match="media_source_unavailable"):
+                        await prepare_reading_event(task.id)
+                    saved = await MediaEvent.get(id=task.id)
+                    payload = ReadingReconcile.model_validate(saved.payload)
+                    assert payload.attempts == attempt
+                    assert payload.error_code == "media_source_unavailable"
+                    assert payload.observed_snapshot is None
+                    assert payload.force_targets == initial.force_targets
+                    assert payload.not_before == deadline
+                    assert payload.state == (
+                        "failed" if deadline is None else "deferred"
+                    )
+                    assert denied.call_count == attempt
+                    moment[0] = deadline - 0.1 if deadline is not None else 1000.0
+                    assert not await prepare_reading_event(task.id)
+                    # calls reload the saved row without advancing its retry counter
+                    assert denied.call_count == attempt
+                    assert (await MediaEvent.get(id=task.id)).payload == saved.payload
+                    if deadline is not None:
+                        moment[0] = deadline
+            assert await MediaEvent.all().count() == 1
+            assert not await MediaItem.all().exists()
+            assert not await coalesce_reading_events(lib.id)
+            inspect = Mock(wraps=handler.snapshot_sources)
+            monkeypatch.setattr(handler, "snapshot_sources", inspect)
+            assert not await prepare_reading_event(task.id)
+            assert inspect.call_count == 0
+            await MediaEvent.create(lib=lib, src_path=str(body), event_type="modified")
+            merged = (await coalesce_reading_events(lib.id))[0]
+            assert merged.id == task.id
+            payload = ReadingReconcile.model_validate(merged.payload)
+            assert payload.state == "pending" and payload.attempts == 0
+            assert payload.error_code is payload.not_before is None
+            assert payload.force_targets == initial.force_targets
+            assert not await prepare_reading_event(task.id)
+            moment[0] = 1002.0
+            assert await prepare_reading_event(task.id)
+            assert inspect.call_count == 2
+            assert await MediaEvent.filter(id=task.id).exists()
+
+    asyncio.run(run())
+
+
+def test_prepare_failed_isolation(tmp_path, monkeypatch, moment):
+    """Keep a failed work dormant while another work completes its observations.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture counting filesystem observations.
+        moment: The controllable task clock.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path)
+            payload = ReadingReconcile.model_validate(task.payload)
+            payload.state = "failed"
+            payload.attempts = 5
+            payload.error_code = "media_source_unavailable"
+            task.payload = payload.model_dump(mode="json", exclude_none=True)
+            await task.save()
+            other = Path(lib.dir) / "Other/Book.txt"
+            other.parent.mkdir()
+            other.write_text("Body")
+            await MediaEvent.create(lib=lib, src_path=str(other), event_type="created")
+            second = (await coalesce_reading_events(lib.id))[0]
+            handler = get_handler(LibType.NOVEL)
+            inspect = Mock(wraps=handler.snapshot_sources)
+            monkeypatch.setattr(handler, "snapshot_sources", inspect)
+            assert not await prepare_reading_event(task.id)
+            assert not await prepare_reading_event(second.id)
+            moment[0] = 102.0
+            assert not await prepare_reading_event(task.id)
+            assert await prepare_reading_event(second.id)
+            assert inspect.call_count == 2
+            assert (await MediaEvent.get(id=task.id)).payload == task.payload
 
     asyncio.run(run())
 
@@ -809,7 +935,8 @@ def test_prepare_interrupted(tmp_path, monkeypatch, moment, failure):
 @pytest.mark.parametrize(
     "change", ["merge", "delete", "path", "dir", "lib_type", "library"]
 )
-def test_prepare_race(tmp_path, monkeypatch, moment, change):
+@pytest.mark.parametrize("failed", [False, True])
+def test_prepare_race(tmp_path, monkeypatch, moment, change, failed):
     """Discard stale observations after unlocked I/O without overwriting new work.
 
     Args:
@@ -817,6 +944,7 @@ def test_prepare_race(tmp_path, monkeypatch, moment, change):
         monkeypatch: The fixture changing persisted work during observation.
         moment: The controllable task clock.
         change: The task or library mutation to inject after the source read.
+        failed: Whether observation fails after the concurrent change.
     """
 
     async def run():
@@ -834,6 +962,9 @@ def test_prepare_race(tmp_path, monkeypatch, moment, change):
 
                 Returns:
                     The source digest computed before the simulated mutation.
+
+                Raises:
+                    ContentError: If the source observation is configured to fail.
                 """
                 result = await worker(function, *args, **kwargs)
                 async with await library_lock(lib.dir).acquire(timeout=0):
@@ -859,6 +990,8 @@ def test_prepare_race(tmp_path, monkeypatch, moment, change):
                             else LibType.COMIC
                         }
                     )
+                if failed:
+                    raise ContentError("media_source_unavailable")
                 return result
 
             monkeypatch.setattr(media_events, "to_thread", observe)
