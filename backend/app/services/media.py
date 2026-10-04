@@ -260,15 +260,15 @@ def _validate_reading_source(
                     raise ContentError("content_changed")
 
 
-def _validate_reading_work_rename(
+def _validate_reading_directory_rename(
     items: list[MediaItem], src_path: Path, dest_path: Path
 ):
-    """Validate a renamed work and retain all source guards until checks finish.
+    """Validate a renamed container and retain source guards until checks finish.
 
     Args:
         items: The nonempty list of proposed items with library and parents loaded.
-        src_path: The previous work directory from the persisted move.
-        dest_path: The new work directory containing the same registered sources.
+        src_path: The previous work or chapter directory from the persisted move.
+        dest_path: The new sibling directory containing the same registered sources.
 
     Raises:
         ContentError: If sources are invalid, unstable or the old directory is reused.
@@ -880,20 +880,20 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return item
 
     @classmethod
-    async def rename_reading_work(
+    async def rename_reading_directory(
         cls, lib_id: int, src_path: Path, dest_path: Path
     ) -> list[MediaItem]:
-        """Apply an observed work-directory rename and retain all registered IDs.
+        """Apply an observed work or chapter rename within the same parent directory.
 
         Call from the serial library consumer before destination ingestion. Rebase
-        the work and its chapters in one transaction after checking source ownership.
-        Keep histories, summaries and previous caches; mark indexes pending for the
-        subsequent ingestion. This operation does not rename files on disk.
+        selected paths in one transaction after checking source ownership. Retain
+        parent IDs, histories, summaries and previous caches; mark indexes pending
+        for subsequent ingestion. This operation does not rename files on disk.
 
         Args:
-            lib_id: The novel or comic library containing the renamed work.
-            src_path: The absolute previous work directory from a persisted move.
-            dest_path: The absolute new work directory directly below the same root.
+            lib_id: The novel or comic library containing the renamed directory.
+            src_path: The absolute previous work or comic chapter directory.
+            dest_path: The absolute new sibling directory from the persisted move.
 
         Returns:
             Updated items with their original IDs and parents loaded, or an empty
@@ -901,7 +901,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Raises:
             DoesNotExist: If the library no longer exists.
-            ValueError: If paths are not distinct visible works in the same library.
+            ValueError: If paths are not distinct visible work or chapter containers
+                under the same parent directory in this library.
             ContentError: If ownership, layout or stability is invalid, the source
                 directory is reused, or any item already occupies the destination.
         """
@@ -913,12 +914,22 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             not root.is_absolute()
             or ".." in root.parts
             or src_path == dest_path
+            or src_path.parent != dest_path.parent
             or any(
-                path.parent != root or is_ignored_name(path.name)
+                path == root
+                or not path.is_relative_to(root)
+                or ".." in path.parts
+                or (
+                    path.parent != root
+                    and (
+                        original.lib_type != LibType.COMIC or path.parent.parent != root
+                    )
+                )
+                or any(is_ignored_name(part) for part in path.relative_to(root).parts)
                 for path in (src_path, dest_path)
             )
         ):
-            raise ValueError("rename paths must select distinct visible works")
+            raise ValueError("rename paths must select visible sibling containers")
         async with library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
@@ -962,11 +973,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ):
                 raise ContentError("ambiguous_layout")
             for item in items:
-                if (
-                    not Path(item.path).is_relative_to(src_path)
-                    or not Path(item.dir).is_relative_to(src_path)
-                    or (item.parent_id is not None and item.parent_id not in by_id)
-                ):
+                if not Path(item.path).is_relative_to(src_path) or not Path(
+                    item.dir
+                ).is_relative_to(src_path):
                     raise ContentError("unsupported_layout")
                 item.path = str(dest_path / Path(item.path).relative_to(src_path))
                 item.dir = str(dest_path / Path(item.dir).relative_to(src_path))
@@ -976,10 +985,17 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     else Path(item.path).stem
                 )
                 if item.parent_id is not None:
-                    item.parent = by_id[item.parent_id]
+                    if item.parent_id in by_id:
+                        item.parent = by_id[item.parent_id]
+                    elif (
+                        item.parent is None or Path(item.parent.path) != src_path.parent
+                    ):
+                        raise ContentError("unsupported_layout")
                 item.index_state = IndexState.PENDING
                 item.index_error = None
-            await to_thread(_validate_reading_work_rename, items, src_path, dest_path)
+            await to_thread(
+                _validate_reading_directory_rename, items, src_path, dest_path
+            )
             async with in_transaction():
                 await MediaItem.bulk_update(
                     items,

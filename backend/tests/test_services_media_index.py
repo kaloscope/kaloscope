@@ -1562,7 +1562,7 @@ def test_rename_library_changed(tmp_path, monkeypatch, change, work):
             monkeypatch.setattr(media_service, "library_lock", changed)
             with pytest.raises(DoesNotExist if change == "delete" else ContentError):
                 rename = (
-                    MediaItemService.rename_reading_work
+                    MediaItemService.rename_reading_directory
                     if work
                     else MediaItemService.rename_reading_file
                 )
@@ -1688,7 +1688,7 @@ def test_rename_reading_work(tmp_path, monkeypatch, format, chapter):
             assert len(tasks) == 2
             payload = ReadingReconcile.model_validate(tasks[0].payload)
             move = payload.moves[0]
-            renamed = await MediaItemService.rename_reading_work(
+            renamed = await MediaItemService.rename_reading_directory(
                 lib.id, Path(move.src_path), Path(move.dest_path)
             )
             assert {item.id for item in renamed} == set(before)
@@ -1716,7 +1716,7 @@ def test_rename_reading_work(tmp_path, monkeypatch, format, chapter):
                 if item.format is not None:
                     assert _cache(previous).is_dir()
             saved = await MediaItem.all().values()
-            assert not await MediaItemService.rename_reading_work(
+            assert not await MediaItemService.rename_reading_directory(
                 lib.id, work, destination
             )
             assert await MediaItem.all().values() == saved
@@ -1739,8 +1739,10 @@ def test_rename_reading_work(tmp_path, monkeypatch, format, chapter):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("chapter", [False, True])
-def test_rename_work_empty(tmp_path, chapter):
+@pytest.mark.parametrize(
+    ("chapter", "only_chapter"), [(False, False), (True, False), (True, True)]
+)
+def test_rename_directory_empty(tmp_path, chapter, only_chapter):
     async def run():
         async with _database():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=chapter)
@@ -1748,15 +1750,20 @@ def test_rename_work_empty(tmp_path, chapter):
             await MediaItemService.ingest_reading_work(lib.id, work)
             first = await MediaItem.get(path=str(source.path))
             (source.directory / "1.png").unlink()
-            destination = work.with_name("Empty")
-            work.rename(destination)
-            items = await MediaItemService.rename_reading_work(
-                lib.id, work, destination
+            previous = source.directory if only_chapter else work
+            destination = previous.with_name("Empty")
+            previous.rename(destination)
+            items = await MediaItemService.rename_reading_directory(
+                lib.id, previous, destination
             )
-            assert {item.id for item in items} == {
-                item.id for item in await MediaItem.all()
-            }
-            issues = await MediaItemService.ingest_reading_work(lib.id, destination)
+            assert {item.id for item in items} == (
+                {first.id}
+                if only_chapter
+                else {item.id for item in await MediaItem.all()}
+            )
+            issues = await MediaItemService.ingest_reading_work(
+                lib.id, work if only_chapter else destination
+            )
             assert set(issues.values()) == {"empty_content"}
             await first.refresh_from_db()
             assert first.index_state == IndexState.EMPTY
@@ -1766,24 +1773,34 @@ def test_rename_work_empty(tmp_path, chapter):
     asyncio.run(run())
 
 
-def test_rename_work_case(tmp_path):
+@pytest.mark.parametrize("chapter", [False, True])
+def test_rename_directory_case(tmp_path, chapter):
     async def run():
         async with _database():
-            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            lib, source = await _source(
+                tmp_path,
+                MediaFormat.ZIP if chapter else MediaFormat.TXT,
+                chapter=chapter,
+            )
+            if source.parent_path is not None:
+                await MediaItemService.create_reading(
+                    lib.id, ReadingSource(source.parent_path, None)
+                )
             first = await MediaItemService.create_reading(lib.id, source)
             work = source.directory
             # similarly named rows must survive SQLite's case-insensitive LIKE
             other = await MediaItem.create(
                 lib=lib,
-                path=str(work.with_name("WORK") / "Other.txt"),
-                dir=str(work.with_name("WORK")),
+                parent_id=first.parent_id,
+                path=str(work.with_name(work.name.upper()) / "Other.txt"),
+                dir=str(work.with_name(work.name.upper())),
                 name="Other",
                 format=MediaFormat.TXT,
             )
             saved = await MediaItem.filter(id=other.id).values()
-            destination = work.with_name("work")
+            destination = work.with_name(work.name.lower())
             work.rename(destination)
-            items = await MediaItemService.rename_reading_work(
+            items = await MediaItemService.rename_reading_directory(
                 lib.id, work, destination
             )
             assert [item.id for item in items] == [first.id]
@@ -1849,7 +1866,9 @@ def test_rename_work_conflict(tmp_path, problem, code):
                 )
             before = await MediaItem.all().values()
             with pytest.raises(ContentError, match=code):
-                await MediaItemService.rename_reading_work(lib.id, work, destination)
+                await MediaItemService.rename_reading_directory(
+                    lib.id, work, destination
+                )
             assert await MediaItem.all().values() == before
 
     asyncio.run(run())
@@ -1878,7 +1897,9 @@ def test_rename_work_paths(tmp_path, problem):
                 destination = work / "../Renamed"
             before = await MediaItem.all().values()
             with pytest.raises(ValueError, match="rename paths"):
-                await MediaItemService.rename_reading_work(lib.id, work, destination)
+                await MediaItemService.rename_reading_directory(
+                    lib.id, work, destination
+                )
             assert await MediaItem.all().values() == before
 
     asyncio.run(run())
@@ -1895,11 +1916,11 @@ def test_rename_work_unregistered(tmp_path, video):
             if video:
                 await MediaLib.filter(id=lib.id).update(lib_type=LibType.MOVIE)
                 with pytest.raises(ContentError, match="unsupported_media_format"):
-                    await MediaItemService.rename_reading_work(
+                    await MediaItemService.rename_reading_directory(
                         lib.id, work, destination
                     )
             else:
-                assert not await MediaItemService.rename_reading_work(
+                assert not await MediaItemService.rename_reading_directory(
                     lib.id, work, destination
                 )
             assert await MediaItem.all().count() == 0
@@ -1909,14 +1930,16 @@ def test_rename_work_unregistered(tmp_path, video):
 
 
 @pytest.mark.parametrize("change", ["replace", "reuse", "cancel", "write_failure"])
-def test_rename_work_unstable(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("only_chapter", [False, True])
+def test_rename_directory_unstable(tmp_path, monkeypatch, change, only_chapter):
     async def run():
         async with _database():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
-            destination = work.with_name("Renamed")
-            work.rename(destination)
+            previous = source.directory if only_chapter else work
+            destination = previous.with_name("Renamed")
+            previous.rename(destination)
             before = await MediaItem.all().values()
             handler = get_handler(LibType.COMIC)
             scan = handler.scan_sources
@@ -1938,12 +1961,12 @@ def test_rename_work_unstable(tmp_path, monkeypatch, change):
                 if change == "cancel":
                     raise asyncio.CancelledError
                 if change == "replace":
-                    chapter = destination / "Chapter"
-                    chapter.rename(destination / "Moved")
+                    chapter = destination if only_chapter else destination / "Chapter"
+                    chapter.rename(chapter.with_name("Moved"))
                     chapter.mkdir()
                     (chapter / "1.png").write_bytes(_PNG)
                 else:
-                    work.mkdir(exist_ok=True)
+                    previous.mkdir(exist_ok=True)
                 return result
 
             async def failed(items, fields):
@@ -1970,7 +1993,182 @@ def test_rename_work_unstable(tmp_path, monkeypatch, change):
                 if change == "write_failure"
                 else ContentError
             ):
-                await MediaItemService.rename_reading_work(lib.id, work, destination)
+                await MediaItemService.rename_reading_directory(
+                    lib.id, previous, destination
+                )
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
+def test_rename_reading_chapter(tmp_path, monkeypatch, format):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=True)
+            work = source.directory.parent
+            sibling = work / "Chapter 2"
+            sibling.mkdir()
+            (sibling / "1.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            first = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=first.id).update(visible=False)
+            untouched = await MediaItem.exclude(id=first.id).values()
+            sibling_row = await MediaItem.filter(path=str(sibling)).values()
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_id=first.parent_id,
+                rel_type=HistoryType.IMAGE,
+                percentage=25,
+                locator={"chapter_item_id": first.id, "version": first.index_version},
+            )
+            history = await UserHistory.all().values()
+            destination = source.directory.with_name("Chapter 10")
+            source.directory.rename(destination)
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            await MediaEvent.create(
+                lib_id=lib.id,
+                event_type="moved",
+                src_path=str(source.directory),
+                dest_path=str(destination),
+                is_directory=True,
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            payload = ReadingReconcile.model_validate(task.payload)
+            assert set(payload.targets) == {str(source.directory), str(destination)}
+            move = payload.moves[0]
+            renamed = await MediaItemService.rename_reading_directory(
+                lib.id, Path(move.src_path), Path(move.dest_path)
+            )
+            assert [item.id for item in renamed] == [first.id]
+            current = renamed[0]
+            assert current.path == str(
+                destination
+                if format == MediaFormat.DIR
+                else destination / source.path.name
+            )
+            assert current.dir == str(destination) and not current.visible
+            assert current.name == (
+                "Chapter 10" if format == MediaFormat.DIR else "Book"
+            )
+            assert current.parent_id == first.parent_id
+            assert current.parent is not None and current.parent.path == str(work)
+            assert current.index_state == IndexState.PENDING
+            assert current.index_version == first.index_version
+            assert await MediaItem.exclude(id=first.id).values() == untouched
+            saved = await MediaItem.all().values()
+            assert not await MediaItemService.rename_reading_directory(
+                lib.id, source.directory, destination
+            )
+            assert await MediaItem.all().values() == saved
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id,
+                work,
+                targets={Path(path) for path in payload.targets},
+                force_targets={Path(path) for path in payload.force_targets},
+            )
+            await current.refresh_from_db()
+            assert current.index_state == IndexState.READY
+            assert (
+                current.index_version != first.index_version and _cache(first).is_dir()
+            )
+            assert current.parent_id == first.parent_id and not current.visible
+            assert await MediaItem.filter(path=str(sibling)).values() == sibling_row
+            parent = await MediaItem.get(id=first.parent_id)
+            assert parent.index_state == IndexState.READY and parent.extra is not None
+            assert parent.extra["content"]["chapter_count"] == 1
+            assert await MediaItem.all().count() == 3
+            assert await UserHistory.all().values() == history
+            assert await MediaEvent.filter(id=task.id).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("problem", "code"),
+    [
+        ("no_parent", "unsupported_layout"),
+        ("wrong_parent", "unsupported_layout"),
+        ("foreign_parent", "unsupported_layout"),
+        ("parent_format", "unsupported_layout"),
+        ("owned", "ambiguous_layout"),
+        ("parent_body", "ambiguous_layout"),
+        ("parent_link", "media_source_unavailable"),
+    ],
+)
+def test_rename_chapter_conflict(tmp_path, problem, code):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.ZIP, chapter=True)
+            work = source.directory.parent
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            parent = await MediaItem.get(path=str(work))
+            destination = source.directory.with_name("Renamed")
+            source.directory.rename(destination)
+            if problem == "no_parent":
+                await MediaItem.filter(path=str(source.path)).update(parent_id=None)
+            elif problem == "wrong_parent":
+                await MediaItem.filter(id=parent.id).update(
+                    path=str(work.with_name("Other"))
+                )
+            elif problem == "foreign_parent":
+                other = await MediaLib.create(
+                    name="Other",
+                    dir=str(tmp_path / "Other"),
+                    lib_type=LibType.COMIC,
+                    priority=2,
+                )
+                await MediaItem.filter(id=parent.id).update(lib_id=other.id)
+            elif problem == "parent_format":
+                await MediaItem.filter(id=parent.id).update(format=MediaFormat.DIR)
+            elif problem == "owned":
+                await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    dir=str(destination),
+                    path=str(destination / "Other.cbz"),
+                    name="Other",
+                    format=MediaFormat.CBZ,
+                )
+            elif problem == "parent_body":
+                (work / "1.png").write_bytes(_PNG)
+            else:
+                outside = tmp_path / "Outside"
+                work.rename(outside)
+                work.symlink_to(outside, target_is_directory=True)
+            before = await MediaItem.all().values()
+            with pytest.raises(ContentError, match=code):
+                await MediaItemService.rename_reading_directory(
+                    lib.id, source.directory, destination
+                )
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("problem", ["cross_work", "deep", "hidden_parent"])
+def test_rename_chapter_paths(tmp_path, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.directory.parent
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            previous, destination = source.directory, work / "Renamed"
+            if problem == "cross_work":
+                destination = work.with_name("Other") / "Renamed"
+            elif problem == "deep":
+                previous, destination = previous / "Child", previous / "Renamed"
+            else:
+                hidden = work.with_name(".Hidden")
+                previous, destination = hidden / "Chapter", hidden / "Renamed"
+            before = await MediaItem.all().values()
+            with pytest.raises(ValueError, match="rename paths"):
+                await MediaItemService.rename_reading_directory(
+                    lib.id, previous, destination
+                )
             assert await MediaItem.all().values() == before
 
     asyncio.run(run())

@@ -769,6 +769,61 @@ def test_parent_scope(tmp_path, parent_state):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
+def test_renamed_chapter_metadata(tmp_path, format):
+    async def run():
+        async with _database():
+            parent = await _item(tmp_path, None)
+            work = Path(parent.path)
+            directory = work / "Chapter"
+            directory.mkdir()
+            path = (
+                directory if format == MediaFormat.DIR else directory / f"Book.{format}"
+            )
+            if format == MediaFormat.DIR:
+                (directory / "1.png").write_bytes(_PNG)
+            else:
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("1.png", _PNG)
+            (work / "ComicInfo.xml").write_text(
+                "<ComicInfo><Writer>Author</Writer></ComicInfo>"
+            )
+            xml = "<ComicInfo><Title>Chapter</Title></ComicInfo>"
+            (directory / "ComicInfo.xml").write_text(xml)
+            (directory / "cover.png").write_bytes(_PNG)
+            child = await MediaItem.create(
+                lib_id=parent.lib_id,
+                parent=parent,
+                dir=str(directory),
+                path=str(path),
+                name="Chapter",
+                format=format,
+            )
+            destination = directory.with_name("Renamed")
+            directory.rename(destination)
+            await MediaItemService.rename_reading_directory(
+                parent.lib_id, directory, destination
+            )
+            data = await MediaItemService.get_details(child.id, _user([parent.lib_id]))
+            assert data["title"] == "Chapter" and data["metadata_state"] == "ready"
+            assert data["metadata"]["authors"] == ("Author",)
+            assert data["parent"]["id"] == parent.id
+            cover = await MediaItemService.get_cover(child.id, _user([parent.lib_id]))
+            assert cover is not None and cover.path == destination / "cover.png"
+            assert cover.data == _PNG
+            assert (destination / "ComicInfo.xml").read_text() == xml
+            (destination / "ComicInfo.xml").write_text(xml.replace("Chapter", "Fresh"))
+            (work / "ComicInfo.xml").write_text(
+                "<ComicInfo><Writer>Current author</Writer></ComicInfo>"
+            )
+            data = await MediaItemService.get_details(child.id, _user([parent.lib_id]))
+            assert data["title"] == "Fresh"
+            assert data["metadata"]["authors"] == ("Current author",)
+            assert await MediaItem.all().count() == 2
+
+    asyncio.run(run())
+
+
 def test_related_items(tmp_path):
     async def run():
         async with _database():
