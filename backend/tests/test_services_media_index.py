@@ -640,6 +640,247 @@ def test_ingest_undiscovered(tmp_path, problem):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("chapter", [False, True])
+@pytest.mark.parametrize("hidden", [False, True])
+def test_ingest_empty_images(tmp_path, monkeypatch, chapter, hidden):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=chapter)
+            work = source.parent_path or source.directory
+            metadata = source.directory / "ComicInfo.xml"
+            xml = "<ComicInfo><Title>Saved title</Title></ComicInfo>"
+            metadata.write_text(xml)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            first = await MediaItem.get(lib_id=lib.id, path=str(source.path))
+            await MediaItem.filter(id=first.id).update(visible=not hidden)
+            page = source.path / "1.png"
+            page.unlink()
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            await MediaEvent.create(
+                lib_id=lib.id,
+                event_type="deleted",
+                src_path=str(page),
+                is_directory=False,
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            payload = ReadingReconcile.model_validate(task.payload)
+            for _ in range(2):
+                assert await MediaItemService.ingest_reading_work(
+                    lib.id,
+                    work,
+                    targets={Path(path) for path in payload.targets},
+                    force_targets={Path(path) for path in payload.force_targets},
+                ) == {source.path: "empty_content"}
+                current = await MediaItem.get(id=first.id)
+                assert current.index_state == IndexState.EMPTY
+                assert current.index_error == "empty_content"
+                assert current.title == "Saved title" and current.visible != hidden
+                assert current.parent_id == first.parent_id
+                assert current.index_version == first.index_version
+                assert current.extra == first.extra and current.size == first.size
+                assert list(_cache(current).parent.iterdir()) == [_cache(first)]
+                assert metadata.read_text() == xml
+                if chapter:
+                    parent = await MediaItem.get(id=first.parent_id)
+                    assert parent.index_state == IndexState.EMPTY
+                    assert parent.index_error == "empty_content"
+                    assert parent.index_version is None and parent.extra is not None
+                    assert parent.extra["content"]["chapter_count"] == int(not hidden)
+            page.write_bytes(_PNG)
+            (source.path / "2.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            recovered = await MediaItem.get(id=first.id)
+            assert recovered.index_state == IndexState.READY
+            assert recovered.index_error is None and recovered.visible != hidden
+            assert recovered.title == "Saved title"
+            assert recovered.index_version != first.index_version
+            assert recovered.extra is not None
+            assert recovered.extra["content"]["page_count"] == 2
+            assert await MediaItem.all().count() == (2 if chapter else 1)
+            if chapter:
+                parent = await MediaItem.get(id=first.parent_id)
+                assert parent.index_state == (
+                    IndexState.EMPTY if hidden else IndexState.READY
+                )
+
+    asyncio.run(run())
+
+
+def test_ingest_empty_scope(tmp_path):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.parent_path
+            assert work is not None
+            other = work / "Other"
+            other.mkdir()
+            (other / "1.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            sibling = await MediaItem.get(path=str(other))
+            before = await MediaItem.filter(id=sibling.id).values()
+            empty = work / "Empty"
+            empty.mkdir()
+            (empty / "ComicInfo.xml").write_text("<ComicInfo/>")
+            for directory in (source.path, other):
+                (directory / "1.png").unlink()
+            assert await MediaItemService.ingest_reading_work(
+                lib.id, work, targets={source.directory}
+            ) == {source.path: "empty_content"}
+            assert await MediaItem.filter(id=sibling.id).values() == before
+            parent = await MediaItem.get(path=str(work))
+            assert parent.index_state == IndexState.READY
+            assert not await MediaItem.filter(path=str(empty)).exists()
+            assert await MediaItemService.ingest_reading_work(lib.id, work) == {
+                source.path: "empty_content",
+                other: "empty_content",
+            }
+            parent = await MediaItem.get(id=parent.id)
+            assert parent.index_state == IndexState.EMPTY and parent.extra is not None
+            assert parent.extra["content"]["chapter_count"] == 2
+            assert await MediaItem.all().count() == 3
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_ingest_empty_collection(tmp_path, existing):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.parent_path
+            assert work is not None
+            original = None
+            if existing:
+                await MediaItemService.ingest_reading_work(lib.id, work)
+                original = await MediaItem.get(path=str(work))
+                await MediaItem.filter(parent_id=original.id).delete()
+            shutil.rmtree(source.directory)
+            metadata = work / "ComicInfo.xml"
+            xml = "<ComicInfo><Title>Empty collection</Title></ComicInfo>"
+            metadata.write_text(xml)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            assert await MediaItem.all().count() == int(existing)
+            if original is not None:
+                current = await MediaItem.get(id=original.id)
+                assert current.title == "Empty collection"
+                assert current.index_state == IndexState.EMPTY
+                assert current.index_error == "empty_content"
+                assert current.index_version is None and current.extra is not None
+                assert current.extra["content"]["chapter_count"] == 0
+            assert metadata.read_text() == xml
+            source.directory.mkdir()
+            (source.directory / "1.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            current = await MediaItem.get(path=str(work))
+            assert current.index_state == IndexState.READY
+            assert current.index_error is None
+            assert original is None or current.id == original.id
+            assert await MediaItem.all().count() == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("problem", ["missing", "symlink", "inaccessible", "ambiguous"])
+def test_ingest_directory_unavailable(tmp_path, monkeypatch, problem):
+    async def run():
+        async with _database():
+            from app.core.media.handlers import reading
+
+            lib, source = await _source(tmp_path, MediaFormat.DIR)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            before = await MediaItem.all().values()
+            if problem == "missing":
+                shutil.rmtree(source.directory)
+            elif problem == "symlink":
+                moved = tmp_path / "Moved"
+                source.directory.rename(moved)
+                source.directory.symlink_to(moved, target_is_directory=True)
+            elif problem == "inaccessible":
+
+                def denied(directory):
+                    """Simulate failed enumeration without relying on permissions.
+
+                    Args:
+                        directory: The work directory being inspected.
+
+                    Raises:
+                        PermissionError: For the inaccessible work.
+                    """
+                    assert directory == source.directory
+                    raise PermissionError(str(directory))
+
+                monkeypatch.setattr(reading, "list_source_entries", denied)
+            else:
+                (source.directory / "Book.cbz").write_bytes(b"broken")
+            assert await MediaItemService.ingest_reading_work(
+                lib.id, source.directory
+            ) == {
+                source.path: "ambiguous_layout"
+                if problem == "ambiguous"
+                else "media_source_unavailable"
+            }
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["delete", "move", "refill"])
+def test_ingest_empty_changed(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            first = await MediaItem.get(path=str(source.path))
+            (source.path / "1.png").unlink()
+            create = MediaItemService.create_reading
+
+            async def changed(lib_id, candidate):
+                """Change a saved source after discovery and before revalidation.
+
+                Args:
+                    lib_id: The library passed to source registration.
+                    candidate: The saved empty container selected for revalidation.
+
+                Returns:
+                    The registered item if its current source is still valid.
+
+                Raises:
+                    ContentError: If the source or its saved ownership changed.
+                """
+                if change == "delete":
+                    await MediaItem.filter(id=first.id).delete()
+                elif change == "move":
+                    moved = source.path.with_name("Moved")
+                    source.path.rename(moved)
+                    await MediaItem.filter(id=first.id).update(
+                        dir=str(moved), path=str(moved)
+                    )
+                else:
+                    (source.path / "1.png").write_bytes(_PNG)
+                    (source.path / "2.png").write_bytes(_PNG)
+                return await create(lib_id, candidate)
+
+            monkeypatch.setattr(MediaItemService, "create_reading", changed)
+            issues = await MediaItemService.ingest_reading_work(
+                lib.id, source.directory
+            )
+            if change == "delete":
+                assert issues == {source.path: "empty_content"}
+                assert not await MediaItem.all().exists()
+            else:
+                current = await MediaItem.get(id=first.id)
+                assert current.index_state == IndexState.READY
+                if change == "move":
+                    assert issues == {source.path: "media_source_unavailable"}
+                    assert current.path == str(source.path.with_name("Moved"))
+                    assert current.index_version == first.index_version
+                else:
+                    assert not issues
+                    assert current.index_version != first.index_version
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "problem",
     [

@@ -544,11 +544,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         force: bool = False,
         force_targets: set[Path] | None = None,
     ) -> dict[Path, str]:
-        """Ingest currently discoverable sources in one reading work serially.
+        """Ingest reading candidates and revisit indexed comic directories serially.
 
         The library consumer must call this outside the library lock. Each service
-        step revalidates ownership and manages its own lock. Missing or ambiguous
-        sources require separate reconciliation; discovery never implies deletion.
+        step revalidates ownership and manages its own lock. Indexed image directories
+        and collections retain their identity when empty. Missing or ambiguous sources
+        still require separate reconciliation; discovery never implies deletion.
 
         Args:
             lib_id: The novel or comic library containing the work.
@@ -571,7 +572,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ContentError: If the library type is unsupported or changes while scanning.
         """
         from app.core.media.handlers.base import get_handler
-        from app.core.media.handlers.reading import is_ignored_name
+        from app.core.media.handlers.reading import ReadingSource, is_ignored_name
 
         lib = await MediaLib.get(id=lib_id)
         if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
@@ -617,8 +618,29 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             raise ContentError("content_changed")
         issues = {path: error for path, error in scan.issues.items() if selected(path)}
         sources = [source for source in scan.sources if selected(source.directory)]
-        if not any(source.format is not None for source in sources):
+        known: list[MediaItem] = []
+        if lib.lib_type == LibType.COMIC:
+            known = await MediaItem.filter(
+                Q(path=str(work_path)) | Q(parent__path=str(work_path)),
+                Q(format=MediaFormat.DIR) | Q(format__isnull=True),
+                lib_id=lib_id,
+            ).select_related("parent")
+            discovered = {source.directory for source in sources}
+            # discovery omits empty containers, but indexed ones still need updates
+            sources.extend(
+                ReadingSource(
+                    Path(item.path),
+                    item.format,
+                    Path(item.parent.path) if item.parent is not None else None,
+                )
+                for item in known
+                if Path(item.dir) not in discovered and selected(Path(item.dir))
+            )
+        if not any(source.format is not None for source in sources) and not any(
+            item.path == str(work_path) and item.format is None for item in known
+        ):
             return issues
+        sources.sort(key=lambda source: source.parent_path is not None)
         collection = None
         for source in sources:
             try:
