@@ -5,7 +5,7 @@ from pathlib import Path
 from time import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from tortoise.transactions import in_transaction
 from watchdog.events import FileSystemEvent
 
@@ -36,6 +36,10 @@ class ReadingReconcile(BaseModel):
 
     schema_version: Literal[1] = 1
     targets: list[str]
+    # tasks without body-change facts must rebuild their selected scope
+    force_targets: list[str] = Field(
+        validation_alias=AliasChoices("force_targets", "targets")
+    )
     moves: list[ReadingMove] = Field(default_factory=list)
     observed_snapshot: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     not_before: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -82,11 +86,17 @@ async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
             source = FileSystemEvent(event.src_path, event.dest_path or "")
             source.event_type = event.event_type
             source.is_directory = event.is_directory
+            content = handler.resolve_content_targets(source, base_path=lib.dir)
             for work, targets in handler.resolve_event_targets(
                 source, base_path=lib.dir
             ).items():
-                batch = grouped.setdefault(str(work), ReadingReconcile(targets=[]))
+                batch = grouped.setdefault(
+                    str(work), ReadingReconcile(targets=[], force_targets=[])
+                )
                 batch.targets.extend(str(target) for target in targets)
+                batch.force_targets.extend(
+                    str(target) for target in content.get(work, ())
+                )
                 if event.event_type == "moved":
                     batch.moves.append(
                         ReadingMove(
@@ -98,16 +108,19 @@ async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
                     )
 
         for work, batch in grouped.items():
+            forced = list(batch.force_targets)
             pending = await MediaEvent.filter(
                 lib_id=lib_id, event_type="reconcile", src_path=work
             ).order_by("id")
             for event in pending:
                 previous = ReadingReconcile.model_validate(event.payload)
                 batch.targets.extend(previous.targets)
+                forced.extend(previous.force_targets)
                 batch.moves.extend(previous.moves)
             batch.targets = (
                 [work] if work in batch.targets else sorted(set(batch.targets))
             )
+            batch.force_targets = [work] if work in forced else sorted(set(forced))
             # a move spanning works belongs to both tasks with the same event ID
             moves: dict[int, ReadingMove] = {}
             for move in batch.moves:

@@ -620,6 +620,111 @@ def test_event_boundaries(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    ("lib_type", "relative", "forced"),
+    [
+        (LibType.NOVEL, "Work/Book.TXT", "Work"),
+        (LibType.NOVEL, "Work/Book.epub", "Work"),
+        (LibType.NOVEL, "Work/metadata.opf", None),
+        (LibType.NOVEL, "Work/illustration.png", None),
+        (LibType.COMIC, "Work/Chapter/Book.CBZ", "Work/Chapter"),
+        (LibType.COMIC, "Work/Chapter/Book.zip", "Work/Chapter"),
+        (LibType.COMIC, "Work/Chapter/1.PNG", "Work/Chapter"),
+        (LibType.COMIC, "Work/Chapter/COVER.jpg", None),
+        (LibType.COMIC, "Work/folder.png", None),
+        (LibType.COMIC, "Work/poster.gif", None),
+        (LibType.COMIC, "Work/ComicInfo.XML", None),
+        (LibType.COMIC, "Work/.hidden/1.png", None),
+        (LibType.COMIC, "Work/Chapter/1.png.part", None),
+        (LibType.COMIC, "Work/../Outside/1.png", None),
+    ],
+)
+def test_content_events(tmp_path, lib_type, relative, forced):
+    """Distinguish body changes from metadata, covers and ignored file events.
+
+    Args:
+        tmp_path: The isolated library root.
+        lib_type: The reading library type.
+        relative: The event path relative to the root.
+        forced: The expected forced container, or None for an incremental check.
+    """
+    handler = get_handler(lib_type)
+    assert isinstance(handler, reading.ReadingMediaHandler)
+    for event_type in (FileCreatedEvent, FileModifiedEvent, FileDeletedEvent):
+        event = event_type(str(tmp_path / relative))
+        assert handler.resolve_content_targets(event, base_path=str(tmp_path)) == (
+            {tmp_path / "Work": {tmp_path / forced}} if forced else {}
+        )
+
+
+@pytest.mark.parametrize(
+    ("src", "dest", "forced"),
+    [
+        ("Old/cover.png", "New/1.png", {"New"}),
+        ("Old/1.png", "New/cover.png", {"Old"}),
+        ("Old/1.png", "New/2.png", {"Old", "New"}),
+        ("Old/ComicInfo.xml", "New/ComicInfo.xml", set()),
+        ("Old/1.png.part", "New/1.png", {"New"}),
+        ("../Outside/1.png", "New/1.png", {"New"}),
+    ],
+)
+def test_content_moves(tmp_path, src, dest, forced):
+    """Classify both ends of a move independently without changing its facts.
+
+    Args:
+        tmp_path: The isolated library root.
+        src: The relative source path.
+        dest: The relative destination path.
+        forced: Work names whose body indexes must be rebuilt.
+    """
+    event = FileMovedEvent(str(tmp_path / src), str(tmp_path / dest))
+    assert get_handler(LibType.COMIC).resolve_content_targets(
+        event, base_path=str(tmp_path)
+    ) == {tmp_path / work: {tmp_path / work} for work in forced}
+    assert (event.src_path, event.dest_path) == (
+        str(tmp_path / src),
+        str(tmp_path / dest),
+    )
+
+
+def test_content_directories(tmp_path):
+    """Force replaced directories while keeping directory modifications incremental.
+
+    Args:
+        tmp_path: The isolated library root.
+    """
+    handler = get_handler(LibType.COMIC)
+    path = str(tmp_path / "Work/Chapter")
+    for event in (
+        DirCreatedEvent(path),
+        DirDeletedEvent(path),
+        DirMovedEvent(path, str(tmp_path / "Work/Other")),
+    ):
+        assert handler.resolve_content_targets(
+            event, base_path=str(tmp_path)
+        ) == handler.resolve_event_targets(event, base_path=str(tmp_path))
+    assert (
+        handler.resolve_content_targets(DirModifiedEvent(path), base_path=str(tmp_path))
+        == {}
+    )
+    assert (
+        handler.resolve_content_targets(
+            FileOpenedEvent(path + "/1.png"), base_path=str(tmp_path)
+        )
+        == {}
+    )
+    for lib_type, relative in (
+        (LibType.NOVEL, "Work/assets"),
+        (LibType.COMIC, "Work/Chapter/assets"),
+    ):
+        handler = get_handler(lib_type)
+        assert isinstance(handler, reading.ReadingMediaHandler)
+        for event_type in (DirCreatedEvent, DirDeletedEvent):
+            event = event_type(str(tmp_path / relative))
+            assert handler.resolve_event_targets(event, base_path=str(tmp_path))
+            assert handler.resolve_content_targets(event, base_path=str(tmp_path)) == {}
+
+
 def test_registered_handlers(tmp_path):
     assert all(get_handler(lib_type) for lib_type in LibType)
     for lib_type in (LibType.NOVEL, LibType.COMIC):

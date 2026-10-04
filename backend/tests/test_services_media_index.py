@@ -18,14 +18,23 @@ from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
+from app.core.media import events as media_events
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.epub.cache import EpubContent
+from app.core.media.events import ReadingReconcile, coalesce_reading_events
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingMediaHandler, ReadingSource
 from app.core.media.image import load_image_index, read_image_resource
 from app.core.media.text import load_text_index, read_text_chapter
-from app.models.media import IndexState, LibType, MediaFormat, MediaItem, MediaLib
+from app.models.media import (
+    IndexState,
+    LibType,
+    MediaEvent,
+    MediaFormat,
+    MediaItem,
+    MediaLib,
+)
 from app.services import media as media_service
 from app.services.media import MediaItemService
 
@@ -353,6 +362,239 @@ def test_ingest_targets(tmp_path, whole_work):
             assert not await MediaItemService.ingest_reading_work(
                 lib.id, work, targets={source.directory}
             )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat]
+    + [
+        (format, True) for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+    ],
+)
+def test_ingest_body_events(tmp_path, monkeypatch, format, chapter):
+    """Rebuild changed bodies even when the source size and mtime are preserved.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture disabling application notifications.
+        format: The reading source format.
+        chapter: Whether the source is a comic chapter.
+    """
+    monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            original = await MediaItem.get(lib_id=lib.id, path=str(source.path))
+            path = source.path / "1.png" if format == MediaFormat.DIR else source.path
+            before = path.stat()
+            if format in (MediaFormat.TXT, MediaFormat.DIR):
+                path.write_bytes(
+                    path.read_bytes()
+                    .replace(b"Body", b"Next")
+                    .replace(b"image", b"other")
+                )
+            else:
+                with zipfile.ZipFile(path) as archive:
+                    members = [
+                        (entry, archive.read(entry)) for entry in archive.infolist()
+                    ]
+                with zipfile.ZipFile(path, "w") as archive:
+                    for entry, data in members:
+                        archive.writestr(
+                            entry,
+                            data.replace(b"Body", b"Next").replace(b"image", b"other"),
+                        )
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            assert path.stat().st_size == before.st_size
+            await MediaEvent.create(lib=lib, src_path=str(path), event_type="modified")
+            task = (await coalesce_reading_events(lib.id))[0]
+            payload = ReadingReconcile.model_validate(task.payload)
+            assert payload.force_targets == [str(source.directory)]
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id,
+                work,
+                targets={Path(path) for path in payload.targets},
+                force_targets={Path(path) for path in payload.force_targets},
+            )
+            current = await MediaItem.get(id=original.id)
+            assert current.index_version != original.index_version
+            assert current.index_state == IndexState.READY
+            if format in (MediaFormat.TXT, MediaFormat.EPUB):
+                index = load_text_index(_cache(current))
+                content = read_text_chapter(_cache(current), index.chapters[0].id)
+                if format == MediaFormat.TXT:
+                    assert content == ["Next"]
+                else:
+                    assert isinstance(content, EpubContent)
+                    assert '"Next"' in content.model_dump_json()
+            else:
+                index = load_image_index(_cache(current))
+                assert read_image_resource(
+                    source.path, _cache(current), index.pages[0].id
+                ) == (_PNG.replace(b"image", b"other"), "image/png")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", list(MediaFormat))
+def test_ingest_metadata_events(tmp_path, monkeypatch, format):
+    """Apply metadata and cover events without parsing an unchanged body.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture rejecting unnecessary body builds and notifications.
+        format: The reading source format.
+    """
+    monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            original = await MediaItem.get(lib_id=lib.id, path=str(source.path))
+            monkeypatch.setattr(
+                media_service,
+                "_build_content",
+                lambda *_args: pytest.fail("metadata must reuse the body index"),
+            )
+            novel = lib.lib_type == LibType.NOVEL
+            metadata = source.directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            metadata.write_text(
+                '<package xmlns="http://www.idpf.org/2007/opf" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>'
+                "<dc:title>Updated</dc:title></metadata></package>"
+                if novel
+                else "<ComicInfo><Title>Updated</Title></ComicInfo>"
+            )
+            cover = source.directory / "cover.png"
+            cover.write_bytes(_PNG)
+            for path in (metadata, cover, source.directory):
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(path),
+                    event_type="modified",
+                    is_directory=path == source.directory,
+                )
+            task = (await coalesce_reading_events(lib.id))[0]
+            payload = ReadingReconcile.model_validate(task.payload)
+            assert payload.force_targets == []
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id,
+                source.directory,
+                targets={Path(path) for path in payload.targets},
+                force_targets={Path(path) for path in payload.force_targets},
+            )
+            current = await MediaItem.get(id=original.id)
+            assert current.title == "Updated"
+            assert current.index_version == original.index_version
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["chapter", "work", "empty", "force"])
+def test_ingest_forced_scope(tmp_path, monkeypatch, scope):
+    """Limit forced rebuilds to selected chapters while retaining full-force support.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture disabling application notifications.
+        scope: The forced scope or the existing full-force flag to exercise.
+    """
+    monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.parent_path
+            assert work is not None
+            other = work / "Other"
+            other.mkdir()
+            (other / "1.png").write_bytes(_PNG)
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            await MediaItem.filter(path=str(source.path)).update(visible=False)
+            before = {item.path: item.index_version for item in await MediaItem.all()}
+            forced = (
+                {work}
+                if scope == "work"
+                else {source.directory}
+                if scope == "chapter"
+                else set()
+            )
+            if scope == "chapter":
+                metadata = work / "ComicInfo.xml"
+                metadata.write_text("<ComicInfo><Title>Updated</Title></ComicInfo>")
+                for path in (source.path / "1.png", metadata):
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(path), event_type="modified"
+                    )
+                task = (await coalesce_reading_events(lib.id))[0]
+                payload = ReadingReconcile.model_validate(task.payload)
+                assert payload.targets == [str(work)]
+                forced = {Path(path) for path in payload.force_targets}
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id,
+                work,
+                targets={work},
+                force_targets=forced,
+                force=scope == "force",
+            )
+            after = {item.path: item.index_version for item in await MediaItem.all()}
+            assert (after[str(source.path)] != before[str(source.path)]) == (
+                scope != "empty"
+            )
+            assert (after[str(other)] != before[str(other)]) == (
+                scope in ("work", "force")
+            )
+            assert after[str(work)] is None
+            assert not (await MediaItem.get(path=str(source.path))).visible
+            if scope == "chapter":
+                assert (await MediaItem.get(path=str(work))).title == "Updated"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("novel", "selection", "forced"),
+    [
+        (False, None, "../Other"),
+        (False, None, ".Hidden"),
+        (False, None, "Chapter/Nested"),
+        (False, "Chapter", "Other"),
+        (False, "Chapter", "."),
+        (True, None, "Chapter"),
+    ],
+)
+def test_ingest_forced_invalid(tmp_path, novel, selection, forced):
+    """Reject forced containers outside the requested reading scope before writing.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        novel: Whether to use the stricter novel layout.
+        selection: The selected chapter, or None for the whole work.
+        forced: The invalid forced container relative to the work.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(
+                tmp_path,
+                MediaFormat.TXT if novel else MediaFormat.DIR,
+                chapter=not novel,
+            )
+            work = source.parent_path or source.directory
+            with pytest.raises(ValueError):
+                await MediaItemService.ingest_reading_work(
+                    lib.id,
+                    work,
+                    targets={work / selection} if selection else None,
+                    force_targets={work / forced},
+                )
+            assert not await MediaItem.all().exists()
 
     asyncio.run(run())
 

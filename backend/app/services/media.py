@@ -542,6 +542,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         *,
         targets: set[Path] | None = None,
         force: bool = False,
+        force_targets: set[Path] | None = None,
     ) -> dict[Path, str]:
         """Ingest currently discoverable sources in one reading work serially.
 
@@ -555,7 +556,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             targets: Work or direct comic chapter directories to process; None
                 processes the whole work. A chapter selection includes its collection.
             force: Whether to rebuild selected bodies unconditionally; defaults to
-                False for incremental scans. Body modification events must use True.
+                False for incremental scans; True rebuilds every selected body.
+            force_targets: Containers whose selected bodies must be rebuilt even
+                when size and mtime match; None adds no forced containers. Use this
+                for mixed body and metadata events, or force=True for the whole scope.
 
         Returns:
             Selected source or scope paths mapped to discovery, metadata or body
@@ -572,19 +576,25 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         lib = await MediaLib.get(id=lib_id)
         if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise ContentError("unsupported_media_format")
-        if targets is not None and (
-            not targets
-            or any(
-                target != work_path
-                and (
-                    lib.lib_type != LibType.COMIC
-                    or target.parent != work_path
-                    or is_ignored_name(target.name)
-                )
-                for target in targets
+        if (targets is not None and not targets) or any(
+            target != work_path
+            and (
+                lib.lib_type != LibType.COMIC
+                or target.parent != work_path
+                or is_ignored_name(target.name)
             )
+            for target in (targets or set()) | (force_targets or set())
         ):
             raise ValueError("targets must select the work or direct comic chapters")
+        if (
+            targets is not None
+            and force_targets
+            and any(
+                not any(forced.is_relative_to(target) for target in targets)
+                for forced in force_targets
+            )
+        ):
+            raise ValueError("forced containers must be within the selected targets")
 
         def selected(path: Path) -> bool:
             """Include selected containers and their discovery scopes.
@@ -635,7 +645,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 collection = item
                 continue
             try:
-                await cls.index_content(item.id, force=force)
+                await cls.index_content(
+                    item.id,
+                    force=force
+                    or any(
+                        source.directory.is_relative_to(target)
+                        for target in force_targets or ()
+                    ),
+                )
             except ContentError as error:
                 issues[source.path] = error.code
             except DoesNotExist:

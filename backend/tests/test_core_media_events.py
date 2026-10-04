@@ -177,6 +177,7 @@ def test_coalesce_scopes(tmp_path):
             assert tasks[0].payload == {
                 "schema_version": 1,
                 "targets": [str(work / "A"), str(work / "B")],
+                "force_targets": [str(work / "A"), str(work / "B")],
                 "moves": [],
             }
             unchanged = await MediaEvent.get(id=tasks[1].id)
@@ -218,6 +219,85 @@ def test_coalesce_scopes(tmp_path):
             assert (
                 await MediaEvent.get(id=unchanged.id)
             ).updated_at == unchanged.updated_at
+
+    asyncio.run(run())
+
+
+def test_coalesce_content(tmp_path):
+    """Retain forced chapters when metadata expands the task to the whole work.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            work = Path(lib.dir) / "Work"
+            for path in (
+                work / "A/1.png",
+                work / "ComicInfo.xml",
+                work / "B/cover.png",
+            ):
+                await MediaEvent.create(
+                    lib=lib, src_path=str(path), event_type="modified"
+                )
+            task = (await coalesce_reading_events(lib.id))[0]
+            payload = ReadingReconcile.model_validate(task.payload)
+            assert payload.targets == [str(work)]
+            assert payload.force_targets == [str(work / "A")]
+            await MediaEvent.create(
+                lib=lib, src_path=str(work), event_type="modified", is_directory=True
+            )
+            merged = (await coalesce_reading_events(lib.id))[0]
+            assert merged.id == task.id
+            assert ReadingReconcile.model_validate(merged.payload).force_targets == [
+                str(work / "A")
+            ]
+            await MediaEvent.create(
+                lib=lib, src_path=str(work), event_type="created", is_directory=True
+            )
+            whole = (await coalesce_reading_events(lib.id))[0]
+            assert ReadingReconcile.model_validate(whole.payload).force_targets == [
+                str(work)
+            ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_coalesce_legacy(tmp_path, legacy):
+    """Preserve metadata-only intent, rebuilding unknown legacy scopes conservatively.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        legacy: Whether the saved task predates body-change tracking.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            work = Path(lib.dir) / "Work"
+            payload = {"targets": [str(work)], "moves": [], "schema_version": 1}
+            if not legacy:
+                payload["force_targets"] = []
+            assert ReadingReconcile.model_validate(payload).force_targets == (
+                [str(work)] if legacy else []
+            )
+            task = await MediaEvent.create(
+                lib=lib,
+                src_path=str(work),
+                event_type="reconcile",
+                payload=payload,
+            )
+            await MediaEvent.create(
+                lib=lib, src_path=str(work / "ComicInfo.xml"), event_type="modified"
+            )
+            merged = (await coalesce_reading_events(lib.id))[0]
+            assert merged.id == task.id
+            assert ReadingReconcile.model_validate(merged.payload).force_targets == (
+                [str(work)] if legacy else []
+            )
 
     asyncio.run(run())
 

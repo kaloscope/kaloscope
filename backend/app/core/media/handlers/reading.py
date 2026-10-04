@@ -463,6 +463,61 @@ class ReadingMediaHandler(MediaHandler):
             result.setdefault(work, set()).add(target)
         return result
 
+    def resolve_content_targets(
+        self, event: FileSystemEvent, *, base_path: str
+    ) -> dict[Path, set[Path]]:
+        """Identify containers whose body events require an index rebuild.
+
+        Metadata and named covers do not invalidate body indexes. Directory
+        modifications only request a layout check. Creating, deleting or moving
+        work and chapter containers may replace bodies while preserving their
+        size and mtime; deeper auxiliary directories do not contain supported bodies.
+
+        Args:
+            event: The original filesystem event, including both sides of a move.
+            base_path: The absolute library root.
+
+        Returns:
+            Work paths mapped to containers requiring an unconditional rebuild.
+
+        Raises:
+            ValueError: If the root is not an absolute normalized path.
+        """
+        scopes = self.resolve_event_targets(event, base_path=base_path)
+        if not scopes:
+            return {}
+        if event.is_directory and event.event_type == EVENT_TYPE_MODIFIED:
+            return {}
+        paths = [event.src_path]
+        if event.event_type == EVENT_TYPE_MOVED:
+            paths.append(event.dest_path)
+        result: dict[Path, set[Path]] = {}
+        for value in paths:
+            path = Path(os.fsdecode(value))
+            if event.is_directory:
+                for work, targets in self.resolve_event_targets(
+                    DirModifiedEvent(value), base_path=base_path
+                ).items():
+                    if path in targets:
+                        result.setdefault(work, set()).add(path)
+                continue
+            suffix = path.suffix.casefold()
+            body = (
+                suffix in _NOVEL_EXTENSIONS
+                if self.lib_type == LibType.NOVEL
+                else suffix in _COMIC_EXTENSIONS
+                or (
+                    suffix in IMAGE_EXTENSIONS
+                    and path.stem.casefold() not in COVER_NAMES
+                )
+            )
+            if body:
+                for work, targets in self.resolve_event_targets(
+                    FileModifiedEvent(value), base_path=base_path
+                ).items():
+                    result.setdefault(work, set()).update(targets)
+        return result
+
     def filter_event(
         self, event: FileSystemEvent, *, base_path: str
     ) -> FileSystemEvent | None:
