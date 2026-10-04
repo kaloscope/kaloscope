@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import shutil
 import stat
@@ -264,6 +265,79 @@ def _read_reading(
             raise ContentError("media_source_unavailable")
         cover = read_cover(source, metadata) if with_cover else None
         return metadata, cover, "media_source_unavailable" if missing else None
+
+
+def _content_is_current(item: MediaItem) -> bool:
+    """Check whether a ready body index still matches its source without parsing it.
+
+    Compare source sizes and modification times, plus ordered page names for image
+    directories. Metadata and covers are read independently and do not invalidate
+    the body. Explicit modification events must still force a rebuild.
+
+    Args:
+        item: The reading unit with its library and optional parent loaded.
+
+    Returns:
+        Whether the current cache and source pass the incremental reuse checks.
+    """
+    from app.core.media.handlers.reading import (
+        identify_comic_source,
+        list_source_entries,
+    )
+    from app.core.media.image import load_image_index
+    from app.core.media.text import load_text_index
+
+    if (
+        item.index_state != IndexState.READY
+        or item.index_version is None
+        or re.fullmatch(r"[0-9a-f]{64}", item.index_version) is None
+    ):
+        return False
+    cache = (
+        Path(KaloscopeConfig.get_workspace("temp"))
+        / "media_index"
+        / str(item.id)
+        / item.index_version
+    )
+    try:
+        with _reading_source(item) as (source, states, missing):
+            if missing:
+                return False
+            load = (
+                load_text_index
+                if item.lib.lib_type == LibType.NOVEL
+                else load_image_index
+            )
+            index = load(cache)
+            if index.format != item.format or index.index_version != item.index_version:
+                return False
+            if index.source_snapshot is not None:
+                info = source.path.stat(follow_symlinks=False)
+                return (
+                    info.st_size == index.source_snapshot.size
+                    and info.st_mtime_ns == index.source_snapshot.mtime_ns
+                )
+            files, _ = list_source_entries(source.directory)
+            current = identify_comic_source(source.directory, files)
+            if current is None or current.format != MediaFormat.DIR:
+                return False
+            pages = current.pages
+            if [path.name for path in pages] != [
+                page.relative_path for page in index.pages
+            ]:
+                return False
+            for path, page in zip(pages, index.pages, strict=True):
+                info = path.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_size != page.size
+                    or info.st_mtime_ns != page.mtime_ns
+                ):
+                    return False
+                states[path] = file_state(info)
+            return True
+    except ValueError:
+        return False
 
 
 def _build_content(
@@ -652,21 +726,25 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return item
 
     @classmethod
-    async def index_content(cls, id: int) -> MediaItem:
+    async def index_content(cls, id: int, *, force: bool = True) -> MediaItem:
         """Rebuild and publish content for one persisted reading unit.
 
         The library's single event consumer must await builds serially and decide
-        when rebuilding is required. Scan, watch and retry paths must enqueue work
-        for that consumer. Collections derive their state from children and cannot
-        be indexed as a body. Cache directories publish before the database pointer;
+        when rebuilding is required. Ordinary scans can reuse a matching ready
+        index; body modification events must force rebuilding even when file sizes
+        and modification times match. All paths must enqueue work for the consumer.
+        Collections derive their state from children and cannot be indexed as a
+        body. Cache directories publish before the database pointer;
         old and orphaned versions are retained for separate cleanup. Cancellation
         leaves pending work safe to retry.
 
         Args:
             id: The internal reading item ID selected by the library consumer.
+            force: Whether to rebuild unconditionally; defaults to True to preserve
+                explicit rebuilds. False permits reuse after source and cache checks.
 
         Returns:
-            The item with a ready version, source size and bounded content counts.
+            The item with a reused or rebuilt ready version and content counts.
 
         Raises:
             DoesNotExist: If the item was removed before indexing starts.
@@ -689,6 +767,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 or item.format is None
             ):
                 raise ContentError("unsupported_media_format")
+            if not force and await to_thread(_content_is_current, item):
+                return item
             item.index_state = IndexState.PENDING
             item.index_error = None
             await item.save(update_fields=["index_state", "index_error"])

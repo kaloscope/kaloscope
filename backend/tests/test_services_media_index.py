@@ -1,7 +1,9 @@
 """Tests for reading registration, index publication and collection summaries."""
 
 import asyncio
+import json
 import os
+import shutil
 import threading
 import zipfile
 from collections.abc import AsyncGenerator
@@ -564,6 +566,8 @@ def test_rebuild_content(tmp_path):
             info = path.stat()
             path.write_text("Next")
             os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+            reused = await MediaItemService.index_content(item.id, force=False)
+            assert reused.index_version == first.index_version
             current = await MediaItemService.index_content(item.id)
             assert current.index_version != first.index_version
             for row, expected in ((first, "Body"), (current, "Next")):
@@ -571,6 +575,228 @@ def test_rebuild_content(tmp_path):
                 index = load_text_index(cache)
                 assert read_text_chapter(cache, index.chapters[0].id) == [expected]
             assert len(list(_cache(current).parent.iterdir())) == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat]
+    + [
+        (format, True) for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+    ],
+)
+def test_reuse_content(tmp_path, monkeypatch, format, chapter):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format, chapter=chapter)
+            await MediaItem.filter(id=item.id).update(visible=False)
+            first = await MediaItemService.index_content(item.id)
+            before = await MediaItem.all().values()
+            cached = {path.name: path.read_bytes() for path in _cache(first).iterdir()}
+            monkeypatch.setattr(
+                media_service,
+                "_build_content",
+                lambda *_args: pytest.fail("unchanged bodies must not be parsed"),
+            )
+            metadata = Path(item.dir) / (
+                "metadata.opf"
+                if item.lib.lib_type == LibType.NOVEL
+                else "ComicInfo.xml"
+            )
+            cover = Path(item.dir) / "cover.png"
+            for change in ("none", "create", "modify", "delete"):
+                if change in ("create", "modify"):
+                    metadata.write_text(f"invalid metadata: {change}")
+                    cover.write_bytes(_PNG + change.encode())
+                elif change == "delete":
+                    metadata.unlink()
+                    cover.unlink()
+                current = await MediaItemService.index_content(item.id, force=False)
+                assert current.index_version == first.index_version
+                assert current.index_state == IndexState.READY and not current.visible
+                assert await MediaItem.all().values() == before
+                assert list(_cache(first).parent.iterdir()) == [_cache(first)]
+                assert {
+                    path.name: path.read_bytes() for path in _cache(first).iterdir()
+                } == cached
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", list(MediaFormat))
+@pytest.mark.parametrize("change", ["size", "mtime"])
+def test_reuse_changed_source(tmp_path, format, change):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            first = await MediaItemService.index_content(item.id)
+            path = Path(item.path)
+            if format == MediaFormat.DIR:
+                path /= "1.png"
+            before = path.stat()
+            if change == "mtime":
+                os.utime(
+                    path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000)
+                )
+            elif format in (MediaFormat.CBZ, MediaFormat.ZIP, MediaFormat.EPUB):
+                with zipfile.ZipFile(path, "a") as archive:
+                    archive.writestr("2.png", _PNG)
+            else:
+                path.write_bytes(
+                    b"Updated body" if format == MediaFormat.TXT else _PNG * 2
+                )
+            if change == "size":
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            current = await MediaItemService.index_content(item.id, force=False)
+            assert current.index_version != first.index_version
+            assert (
+                current.index_state == IndexState.READY and current.index_error is None
+            )
+            assert len(list(_cache(first).parent.iterdir())) == 2
+            assert current.extra is not None
+            if change == "size" and format in (MediaFormat.CBZ, MediaFormat.ZIP):
+                assert current.extra["content"]["page_count"] == 2
+            reused = await MediaItemService.index_content(item.id, force=False)
+            assert reused.index_version == current.index_version
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "rename"])
+def test_reuse_changed_pages(tmp_path, change):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.DIR)
+            second = Path(item.path) / "2.png"
+            second.write_bytes(_PNG)
+            first = await MediaItemService.index_content(item.id)
+            if change == "add":
+                (Path(item.path) / "10.png").write_bytes(_PNG)
+            elif change == "remove":
+                second.unlink()
+            else:
+                second.rename(second.with_name("10.png"))
+            current = await MediaItemService.index_content(item.id, force=False)
+            assert current.index_version != first.index_version
+            index = load_image_index(_cache(current))
+            assert [page.relative_path for page in index.pages] == (
+                ["1.png", "2.png", "10.png"]
+                if change == "add"
+                else ["1.png"]
+                if change == "remove"
+                else ["1.png", "10.png"]
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "problem"),
+    [
+        (format, problem)
+        for format in MediaFormat
+        for problem in ("missing", "json", "version")
+    ]
+    + [
+        (format, problem)
+        for format in (MediaFormat.TXT, MediaFormat.EPUB)
+        for problem in ("body_missing", "body_truncated")
+    ]
+    + [(format, "format") for format in (MediaFormat.CBZ, MediaFormat.ZIP)]
+    + [(MediaFormat.TXT, "pointer")],
+)
+def test_reuse_invalid_cache(tmp_path, format, problem):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            first = await MediaItemService.index_content(item.id)
+            cache = _cache(first)
+            if problem == "missing":
+                shutil.rmtree(cache)
+            elif problem == "json":
+                (cache / "index.json").write_text("{")
+            elif problem.startswith("body_"):
+                body = cache / (
+                    "content.txt" if format == MediaFormat.TXT else "content.jsonl"
+                )
+                if problem == "body_missing":
+                    body.unlink()
+                else:
+                    body.write_bytes(b"")
+            elif problem == "pointer":
+                await MediaItem.filter(id=item.id).update(index_version="../outside")
+            else:
+                index = json.loads((cache / "index.json").read_text())
+                index[problem if problem == "format" else "index_version"] = (
+                    ("zip" if format == MediaFormat.CBZ else "cbz")
+                    if problem == "format"
+                    else "0" * 64
+                )
+                (cache / "index.json").write_text(json.dumps(index))
+            current = await MediaItemService.index_content(item.id, force=False)
+            assert current.index_version != first.index_version
+            assert current.index_state == IndexState.READY
+            assert current.extra == first.extra and current.size == first.size
+            reused = await MediaItemService.index_content(item.id, force=False)
+            assert reused.index_version == current.index_version
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "state", [IndexState.PENDING, IndexState.ERROR, IndexState.EMPTY]
+)
+def test_reuse_unready(tmp_path, state):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            first = await MediaItemService.index_content(item.id)
+            await MediaItem.filter(id=item.id).update(
+                index_state=state, index_error="old_error"
+            )
+            current = await MediaItemService.index_content(item.id, force=False)
+            assert current.index_version != first.index_version
+            assert (
+                current.index_state == IndexState.READY and current.index_error is None
+            )
+
+    asyncio.run(run())
+
+
+def test_reuse_unstable(tmp_path, monkeypatch):
+    from app.core.media import text
+
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            first = await MediaItemService.index_content(item.id)
+            load = text.load_text_index
+            loop_thread = threading.get_ident()
+
+            def changed(cache):
+                """Change the source after loading its index in a worker.
+
+                Args:
+                    cache: The published index directory being checked for reuse.
+
+                Returns:
+                    The previously loaded index.
+                """
+                assert threading.get_ident() != loop_thread
+                index = load(cache)
+                path = Path(item.path)
+                before = path.stat()
+                path.write_text("Next")
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                return index
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(text, "load_text_index", changed)
+                current = await MediaItemService.index_content(item.id, force=False)
+            assert current.index_version != first.index_version
+            index = load(_cache(current))
+            assert read_text_chapter(_cache(current), index.chapters[0].id) == ["Next"]
 
     asyncio.run(run())
 
@@ -587,7 +813,8 @@ def test_rebuild_content(tmp_path):
         (MediaFormat.TXT, "missing", IndexState.PENDING, "media_source_unavailable"),
     ],
 )
-def test_failed_rebuild(tmp_path, format, problem, state, code):
+@pytest.mark.parametrize("force", [False, True])
+def test_failed_rebuild(tmp_path, format, problem, state, code, force):
     async def run():
         async with _database():
             item = await _item(tmp_path, format)
@@ -602,7 +829,7 @@ def test_failed_rebuild(tmp_path, format, problem, state, code):
             else:
                 path.write_bytes(b"" if problem == "empty" else b"\x00invalid")
             with pytest.raises(ContentError, match=code):
-                await MediaItemService.index_content(item.id)
+                await MediaItemService.index_content(item.id, force=force)
             current = await MediaItem.get(id=item.id)
             assert current.index_state == state and current.index_error == code
             assert current.index_version == first.index_version
