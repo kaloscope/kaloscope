@@ -857,6 +857,8 @@
     "file_not_exists": "文件不存在！",
     "media_source_unavailable": "无法访问媒体源文件！",
     "content_changed": "媒体内容已变化，请重试！",
+    "content_not_ready": "媒体内容尚未准备好，请稍后重试！",
+    "empty_content": "媒体来源没有可阅读的内容！",
     "unsupported_layout": "媒体目录结构不受支持！",
     "ambiguous_layout": "媒体目录包含冲突的正文来源！",
     "unsupported_media_format": "媒体格式不受支持！",

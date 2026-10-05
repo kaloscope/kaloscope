@@ -215,6 +215,39 @@ class MediaQuery(Pageable):
     path: str | None = None
 
 
+class MediaContentQuery(BaseModel):
+    """Select a TXT chapter from the current published content version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class ContentChapter(BaseModel):
+    """Expose a reading section without internal cache offsets or source paths."""
+
+    id: str
+    title: str | None
+    part: int
+    volume: None = None
+
+
+class TextContent(BaseModel):
+    """Return the current TXT directory and one bounded section of plain text."""
+
+    item_id: int
+    source_item_id: int
+    media_type: Literal["text"] = "text"
+    format: Literal["txt"] = "txt"
+    content_type: Literal["text"] = "text"
+    title: str
+    version: str
+    chapter_id: str
+    chapters: list[ContentChapter]
+    text: list[str]
+
+
 class MediaMetadata(BaseModel):
     graph_id: PositiveInt
     metadata: dict

@@ -32,8 +32,10 @@ from app.core.media.metadata import ReadingMetadata
 from app.core.media.naming import validate_template
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import (
+    ContentChapter,
     IndexState,
     LibType,
+    MediaContentQuery,
     MediaFormat,
     MediaItem,
     MediaLib,
@@ -41,6 +43,7 @@ from app.models.media import (
     MediaMetadata,
     NFOType,
     ReadingMetadataSync,
+    TextContent,
 )
 from app.models.user import (
     HistoryType,
@@ -551,6 +554,78 @@ def _content_is_current(item: MediaItem) -> bool:
             return True
     except ValueError:
         return False
+
+
+def _read_text_content(item: MediaItem, chapter_id: str | None) -> TextContent:
+    """Read a published TXT section while guarding its source and cache files.
+
+    Args:
+        item: The accessible TXT item with a validated ready index version.
+        chapter_id: The exact section ID, or None to select the first section.
+
+    Returns:
+        Public chapter labels and paragraphs, with a freshly read local title.
+
+    Raises:
+        ContentError: If the source or cache is unavailable, changed or invalid,
+            or the chapter is absent from the current index.
+    """
+    from app.core.media.metadata_reader import read_metadata
+    from app.core.media.text import TextIndex, load_text_index, read_text_chapter
+
+    with _reading_source(item) as (source, _, missing):
+        if missing:
+            raise ContentError("media_source_unavailable")
+        root = Path(KaloscopeConfig.get_workspace("temp"))
+        cache = root / "media_index" / str(item.id) / str(item.index_version)
+        try:
+            directories = (root, cache.parent.parent, cache.parent, cache)
+            states = {}
+            for path in (*directories, cache / "index.json", cache / "content.txt"):
+                info = path.stat(follow_symlinks=False)
+                directory = path in directories
+                if not (
+                    stat.S_ISDIR(info.st_mode)
+                    if directory
+                    else stat.S_ISREG(info.st_mode)
+                ):
+                    raise ContentError("content_not_ready")
+                # sibling cache writes do not change the selected version
+                states[path] = file_state(info)[:2] if directory else file_state(info)
+            index = load_text_index(cache)
+            if (
+                not isinstance(index, TextIndex)
+                or index.index_version != item.index_version
+            ):
+                raise ContentError("content_not_ready")
+            info = source.path.stat(follow_symlinks=False)
+            if (
+                info.st_size != index.source_snapshot.size
+                or info.st_mtime_ns != index.source_snapshot.mtime_ns
+            ):
+                raise ContentError("content_changed")
+            selected = chapter_id or index.chapters[0].id
+            paragraphs = read_text_chapter(cache, selected)
+            if not isinstance(paragraphs, list):
+                raise ContentError("content_not_ready")
+            for path, before in states.items():
+                after = file_state(path.stat(follow_symlinks=False))
+                if after[: len(before)] != before:
+                    raise ContentError("content_changed")
+        except OSError as error:
+            raise ContentError("content_not_ready") from error
+        return TextContent(
+            item_id=item.id,
+            source_item_id=item.id,
+            title=read_metadata(source).data.title or source.path.stem,
+            version=index.index_version,
+            chapter_id=selected,
+            chapters=[
+                ContentChapter(id=chapter.id, title=chapter.title, part=chapter.part)
+                for chapter in index.chapters
+            ],
+            text=paragraphs,
+        )
 
 
 def _build_content(
@@ -1721,6 +1796,71 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             raise NotFoundException()
         _, _, cover, _ = await cls._read_current(item, user, with_cover=True)
         return cover
+
+    @classmethod
+    async def get_content(
+        cls, id: int, user: UserInfo, query: MediaContentQuery
+    ) -> TextContent:
+        """Read TXT content after checking access, readiness and published version.
+
+        Reading does not rebuild content, write metadata or update history. The
+        caller receives a controlled error until ingestion publishes a ready index.
+
+        Args:
+            id: The requested reading item ID.
+            user: The authenticated user with loaded library permissions.
+            query: The optional chapter and expected content version.
+
+        Returns:
+            The current TXT directory and selected plain-text section.
+
+        Raises:
+            NotFoundException: If the item is hidden, missing or not reading media.
+            ForbiddenException: If library access is denied or revoked during reading.
+            ContentError: If the format is unsupported, the index is not ready,
+                sources change, or the requested chapter or version is unavailable.
+        """
+        item = await cls.get_accessible(id, user)
+        if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+            raise NotFoundException()
+        if item.lib.lib_type != LibType.NOVEL or item.format != MediaFormat.TXT:
+            raise ContentError("unsupported_media_format")
+        if (
+            item.index_state != IndexState.READY
+            or item.index_version is None
+            or re.fullmatch(r"[0-9a-f]{64}", item.index_version) is None
+        ):
+            raise ContentError(
+                "empty_content"
+                if item.index_state == IndexState.EMPTY
+                else "content_not_ready"
+            )
+        if query.version is not None and query.version != item.index_version:
+            raise ContentError("content_changed")
+        failure = None
+        result = None
+        try:
+            result = await to_thread(_read_text_content, item, query.chapter_id)
+        except ContentError as error:
+            failure = error
+        current = await cls.get_accessible(id, user)
+        if (
+            user.role != UserRole.ADMIN
+            and not await UserPermission.filter(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=current.lib_id
+            ).exists()
+        ):
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        if (
+            _reading_identity(current) != _reading_identity(item)
+            or current.index_state != IndexState.READY
+            or current.index_version != item.index_version
+        ):
+            raise ContentError("content_changed")
+        if failure is not None:
+            raise failure
+        assert result is not None
+        return result
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):

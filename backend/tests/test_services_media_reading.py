@@ -1,4 +1,4 @@
-"""Tests for reading details, summary synchronization, covers and source boundaries."""
+"""Tests for reading details, summaries, covers, TXT content and source boundaries."""
 
 import asyncio
 import hashlib
@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import uuid4
 
 import httpx
@@ -25,7 +26,14 @@ from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.reading import ReadingSource
 from app.core.middleware import on_request, on_response
-from app.models.media import IndexState, LibType, MediaFormat, MediaItem, MediaLib
+from app.models.media import (
+    IndexState,
+    LibType,
+    MediaContentQuery,
+    MediaFormat,
+    MediaItem,
+    MediaLib,
+)
 from app.models.user import (
     Permissions,
     PermType,
@@ -1192,5 +1200,399 @@ def test_cover_errors_http(tmp_path):
                 response = await client.get(url)
                 assert response.status_code == 404
                 assert response.headers["cache-control"] == "private, no-store"
+
+    asyncio.run(run())
+
+
+async def _indexed_text(
+    tmp_path: Path, body: str = "Chapter 1\n\nFirst\n\nChapter 2\n\nSecond"
+) -> MediaItem:
+    """Publish a real TXT index without starting a library consumer.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        body: The novel text, defaulting to two short chapters.
+
+    Returns:
+        The ready item whose source and cache may be changed by a test.
+    """
+    item = await _item(tmp_path, MediaFormat.TXT)
+    Path(item.path).write_text(body)
+    return await MediaItemService.index_content(item.id)
+
+
+def test_text_content_http(tmp_path):
+    """Read chapters through authentication and retain live metadata semantics.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            body = "Chapter 1\n\n<script>alert(1)</script>\n\nChapter 2\n\n中文正文"
+            item = await _indexed_text(tmp_path, body)
+            metadata = Path(item.dir) / "metadata.opf"
+            metadata.write_bytes(_opf("Current title"))
+            user = _user([item.lib_id])
+            await User.create(
+                id=user.id, username="Reader", password="unused", role=UserRole.USER
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=item.lib_id
+            )
+            async with _client(user) as client:
+                url = f"/_api/media/{item.id}/content"
+                response = await client.get(url)
+                assert response.status_code == 200, response.text
+                data = response.json()["data"]
+                assert data == {
+                    "item_id": item.id,
+                    "source_item_id": item.id,
+                    "media_type": "text",
+                    "format": "txt",
+                    "content_type": "text",
+                    "title": "Current title",
+                    "version": item.index_version,
+                    "chapter_id": data["chapters"][0]["id"],
+                    "chapters": data["chapters"],
+                    "text": ["Chapter 1", "<script>alert(1)</script>", ""],
+                }
+                assert [entry["title"] for entry in data["chapters"]] == [
+                    "Chapter 1",
+                    "Chapter 2",
+                ]
+                assert all(
+                    set(entry) == {"id", "title", "part", "volume"}
+                    for entry in data["chapters"]
+                )
+                assert all(
+                    entry["part"] == 1 and entry["volume"] is None
+                    for entry in data["chapters"]
+                )
+                assert str(tmp_path) not in response.text
+                assert response.headers["cache-control"] == "private, no-store"
+                assert response.headers["x-content-type-options"] == "nosniff"
+                metadata.write_bytes(_opf("Changed title"))
+                response = await client.get(
+                    url,
+                    params={
+                        "chapter_id": data["chapters"][1]["id"],
+                        "version": data["version"],
+                    },
+                )
+                assert response.status_code == 200, response.text
+                second = response.json()["data"]
+                assert second["title"] == "Changed title"
+                assert "\n\n".join(data["text"]) + "\n\n".join(second["text"]) == body
+                assert second["version"] == data["version"]
+                metadata.write_bytes(b"invalid metadata")
+                assert (await client.get(url)).json()["data"]["title"] == "Book"
+                await UserPermission.all().delete()
+                assert (await client.get(url)).status_code == 403
+                client.headers.clear()
+                client.cookies.clear()
+                assert (await client.get(url)).status_code == 401
+            saved = await MediaItem.get(id=item.id)
+            assert saved.title == "Old database title"
+            assert saved.index_version == item.index_version
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "params,status,code",
+    [
+        ({"chapter_id": "f" * 32}, 404, "not_found"),
+        ({"version": "f" * 64}, 409, "content_changed"),
+        ({"chapter_id": "../content.txt"}, 400, "bad_request"),
+        ({"chapter_id": "invalid"}, 400, "bad_request"),
+        ({"version": "../index.json"}, 400, "bad_request"),
+        ({"path": "/untrusted.txt"}, 400, "bad_request"),
+    ],
+)
+def test_text_query_http(tmp_path, params, status, code):
+    """Reject unknown chapters and malformed or stale selections.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        params: The query values under test.
+        status: The expected HTTP status.
+        code: The expected application error code.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            async with _client(_user()) as client:
+                response = await client.get(
+                    f"/_api/media/{item.id}/content", params=params
+                )
+                assert response.status_code == status, response.text
+                assert response.json()["message"] == code
+                if status != 400:
+                    assert response.headers["cache-control"] == "private, no-store"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("source", "content_changed"),
+        ("missing_source", "media_source_unavailable"),
+        ("source_link", "media_source_unavailable"),
+        ("cache", "content_not_ready"),
+        ("truncated", "content_not_ready"),
+        ("cache_link", "content_not_ready"),
+        ("cache_version", "content_not_ready"),
+    ],
+)
+def test_text_content_sources(tmp_path, change, code):
+    """Prevent cached text from masking changed or unavailable sources.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        change: The source or published cache mutation.
+        code: The expected controlled read error.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            source = Path(item.path)
+            cache = (
+                tmp_path / "cache/media_index" / str(item.id) / str(item.index_version)
+            )
+            if change == "source":
+                source.write_text("Replaced body")
+            elif change == "missing_source":
+                source.unlink()
+            elif change == "source_link":
+                target = tmp_path / "outside.txt"
+                source.rename(target)
+                source.symlink_to(target)
+            elif change == "cache":
+                (cache / "index.json").unlink()
+            elif change == "truncated":
+                (cache / "content.txt").write_text("truncated")
+            elif change == "cache_link":
+                target = tmp_path / "outside-cache.txt"
+                (cache / "content.txt").rename(target)
+                (cache / "content.txt").symlink_to(target)
+            else:
+                path = cache / "index.json"
+                path.write_text(
+                    path.read_text().replace(str(item.index_version), "f" * 64)
+                )
+            with pytest.raises(ContentError, match=code):
+                await MediaItemService.get_content(
+                    item.id, _user(), MediaContentQuery()
+                )
+            saved = await MediaItem.get(id=item.id)
+            assert saved.index_version == item.index_version
+            assert saved.index_state == IndexState.READY
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("pending", "content_not_ready"),
+        ("empty", "empty_content"),
+        ("error", "content_not_ready"),
+        ("version", "content_not_ready"),
+        ("hidden", "not_found"),
+        ("deleted", "not_found"),
+        ("denied", "permission_denied"),
+        ("video", "not_found"),
+        ("epub", "unsupported_media_format"),
+        ("comic", "unsupported_media_format"),
+    ],
+)
+def test_text_content_access(tmp_path, monkeypatch, change, code):
+    """Reject inaccessible and unready requests before reading cache or source files.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture replacing file reads.
+        change: The access, readiness or format change.
+        code: The expected error message.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            user = _user()
+            if change in {"pending", "empty", "error"}:
+                await MediaItem.filter(id=item.id).update(
+                    index_state=IndexState(change)
+                )
+            elif change == "version":
+                await MediaItem.filter(id=item.id).update(index_version="../invalid")
+            elif change == "hidden":
+                await MediaItem.filter(id=item.id).update(visible=False)
+            elif change == "deleted":
+                await item.delete()
+            elif change == "denied":
+                user = _user([])
+            elif change == "epub":
+                await MediaItem.filter(id=item.id).update(format=MediaFormat.EPUB)
+            else:
+                await MediaLib.filter(id=item.lib_id).update(
+                    lib_type=LibType.MOVIE if change == "video" else LibType.COMIC
+                )
+            reader = Mock(side_effect=AssertionError("unexpected content read"))
+            monkeypatch.setattr(media_service, "_read_text_content", reader)
+            with pytest.raises(
+                (ContentError, NotFoundException, ForbiddenException), match=code
+            ):
+                await MediaItemService.get_content(item.id, user, MediaContentQuery())
+            reader.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change", ["hidden", "deleted", "moved", "version", "pending", "permission"]
+)
+def test_text_content_race(tmp_path, monkeypatch, change):
+    """Revalidate database access and source ownership after unlocked file reading.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture replacing the worker dispatch.
+        change: The database mutation occurring during file reading.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            user = _user([item.lib_id])
+            await User.create(
+                id=user.id, username="Reader", password="unused", role=UserRole.USER
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=item.lib_id
+            )
+            dispatch = asyncio.to_thread
+
+            async def changed(func, *args):
+                """Dispatch the actual read and mutate ownership before it returns.
+
+                Args:
+                    func: The synchronous content reader.
+                    *args: The reader arguments.
+
+                Returns:
+                    The original content result before database revalidation.
+                """
+                result = await dispatch(func, *args)
+                if change == "permission":
+                    await UserPermission.all().delete()
+                elif change == "deleted":
+                    await item.delete()
+                else:
+                    fields = {
+                        "hidden": {"visible": False},
+                        "moved": {"path": str(Path(item.dir) / "Moved.txt")},
+                        "version": {"index_version": "f" * 64},
+                        "pending": {"index_state": IndexState.PENDING},
+                    }
+                    await MediaItem.filter(id=item.id).update(**fields[change])
+                return result
+
+            monkeypatch.setattr(media_service, "to_thread", changed)
+            expected = (
+                NotFoundException
+                if change in {"hidden", "deleted"}
+                else ForbiddenException
+                if change == "permission"
+                else ContentError
+            )
+            with pytest.raises(expected):
+                await MediaItemService.get_content(item.id, user, MediaContentQuery())
+
+    asyncio.run(run())
+
+
+def test_text_content_limit(tmp_path):
+    """Include chapter labels when enforcing the HTTP response size limit.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            body = "\n\n".join(
+                f"Chapter {index} " + "长" * 100 + "\n\nBody" for index in range(3500)
+            )
+            item = await _indexed_text(tmp_path, body)
+            async with _client(_user()) as client:
+                response = await client.get(f"/_api/media/{item.id}/content")
+                assert response.status_code == 422, response.text
+                assert response.json()["message"] == "media_limit_exceeded"
+                assert response.headers["cache-control"] == "private, no-store"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["source", "index", "body", "sibling"])
+def test_text_content_files_change(tmp_path, monkeypatch, change):
+    """Guard unlocked reads without treating other cache writes as content changes.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture replacing the chapter reader.
+        change: The file changed while reading the selected chapter.
+    """
+    from app.core.media import text as text_media
+
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            reader = text_media.read_text_chapter
+            loop_thread = threading.get_ident()
+
+            def changed(cache, chapter_id):
+                """Read one chapter and simulate an external writer before returning.
+
+                Args:
+                    cache: The current published cache directory.
+                    chapter_id: The section selected by the request.
+
+                Returns:
+                    The original section read before the external change.
+                """
+                assert threading.get_ident() != loop_thread
+                result = reader(cache, chapter_id)
+                if change == "sibling":
+                    (cache.parent / "unrelated.tmp").write_text("unrelated")
+                else:
+                    path = (
+                        Path(item.path)
+                        if change == "source"
+                        else cache
+                        / ("index.json" if change == "index" else "content.txt")
+                    )
+                    before = path.stat()
+                    path.write_bytes(path.read_bytes().replace(b"Chapter", b"Changed"))
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                return result
+
+            monkeypatch.setattr(text_media, "read_text_chapter", changed)
+            # file reading does not need the library lock held by writers
+            async with library_lock(item.lib.dir):
+                request = MediaItemService.get_content(
+                    item.id, _user(), MediaContentQuery()
+                )
+                if change == "sibling":
+                    result = await asyncio.wait_for(request, timeout=3)
+                    assert result.text[0] == "Chapter 1"
+                else:
+                    with pytest.raises(ContentError, match="content_changed"):
+                        await asyncio.wait_for(request, timeout=3)
 
     asyncio.run(run())

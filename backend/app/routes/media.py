@@ -41,6 +41,7 @@ from app.models.base import IDs, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
     LibType,
+    MediaContentQuery,
     MediaDel,
     MediaItem,
     MediaLib,
@@ -229,6 +230,54 @@ async def get_item_cover(request: Request, id: int) -> HTTPResponse:
         content_type=cover.mime_type,
         headers=headers,
     )
+
+
+@media.get("/<id:int>/content")
+@authorize()
+@validate(query=MediaContentQuery)
+async def get_item_content(
+    request: Request, id: int, query: MediaContentQuery
+) -> HTTPResponse:
+    """Serve a TXT directory and chapter from the current published index.
+
+    Args:
+        request: The authenticated request with loaded library permissions.
+        id: The requested reading item ID.
+        query: The optional chapter and expected content version.
+
+    Returns:
+        Plain-text content with private caching disabled and a bounded JSON body.
+
+    Raises:
+        KaloscopeException: If access, source, index or response limits fail.
+    """
+    headers = {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    try:
+        content = await MediaItemService.get_content(id, request.ctx.user, query)
+        response = json(content.model_dump(), headers=headers)
+        # bound the complete content payload, including chapter labels
+        if len(response.body or b"") > 1024 * 1024:
+            raise ContentError("media_limit_exceeded")
+        return response
+    except ContentError as error:
+        status = (
+            404
+            if error.code == "not_found"
+            else 409
+            if error.code in {"content_changed", "content_not_ready"}
+            else 503
+            if error.code == "media_source_unavailable"
+            else 422
+        )
+        raise KaloscopeException(
+            error.code, status_code=status, headers=headers
+        ) from error
+    except KaloscopeException as error:
+        error.headers = {**error.headers, **headers}
+        raise
 
 
 @media.post("/<id:int>/gen_nfo")

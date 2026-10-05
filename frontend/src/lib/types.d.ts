@@ -298,6 +298,40 @@ export type MediaItem = {
 };
 
 /**
+ * A section selected from the current reading content version.
+ */
+export type MediaContentQuery = {
+  chapter_id?: string;
+  version?: string;
+};
+
+/**
+ * Public chapter labels without cache offsets or local paths.
+ */
+export type ContentChapter = {
+  id: string;
+  title: string | null;
+  part: number;
+  volume: null;
+};
+
+/**
+ * The TXT chapter directory and one section of plain-text paragraphs.
+ */
+export type TextContent = {
+  item_id: number;
+  source_item_id: number;
+  media_type: 'text';
+  format: 'txt';
+  content_type: 'text';
+  title: string;
+  version: string;
+  chapter_id: string;
+  chapters: ContentChapter[];
+  text: string[];
+};
+
+/**
  * An actor credited in media metadata.
  */
 export type Actor = {
