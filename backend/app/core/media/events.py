@@ -1,4 +1,4 @@
-"""Coalesce reading events and check source stability with bounded retries."""
+"""Coalesce, observe and finalize reading tasks with bounded retries."""
 
 from asyncio import to_thread
 from pathlib import Path
@@ -47,6 +47,43 @@ class ReadingReconcile(BaseModel):
     state: Literal["pending", "deferred", "failed"] = "pending"
     attempts: int = Field(default=0, ge=0, le=len(_RETRY_DELAYS) + 1)
     error_code: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+def _reading_event_identity(event: MediaEvent) -> tuple:
+    """Identify the persisted task version used during unlocked work.
+
+    Args:
+        event: The task captured before observation or execution.
+
+    Returns:
+        The ownership, scope, payload and revision that must still match at completion.
+    """
+    return (
+        event.lib_id,
+        event.event_type,
+        event.src_path,
+        event.dest_path,
+        event.is_directory,
+        event.payload,
+        event.updated_at,
+    )
+
+
+def _defer_reading_task(payload: ReadingReconcile, error: ContentError):
+    """Apply the shared retry limit without changing scopes or source observations.
+
+    Args:
+        payload: The current task payload whose retry state will be updated.
+        error: The controlled source or execution failure to persist.
+    """
+    payload.attempts = min(payload.attempts + 1, len(_RETRY_DELAYS) + 1)
+    payload.error_code = error.code
+    payload.state = "failed" if payload.attempts > len(_RETRY_DELAYS) else "deferred"
+    payload.not_before = (
+        None
+        if payload.state == "failed"
+        else time() + _RETRY_DELAYS[payload.attempts - 1]
+    )
 
 
 async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
@@ -207,19 +244,9 @@ async def prepare_reading_event(event_id: int) -> bool:
 
     async with library_lock(lib.dir):
         current = await MediaEvent.get_or_none(id=event_id).select_related("lib")
-        if current is None or (
-            current.lib_id,
-            current.event_type,
-            current.src_path,
-            current.payload,
-            current.updated_at,
-        ) != (
-            event.lib_id,
-            event.event_type,
-            event.src_path,
-            event.payload,
-            event.updated_at,
-        ):
+        if current is None or _reading_event_identity(
+            current
+        ) != _reading_event_identity(event):
             return False
         if (current.lib.dir, current.lib.lib_type) != (lib.dir, lib.lib_type):
             raise ContentError("content_changed")
@@ -237,16 +264,90 @@ async def prepare_reading_event(event_id: int) -> bool:
             payload.error_code = None
             payload.not_before = time() + _STABILITY_SECONDS
         else:
-            payload.attempts = min(payload.attempts + 1, len(_RETRY_DELAYS) + 1)
-            payload.error_code = failure.code
-            payload.state = (
-                "failed" if payload.attempts > len(_RETRY_DELAYS) else "deferred"
-            )
-            payload.not_before = (
-                None
-                if payload.state == "failed"
-                else time() + _RETRY_DELAYS[payload.attempts - 1]
-            )
+            _defer_reading_task(payload, failure)
+        current.payload = payload.model_dump(mode="json", exclude_none=True)
+        await current.save(update_fields=["payload", "updated_at"])
+
+    if failure is not None:
+        raise failure
+    return False
+
+
+async def finish_reading_event(
+    event: MediaEvent, *, error: ContentError | None = None
+) -> bool:
+    """Acknowledge completed work or persist a bounded execution retry.
+
+    Call outside the library lock after serially processing every task scope and
+    move. Capture the event with its library loaded after preparation and before
+    execution; do not reload that snapshot on completion. New events, changed task
+    revisions and source changes keep the task pending. This step neither performs
+    ingestion nor decides whether a missing source is safe to remove.
+
+    Args:
+        event: The unmodified, prepared task snapshot with its library loaded.
+        error: A controlled execution failure; None reports successful processing
+            of every scope, including any required moves and deletion cleanup.
+
+    Returns:
+        True only when this exact task is acknowledged. False for obsolete,
+        unprepared, deferred or failed work, or after saving an execution retry.
+
+    Raises:
+        ValueError: If the library, payload or selected scope is invalid.
+        ContentError: If the library changes or source rechecking fails. Recheck
+            failures persist their retry state before propagating; reported
+            execution errors are persisted without being raised again.
+    """
+    if event.event_type != "reconcile":
+        return False
+    lib = event.lib
+    if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+        raise ValueError("unsupported reading library type")
+    payload = ReadingReconcile.model_validate(event.payload)
+    if (
+        payload.state == "failed"
+        or payload.observed_snapshot is None
+        or payload.not_before is None
+        or time() < payload.not_before
+    ):
+        return False
+
+    snapshot = None
+    failure = None
+    try:
+        snapshot = await to_thread(
+            get_handler(lib.lib_type).snapshot_sources,
+            lib.dir,
+            work_path=Path(event.src_path),
+            targets={Path(path) for path in payload.targets},
+        )
+    except ContentError as observed:
+        failure = observed
+
+    async with library_lock(lib.dir):
+        current = await MediaEvent.get_or_none(id=event.id).select_related("lib")
+        if current is None or _reading_event_identity(
+            current
+        ) != _reading_event_identity(event):
+            return False
+        if (current.lib.dir, current.lib.lib_type) != (lib.dir, lib.lib_type):
+            raise ContentError("content_changed")
+        if time() < payload.not_before:
+            return False
+        if snapshot is not None and snapshot != payload.observed_snapshot:
+            # changed sources start a new quiet interval, even after failed execution
+            payload.state = "pending"
+            payload.attempts = 0
+            payload.error_code = None
+            payload.not_before = time() + _STABILITY_SECONDS
+        elif (retry_error := failure or error) is not None:
+            _defer_reading_task(payload, retry_error)
+        else:
+            await current.delete()
+            return True
+        # stable execution failures retain the snapshot so readiness keeps the counter
+        payload.observed_snapshot = snapshot
         current.payload = payload.model_dump(mode="json", exclude_none=True)
         await current.save(update_fields=["payload", "updated_at"])
 
