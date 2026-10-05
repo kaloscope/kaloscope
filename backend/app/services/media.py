@@ -179,6 +179,11 @@ def _reading_source(
             for scope, error in scan.issues.items():
                 if source.directory.is_relative_to(scope):
                     raise ContentError(error)
+            if parent is not None and any(
+                entry.directory == source.directory.parent and entry.format is not None
+                for entry in scan.sources
+            ):
+                raise ContentError("unsupported_layout")
             current = next(
                 (
                     entry
@@ -227,6 +232,45 @@ def _reading_source(
         raise ContentError("media_source_unavailable") from error
 
 
+def _validate_previous_path(
+    root: Path, src_path: Path, dest_path: Path, states: _SourceStates
+):
+    """Check that an observed move no longer resolves through its previous path.
+
+    Args:
+        root: The validated absolute library directory.
+        src_path: The previous file or directory path within this library.
+        dest_path: The validated destination with its state and ancestors captured.
+        states: Source guards retained until the enclosing validation finishes.
+
+    Raises:
+        ContentError: If the previous path is reused or an ancestor is not a directory.
+        OSError: If source inspection fails; the enclosing source guard translates it.
+    """
+    for directory in (*reversed(src_path.parent.parents), src_path.parent):
+        if not directory.is_relative_to(root):
+            continue
+        try:
+            info = directory.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(info.st_mode):
+            raise ContentError("media_source_unavailable")
+        # retain earlier observations when both paths share an ancestor
+        states.setdefault(directory, file_state(info))
+    try:
+        info = src_path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    # case-only renames can still resolve through the old spelling
+    if (
+        str(src_path).casefold() != str(dest_path).casefold()
+        or file_state(info) != states[dest_path]
+        or states[src_path.parent][:2] != states[dest_path.parent][:2]
+    ):
+        raise ContentError("content_changed")
+
+
 def _validate_reading_source(
     item: MediaItem, *, require_candidate: bool, previous_path: Path | None = None
 ):
@@ -247,63 +291,71 @@ def _validate_reading_source(
         _,
     ):
         if previous_path is not None:
-            for directory in (
-                *reversed(previous_path.parent.parents),
-                previous_path.parent,
-            ):
-                if not directory.is_relative_to(item.lib.dir):
-                    continue
-                try:
-                    info = directory.stat(follow_symlinks=False)
-                except FileNotFoundError:
-                    return
-                if not stat.S_ISDIR(info.st_mode):
-                    raise ContentError("media_source_unavailable")
-                # retain earlier observations when both paths share an ancestor
-                states.setdefault(directory, file_state(info))
-            try:
-                info = previous_path.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                # case-only renames can still resolve through the old spelling
-                if (
-                    str(previous_path).casefold() != str(source.path).casefold()
-                    or file_state(info) != states[source.path]
-                    or states[previous_path.parent][:2] != states[source.directory][:2]
-                ):
-                    raise ContentError("content_changed")
+            _validate_previous_path(
+                Path(item.lib.dir), previous_path, source.path, states
+            )
 
 
-def _validate_reading_directory_rename(
+def _validate_reading_directory_move(
     items: list[MediaItem], src_path: Path, dest_path: Path
 ):
-    """Validate a renamed container and retain source guards until checks finish.
+    """Validate a moved container and retain source guards until checks finish.
 
     Args:
         items: The nonempty list of proposed items with library and parents loaded.
         src_path: The previous work or chapter directory from the persisted move.
-        dest_path: The new sibling directory containing the same registered sources.
+        dest_path: The new directory containing the same registered sources.
 
     Raises:
         ContentError: If sources are invalid, unstable or the old directory is reused.
     """
-    with ExitStack() as stack:
-        states: _SourceStates = {}
+    with _reading_source(items[0]) as (_, states, _), ExitStack() as stack:
         # ponytail: per-item discovery is quadratic; share scans for large works
-        for item in items:
-            _, current, _ = stack.enter_context(_reading_source(item))
-            states.update(current)
-        try:
-            info = src_path.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        # case-only directory renames may still resolve through the old spelling
+        for item in items[1:]:
+            stack.enter_context(_reading_source(item))
+        _validate_previous_path(Path(items[0].lib.dir), src_path, dest_path, states)
+
+
+async def _reading_destination_parent(
+    item: MediaItem, src_directory: Path, dest_directory: Path
+) -> MediaItem:
+    """Resolve the registered collection for a chapter moving between works.
+
+    Args:
+        item: The original chapter with library and parent loaded under the lock.
+        src_directory: The chapter's previous container in this library.
+        dest_directory: The new chapter container in another work of this library.
+
+    Returns:
+        The destination collection; its filesystem layout is validated with the chapter.
+
+    Raises:
+        ContentError: If either collection is missing or has incompatible ownership.
+    """
+    parent = item.parent if item.parent_id is not None else None
+    destination = await MediaItem.get_or_none(
+        lib_id=item.lib_id, path=str(dest_directory.parent)
+    )
+    if (
+        destination is None
+        or item.lib.lib_type != LibType.COMIC
+        or item.format not in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+    ):
+        raise ContentError("unsupported_layout")
+    for candidate, directory in (
+        (parent, src_directory.parent),
+        (destination, dest_directory.parent),
+    ):
         if (
-            src_path.name.casefold() != dest_path.name.casefold()
-            or file_state(info) != states[dest_path]
+            candidate is None
+            or candidate.lib_id != item.lib_id
+            or candidate.format is not None
+            or candidate.parent_id is not None
+            or candidate.path != str(directory)
+            or candidate.dir != str(directory)
         ):
-            raise ContentError("content_changed")
+            raise ContentError("unsupported_layout")
+    return destination
 
 
 def _read_reading(
@@ -817,17 +869,18 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     async def move_reading_file(
         cls, lib_id: int, src_path: Path, dest_path: Path
     ) -> MediaItem | None:
-        """Apply an observed body-file move without changing its registered parent.
+        """Apply an observed body-file move while retaining its registered identity.
 
         Call from the serial library consumer before destination ingestion, using a
-        persisted filesystem move. Accept renames or moves between sibling work or
-        chapter containers. Files and histories stay untouched. Retain the old cache
-        for cleanup and mark the item pending for indexing at its new path.
+        persisted filesystem move. Accept renames or moves between work or chapter
+        containers. Register a destination collection before moving a chapter across
+        works. Files and histories stay untouched. Retain the old cache for cleanup
+        and mark the item pending for indexing at its new path.
 
         Args:
             lib_id: The novel or comic library containing the moved file.
             src_path: The absolute previous body path from the move event.
-            dest_path: The absolute new body path in the same or a sibling container.
+            dest_path: The absolute new body path at the same depth in this library.
 
         Returns:
             The updated item with its original ID, or None if the previous path is
@@ -835,8 +888,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Raises:
             DoesNotExist: If the library no longer exists.
-            ValueError: If paths are hidden, outside the library or change the parent
-                of the work or chapter container.
+            ValueError: If paths are hidden, outside the library or change between
+                standalone works and chapters.
             ContentError: If ownership, format, layout or source stability is invalid,
                 the previous path is reused, or another item owns the destination.
         """
@@ -848,7 +901,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             not root.is_absolute()
             or ".." in root.parts
             or src_path == dest_path
-            or src_path.parent.parent != dest_path.parent.parent
+            or (
+                src_path.parent.parent != dest_path.parent.parent
+                and not (
+                    original.lib_type == LibType.COMIC
+                    and src_path.parent.parent.parent == root
+                    and dest_path.parent.parent.parent == root
+                )
+            )
             or any(
                 not path.is_relative_to(root)
                 or ".." in path.parts
@@ -856,7 +916,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 for path in (src_path, dest_path)
             )
         ):
-            raise ValueError("move paths must select the same or sibling containers")
+            raise ValueError("move paths must select containers at the same depth")
         async with library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
@@ -880,6 +940,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 raise ContentError("unsupported_media_format")
             if item.dir != str(src_path.parent):
                 raise ContentError("unsupported_layout")
+            if src_path.parent.parent != dest_path.parent.parent:
+                item.parent = await _reading_destination_parent(
+                    item, src_path.parent, dest_path.parent
+                )
             if (
                 await MediaItem.filter(
                     Q(path=str(dest_path)) | Q(dir=str(dest_path.parent)), lib_id=lib_id
@@ -900,25 +964,34 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             item.index_state = IndexState.PENDING
             item.index_error = None
             await item.save(
-                update_fields=["path", "dir", "name", "index_state", "index_error"]
+                update_fields=[
+                    "path",
+                    "dir",
+                    "name",
+                    "parent_id",
+                    "index_state",
+                    "index_error",
+                ]
             )
             return item
 
     @classmethod
-    async def rename_reading_directory(
+    async def move_reading_directory(
         cls, lib_id: int, src_path: Path, dest_path: Path
     ) -> list[MediaItem]:
-        """Apply an observed work or chapter rename within the same parent directory.
+        """Apply an observed work or chapter directory move within the same library.
 
         Call from the serial library consumer before destination ingestion. Rebase
-        selected paths in one transaction after checking source ownership. Retain
-        parent IDs, histories, summaries and previous caches; mark indexes pending
-        for subsequent ingestion. This operation does not rename files on disk.
+        selected paths in one transaction after checking source ownership. Register
+        the destination collection before moving chapters across works. Preserve
+        histories under their original work; update chapter parents, retain summaries
+        and previous caches, and mark indexes pending for subsequent ingestion of
+        both works. This operation does not rename files on disk.
 
         Args:
-            lib_id: The novel or comic library containing the renamed directory.
+            lib_id: The novel or comic library containing the moved directory.
             src_path: The absolute previous work or comic chapter directory.
-            dest_path: The absolute new sibling directory from the persisted move.
+            dest_path: The absolute new directory at the same depth in this library.
 
         Returns:
             Updated items with their original IDs and parents loaded, or an empty
@@ -927,7 +1000,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Raises:
             DoesNotExist: If the library no longer exists.
             ValueError: If paths are not distinct visible work or chapter containers
-                under the same parent directory in this library.
+                at the same depth in this library.
             ContentError: If ownership, layout or stability is invalid, the source
                 directory is reused, or any item already occupies the destination.
         """
@@ -939,7 +1012,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             not root.is_absolute()
             or ".." in root.parts
             or src_path == dest_path
-            or src_path.parent != dest_path.parent
+            or (src_path.parent == root) != (dest_path.parent == root)
             or any(
                 path == root
                 or not path.is_relative_to(root)
@@ -954,7 +1027,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 for path in (src_path, dest_path)
             )
         ):
-            raise ValueError("rename paths must select visible sibling containers")
+            raise ValueError(
+                "move paths must select visible work or chapter containers"
+            )
         async with library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
@@ -1002,6 +1077,17 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     item.dir
                 ).is_relative_to(src_path):
                     raise ContentError("unsupported_layout")
+                if src_path.parent != dest_path.parent:
+                    item.parent = await _reading_destination_parent(
+                        item, src_path, dest_path
+                    )
+                elif item.parent_id is not None:
+                    if item.parent_id in by_id:
+                        item.parent = by_id[item.parent_id]
+                    elif (
+                        item.parent is None or Path(item.parent.path) != src_path.parent
+                    ):
+                        raise ContentError("unsupported_layout")
                 item.path = str(dest_path / Path(item.path).relative_to(src_path))
                 item.dir = str(dest_path / Path(item.dir).relative_to(src_path))
                 item.name = (
@@ -1009,22 +1095,22 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     if item.format in (None, MediaFormat.DIR)
                     else Path(item.path).stem
                 )
-                if item.parent_id is not None:
-                    if item.parent_id in by_id:
-                        item.parent = by_id[item.parent_id]
-                    elif (
-                        item.parent is None or Path(item.parent.path) != src_path.parent
-                    ):
-                        raise ContentError("unsupported_layout")
                 item.index_state = IndexState.PENDING
                 item.index_error = None
             await to_thread(
-                _validate_reading_directory_rename, items, src_path, dest_path
+                _validate_reading_directory_move, items, src_path, dest_path
             )
             async with in_transaction():
                 await MediaItem.bulk_update(
                     items,
-                    fields=["path", "dir", "name", "index_state", "index_error"],
+                    fields=[
+                        "path",
+                        "dir",
+                        "name",
+                        "parent_id",
+                        "index_state",
+                        "index_error",
+                    ],
                 )
             return items
 

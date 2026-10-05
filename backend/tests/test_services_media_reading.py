@@ -23,6 +23,7 @@ from app.core.exceptions import ForbiddenException, NotFoundException, error_han
 from app.core.media import metadata_reader
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
+from app.core.media.handlers.reading import ReadingSource
 from app.core.middleware import on_request, on_response
 from app.models.media import IndexState, LibType, MediaFormat, MediaItem, MediaLib
 from app.models.user import (
@@ -832,8 +833,16 @@ def test_moved_file_metadata(tmp_path, format, external):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
-def test_renamed_chapter_metadata(tmp_path, format):
+@pytest.mark.parametrize(
+    ("format", "move_type"),
+    [
+        (format, move_type)
+        for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+        for move_type in ("rename", "directory")
+    ]
+    + [(format, "file") for format in (MediaFormat.CBZ, MediaFormat.ZIP)],
+)
+def test_moved_chapter_metadata(tmp_path, format, move_type):
     async def run():
         async with _database():
             parent = await _item(tmp_path, None)
@@ -863,26 +872,61 @@ def test_renamed_chapter_metadata(tmp_path, format):
                 format=format,
             )
             destination = directory.with_name("Renamed")
-            directory.rename(destination)
-            await MediaItemService.rename_reading_directory(
-                parent.lib_id, directory, destination
-            )
+            target = parent
+            if move_type != "rename":
+                other = work.with_name("Other")
+                other.mkdir()
+                (other / "ComicInfo.xml").write_text(
+                    "<ComicInfo><Writer>New author</Writer></ComicInfo>"
+                )
+                destination = other / "Chapter"
+            if move_type == "file":
+                destination.mkdir()
+                path.rename(destination / path.name)
+                (destination / "ComicInfo.xml").write_text(
+                    xml.replace("Chapter", "New chapter")
+                )
+                (destination / "cover.png").write_bytes(_PNG + b"new")
+            else:
+                directory.rename(destination)
+            if move_type != "rename":
+                target = await MediaItemService.create_reading(
+                    parent.lib_id, ReadingSource(destination.parent, None)
+                )
+            if move_type == "file":
+                await MediaItemService.move_reading_file(
+                    parent.lib_id, path, destination / path.name
+                )
+                assert (directory / "ComicInfo.xml").read_text() == xml
+                assert (directory / "cover.png").read_bytes() == _PNG
+            else:
+                await MediaItemService.move_reading_directory(
+                    parent.lib_id, directory, destination
+                )
             data = await MediaItemService.get_details(child.id, _user([parent.lib_id]))
-            assert data["title"] == "Chapter" and data["metadata_state"] == "ready"
-            assert data["metadata"]["authors"] == ("Author",)
-            assert data["parent"]["id"] == parent.id
+            title = "New chapter" if move_type == "file" else "Chapter"
+            assert data["title"] == title and data["metadata_state"] == "ready"
+            assert data["metadata"]["authors"] == (
+                "Author" if move_type == "rename" else "New author",
+            )
+            assert data["parent"]["id"] == target.id
             cover = await MediaItemService.get_cover(child.id, _user([parent.lib_id]))
             assert cover is not None and cover.path == destination / "cover.png"
-            assert cover.data == _PNG
-            assert (destination / "ComicInfo.xml").read_text() == xml
+            assert cover.data == (_PNG + b"new" if move_type == "file" else _PNG)
             (destination / "ComicInfo.xml").write_text(xml.replace("Chapter", "Fresh"))
-            (work / "ComicInfo.xml").write_text(
+            (Path(target.path) / "ComicInfo.xml").write_text(
                 "<ComicInfo><Writer>Current author</Writer></ComicInfo>"
             )
+            if move_type != "rename":
+                (work / "ComicInfo.xml").write_text(
+                    "<ComicInfo><Writer>Old author</Writer></ComicInfo>"
+                )
             data = await MediaItemService.get_details(child.id, _user([parent.lib_id]))
             assert data["title"] == "Fresh"
             assert data["metadata"]["authors"] == ("Current author",)
-            assert await MediaItem.all().count() == 2
+            synced = await MediaItemService.sync_metadata(child.id)
+            assert synced.title == "Fresh" and synced.parent_id == target.id
+            assert await MediaItem.all().count() == (2 if move_type == "rename" else 3)
 
     asyncio.run(run())
 
