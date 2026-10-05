@@ -442,7 +442,9 @@
       "font_size": "字号",
       "line_height": "行间距",
       "para_spacing": "段间距",
-      "padding_x": "左右边距"
+      "padding_x": "左右边距",
+      "image_load_failed": "图片加载失败",
+      "image_unavailable": "图片不可用"
     },
     "image": {
       "chapters": "章节",

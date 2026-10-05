@@ -1,18 +1,18 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores';
-  import type { Chapter, ChapterGroup } from '$lib/types';
+  import type { Chapter, ChapterGroup, ContentBlock, ContentRun } from '$lib/types';
 
   /** Delay in ms before auto-hiding the overlay controls. */
   const CONTROLS_HIDE_DELAY = 3000;
 
   /** Options passed to the text viewer mount function. */
   export type TextViewerOptions = {
-    text: string | string[];
     title?: string | null;
     chapters?: Chapter[];
     chapterId?: string | null;
     chapterChange?: (chapter: Chapter) => void;
-  };
+    back?: () => void;
+  } & ({ text: string | string[]; blocks?: never } | { text?: never; blocks: ContentBlock[] });
 
   /** Color theme. */
   export type Theme = 'white' | 'cream' | 'sepia' | 'light' | 'green' | 'dark' | 'slate' | 'black';
@@ -151,7 +151,7 @@
   /**
    * Normalize text payloads into the viewer's paragraph-based rendering model.
    *
-   * @param text - The text payload from a flow response.
+   * @param text - The plain-text payload to display.
    * @returns A single text body to render.
    */
   function normalizeTextContent(text: string | string[]): string {
@@ -170,6 +170,14 @@
   let title = $state('');
   // text content of the current chapter
   let content = $state('');
+  // structured content of the current chapter
+  let blocks = $state<ContentBlock[]>([]);
+  // image failures in the current chapter
+  let failedImages = $state<Record<string, boolean>>({});
+  // callback to return from a local reading overlay
+  let back = $state<(() => void) | undefined>(undefined);
+  // the reading area's scroll container
+  let scrollEl = $state<HTMLElement | undefined>(undefined);
   // available chapters
   let chapters = $state<Chapter[]>([]);
   // chapters grouped by volume in source order
@@ -204,19 +212,23 @@
   let paragraphs = $derived(content.split(/\n{2,}/).map((para) => para.trim()));
 
   /**
-   * Mount the text viewer with the given text resource.
+   * Mount the text viewer with plain text or structured blocks.
    *
    * @param options - The text viewer options.
    */
   export function mount(options: TextViewerOptions) {
-    if (!options || !options.text) {
+    if (!options) {
       return;
     }
     title = options.title ?? '';
-    content = normalizeTextContent(options.text);
+    content = options.text === undefined ? '' : normalizeTextContent(options.text);
+    blocks = options.blocks ?? [];
+    failedImages = {};
+    back = options.back;
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
+    scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
     showControls();
   }
 
@@ -298,7 +310,7 @@
         <button
           class="btn border-0 btn-ghost shadow-none btn-xs"
           style:color={colors.muted}
-          onclick={() => historyBack()}
+          onclick={() => (back ?? historyBack)()}
           aria-label="Back"
         >
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
@@ -370,10 +382,11 @@
   <!-- reading area -->
   {#if $settings !== null}
     <article
+      bind:this={scrollEl}
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
       style:padding="2.5rem {$settings.paddingX}rem"
     >
-      {#if content}
+      {#if content || blocks.length}
         <div
           class="mx-auto max-w-3xl min-w-0 wrap-break-word [word-break:normal] transition-all duration-300"
           style:font-family={FONTS[$settings.font]}
@@ -381,15 +394,86 @@
           style:line-height={$settings.lineHeight}
           style:color={colors.text}
         >
-          {#each paragraphs as para, i (i)}
-            <p class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
-              {#if para}
-                {para}
-              {:else}
-                &nbsp;
-              {/if}
-            </p>
-          {/each}
+          {#if blocks.length}
+            {#key blocks}
+              {#each blocks as block (block.id)}
+                {#if block.type === 'paragraph'}
+                  <p class="whitespace-pre-line" style:margin-bottom="{$settings.paraSpacing}em">
+                    {@render textRuns(block.runs)}
+                  </p>
+                {:else if block.type === 'heading'}
+                  <svelte:element
+                    this={`h${block.level ?? 2}`}
+                    class="font-bold whitespace-pre-line"
+                    style:font-size={block.level === 1 ? '1.5em' : block.level === 2 ? '1.25em' : '1.125em'}
+                    style:margin-bottom="{$settings.paraSpacing}em"
+                  >
+                    {@render textRuns(block.runs)}
+                  </svelte:element>
+                {:else if block.type === 'quote'}
+                  <blockquote
+                    class="border-s-2 border-current/30 ps-4 whitespace-pre-line"
+                    style:margin-bottom="{$settings.paraSpacing}em"
+                  >
+                    {@render textRuns(block.runs)}
+                  </blockquote>
+                {:else if block.type === 'list'}
+                  <svelte:element
+                    this={block.ordered ? 'ol' : 'ul'}
+                    start={block.ordered ? (block.start ?? 1) : undefined}
+                    class="space-y-1 ps-8 {block.ordered ? 'list-decimal' : 'list-disc'}"
+                    style:margin-bottom="{$settings.paraSpacing}em"
+                  >
+                    {#each block.items as runs, i (i)}
+                      <li class="whitespace-pre-line">{@render textRuns(runs)}</li>
+                    {/each}
+                  </svelte:element>
+                {:else if block.type === 'image'}
+                  <figure style:margin-bottom="{$settings.paraSpacing}em">
+                    {#if !block.url || failedImages[block.id]}
+                      <div
+                        role="status"
+                        class="flex min-h-32 flex-col items-center justify-center gap-2 rounded-field border border-current/20 p-4 text-center text-sm"
+                      >
+                        {#if block.alt}
+                          <p>{block.alt}</p>
+                        {/if}
+                        <p>{$_(block.url ? 'media.text.image_load_failed' : 'media.text.image_unavailable')}</p>
+                        {#if block.url}
+                          <button
+                            class="btn border-0 btn-ghost shadow-none btn-sm"
+                            style:color={colors.text}
+                            onclick={() => delete failedImages[block.id]}
+                          >
+                            {$_('action.retry')}
+                          </button>
+                        {/if}
+                      </div>
+                    {:else}
+                      <img
+                        src={block.url}
+                        alt={block.alt}
+                        class="mx-auto h-auto max-w-full"
+                        loading="lazy"
+                        decoding="async"
+                        onerror={() => (failedImages[block.id] = true)}
+                      />
+                    {/if}
+                  </figure>
+                {/if}
+              {/each}
+            {/key}
+          {:else}
+            {#each paragraphs as para, i (i)}
+              <p class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
+                {#if para}
+                  {para}
+                {:else}
+                  &nbsp;
+                {/if}
+              </p>
+            {/each}
+          {/if}
         </div>
       {/if}
     </article>
@@ -493,6 +577,20 @@
     </div>
   {/if}
 </div>
+
+{#snippet textRuns(runs: ContentRun[])}
+  {#each runs as run, i (i)}
+    {#if run.marks.includes('strong') && run.marks.includes('em')}
+      <strong><em>{run.text}</em></strong>
+    {:else if run.marks.includes('strong')}
+      <strong>{run.text}</strong>
+    {:else if run.marks.includes('em')}
+      <em>{run.text}</em>
+    {:else}
+      {run.text}
+    {/if}
+  {/each}
+{/snippet}
 
 {#snippet chapterMenu()}
   <ul class="menu w-full px-2 pb-6 text-sm">

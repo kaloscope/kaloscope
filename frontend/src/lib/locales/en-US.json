@@ -442,7 +442,9 @@
       "font_size": "Font Size",
       "line_height": "Line Height",
       "para_spacing": "Paragraph Spacing",
-      "padding_x": "Horizontal Padding"
+      "padding_x": "Horizontal Padding",
+      "image_load_failed": "Failed to load image",
+      "image_unavailable": "Image unavailable"
     },
     "image": {
       "chapters": "Chapters",
