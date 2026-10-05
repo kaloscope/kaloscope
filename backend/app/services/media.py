@@ -6,8 +6,8 @@ import secrets
 import shutil
 import stat
 from asyncio import create_task, to_thread
-from collections.abc import Generator
-from contextlib import ExitStack, contextmanager, suppress
+from collections.abc import AsyncGenerator, Generator
+from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +33,7 @@ from app.core.media.naming import validate_template
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import (
     ContentChapter,
+    EpubContent,
     IndexState,
     LibType,
     MediaContentQuery,
@@ -556,32 +557,33 @@ def _content_is_current(item: MediaItem) -> bool:
         return False
 
 
-def _read_text_content(item: MediaItem, chapter_id: str | None) -> TextContent:
-    """Read a published TXT section while guarding its source and cache files.
+@contextmanager
+def _text_index(
+    item: MediaItem,
+) -> Generator[tuple[ReadingSource, Path, TextIndex | EpubIndex]]:
+    """Guard a novel's source and published cache throughout a content read.
 
     Args:
-        item: The accessible TXT item with a validated ready index version.
-        chapter_id: The exact section ID, or None to select the first section.
+        item: The accessible novel with a validated ready index version.
 
-    Returns:
-        Public chapter labels and paragraphs, with a freshly read local title.
+    Yields:
+        The validated source, cache directory and current text or EPUB index.
 
     Raises:
-        ContentError: If the source or cache is unavailable, changed or invalid,
-            or the chapter is absent from the current index.
+        ContentError: If the source or cache is unavailable, changed or invalid.
     """
-    from app.core.media.metadata_reader import read_metadata
-    from app.core.media.text import TextIndex, load_text_index, read_text_chapter
+    from app.core.media.text import load_text_index
 
     with _reading_source(item) as (source, _, missing):
         if missing:
             raise ContentError("media_source_unavailable")
         root = Path(KaloscopeConfig.get_workspace("temp"))
         cache = root / "media_index" / str(item.id) / str(item.index_version)
+        filename = "content.txt" if item.format == MediaFormat.TXT else "content.jsonl"
         try:
             directories = (root, cache.parent.parent, cache.parent, cache)
             states = {}
-            for path in (*directories, cache / "index.json", cache / "content.txt"):
+            for path in (*directories, cache / "index.json", cache / filename):
                 info = path.stat(follow_symlinks=False)
                 directory = path in directories
                 if not (
@@ -593,10 +595,7 @@ def _read_text_content(item: MediaItem, chapter_id: str | None) -> TextContent:
                 # sibling cache writes do not change the selected version
                 states[path] = file_state(info)[:2] if directory else file_state(info)
             index = load_text_index(cache)
-            if (
-                not isinstance(index, TextIndex)
-                or index.index_version != item.index_version
-            ):
+            if index.format != item.format or index.index_version != item.index_version:
                 raise ContentError("content_not_ready")
             info = source.path.stat(follow_symlinks=False)
             if (
@@ -604,28 +603,79 @@ def _read_text_content(item: MediaItem, chapter_id: str | None) -> TextContent:
                 or info.st_mtime_ns != index.source_snapshot.mtime_ns
             ):
                 raise ContentError("content_changed")
-            selected = chapter_id or index.chapters[0].id
-            paragraphs = read_text_chapter(cache, selected)
-            if not isinstance(paragraphs, list):
-                raise ContentError("content_not_ready")
+            yield source, cache, index
             for path, before in states.items():
                 after = file_state(path.stat(follow_symlinks=False))
                 if after[: len(before)] != before:
                     raise ContentError("content_changed")
         except OSError as error:
             raise ContentError("content_not_ready") from error
-        return TextContent(
-            item_id=item.id,
-            source_item_id=item.id,
-            title=read_metadata(source).data.title or source.path.stem,
-            version=index.index_version,
-            chapter_id=selected,
-            chapters=[
+
+
+def _read_text_content(
+    item: MediaItem, chapter_id: str | None
+) -> TextContent | EpubContent:
+    """Read a published novel section without exposing source or cache locations.
+
+    Args:
+        item: The accessible novel with a validated ready index version.
+        chapter_id: The exact section ID, or None to select the first section.
+
+    Returns:
+        Public chapter labels, a live local title, and paragraphs or EPUB blocks.
+
+    Raises:
+        ContentError: If the source or cache is unavailable, changed or invalid,
+            or the chapter is absent from the current index.
+    """
+    from app.core.media.metadata_reader import read_metadata
+    from app.core.media.text import read_text_chapter
+
+    with _text_index(item) as (source, cache, index):
+        selected = chapter_id or index.chapters[0].id
+        content = read_text_chapter(cache, selected)
+        values = {
+            "item_id": item.id,
+            "source_item_id": item.id,
+            "title": read_metadata(source).data.title or source.path.stem,
+            "version": index.index_version,
+            "chapter_id": selected,
+            "chapters": [
                 ContentChapter(id=chapter.id, title=chapter.title, part=chapter.part)
                 for chapter in index.chapters
             ],
-            text=paragraphs,
-        )
+        }
+        if isinstance(content, list):
+            return TextContent.model_validate({**values, "text": content})
+        data = content.model_dump(mode="json")
+        for block in data["blocks"]:
+            if block["type"] == "image":
+                asset_id = block["asset_id"]
+                block["url"] = (
+                    f"/_api/media/{item.id}/assets/{asset_id}?v={index.index_version}"
+                    if asset_id is not None
+                    else None
+                )
+        return EpubContent.model_validate({**values, **data})
+
+
+def _read_text_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
+    """Read one indexed EPUB image within the same source and cache guards.
+
+    Args:
+        item: The accessible EPUB item with a validated ready index version.
+        asset_id: The opaque image ID from a published content block.
+
+    Returns:
+        Verified raster bytes and their detected MIME type.
+
+    Raises:
+        ContentError: If the resource is unknown, unavailable, changed or invalid.
+    """
+    from app.core.media.text import read_text_resource
+
+    with _text_index(item) as (source, cache, _):
+        return read_text_resource(source.path, cache, asset_id)
 
 
 def _build_content(
@@ -1798,21 +1848,19 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         return cover
 
     @classmethod
-    async def get_content(
-        cls, id: int, user: UserInfo, query: MediaContentQuery
-    ) -> TextContent:
-        """Read TXT content after checking access, readiness and published version.
-
-        Reading does not rebuild content, write metadata or update history. The
-        caller receives a controlled error until ingestion publishes a ready index.
+    @asynccontextmanager
+    async def _content_item(
+        cls, id: int, user: UserInfo, version: str | None
+    ) -> AsyncGenerator[MediaItem]:
+        """Check access and published version before and after unlocked reading.
 
         Args:
             id: The requested reading item ID.
             user: The authenticated user with loaded library permissions.
-            query: The optional chapter and expected content version.
+            version: The expected published version, or None for the current one.
 
-        Returns:
-            The current TXT directory and selected plain-text section.
+        Yields:
+            The accessible, ready novel item for one read operation.
 
         Raises:
             NotFoundException: If the item is hidden, missing or not reading media.
@@ -1823,7 +1871,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         item = await cls.get_accessible(id, user)
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise NotFoundException()
-        if item.lib.lib_type != LibType.NOVEL or item.format != MediaFormat.TXT:
+        if item.lib.lib_type != LibType.NOVEL or item.format not in (
+            MediaFormat.TXT,
+            MediaFormat.EPUB,
+        ):
             raise ContentError("unsupported_media_format")
         if (
             item.index_state != IndexState.READY
@@ -1835,12 +1886,11 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 if item.index_state == IndexState.EMPTY
                 else "content_not_ready"
             )
-        if query.version is not None and query.version != item.index_version:
+        if version is not None and version != item.index_version:
             raise ContentError("content_changed")
         failure = None
-        result = None
         try:
-            result = await to_thread(_read_text_content, item, query.chapter_id)
+            yield item
         except ContentError as error:
             failure = error
         current = await cls.get_accessible(id, user)
@@ -1859,8 +1909,56 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             raise ContentError("content_changed")
         if failure is not None:
             raise failure
-        assert result is not None
-        return result
+
+    @classmethod
+    async def get_content(
+        cls, id: int, user: UserInfo, query: MediaContentQuery
+    ) -> TextContent | EpubContent:
+        """Read a novel chapter without indexing, metadata writes or history updates.
+
+        Args:
+            id: The requested novel item ID.
+            user: The authenticated user with loaded library permissions.
+            query: The optional chapter and expected content version.
+
+        Returns:
+            A chapter list and TXT paragraphs or EPUB blocks with local image URLs.
+
+        Raises:
+            NotFoundException: If the item is unavailable or belongs to a video library.
+            ForbiddenException: If library access is denied.
+            ContentError: If the requested content is unavailable or changed.
+        """
+        async with cls._content_item(id, user, query.version) as item:
+            return await to_thread(_read_text_content, item, query.chapter_id)
+
+    @classmethod
+    async def get_asset(
+        cls, id: int, user: UserInfo, asset_id: str, version: str
+    ) -> tuple[bytes, str]:
+        """Read an EPUB image from its current index after checking library access.
+
+        Args:
+            id: The requested source item ID.
+            user: The authenticated user with loaded library permissions.
+            asset_id: The opaque image ID selected from the current index.
+            version: The required published content version.
+
+        Returns:
+            Verified image bytes and their MIME type; no filesystem path is returned.
+
+        Raises:
+            NotFoundException: If the item is unavailable or belongs to a video library.
+            ForbiddenException: If library access is denied.
+            ContentError: If the source, version or resource cannot be read safely.
+        """
+        async with cls._content_item(id, user, version) as item:
+            if (
+                re.fullmatch(r"[0-9a-f]{32}", asset_id) is None
+                or item.format != MediaFormat.EPUB
+            ):
+                raise ContentError("not_found")
+            return await to_thread(_read_text_asset, item, asset_id)
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):

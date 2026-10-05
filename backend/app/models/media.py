@@ -1,5 +1,5 @@
 from enum import StrEnum, auto
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 from tortoise.fields import (
@@ -216,12 +216,20 @@ class MediaQuery(Pageable):
 
 
 class MediaContentQuery(BaseModel):
-    """Select a TXT chapter from the current published content version."""
+    """Select a novel chapter from the current published content version."""
 
     model_config = ConfigDict(extra="forbid")
 
     chapter_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class MediaAssetQuery(BaseModel):
+    """Require the published version when reading an indexed image resource."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    v: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ContentChapter(BaseModel):
@@ -233,19 +241,89 @@ class ContentChapter(BaseModel):
     volume: None = None
 
 
-class TextContent(BaseModel):
-    """Return the current TXT directory and one bounded section of plain text."""
+class ContentResponse(BaseModel):
+    """Share chapter selection and ownership across reading content responses."""
 
     item_id: int
     source_item_id: int
-    media_type: Literal["text"] = "text"
-    format: Literal["txt"] = "txt"
-    content_type: Literal["text"] = "text"
     title: str
     version: str
     chapter_id: str
     chapters: list[ContentChapter]
+
+
+class TextContent(ContentResponse):
+    """Return one bounded TXT section as plain-text paragraphs."""
+
+    media_type: Literal["text"] = "text"
+    format: Literal["txt"] = "txt"
+    content_type: Literal["text"] = "text"
     text: list[str]
+
+
+class ContentRun(BaseModel):
+    """Expose plain text and supported emphasis without source HTML."""
+
+    text: str
+    marks: list[Literal["strong", "em"]]
+
+
+class ContentText(BaseModel):
+    """Expose a paragraph, quote or heading from validated reading blocks."""
+
+    id: str
+    type: Literal["paragraph", "heading", "quote"]
+    runs: list[ContentRun]
+    level: int | None = Field(default=None, ge=1, le=6)
+
+
+class ContentList(BaseModel):
+    """Expose an ordered or unordered list of text runs."""
+
+    id: str
+    type: Literal["list"]
+    ordered: bool
+    items: list[list[ContentRun]]
+    start: int | None = None
+
+
+class ContentImage(BaseModel):
+    """Expose an opaque image ID and application URL, or a missing-image placeholder."""
+
+    id: str
+    type: Literal["image"]
+    asset_id: str | None
+    url: str | None
+    alt: str
+
+
+class ContentWarning(BaseModel):
+    """Associate a controlled reading warning with its displayed block."""
+
+    code: Literal[
+        "missing_image",
+        "external_image",
+        "invalid_image_reference",
+        "encrypted_image",
+        "unsupported_image",
+        "invalid_image",
+        "image_limit_exceeded",
+        "unsupported_content",
+        "simplified_layout",
+    ]
+    block_id: str
+
+
+class EpubContent(ContentResponse):
+    """Return validated EPUB blocks with application-owned image URLs."""
+
+    media_type: Literal["text"] = "text"
+    format: Literal["epub"] = "epub"
+    content_type: Literal["blocks"] = "blocks"
+    blocks: list[
+        Annotated[ContentText | ContentList | ContentImage, Field(discriminator="type")]
+    ]
+    warnings: list[ContentWarning]
 
 
 class MediaMetadata(BaseModel):

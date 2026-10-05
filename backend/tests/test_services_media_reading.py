@@ -1,4 +1,4 @@
-"""Tests for reading details, summaries, covers, TXT content and source boundaries."""
+"""Tests for reading details, summaries, covers, novel content and source boundaries."""
 
 import asyncio
 import hashlib
@@ -27,12 +27,14 @@ from app.core.media.coordination import library_lock
 from app.core.media.handlers.reading import ReadingSource
 from app.core.middleware import on_request, on_response
 from app.models.media import (
+    EpubContent,
     IndexState,
     LibType,
     MediaContentQuery,
     MediaFormat,
     MediaItem,
     MediaLib,
+    TextContent,
 )
 from app.models.user import (
     Permissions,
@@ -1407,7 +1409,7 @@ def test_text_content_sources(tmp_path, change, code):
         ("deleted", "not_found"),
         ("denied", "permission_denied"),
         ("video", "not_found"),
-        ("epub", "unsupported_media_format"),
+        ("format", "unsupported_media_format"),
         ("comic", "unsupported_media_format"),
     ],
 )
@@ -1437,8 +1439,8 @@ def test_text_content_access(tmp_path, monkeypatch, change, code):
                 await item.delete()
             elif change == "denied":
                 user = _user([])
-            elif change == "epub":
-                await MediaItem.filter(id=item.id).update(format=MediaFormat.EPUB)
+            elif change == "format":
+                await MediaItem.filter(id=item.id).update(format=MediaFormat.ZIP)
             else:
                 await MediaLib.filter(id=item.lib_id).update(
                     lib_type=LibType.MOVIE if change == "video" else LibType.COMIC
@@ -1457,18 +1459,22 @@ def test_text_content_access(tmp_path, monkeypatch, change, code):
 @pytest.mark.parametrize(
     "change", ["hidden", "deleted", "moved", "version", "pending", "permission"]
 )
-def test_text_content_race(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("mode", ["txt", "epub", "asset"])
+def test_content_race(tmp_path, monkeypatch, change, mode):
     """Revalidate database access and source ownership after unlocked file reading.
 
     Args:
         tmp_path: The isolated source and cache root.
         monkeypatch: The fixture replacing the worker dispatch.
         change: The database mutation occurring during file reading.
+        mode: The content or resource read whose result must be discarded.
     """
 
     async def run():
         async with _database():
-            item = await _indexed_text(tmp_path)
+            item = await (
+                _indexed_text(tmp_path) if mode == "txt" else _indexed_epub(tmp_path)
+            )
             user = _user([item.lib_id])
             await User.create(
                 id=user.id, username="Reader", password="unused", role=UserRole.USER
@@ -1512,7 +1518,14 @@ def test_text_content_race(tmp_path, monkeypatch, change):
                 else ContentError
             )
             with pytest.raises(expected):
-                await MediaItemService.get_content(item.id, user, MediaContentQuery())
+                if mode == "asset":
+                    await MediaItemService.get_asset(
+                        item.id, user, _epub_asset_id(), str(item.index_version)
+                    )
+                else:
+                    await MediaItemService.get_content(
+                        item.id, user, MediaContentQuery()
+                    )
 
     asyncio.run(run())
 
@@ -1540,19 +1553,25 @@ def test_text_content_limit(tmp_path):
 
 
 @pytest.mark.parametrize("change", ["source", "index", "body", "sibling"])
-def test_text_content_files_change(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB])
+def test_text_content_files_change(tmp_path, monkeypatch, change, format):
     """Guard unlocked reads without treating other cache writes as content changes.
 
     Args:
         tmp_path: The isolated source and cache root.
         monkeypatch: The fixture replacing the chapter reader.
         change: The file changed while reading the selected chapter.
+        format: The novel format whose source and cache must remain stable.
     """
     from app.core.media import text as text_media
 
     async def run():
         async with _database():
-            item = await _indexed_text(tmp_path)
+            item = await (
+                _indexed_text(tmp_path)
+                if format == MediaFormat.TXT
+                else _indexed_epub(tmp_path)
+            )
             reader = text_media.read_text_chapter
             loop_thread = threading.get_ident()
 
@@ -1575,7 +1594,13 @@ def test_text_content_files_change(tmp_path, monkeypatch, change):
                         Path(item.path)
                         if change == "source"
                         else cache
-                        / ("index.json" if change == "index" else "content.txt")
+                        / (
+                            "index.json"
+                            if change == "index"
+                            else "content.txt"
+                            if format == MediaFormat.TXT
+                            else "content.jsonl"
+                        )
                     )
                     before = path.stat()
                     path.write_bytes(path.read_bytes().replace(b"Chapter", b"Changed"))
@@ -1590,9 +1615,331 @@ def test_text_content_files_change(tmp_path, monkeypatch, change):
                 )
                 if change == "sibling":
                     result = await asyncio.wait_for(request, timeout=3)
-                    assert result.text[0] == "Chapter 1"
+                    if isinstance(result, TextContent):
+                        assert result.text[0] == "Chapter 1"
+                    else:
+                        assert isinstance(result, EpubContent) and result.blocks
                 else:
                     with pytest.raises(ContentError, match="content_changed"):
                         await asyncio.wait_for(request, timeout=3)
+
+    asyncio.run(run())
+
+
+def _epub_asset_id(name: str = "picture.png") -> str:
+    """Resolve a fixture image's opaque ID without putting its path in requests.
+
+    Args:
+        name: The member basename, defaulting to the fixture's first valid image.
+
+    Returns:
+        The ID generated by the actual EPUB index builder.
+    """
+    return hashlib.sha256(f"epub:Book/images/{name}".encode()).hexdigest()[:32]
+
+
+async def _indexed_epub(tmp_path: Path) -> MediaItem:
+    """Publish a real EPUB with mixed blocks, two chapters and unavailable images.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+
+    Returns:
+        The ready EPUB item, built through the normal indexing service.
+    """
+    item = await _item(tmp_path, MediaFormat.EPUB)
+    bodies = (
+        "<h1>Chapter 1</h1><p>Before<strong>Bold</strong><em>Emphasis</em>After</p>"
+        '<blockquote>Quote</blockquote><ol start="3"><li>List item</li></ol>'
+        '<img src="../images/picture.png" alt="Art"/>'
+        '<img src="https://example.test/private.png" alt="Remote"/>'
+        '<img src="../images/missing.png" alt="Missing"/>'
+        "<script>untrusted_script()</script>",
+        '<h1>Chapter 2</h1><p>End</p><img src="../images/other.png" alt="Other"/>',
+    )
+    manifest = "".join(
+        f'<item id="c{i}" href="Text/{i}.xhtml" media-type="application/xhtml+xml"/>'
+        for i in range(len(bodies))
+    ) + "".join(
+        f'<item id="{name}" href="images/{name}.png" media-type="image/png"/>'
+        for name in ("picture", "other", "missing", "unused")
+    )
+    with zipfile.ZipFile(item.path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr(
+            "META-INF/container.xml",
+            '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
+            'version="1.0"><rootfiles><rootfile full-path="Book/book.opf" '
+            'media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        archive.writestr(
+            "Book/book.opf",
+            '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            "<dc:title>Embedded</dc:title></metadata>"
+            f"<manifest>{manifest}</manifest><spine>"
+            + "".join(f'<itemref idref="c{i}"/>' for i in range(len(bodies)))
+            + "</spine></package>",
+        )
+        for index, body in enumerate(bodies):
+            archive.writestr(
+                f"Book/Text/{index}.xhtml",
+                '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Fallback</title></head>'
+                f"<body>{body}</body></html>",
+            )
+        archive.writestr("Book/images/picture.png", _PNG)
+        archive.writestr("Book/images/other.png", _PNG + b"other")
+        archive.writestr("Book/images/unused.png", b"not an indexed image")
+    return await MediaItemService.index_content(item.id)
+
+
+def test_epub_content_http(tmp_path):
+    """Read safe blocks and their images through the shared content and asset routes.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_epub(tmp_path)
+            user = _user([item.lib_id])
+            await User.create(
+                id=user.id, username="Reader", password="unused", role=UserRole.USER
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=item.lib_id
+            )
+            async with _client(user) as client:
+                url = f"/_api/media/{item.id}/content"
+                response = await client.get(url)
+                assert response.status_code == 200, response.text
+                data = response.json()["data"]
+                assert (data["media_type"], data["format"], data["content_type"]) == (
+                    "text",
+                    "epub",
+                    "blocks",
+                )
+                assert data["title"] == "Embedded" and "text" not in data
+                assert [entry["title"] for entry in data["chapters"]] == [
+                    "Chapter 1",
+                    "Chapter 2",
+                ]
+                assert [block["type"] for block in data["blocks"]] == [
+                    "heading",
+                    "paragraph",
+                    "quote",
+                    "list",
+                    "image",
+                    "image",
+                    "image",
+                ]
+                assert [run["marks"] for run in data["blocks"][1]["runs"]] == [
+                    [],
+                    ["strong"],
+                    ["em"],
+                    [],
+                ]
+                assert data["blocks"][0]["level"] == 1
+                assert data["blocks"][3]["start"] == 3 and data["blocks"][3]["ordered"]
+                assert {warning["code"] for warning in data["warnings"]} == {
+                    "external_image",
+                    "missing_image",
+                }
+                images = [block for block in data["blocks"] if block["type"] == "image"]
+                assert all(
+                    block["asset_id"] is None and block["url"] is None
+                    for block in images[1:]
+                )
+                for hidden in (
+                    str(tmp_path),
+                    "Book/images",
+                    "Book/Text",
+                    "example.test",
+                    "untrusted_script",
+                ):
+                    assert hidden not in response.text
+                asset_url = images[0]["url"]
+                assert (
+                    asset_url == f"/_api/media/{item.id}/assets/{_epub_asset_id()}"
+                    f"?v={item.index_version}"
+                )
+                image = await client.get(asset_url)
+                assert image.status_code == 200 and image.content == _PNG
+                assert image.headers["content-type"] == "image/png"
+                assert image.headers["x-content-type-options"] == "nosniff"
+                assert (
+                    image.headers["cache-control"]
+                    == "private, max-age=0, must-revalidate"
+                )
+                etag = image.headers["etag"]
+                for condition in (etag, f'"unrelated", W/{etag}', "*"):
+                    cached = await client.get(
+                        asset_url, headers={"If-None-Match": condition}
+                    )
+                    assert cached.status_code == 304 and cached.content == b""
+                    assert cached.headers["etag"] == etag
+                assert (
+                    await client.get(
+                        asset_url, headers={"If-None-Match": '"unrelated"'}
+                    )
+                ).status_code == 200
+                (Path(item.dir) / "metadata.opf").write_bytes(_opf("External"))
+                second = await client.get(
+                    url,
+                    params={
+                        "chapter_id": data["chapters"][1]["id"],
+                        "version": data["version"],
+                    },
+                )
+                assert (
+                    second.status_code == 200
+                    and second.json()["data"]["title"] == "External"
+                )
+                last_image = second.json()["data"]["blocks"][-1]["url"]
+                assert (await client.get(last_image)).content == _PNG + b"other"
+                # the fixed cover route takes precedence and needs no version
+                (Path(item.dir) / "cover.png").write_bytes(_PNG)
+                assert (
+                    await client.get(f"/_api/media/{item.id}/assets/cover")
+                ).content == _PNG
+                await UserPermission.all().delete()
+                denied = await client.get(asset_url, headers={"If-None-Match": etag})
+                assert denied.status_code == 403
+                assert (await client.get(url)).status_code == 403
+                client.headers.clear()
+                client.cookies.clear()
+                assert (
+                    await client.get(asset_url, headers={"If-None-Match": etag})
+                ).status_code == 401
+            assert (await MediaItem.get(id=item.id)).index_version == item.index_version
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "case,status,code",
+    [
+        ("missing_version", 400, "bad_request"),
+        ("invalid_version", 400, "bad_request"),
+        ("stale_version", 409, "content_changed"),
+        ("path_query", 400, "bad_request"),
+        ("unknown", 404, "not_found"),
+        ("unindexed", 404, "not_found"),
+        ("filename", 404, "not_found"),
+        ("txt", 404, "not_found"),
+        ("missing_source", 503, "media_source_unavailable"),
+        ("source_changed", 409, "content_changed"),
+        ("crc_changed", 409, "content_changed"),
+        ("missing_cache", 409, "content_not_ready"),
+        ("hidden", 404, "not_found"),
+        ("pending", 409, "content_not_ready"),
+    ],
+)
+def test_epub_asset_errors(tmp_path, case, status, code):
+    """Never let conditional requests bypass access, membership or source checks.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        case: The invalid query, access or source condition.
+        status: The expected HTTP status.
+        code: The stable error exposed to the client.
+    """
+
+    async def run():
+        async with _database():
+            item = await (
+                _indexed_text(tmp_path) if case == "txt" else _indexed_epub(tmp_path)
+            )
+            asset_id = _epub_asset_id()
+            params = {"v": str(item.index_version)}
+            if case == "missing_version":
+                params.clear()
+            elif case == "invalid_version":
+                params["v"] = "../invalid"
+            elif case == "stale_version":
+                params["v"] = "f" * 64
+            elif case == "path_query":
+                params["path"] = "/untrusted.png"
+            elif case == "unknown":
+                asset_id = "f" * 32
+            elif case == "unindexed":
+                asset_id = _epub_asset_id("unused.png")
+            elif case == "filename":
+                asset_id = "picture.png"
+            elif case == "missing_source":
+                Path(item.path).unlink()
+            elif case == "source_changed":
+                Path(item.path).write_bytes(b"replaced source")
+            elif case == "crc_changed":
+                path = Path(item.path)
+                before = path.stat()
+                with zipfile.ZipFile(path) as archive:
+                    entries = [
+                        (entry, archive.read(entry)) for entry in archive.infolist()
+                    ]
+                with zipfile.ZipFile(path, "w") as archive:
+                    for entry, data in entries:
+                        if entry.filename == "Book/images/picture.png":
+                            data = data.replace(b"image", b"other")
+                        archive.writestr(entry, data)
+                assert path.stat().st_size == before.st_size
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            elif case == "missing_cache":
+                cache = (
+                    tmp_path
+                    / "cache/media_index"
+                    / str(item.id)
+                    / str(item.index_version)
+                )
+                (cache / "index.json").unlink()
+            elif case == "hidden":
+                await MediaItem.filter(id=item.id).update(visible=False)
+            elif case == "pending":
+                await MediaItem.filter(id=item.id).update(
+                    index_state=IndexState.PENDING
+                )
+            async with _client(_user()) as client:
+                response = await client.get(
+                    f"/_api/media/{item.id}/assets/{asset_id}",
+                    params=params,
+                    headers={"If-None-Match": "*"},
+                )
+                assert response.status_code == status, response.text
+                assert response.json()["message"] == code
+                assert "etag" not in response.headers
+                if status != 400:
+                    assert response.headers["cache-control"] == "private, no-store"
+                    assert response.headers["x-content-type-options"] == "nosniff"
+
+    asyncio.run(run())
+
+
+def test_epub_content_corrupt(tmp_path):
+    """Reject modified cached blocks and invalid chapter selections through HTTP.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_epub(tmp_path)
+            async with _client(_user()) as client:
+                url = f"/_api/media/{item.id}/content"
+                assert (
+                    await client.get(url, params={"chapter_id": "f" * 32})
+                ).status_code == 404
+                cache = (
+                    tmp_path
+                    / "cache/media_index"
+                    / str(item.id)
+                    / str(item.index_version)
+                )
+                path = cache / "content.jsonl"
+                path.write_bytes(path.read_bytes().replace(b"Before", b"Broken"))
+                response = await client.get(url)
+                assert response.status_code == 409, response.text
+                assert response.json()["message"] == "content_not_ready"
 
     asyncio.run(run())

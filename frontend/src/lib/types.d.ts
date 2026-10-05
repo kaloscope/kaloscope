@@ -306,6 +306,13 @@ export type MediaContentQuery = {
 };
 
 /**
+ * The published version required by an indexed image request.
+ */
+export type MediaAssetQuery = {
+  v: string;
+};
+
+/**
  * Public chapter labels without cache offsets or local paths.
  */
 export type ContentChapter = {
@@ -316,20 +323,89 @@ export type ContentChapter = {
 };
 
 /**
- * The TXT chapter directory and one section of plain-text paragraphs.
+ * Chapter selection and ownership shared by reading content responses.
  */
-export type TextContent = {
+export type ContentResponse = {
   item_id: number;
   source_item_id: number;
-  media_type: 'text';
-  format: 'txt';
-  content_type: 'text';
   title: string;
   version: string;
   chapter_id: string;
   chapters: ContentChapter[];
+};
+
+/**
+ * One TXT section of plain-text paragraphs.
+ */
+export type TextContent = ContentResponse & {
+  media_type: 'text';
+  format: 'txt';
+  content_type: 'text';
   text: string[];
 };
+
+/**
+ * Plain text with the supported semantic emphasis marks.
+ */
+export type ContentRun = {
+  text: string;
+  marks: ('strong' | 'em')[];
+};
+
+/**
+ * Structured reading blocks without source HTML or arbitrary resource references.
+ */
+export type ContentBlock =
+  | {
+      id: string;
+      type: 'paragraph' | 'heading' | 'quote';
+      runs: ContentRun[];
+      level: number | null;
+    }
+  | {
+      id: string;
+      type: 'list';
+      ordered: boolean;
+      items: ContentRun[][];
+      start: number | null;
+    }
+  | {
+      id: string;
+      type: 'image';
+      asset_id: string | null;
+      url: string | null;
+      alt: string;
+    };
+
+/**
+ * A controlled reading warning associated with a displayed block.
+ */
+export type ContentWarning = {
+  code:
+    | 'missing_image'
+    | 'external_image'
+    | 'invalid_image_reference'
+    | 'encrypted_image'
+    | 'unsupported_image'
+    | 'invalid_image'
+    | 'image_limit_exceeded'
+    | 'unsupported_content'
+    | 'simplified_layout';
+  block_id: string;
+};
+
+/**
+ * One EPUB section with application-owned image URLs and degradation warnings.
+ */
+export type EpubContent = ContentResponse & {
+  media_type: 'text';
+  format: 'epub';
+  content_type: 'blocks';
+  blocks: ContentBlock[];
+  warnings: ContentWarning[];
+};
+
+export type MediaContent = TextContent | EpubContent;
 
 /**
  * An actor credited in media metadata.

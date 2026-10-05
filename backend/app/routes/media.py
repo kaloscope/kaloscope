@@ -41,6 +41,7 @@ from app.models.base import IDs, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
     LibType,
+    MediaAssetQuery,
     MediaContentQuery,
     MediaDel,
     MediaItem,
@@ -59,6 +60,25 @@ from app.utils.extractor import extract_title
 from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
 
 media = Blueprint("media", url_prefix="/media")
+
+
+def _content_error(error: ContentError, headers: dict[str, str]) -> KaloscopeException:
+    """Map a controlled reading failure to the shared HTTP content contract.
+
+    Args:
+        error: The source, cache or resource failure reported by the service.
+        headers: The private cache and MIME protection headers for the response.
+
+    Returns:
+        The application exception carrying a stable error code and HTTP status.
+    """
+    status = {
+        "not_found": 404,
+        "content_changed": 409,
+        "content_not_ready": 409,
+        "media_source_unavailable": 503,
+    }.get(error.code, 422)
+    return KaloscopeException(error.code, status_code=status, headers=headers)
 
 
 @media.get("/lib/list")
@@ -238,7 +258,7 @@ async def get_item_cover(request: Request, id: int) -> HTTPResponse:
 async def get_item_content(
     request: Request, id: int, query: MediaContentQuery
 ) -> HTTPResponse:
-    """Serve a TXT directory and chapter from the current published index.
+    """Serve a novel's chapter list and selected content from its published index.
 
     Args:
         request: The authenticated request with loaded library permissions.
@@ -246,7 +266,7 @@ async def get_item_content(
         query: The optional chapter and expected content version.
 
     Returns:
-        Plain-text content with private caching disabled and a bounded JSON body.
+        TXT paragraphs or EPUB blocks with private caching disabled and bounded JSON.
 
     Raises:
         KaloscopeException: If access, source, index or response limits fail.
@@ -263,21 +283,55 @@ async def get_item_content(
             raise ContentError("media_limit_exceeded")
         return response
     except ContentError as error:
-        status = (
-            404
-            if error.code == "not_found"
-            else 409
-            if error.code in {"content_changed", "content_not_ready"}
-            else 503
-            if error.code == "media_source_unavailable"
-            else 422
-        )
-        raise KaloscopeException(
-            error.code, status_code=status, headers=headers
-        ) from error
+        raise _content_error(error, headers) from error
     except KaloscopeException as error:
         error.headers = {**error.headers, **headers}
         raise
+
+
+@media.get("/<id:int>/assets/<asset_id:str>")
+@authorize()
+@validate(query=MediaAssetQuery)
+async def get_item_asset(
+    request: Request, id: int, asset_id: str, query: MediaAssetQuery
+) -> HTTPResponse:
+    """Serve one indexed image after revalidating access, source and content version.
+
+    Args:
+        request: The authenticated request, optionally carrying If-None-Match.
+        id: The source item owning the requested resource.
+        asset_id: The opaque image ID from its content response.
+        query: The required published content version.
+
+    Returns:
+        Verified image bytes, or 304 only after the same access and source checks.
+
+    Raises:
+        KaloscopeException: If the source, version, resource or access is invalid.
+    """
+    headers = {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    try:
+        data, mime = await MediaItemService.get_asset(
+            id, request.ctx.user, asset_id, query.v
+        )
+    except ContentError as error:
+        raise _content_error(error, headers) from error
+    except KaloscopeException as error:
+        error.headers = {**error.headers, **headers}
+        raise
+    etag = f'"{query.v}-{asset_id}"'
+    headers.update(
+        {"Cache-Control": "private, max-age=0, must-revalidate", "ETag": etag}
+    )
+    if any(
+        tag.strip().removeprefix("W/") in ("*", etag)
+        for tag in request.headers.get("if-none-match", "").split(",")
+    ):
+        return empty(status=304, headers=headers)
+    return HTTPResponse(data, content_type=mime, headers=headers)
 
 
 @media.post("/<id:int>/gen_nfo")
