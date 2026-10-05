@@ -1,4 +1,4 @@
-"""Tests for reading details, summaries, covers, novel content and source boundaries."""
+"""Tests for reading details, summaries, covers, content and source boundaries."""
 
 import asyncio
 import hashlib
@@ -1311,6 +1311,9 @@ def test_text_content_http(tmp_path):
         ({"chapter_id": "invalid"}, 400, "bad_request"),
         ({"version": "../index.json"}, 400, "bad_request"),
         ({"path": "/untrusted.txt"}, 400, "bad_request"),
+        ({"offset": "0"}, 400, "bad_request"),
+        ({"limit": "40"}, 400, "bad_request"),
+        ({"chapter_id": "item:1"}, 400, "bad_request"),
     ],
 )
 def test_text_query_http(tmp_path, params, status, code):
@@ -1459,7 +1462,7 @@ def test_text_content_access(tmp_path, monkeypatch, change, code):
 @pytest.mark.parametrize(
     "change", ["hidden", "deleted", "moved", "version", "pending", "permission"]
 )
-@pytest.mark.parametrize("mode", ["txt", "epub", "asset"])
+@pytest.mark.parametrize("mode", ["txt", "epub", "asset", "comic", "comic_asset"])
 def test_content_race(tmp_path, monkeypatch, change, mode):
     """Revalidate database access and source ownership after unlocked file reading.
 
@@ -1473,7 +1476,11 @@ def test_content_race(tmp_path, monkeypatch, change, mode):
     async def run():
         async with _database():
             item = await (
-                _indexed_text(tmp_path) if mode == "txt" else _indexed_epub(tmp_path)
+                _indexed_text(tmp_path)
+                if mode == "txt"
+                else _indexed_comic(tmp_path, MediaFormat.DIR)
+                if mode.startswith("comic")
+                else _indexed_epub(tmp_path)
             )
             user = _user([item.lib_id])
             await User.create(
@@ -1518,9 +1525,14 @@ def test_content_race(tmp_path, monkeypatch, change, mode):
                 else ContentError
             )
             with pytest.raises(expected):
-                if mode == "asset":
+                if mode in {"asset", "comic_asset"}:
                     await MediaItemService.get_asset(
-                        item.id, user, _epub_asset_id(), str(item.index_version)
+                        item.id,
+                        user,
+                        hashlib.sha256(b"image:1.png").hexdigest()[:32]
+                        if mode == "comic_asset"
+                        else _epub_asset_id(),
+                        str(item.index_version),
                     )
                 else:
                     await MediaItemService.get_content(
@@ -1941,5 +1953,451 @@ def test_epub_content_corrupt(tmp_path):
                 response = await client.get(url)
                 assert response.status_code == 409, response.text
                 assert response.json()["message"] == "content_not_ready"
+
+    asyncio.run(run())
+
+
+async def _indexed_comic(
+    tmp_path: Path, format: MediaFormat, *, chapter: bool = False
+) -> MediaItem:
+    """Publish a comic with natural page order and a separate cover.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        format: The directory, CBZ or ZIP source format.
+        chapter: Whether to create a collection child; defaults to a standalone work.
+
+    Returns:
+        The ready source built through the normal indexing service.
+    """
+    item = await _item(tmp_path, None if chapter else format)
+    if chapter:
+        directory = Path(item.path) / "Chapter"
+        directory.mkdir()
+        item = await MediaItem.create(
+            lib_id=item.lib_id,
+            parent=item,
+            path=str(
+                directory if format == MediaFormat.DIR else directory / f"Book.{format}"
+            ),
+            dir=str(directory),
+            name="Chapter",
+            format=format,
+        )
+    images = {
+        "10.png": _PNG + b"10",
+        "2.png": _PNG + b"2",
+        "1.png": _PNG + b"1",
+        "cover.png": _PNG + b"cover",
+    }
+    if format == MediaFormat.DIR:
+        for name, data in images.items():
+            (Path(item.path) / name).write_bytes(data)
+    else:
+        with zipfile.ZipFile(item.path, "w") as archive:
+            for name, data in images.items():
+                archive.writestr(f"pages/{name}", data)
+            archive.writestr(
+                "ComicInfo.xml", "<ComicInfo><Title>Embedded</Title></ComicInfo>"
+            )
+    (Path(item.dir) / "ComicInfo.xml").write_text(
+        "<ComicInfo><Title>Current</Title></ComicInfo>"
+    )
+    return await MediaItemService.index_content(item.id)
+
+
+@pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
+@pytest.mark.parametrize("chapter", [False, True])
+def test_comic_content_http(tmp_path, format, chapter):
+    """Read comic pages, live titles and conditional images through the shared API.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        format: The comic source format.
+        chapter: Whether to access a child source directly.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_comic(tmp_path, format, chapter=chapter)
+            before = await MediaItem.get(id=item.id).values()
+            user = _user([item.lib_id])
+            await User.create(
+                id=user.id, username="Reader", password="unused", role=UserRole.USER
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=item.lib_id
+            )
+            async with _client(user) as client:
+                url = f"/_api/media/{item.id}/content"
+                response = await client.get(url, params={"limit": 2})
+                assert response.status_code == 200, response.text
+                data = response.json()["data"]
+                assert data == {
+                    "item_id": item.id,
+                    "source_item_id": item.id,
+                    "media_type": "image",
+                    "format": format,
+                    "content_type": "images",
+                    "title": "Current",
+                    "version": item.index_version,
+                    "chapter_id": f"item:{item.id}",
+                    "chapters": [
+                        {
+                            "id": f"item:{item.id}",
+                            "title": "Current",
+                            "part": 1,
+                            "volume": None,
+                        }
+                    ],
+                    "images": data["images"],
+                    "image_count": 3,
+                    "next_offset": 2,
+                }
+                assert len(data["images"]) == 2
+                assert response.headers["cache-control"] == "private, no-store"
+                assert (
+                    str(tmp_path) not in response.text and "pages/" not in response.text
+                )
+                last = await client.get(
+                    url,
+                    params={
+                        "chapter_id": data["chapter_id"],
+                        "version": data["version"],
+                        "offset": 2,
+                    },
+                )
+                assert last.status_code == 200, last.text
+                assert last.json()["data"]["next_offset"] is None
+                pages = data["images"] + last.json()["data"]["images"]
+                for page_url, number in zip(pages, (1, 2, 10), strict=True):
+                    image = await client.get(page_url)
+                    assert (
+                        image.status_code == 200
+                        and image.content == _PNG + str(number).encode()
+                    )
+                    assert image.headers["content-type"] == "image/png"
+                    assert image.headers["x-content-type-options"] == "nosniff"
+                    assert (
+                        image.headers["cache-control"]
+                        == "private, max-age=0, must-revalidate"
+                    )
+                etag = image.headers["etag"]
+                cached = await client.get(
+                    pages[-1], headers={"If-None-Match": f"W/{etag}"}
+                )
+                assert cached.status_code == 304 and cached.content == b""
+                empty_page = (await client.get(url, params={"offset": 3})).json()[
+                    "data"
+                ]
+                assert empty_page["images"] == [] and empty_page["next_offset"] is None
+                (Path(item.dir) / "ComicInfo.xml").write_text(
+                    "<ComicInfo><Title>Updated</Title></ComicInfo>"
+                )
+                updated = (await client.get(url)).json()["data"]
+                assert (
+                    updated["title"] == "Updated"
+                    and updated["version"] == data["version"]
+                )
+                assert updated["images"] == pages
+                (Path(item.dir) / "ComicInfo.xml").write_text("invalid metadata")
+                fallback = (await client.get(url)).json()["data"]
+                assert fallback["title"] == (
+                    Path(item.path).name if format == MediaFormat.DIR else "Embedded"
+                )
+                if chapter:
+                    await MediaItem.filter(id=item.parent_id).update(visible=False)
+                    assert (await client.get(url)).status_code == 404
+                    assert (
+                        await client.get(pages[0], headers={"If-None-Match": "*"})
+                    ).status_code == 404
+                    await MediaItem.filter(id=item.parent_id).update(visible=True)
+                for asset_id in ("f" * 32, "1.png"):
+                    missing = await client.get(
+                        f"/_api/media/{item.id}/assets/{asset_id}",
+                        params={"v": data["version"]},
+                        headers={"If-None-Match": "*"},
+                    )
+                    assert missing.status_code == 404 and "etag" not in missing.headers
+                await UserPermission.all().delete()
+                assert (await client.get(url)).status_code == 403
+                assert (
+                    await client.get(pages[-1], headers={"If-None-Match": etag})
+                ).status_code == 403
+                client.headers.clear()
+                client.cookies.clear()
+                assert (await client.get(pages[0])).status_code == 401
+            assert await MediaItem.get(id=item.id).values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "params,status",
+    [
+        ({"offset": -1}, 400),
+        ({"offset": 4}, 400),
+        ({"offset": "invalid"}, 400),
+        ({"limit": 0}, 400),
+        ({"limit": 101}, 400),
+        ({"limit": "1.5"}, 400),
+        ({"chapter_id": "item:999"}, 400),
+        ({"chapter_id": "f" * 32}, 400),
+        ({"chapter_id": "item:0"}, 400),
+        ({"version": "f" * 64}, 409),
+    ],
+)
+def test_comic_query_http(tmp_path, params, status):
+    """Reject invalid comic ranges, foreign chapters and stale versions.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        params: The invalid content query.
+        status: The expected HTTP status.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_comic(tmp_path, MediaFormat.DIR)
+            async with _client(_user()) as client:
+                response = await client.get(
+                    f"/_api/media/{item.id}/content", params=params
+                )
+                assert response.status_code == status, response.text
+                assert response.json()["message"] == (
+                    "bad_request" if status == 400 else "content_changed"
+                )
+
+    asyncio.run(run())
+
+
+def test_comic_page_limits(tmp_path):
+    """Apply the default and maximum batch sizes to the indexed page list.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_comic(tmp_path, MediaFormat.DIR)
+            for number in range(3, 103):
+                (Path(item.path) / f"{number}.png").write_bytes(_PNG)
+            item = await MediaItemService.index_content(item.id)
+            async with _client(_user()) as client:
+                url = f"/_api/media/{item.id}/content"
+                default = (await client.get(url)).json()["data"]
+                assert len(default["images"]) == 40 and default["next_offset"] == 40
+                maximum = (await client.get(url, params={"limit": 100})).json()["data"]
+                assert len(maximum["images"]) == 100 and maximum["next_offset"] == 100
+                assert maximum["image_count"] == 102
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change,status,code",
+    [
+        ("added", 409, "content_changed"),
+        ("removed", 409, "content_changed"),
+        ("renamed", 409, "content_changed"),
+        ("modified", 409, "content_changed"),
+        ("page_link", 409, "content_changed"),
+        ("source_missing", 503, "media_source_unavailable"),
+        ("source_denied", 503, "media_source_unavailable"),
+        ("cache_missing", 409, "content_not_ready"),
+        ("cache_link", 409, "content_not_ready"),
+        ("cache_version", 409, "content_not_ready"),
+    ],
+)
+def test_comic_content_changes(tmp_path, monkeypatch, change, status, code):
+    """Reject stale page lists and conditional images after source or cache changes.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture replacing unavailable file inspection.
+        change: The source or cache mutation before reading.
+        status: The expected HTTP status.
+        code: The expected controlled error.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_comic(tmp_path, MediaFormat.DIR)
+            directory = Path(item.path)
+            page = directory / "1.png"
+            cache = (
+                tmp_path / "cache/media_index" / str(item.id) / str(item.index_version)
+            )
+            async with _client(_user()) as client:
+                url = f"/_api/media/{item.id}/content"
+                asset_url = (await client.get(url)).json()["data"]["images"][0]
+                if change == "added":
+                    (directory / "3.png").write_bytes(_PNG)
+                elif change == "removed":
+                    page.unlink()
+                elif change == "renamed":
+                    page.rename(directory / "0.png")
+                elif change == "modified":
+                    page.write_bytes(_PNG + b"replacement")
+                elif change == "page_link":
+                    target = tmp_path / "outside.png"
+                    page.rename(target)
+                    page.symlink_to(target)
+                elif change == "source_missing":
+                    directory.rename(directory.with_name("Moved"))
+                elif change == "source_denied":
+                    original = Path.stat
+
+                    def denied(path, *args, **kwargs):
+                        """Simulate a page whose attributes are unavailable.
+
+                        Args:
+                            path: The inspected path.
+                            *args: Positional stat arguments.
+                            **kwargs: Keyword stat arguments.
+
+                        Returns:
+                            Attributes of accessible paths.
+
+                        Raises:
+                            PermissionError: For the selected source page.
+                        """
+                        if path == page:
+                            raise PermissionError("unavailable page")
+                        return original(path, *args, **kwargs)
+
+                    monkeypatch.setattr(Path, "stat", denied)
+                elif change == "cache_missing":
+                    (cache / "index.json").unlink()
+                elif change == "cache_link":
+                    target = tmp_path / "outside-index.json"
+                    (cache / "index.json").rename(target)
+                    (cache / "index.json").symlink_to(target)
+                else:
+                    path = cache / "index.json"
+                    path.write_text(
+                        path.read_text().replace(str(item.index_version), "f" * 64)
+                    )
+                for target in (url, asset_url):
+                    response = await client.get(target, headers={"If-None-Match": "*"})
+                    assert response.status_code == status, response.text
+                    assert response.json()["message"] == code
+                    assert response.headers["cache-control"] == "private, no-store"
+                    assert "etag" not in response.headers
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.CBZ, MediaFormat.ZIP])
+def test_comic_asset_crc(tmp_path, format):
+    """Revalidate archive members before allowing a conditional image response.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        format: The supported comic archive format.
+    """
+
+    async def run():
+        async with _database():
+            item = await _indexed_comic(tmp_path, format)
+            async with _client(_user()) as client:
+                content = await client.get(f"/_api/media/{item.id}/content")
+                url = content.json()["data"]["images"][0]
+                etag = (await client.get(url)).headers["etag"]
+                path = Path(item.path)
+                before = path.stat()
+                with zipfile.ZipFile(path) as archive:
+                    entries = [
+                        (entry, archive.read(entry)) for entry in archive.infolist()
+                    ]
+                with zipfile.ZipFile(path, "w") as archive:
+                    for entry, data in entries:
+                        if entry.filename == "pages/1.png":
+                            data = data.replace(b"image", b"other")
+                        archive.writestr(entry, data)
+                assert path.stat().st_size == before.st_size
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                response = await client.get(url, headers={"If-None-Match": etag})
+                assert response.status_code == 409, response.text
+                assert response.json()["message"] == "content_changed"
+                assert "etag" not in response.headers
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("asset", [False, True])
+@pytest.mark.parametrize("change", ["page", "cache", "sibling"])
+def test_comic_read_race(tmp_path, monkeypatch, asset, change):
+    """Guard unlocked comic reads against page and cache replacement.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture wrapping the actual worker read.
+        asset: Whether to read image bytes instead of the page list.
+        change: The file changed before the read's stability check.
+    """
+    from app.core.media import image as image_media
+    from app.core.media import metadata_reader
+
+    async def run():
+        async with _database():
+            item = await _indexed_comic(tmp_path, MediaFormat.DIR)
+            cache = (
+                tmp_path / "cache/media_index" / str(item.id) / str(item.index_version)
+            )
+            module = image_media if asset else metadata_reader
+            name = "read_image_resource" if asset else "read_metadata"
+            read = getattr(module, name)
+            loop_thread = threading.get_ident()
+
+            def changed(*args):
+                """Read actual data and simulate an external writer before returning.
+
+                Args:
+                    *args: The arguments to the original reader.
+
+                Returns:
+                    The original result before the source or cache is mutated.
+                """
+                assert threading.get_ident() != loop_thread
+                result = read(*args)
+                if change == "sibling":
+                    (cache.parent / "unrelated.tmp").write_text("unrelated")
+                else:
+                    # changing an unselected page must also invalidate this version
+                    path = (
+                        Path(item.path) / "2.png"
+                        if change == "page"
+                        else cache / "index.json"
+                    )
+                    before = path.stat()
+                    path.write_bytes(
+                        path.read_bytes().replace(b"image", b"other")
+                        if change == "page"
+                        else path.read_bytes() + b" "
+                    )
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                return result
+
+            monkeypatch.setattr(module, name, changed)
+            async with library_lock(item.lib.dir):
+                request = (
+                    MediaItemService.get_asset(
+                        item.id,
+                        _user(),
+                        hashlib.sha256(b"image:1.png").hexdigest()[:32],
+                        str(item.index_version),
+                    )
+                    if asset
+                    else MediaItemService.get_content(
+                        item.id, _user(), MediaContentQuery()
+                    )
+                )
+                if change == "sibling":
+                    assert await asyncio.wait_for(request, timeout=3)
+                else:
+                    with pytest.raises(ContentError, match="content_changed"):
+                        await asyncio.wait_for(request, timeout=3)
 
     asyncio.run(run())

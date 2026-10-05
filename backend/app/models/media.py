@@ -216,12 +216,16 @@ class MediaQuery(Pageable):
 
 
 class MediaContentQuery(BaseModel):
-    """Select a novel chapter from the current published content version."""
+    """Select a reading section or comic page range from the published version."""
 
     model_config = ConfigDict(extra="forbid")
 
-    chapter_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    chapter_id: str | None = Field(
+        default=None, pattern=r"^(?:[0-9a-f]{32}|item:[1-9][0-9]*)$"
+    )
     version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=40, ge=1, le=100)
 
 
 class MediaAssetQuery(BaseModel):
@@ -324,6 +328,17 @@ class EpubContent(ContentResponse):
         Annotated[ContentText | ContentList | ContentImage, Field(discriminator="type")]
     ]
     warnings: list[ContentWarning]
+
+
+class ImageContent(ContentResponse):
+    """Return a bounded page of indexed comic image URLs."""
+
+    media_type: Literal["image"] = "image"
+    format: Literal["dir", "cbz", "zip"]
+    content_type: Literal["images"] = "images"
+    images: list[str]
+    image_count: int
+    next_offset: int | None
 
 
 class MediaMetadata(BaseModel):

@@ -73,6 +73,7 @@ def _content_error(error: ContentError, headers: dict[str, str]) -> KaloscopeExc
         The application exception carrying a stable error code and HTTP status.
     """
     status = {
+        "bad_request": 400,
         "not_found": 404,
         "content_changed": 409,
         "content_not_ready": 409,
@@ -258,15 +259,15 @@ async def get_item_cover(request: Request, id: int) -> HTTPResponse:
 async def get_item_content(
     request: Request, id: int, query: MediaContentQuery
 ) -> HTTPResponse:
-    """Serve a novel's chapter list and selected content from its published index.
+    """Serve indexed novel content or a bounded page of comic image URLs.
 
     Args:
         request: The authenticated request with loaded library permissions.
         id: The requested reading item ID.
-        query: The optional chapter and expected content version.
+        query: The optional chapter, expected version and comic pagination.
 
     Returns:
-        TXT paragraphs or EPUB blocks with private caching disabled and bounded JSON.
+        Reading content with private caching disabled and a bounded JSON body.
 
     Raises:
         KaloscopeException: If access, source, index or response limits fail.

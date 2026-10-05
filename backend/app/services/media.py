@@ -34,6 +34,7 @@ from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import (
     ContentChapter,
     EpubContent,
+    ImageContent,
     IndexState,
     LibType,
     MediaContentQuery,
@@ -484,6 +485,46 @@ def _read_reading(
         return metadata, cover, "media_source_unavailable" if missing else None
 
 
+def _check_image_pages(source: ReadingSource, index: ImageIndex, states: _SourceStates):
+    """Match directory pages to the index and retain their identities during reading.
+
+    Args:
+        source: The validated image directory whose direct body pages are inspected.
+        index: The published index with ordered filenames and file snapshots.
+        states: The source identities rechecked by the enclosing source guard.
+
+    Raises:
+        ContentError: If page names, types or snapshots no longer match the index.
+        OSError: If page inspection fails; the enclosing source guard translates it.
+    """
+    from app.core.media.handlers.reading import (
+        identify_comic_source,
+        list_source_entries,
+    )
+
+    files, _ = list_source_entries(source.directory)
+    try:
+        current = identify_comic_source(source.directory, files)
+    except ValueError as error:
+        raise ContentError(str(error)) from error
+    if (
+        current is None
+        or current.format != MediaFormat.DIR
+        or [path.name for path in current.pages]
+        != [page.relative_path for page in index.pages]
+    ):
+        raise ContentError("content_changed")
+    for path, page in zip(current.pages, index.pages, strict=True):
+        info = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_size != page.size
+            or info.st_mtime_ns != page.mtime_ns
+        ):
+            raise ContentError("content_changed")
+        states[path] = file_state(info)
+
+
 def _content_is_current(item: MediaItem) -> bool:
     """Check whether a ready body index still matches its source without parsing it.
 
@@ -497,10 +538,6 @@ def _content_is_current(item: MediaItem) -> bool:
     Returns:
         Whether the current cache and source pass the incremental reuse checks.
     """
-    from app.core.media.handlers.reading import (
-        identify_comic_source,
-        list_source_entries,
-    )
     from app.core.media.image import load_image_index
     from app.core.media.text import load_text_index
 
@@ -534,56 +571,45 @@ def _content_is_current(item: MediaItem) -> bool:
                     info.st_size == index.source_snapshot.size
                     and info.st_mtime_ns == index.source_snapshot.mtime_ns
                 )
-            files, _ = list_source_entries(source.directory)
-            current = identify_comic_source(source.directory, files)
-            if current is None or current.format != MediaFormat.DIR:
-                return False
-            pages = current.pages
-            if [path.name for path in pages] != [
-                page.relative_path for page in index.pages
-            ]:
-                return False
-            for path, page in zip(pages, index.pages, strict=True):
-                info = path.stat(follow_symlinks=False)
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or info.st_size != page.size
-                    or info.st_mtime_ns != page.mtime_ns
-                ):
-                    return False
-                states[path] = file_state(info)
+            _check_image_pages(source, index, states)
             return True
     except ValueError:
         return False
 
 
 @contextmanager
-def _text_index(
+def _content_index(
     item: MediaItem,
-) -> Generator[tuple[ReadingSource, Path, TextIndex | EpubIndex]]:
-    """Guard a novel's source and published cache throughout a content read.
+) -> Generator[tuple[ReadingSource, Path, TextIndex | EpubIndex | ImageIndex]]:
+    """Guard a reading source and its published cache throughout a content read.
 
     Args:
-        item: The accessible novel with a validated ready index version.
+        item: The accessible reading unit with a validated ready index version.
 
     Yields:
-        The validated source, cache directory and current text or EPUB index.
+        The validated source, cache directory and current text, EPUB or image index.
 
     Raises:
         ContentError: If the source or cache is unavailable, changed or invalid.
     """
+    from app.core.media.image import load_image_index
     from app.core.media.text import load_text_index
 
-    with _reading_source(item) as (source, _, missing):
+    with _reading_source(item) as (source, source_states, missing):
         if missing:
             raise ContentError("media_source_unavailable")
         root = Path(KaloscopeConfig.get_workspace("temp"))
         cache = root / "media_index" / str(item.id) / str(item.index_version)
-        filename = "content.txt" if item.format == MediaFormat.TXT else "content.jsonl"
+        files = [cache / "index.json"]
+        if item.lib.lib_type == LibType.NOVEL:
+            files.append(
+                cache
+                / ("content.txt" if item.format == MediaFormat.TXT else "content.jsonl")
+            )
         try:
             directories = (root, cache.parent.parent, cache.parent, cache)
             states = {}
-            for path in (*directories, cache / "index.json", cache / filename):
+            for path in (*directories, *files):
                 info = path.stat(follow_symlinks=False)
                 directory = path in directories
                 if not (
@@ -594,16 +620,26 @@ def _text_index(
                     raise ContentError("content_not_ready")
                 # sibling cache writes do not change the selected version
                 states[path] = file_state(info)[:2] if directory else file_state(info)
-            index = load_text_index(cache)
+            index = (
+                load_text_index(cache)
+                if item.lib.lib_type == LibType.NOVEL
+                else load_image_index(cache)
+            )
             if index.format != item.format or index.index_version != item.index_version:
                 raise ContentError("content_not_ready")
+        except OSError as error:
+            raise ContentError("content_not_ready") from error
+        if index.source_snapshot is not None:
             info = source.path.stat(follow_symlinks=False)
             if (
                 info.st_size != index.source_snapshot.size
                 or info.st_mtime_ns != index.source_snapshot.mtime_ns
             ):
                 raise ContentError("content_changed")
-            yield source, cache, index
+        else:
+            _check_image_pages(source, index, source_states)
+        yield source, cache, index
+        try:
             for path, before in states.items():
                 after = file_state(path.stat(follow_symlinks=False))
                 if after[: len(before)] != before:
@@ -629,9 +665,10 @@ def _read_text_content(
             or the chapter is absent from the current index.
     """
     from app.core.media.metadata_reader import read_metadata
-    from app.core.media.text import read_text_chapter
+    from app.core.media.text import EpubIndex, TextIndex, read_text_chapter
 
-    with _text_index(item) as (source, cache, index):
+    with _content_index(item) as (source, cache, index):
+        assert isinstance(index, (TextIndex, EpubIndex))
         selected = chapter_id or index.chapters[0].id
         content = read_text_chapter(cache, selected)
         values = {
@@ -659,12 +696,55 @@ def _read_text_content(
         return EpubContent.model_validate({**values, **data})
 
 
-def _read_text_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
-    """Read one indexed EPUB image within the same source and cache guards.
+def _read_image_content(item: MediaItem, offset: int, limit: int) -> ImageContent:
+    """Read one comic's indexed page range with a live local title.
 
     Args:
-        item: The accessible EPUB item with a validated ready index version.
-        asset_id: The opaque image ID from a published content block.
+        item: The accessible comic source with a validated ready index version.
+        offset: The zero-based first page; the page count selects the empty last page.
+        limit: The validated batch size from 1 to 100.
+
+    Returns:
+        One source's chapter label, version and bounded image URLs in reading order.
+
+    Raises:
+        ContentError: If the source or cache changed, is unavailable or invalid,
+            or the requested offset exceeds the page count.
+    """
+    from app.core.media.image import ImageIndex
+    from app.core.media.metadata_reader import read_metadata
+
+    with _content_index(item) as (source, _, index):
+        assert isinstance(index, ImageIndex)
+        count = len(index.pages)
+        if offset > count:
+            raise ContentError("bad_request")
+        title = read_metadata(source).data.title or source.directory.name
+        chapter_id = f"item:{item.id}"
+        end = min(offset + limit, count)
+        return ImageContent(
+            item_id=item.id,
+            source_item_id=item.id,
+            title=title,
+            format=index.format,
+            version=index.index_version,
+            chapter_id=chapter_id,
+            chapters=[ContentChapter(id=chapter_id, title=title, part=1)],
+            images=[
+                f"/_api/media/{item.id}/assets/{page.id}?v={index.index_version}"
+                for page in index.pages[offset:end]
+            ],
+            image_count=count,
+            next_offset=end if end < count else None,
+        )
+
+
+def _read_content_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
+    """Read one indexed EPUB or comic image within the source and cache guards.
+
+    Args:
+        item: The accessible reading unit with a validated ready index version.
+        asset_id: The opaque image ID from a published block or comic page list.
 
     Returns:
         Verified raster bytes and their detected MIME type.
@@ -672,10 +752,16 @@ def _read_text_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
     Raises:
         ContentError: If the resource is unknown, unavailable, changed or invalid.
     """
+    from app.core.media.image import read_image_resource
     from app.core.media.text import read_text_resource
 
-    with _text_index(item) as (source, cache, _):
-        return read_text_resource(source.path, cache, asset_id)
+    with _content_index(item) as (source, cache, _):
+        read = (
+            read_text_resource
+            if item.lib.lib_type == LibType.NOVEL
+            else read_image_resource
+        )
+        return read(source.path, cache, asset_id)
 
 
 def _build_content(
@@ -1860,7 +1946,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             version: The expected published version, or None for the current one.
 
         Yields:
-            The accessible, ready novel item for one read operation.
+            The accessible, ready novel or comic source for one read operation.
 
         Raises:
             NotFoundException: If the item is hidden, missing or not reading media.
@@ -1871,10 +1957,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         item = await cls.get_accessible(id, user)
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise NotFoundException()
-        if item.lib.lib_type != LibType.NOVEL or item.format not in (
-            MediaFormat.TXT,
-            MediaFormat.EPUB,
-        ):
+        formats = (
+            (MediaFormat.TXT, MediaFormat.EPUB)
+            if item.lib.lib_type == LibType.NOVEL
+            else (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+        )
+        if item.format not in formats:
             raise ContentError("unsupported_media_format")
         if (
             item.index_state != IndexState.READY
@@ -1913,16 +2001,16 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     @classmethod
     async def get_content(
         cls, id: int, user: UserInfo, query: MediaContentQuery
-    ) -> TextContent | EpubContent:
-        """Read a novel chapter without indexing, metadata writes or history updates.
+    ) -> TextContent | EpubContent | ImageContent:
+        """Read published content without indexing, metadata writes or history updates.
 
         Args:
-            id: The requested novel item ID.
+            id: The requested reading source ID.
             user: The authenticated user with loaded library permissions.
-            query: The optional chapter and expected content version.
+            query: The optional chapter, expected version and comic pagination.
 
         Returns:
-            A chapter list and TXT paragraphs or EPUB blocks with local image URLs.
+            TXT paragraphs, EPUB blocks or comic page URLs with chapter labels.
 
         Raises:
             NotFoundException: If the item is unavailable or belongs to a video library.
@@ -1930,13 +2018,23 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ContentError: If the requested content is unavailable or changed.
         """
         async with cls._content_item(id, user, query.version) as item:
+            if item.lib.lib_type == LibType.COMIC:
+                if query.chapter_id not in (None, f"item:{item.id}"):
+                    raise ContentError("bad_request")
+                return await to_thread(
+                    _read_image_content, item, query.offset, query.limit
+                )
+            if query.model_fields_set & {"offset", "limit"} or (
+                query.chapter_id is not None and query.chapter_id.startswith("item:")
+            ):
+                raise ContentError("bad_request")
             return await to_thread(_read_text_content, item, query.chapter_id)
 
     @classmethod
     async def get_asset(
         cls, id: int, user: UserInfo, asset_id: str, version: str
     ) -> tuple[bytes, str]:
-        """Read an EPUB image from its current index after checking library access.
+        """Read an EPUB or comic image from its index after checking library access.
 
         Args:
             id: The requested source item ID.
@@ -1955,10 +2053,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         async with cls._content_item(id, user, version) as item:
             if (
                 re.fullmatch(r"[0-9a-f]{32}", asset_id) is None
-                or item.format != MediaFormat.EPUB
+                or item.format == MediaFormat.TXT
             ):
                 raise ContentError("not_found")
-            return await to_thread(_read_text_asset, item, asset_id)
+            return await to_thread(_read_content_asset, item, asset_id)
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):

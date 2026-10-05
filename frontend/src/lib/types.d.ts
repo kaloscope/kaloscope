@@ -298,11 +298,13 @@ export type MediaItem = {
 };
 
 /**
- * A section selected from the current reading content version.
+ * A section or comic page range selected from the current reading version.
  */
 export type MediaContentQuery = {
   chapter_id?: string;
   version?: string;
+  offset?: number;
+  limit?: number;
 };
 
 /**
@@ -405,7 +407,19 @@ export type EpubContent = ContentResponse & {
   warnings: ContentWarning[];
 };
 
-export type MediaContent = TextContent | EpubContent;
+/**
+ * A bounded page of indexed comic image URLs.
+ */
+export type ImageContent = ContentResponse & {
+  media_type: 'image';
+  format: 'dir' | 'cbz' | 'zip';
+  content_type: 'images';
+  images: string[];
+  image_count: number;
+  next_offset: number | null;
+};
+
+export type MediaContent = TextContent | EpubContent | ImageContent;
 
 /**
  * An actor credited in media metadata.
