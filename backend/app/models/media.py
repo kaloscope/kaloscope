@@ -225,7 +225,7 @@ class MediaContentQuery(BaseModel):
     )
     version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=40, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class MediaAssetQuery(BaseModel):

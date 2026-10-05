@@ -1313,7 +1313,7 @@ def test_text_content_http(tmp_path):
         ({"version": "../index.json"}, 400, "bad_request"),
         ({"path": "/untrusted.txt"}, 400, "bad_request"),
         ({"offset": "0"}, 400, "bad_request"),
-        ({"limit": "40"}, 400, "bad_request"),
+        ({"limit": "20"}, 400, "bad_request"),
         ({"chapter_id": "item:1"}, 400, "bad_request"),
     ],
 )
@@ -2188,10 +2188,21 @@ def test_comic_page_limits(tmp_path):
             async with _client(_user()) as client:
                 url = f"/_api/media/{item.id}/content"
                 default = (await client.get(url)).json()["data"]
-                assert len(default["images"]) == 40 and default["next_offset"] == 40
+                assert len(default["images"]) == 20 and default["next_offset"] == 20
+                following = (
+                    await client.get(
+                        url,
+                        params={
+                            "offset": default["next_offset"],
+                            "version": default["version"],
+                        },
+                    )
+                ).json()["data"]
+                assert len(following["images"]) == 20 and following["next_offset"] == 40
                 maximum = (await client.get(url, params={"limit": 100})).json()["data"]
                 assert len(maximum["images"]) == 100 and maximum["next_offset"] == 100
                 assert maximum["image_count"] == 102
+                assert default["images"] + following["images"] == maximum["images"][:40]
 
     asyncio.run(run())
 

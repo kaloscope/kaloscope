@@ -36,7 +36,7 @@ export { default as Container, type ContainerProps } from './layout/Container.sv
 export { default as Drawer, type DrawerProps } from './layout/Drawer.svelte';
 export { default as Setting, type SettingProps } from './layout/Setting.svelte';
 
-export { default as ImageViewer, type ImageViewerOptions } from './media/image/ImageViewer.svelte';
+export { default as ImageViewer, type ImagePage, type ImageViewerOptions } from './media/image/ImageViewer.svelte';
 export { default as TextViewer, type TextViewerOptions } from './media/text/TextViewer.svelte';
 export { mediaTitle, default as VideoPlayer, type VideoPlayerOptions } from './media/video/VideoPlayer.svelte';
 

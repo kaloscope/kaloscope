@@ -209,10 +209,22 @@
         text: rsrc.text!
       });
     } else if (mediaType === 'image' && imageViewer) {
+      const { indexer_id, rsrc_id } = page.params;
+      const chapter_id = activeChapterId;
       imageViewer.mount({
         ...viewerOptions,
         images,
-        image_count: rsrc.image_count
+        image_count: rsrc.image_count,
+        signal: abortController?.signal,
+        loadImages: async ({ offset, signal }) => {
+          const { data } = await api
+            .post(`flow/graph/${indexer_id}/execute`, {
+              signal,
+              json: { $start: 'details_start', id: rsrc_id, chapter_id, page: offset + 1 }
+            })
+            .json<Resp<Resource | null>>();
+          return { images: data?.images ?? [], image_count: data?.image_count };
+        }
       });
     } else if (mediaType === 'video' && videoPlayer) {
       await videoPlayer.mount({

@@ -1,6 +1,6 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores';
-  import type { Chapter, ChapterGroup, Resource, Resp } from '$lib/types';
+  import type { Chapter, ChapterGroup } from '$lib/types';
 
   /** Delay in ms before auto-hiding the overlay controls. */
   const CONTROLS_HIDE_DELAY = 3000;
@@ -10,15 +10,33 @@
   const SCROLL_LOAD_THRESHOLD = 400;
   /** Maximum retries for a failed image request. */
   const MAX_IMAGE_RETRY = 3;
+  /** Number of images requested in each batch. */
+  const IMAGE_BATCH_SIZE = 20;
 
-  /** Options passed to the image viewer mount function. */
-  export type ImageViewerOptions = {
+  /** A batch of images, with an optional explicit continuation offset. */
+  export type ImagePage = {
     images: string[];
     image_count?: number | null;
+    /** Omit to use the loaded image count, or pass null at the end. */
+    next_offset?: number | null;
+  };
+
+  /** Options passed to the image viewer mount function. */
+  export type ImageViewerOptions = ImagePage & {
     title?: string | null;
     chapters?: Chapter[];
     chapterId?: string | null;
     chapterChange?: (chapter: Chapter) => void;
+    back?: () => void;
+    version?: string;
+    /** Cancels pagination when the caller leaves or replaces the resource. */
+    signal?: AbortSignal;
+    loadImages?: (query: {
+      offset: number;
+      limit: number;
+      version?: string;
+      signal: AbortSignal;
+    }) => Promise<ImagePage>;
   };
 
   /** Reading mode. */
@@ -85,8 +103,7 @@
 </script>
 
 <script lang="ts">
-  import { page as route } from '$app/state';
-  import { api, proxyImage } from '$lib/api';
+  import { proxyImage } from '$lib/api';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
@@ -113,6 +130,8 @@
   );
   // callback to notify parent of chapter change
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
+  // callback to return from a local reading overlay
+  let back = $state<(() => void) | undefined>(undefined);
   // display title, resource title or current chapter title
   let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
   // whether the chapter list is displayed in descending order
@@ -127,18 +146,28 @@
 
   // the scroll container element
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
-  // image elements for paged mode observation
-  let imageEls: HTMLImageElement[] = [];
+  // image elements used to track the scroll position
+  let imageEls = $state<HTMLImageElement[]>([]);
   // current image index, 0-based
   let imageIndex = $state(0);
   // total number of images available from the api
   let imageCount = $state(0);
-  // whether all available images have been loaded
-  let exhausted = $state(false);
+  // continuation offset supplied by the source or derived from loaded images
+  let nextOffset = $state<number | null>(null);
+  // source-specific pagination supplied by the caller
+  let loadImages = $state<ImageViewerOptions['loadImages']>(undefined);
+  // version and cancellation shared by the current resource's requests
+  let version: string | undefined;
+  let readController: AbortController | undefined;
+  let readSignal: AbortSignal | undefined;
+  // recreate image elements when replacing the current resource
+  let mountId = $state(0);
   // whether more images can be loaded
-  let hasMore = $derived(images.length < imageCount && !exhausted);
+  let hasMore = $derived(!!loadImages && nextOffset !== null);
   // whether a network request is in progress
   let loading = $state(false);
+  // whether pagination needs an explicit retry
+  let loadFailed = $state(false);
   // whether an image is currently loading
   let imageLoading = $state(false);
 
@@ -162,18 +191,35 @@
    * @param options - The image viewer options.
    */
   export function mount(options: ImageViewerOptions) {
-    if (!options || !options.images?.length) {
+    if (!options) {
       return;
     }
+    readController?.abort();
+    readController = new AbortController();
+    readSignal = options.signal ? AbortSignal.any([readController.signal, options.signal]) : readController.signal;
+    version = options.version;
+    loadImages = options.loadImages;
     title = options.title ?? '';
-    images = options.images.map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
-    imageCount = options.image_count && options.image_count > 0 ? options.image_count : images.length;
+    images = [];
+    appendImages(options.images);
+    imageCount = Math.max(options.image_count ?? 0, images.length);
+    nextOffset =
+      options.next_offset === undefined ? (images.length < imageCount ? images.length : null) : options.next_offset;
+    if (!images.length || !loadImages || nextOffset === null) {
+      nextOffset = null;
+      imageCount = images.length;
+    }
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
+    back = options.back;
     imageIndex = 0;
-    imageLoading = true;
-    exhausted = images.length >= imageCount;
+    imageEls = [];
+    imageLoading = images.length > 0;
+    loading = false;
+    loadFailed = false;
+    mountId++;
+    scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     showControls();
   }
 
@@ -183,6 +229,7 @@
    * @param chapter - The chapter to select.
    */
   function selectChapter(chapter: Chapter) {
+    readController?.abort();
     chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
@@ -201,7 +248,7 @@
    * Move to the previous loaded image.
    */
   function prev() {
-    if (imageIndex > 0) {
+    if (imageIndex > 0 && !readSignal?.aborted) {
       animForward = false;
       imageIndex--;
       imageLoading = true;
@@ -213,11 +260,15 @@
    * Move to the next image, loading more images when needed.
    */
   async function next() {
-    if (imageIndex >= imageCount - 1 || loading || imageLoading) {
+    const signal = readSignal;
+    if (!signal || signal.aborted || loading || imageLoading) {
       return;
     }
     if (imageIndex >= images.length - 1) {
-      await loadMore();
+      const currentIndex = imageIndex;
+      if (!(await loadMore()) || signal.aborted || imageIndex !== currentIndex) {
+        return;
+      }
     }
     if (imageIndex < images.length - 1) {
       animForward = true;
@@ -230,43 +281,53 @@
   /**
    * Append new image URLs to the viewer, skipping duplicates.
    *
-   * @param urls - The image URLs returned from the details API.
+   * @param urls - The image URLs returned by the content source.
    * @returns The number of images appended.
    */
   function appendImages(urls: string[] | null | undefined): number {
-    const nextImages = (urls ?? []).map((src) => proxyImage(src, 'auto')).filter((src): src is string => !!src);
-    const appended = nextImages.filter((src) => !images.includes(src));
-    if (appended.length > 0) {
-      images = [...images, ...appended];
-    }
-    return appended.length;
+    const nextImages = (urls ?? []).map((src) => proxyImage(src.trim(), 'auto')).filter((src): src is string => !!src);
+    const previousLength = images.length;
+    images = [...new Set([...images, ...nextImages])];
+    return images.length - previousLength;
   }
 
   /**
-   * Load the next batch of images from the details API.
+   * Load the next batch through the current source, ignoring cancelled results.
+   *
+   * @returns Whether new images were appended to the current resource.
    */
   async function loadMore() {
-    if (loading || !hasMore) {
-      return;
+    const loader = loadImages;
+    const signal = readSignal;
+    const offset = nextOffset;
+    if (loading || !loader || !signal || signal.aborted || offset === null) {
+      return false;
     }
     loading = true;
+    loadFailed = false;
     try {
-      const resp = await api
-        .post(`flow/graph/${route.params.indexer_id}/execute`, {
-          json: {
-            $start: 'details_start',
-            id: route.params.rsrc_id,
-            chapter_id: route.url.searchParams.get('chapter_id') ?? chapterId,
-            page: images.length + 1
-          }
-        })
-        .json<Resp<Resource | null>>();
-      const data = resp.data;
-      const nextCount = data?.image_count;
-      imageCount = nextCount && nextCount > 0 ? nextCount : imageCount;
-      exhausted = appendImages(data?.images) === 0;
+      const data = await loader({ offset, limit: IMAGE_BATCH_SIZE, version, signal });
+      if (signal.aborted) {
+        return false;
+      }
+      const appended = appendImages(data.images);
+      imageCount = Math.max(data.image_count ?? imageCount, images.length);
+      const next =
+        data.next_offset === undefined ? (images.length < imageCount ? images.length : null) : data.next_offset;
+      nextOffset = appended > 0 && next !== null && next > offset ? next : null;
+      if (nextOffset === null) {
+        imageCount = images.length;
+      }
+      return appended > 0;
+    } catch {
+      if (!signal.aborted) {
+        loadFailed = true;
+      }
+      return false;
     } finally {
-      loading = false;
+      if (signal === readSignal) {
+        loading = false;
+      }
     }
   }
 
@@ -300,17 +361,22 @@
   }
 
   /**
-   * Retry a failed image request with a cache-busting query parameter.
+   * Retry failed images while preserving local asset query parameters.
    *
    * @param e - The image error event.
    */
   function handleImageError(e: Event) {
     const img = e.target as HTMLImageElement;
+    if (!img.isConnected || readSignal?.aborted) {
+      return;
+    }
     const retry = parseInt(img.dataset.retry || '0');
     if (retry < MAX_IMAGE_RETRY) {
       img.dataset.retry = String(retry + 1);
       const url = new URL(img.src);
-      url.searchParams.set('_r', String(retry + 1));
+      if (url.origin !== window.location.origin || !url.pathname.startsWith('/_api/media/')) {
+        url.searchParams.set('_r', String(retry + 1));
+      }
       img.src = url.toString();
     } else {
       imageLoading = false;
@@ -323,7 +389,7 @@
   function handleImageScroll() {
     updateImageIndex();
     const el = scrollEl;
-    if ($settings?.readMode !== 'scroll' || !el || !hasMore || loading) {
+    if ($settings?.readMode !== 'scroll' || !el || !hasMore || loading || loadFailed) {
       return;
     }
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_THRESHOLD) {
@@ -337,7 +403,7 @@
    * @param e - The keyboard event.
    */
   function handleKeyDown(e: KeyboardEvent) {
-    if (settingsOpen || $settings === null) {
+    if (settingsOpen || chaptersOpen || $settings === null) {
       return;
     }
     if (e.key === 'ArrowUp' || e.key === 'PageUp') {
@@ -357,6 +423,9 @@
    */
   function handleClick(e: MouseEvent) {
     if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') {
+      return;
+    }
+    if (e.target instanceof Element && e.target.closest('button, input, label')) {
       return;
     }
     const direction = $settings.pageDirection;
@@ -398,6 +467,7 @@
     freeze.set(true);
     showControls();
     return () => {
+      readController?.abort();
       freeze.set(false);
       clearTimeout(hideTimer);
     };
@@ -422,7 +492,14 @@
       transition:fade={{ duration: 200 }}
     >
       <div class="flex items-center gap-1">
-        <button class="btn border-0 btn-ghost shadow-none btn-xs" onclick={() => historyBack()} aria-label="Back">
+        <button
+          class="btn border-0 btn-ghost shadow-none btn-xs"
+          onclick={() => {
+            readController?.abort();
+            (back ?? historyBack)();
+          }}
+          aria-label="Back"
+        >
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if chapters.length > 1}
@@ -496,7 +573,7 @@
       class="min-w-0 flex-1 overflow-x-auto overflow-y-auto overscroll-none"
       onscroll={handleImageScroll}
     >
-      {#each images as src, i (i)}
+      {#each images as src, i (`${mountId}:${i}`)}
         <img
           bind:this={imageEls[i]}
           {src}
@@ -517,8 +594,8 @@
   {:else}
     <div bind:this={scrollEl} class="min-w-0 flex-1 overflow-auto overscroll-none">
       <div class="flex-center h-full w-min min-w-full">
-        {#if imageCount > 0}
-          {#key imageIndex}
+        {#if images[imageIndex]}
+          {#key `${mountId}:${imageIndex}`}
             <img
               src={images[imageIndex]}
               alt=""
@@ -537,6 +614,18 @@
         <span class="loading loading-xl loading-spinner"></span>
       </div>
     {/if}
+  {/if}
+
+  {#if loadFailed}
+    <div
+      role="status"
+      class="absolute inset-x-0 bottom-12 z-1 mx-auto flex w-fit max-w-full items-center gap-3 rounded-field bg-black/80 px-4 py-2 text-sm text-white/80"
+    >
+      <span>{$_('media.image.load_failed')}</span>
+      <button class="btn border-0 btn-ghost shadow-none btn-sm" onclick={() => loadMore()}>
+        {$_('action.retry')}
+      </button>
+    </div>
   {/if}
 
   <!-- settings panel -->
