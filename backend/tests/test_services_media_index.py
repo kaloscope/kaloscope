@@ -1,4 +1,4 @@
-"""Tests for reading ingestion, moves, indexes and collection summaries."""
+"""Tests for reading ingestion, moves, removal, indexes and collection summaries."""
 
 import asyncio
 import json
@@ -16,6 +16,7 @@ import pytest
 from filelock import Timeout
 from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
+from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
 from app.core.media import events as media_events
@@ -2537,6 +2538,439 @@ def test_move_empty_chapter(tmp_path, parent_body):
                 }
                 await child.refresh_from_db()
                 assert child.index_state == IndexState.EMPTY
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "directory"),
+    [(format, True) for format in MediaFormat]
+    + [(format, False) for format in MediaFormat if format != MediaFormat.DIR],
+)
+def test_remove_missing_reading(tmp_path, format, directory):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=item.id).update(visible=False)
+            cache = _cache(item).parent
+            (cache / "old-version").mkdir()
+            (cache / "old-version" / "index.json").write_text("old")
+            note = source.directory / "notes.txt"
+            note.write_text("Keep me")
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            for kind in HistoryType:
+                await UserHistory.create(user=user, rel_id=item.id, rel_type=kind)
+            kind = (
+                HistoryType.TEXT if lib.lib_type == LibType.NOVEL else HistoryType.IMAGE
+            )
+            preserved = await UserHistory.exclude(rel_type=kind).values()
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(source.directory),
+                event_type="reconcile",
+                is_directory=True,
+                payload={"targets": [str(source.directory)]},
+            )
+            if directory:
+                shutil.rmtree(source.directory)
+            else:
+                source.path.unlink()
+            assert await MediaItemService.remove_missing_reading_item(item.id) == [
+                item.id
+            ]
+            assert not await MediaItem.exists() and not cache.exists()
+            assert await UserHistory.all().values() == preserved
+            assert await MediaEvent.filter(id=event.id).exists()
+            assert not await MediaItemService.remove_missing_reading_item(item.id)
+            if not directory:
+                assert note.read_text() == "Keep me"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("collection", [False, True])
+@pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
+def test_remove_missing_comic(tmp_path, format, collection):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=True)
+            work = source.directory.parent
+            sibling = work / "Sibling"
+            sibling.mkdir()
+            (sibling / "1.png").write_bytes(_PNG)
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            parent = await MediaItem.get(path=str(work))
+            child = await MediaItem.get(path=str(source.path))
+            second = await MediaItem.get(path=str(sibling))
+            await MediaItem.filter(id=child.id).update(visible=False)
+            preserved = await MediaItem.exclude(id=child.id).values()
+            histories = []
+            for index, chapter_id in enumerate(
+                (child.id, second.id, None, str(child.id), [child.id], True)
+            ):
+                user = await User.create(
+                    username=str(index), password="unused", role=UserRole.USER
+                )
+                history = await UserHistory.create(
+                    user=user,
+                    rel_id=parent.id,
+                    rel_type=HistoryType.IMAGE,
+                    locator={"chapter_item_id": chapter_id},
+                )
+                if chapter_id != child.id:
+                    histories.append(history.id)
+                await UserHistory.create(
+                    user=user,
+                    rel_id=child.id,
+                    rel_type=HistoryType.VIDEO,
+                )
+            video = await UserHistory.filter(rel_type=HistoryType.VIDEO).values()
+            shutil.rmtree(work if collection else source.directory)
+            removed = await MediaItemService.remove_missing_reading_item(
+                parent.id if collection else child.id
+            )
+            assert set(removed) == (
+                {parent.id, child.id, second.id} if collection else {child.id}
+            )
+            assert not _cache(child).parent.exists()
+            assert (
+                await UserHistory.filter(rel_type=HistoryType.VIDEO).values() == video
+            )
+            if collection:
+                assert (
+                    not await MediaItem.exists() and not _cache(second).parent.exists()
+                )
+                assert not await UserHistory.filter(rel_type=HistoryType.IMAGE).exists()
+            else:
+                assert await MediaItem.all().values() == preserved
+                assert set(
+                    await UserHistory.filter(rel_type=HistoryType.IMAGE).values_list(
+                        "id", flat=True
+                    )
+                ) == set(histories)
+                assert _cache(second).is_dir()
+                current = await MediaItemService.sync_collection(parent.id)
+                assert (
+                    current.extra is not None
+                    and current.extra["content"]["chapter_count"] == 1
+                )
+                shutil.rmtree(sibling)
+                await MediaItemService.remove_missing_reading_item(second.id)
+                current = await MediaItemService.sync_collection(parent.id)
+                assert current.index_state == IndexState.EMPTY
+                assert (
+                    current.extra is not None
+                    and current.extra["content"]["chapter_count"] == 0
+                )
+                assert await MediaItem.all().count() == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "kind", ["file", "replacement", "empty_directory", "empty_collection"]
+)
+def test_remove_reading_present(tmp_path, kind):
+    async def run():
+        async with _database():
+            format = (
+                MediaFormat.TXT if kind in ("file", "replacement") else MediaFormat.DIR
+            )
+            lib, source = await _source(
+                tmp_path, format, chapter=kind == "empty_collection"
+            )
+            work = source.parent_path or source.directory
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            item = await MediaItem.get(
+                path=str(work if kind == "empty_collection" else source.path)
+            )
+            if kind == "replacement":
+                source.path.unlink()
+                source.path.write_text("Replacement")
+            elif kind == "empty_collection":
+                shutil.rmtree(source.directory)
+            elif kind == "empty_directory":
+                (source.path / "1.png").unlink()
+            before = await MediaItem.all().values()
+            assert not await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "root_missing",
+        "root_link",
+        "work_link",
+        "source_link",
+        "permission",
+        "file_type",
+    ],
+)
+def test_remove_reading_unavailable(tmp_path, monkeypatch, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            root = Path(lib.dir)
+            if problem in ("root_missing", "root_link", "work_link"):
+                target = source.directory if problem == "work_link" else root
+                outside = tmp_path / "Outside"
+                target.rename(outside)
+                if problem != "root_missing":
+                    target.symlink_to(outside, target_is_directory=True)
+            elif problem == "source_link":
+                source.path.symlink_to(tmp_path / "Absent.txt")
+            elif problem == "file_type":
+                source.path.mkdir()
+            else:
+                original = Path.stat
+
+                def denied(path, *args, **kwargs):
+                    """Reject source access without hiding the permission failure.
+
+                    Args:
+                        path: The path whose attributes are requested.
+                        *args: Positional stat arguments.
+                        **kwargs: Keyword stat arguments.
+
+                    Returns:
+                        Unmodified attributes for other paths.
+
+                    Raises:
+                        PermissionError: For the selected source.
+                    """
+                    if path == source.path:
+                        raise PermissionError("denied")
+                    return original(path, *args, **kwargs)
+
+                monkeypatch.setattr(Path, "stat", denied)
+            before = await MediaItem.all().values()
+            with pytest.raises(ContentError, match="media_source_unavailable"):
+                await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == before and _cache(item).is_dir()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem", ["foreign_child", "outside_child", "nested_child", "parent_format"]
+)
+def test_remove_reading_ownership(tmp_path, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.directory.parent
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            parent = await MediaItem.get(path=str(work))
+            child = await MediaItem.get(path=str(source.path))
+            if problem == "foreign_child":
+                other = await MediaLib.create(
+                    name="Other",
+                    dir=str(tmp_path / "Other"),
+                    lib_type=LibType.COMIC,
+                    priority=2,
+                )
+                await MediaItem.filter(id=child.id).update(lib_id=other.id)
+            elif problem == "outside_child":
+                await MediaItem.filter(id=child.id).update(
+                    path=str(work.with_name("Other") / "Chapter")
+                )
+            elif problem == "nested_child":
+                await MediaItem.create(
+                    lib=lib,
+                    parent=child,
+                    path=str(source.path / "Nested"),
+                    dir=str(source.path / "Nested"),
+                    name="Nested",
+                    format=MediaFormat.DIR,
+                )
+            else:
+                await MediaItem.filter(id=parent.id).update(format=MediaFormat.DIR)
+            shutil.rmtree(work)
+            before = await MediaItem.all().values()
+            with pytest.raises(
+                ContentError,
+                match="media_source_unavailable"
+                if problem == "foreign_child"
+                else "unsupported_layout",
+            ):
+                await MediaItemService.remove_missing_reading_item(parent.id)
+            assert await MediaItem.all().values() == before and _cache(child).is_dir()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem", ["cache", "restore", "ancestor", "ownership", "new_child", "write"]
+)
+def test_remove_reading_failure(tmp_path, monkeypatch, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user, rel_id=item.id, rel_type=HistoryType.TEXT
+            )
+            source.path.unlink()
+            rows, history = (
+                await MediaItem.all().values(),
+                await UserHistory.all().values(),
+            )
+            original = media_service.write_in_thread
+
+            async def changed(function, *args, **kwargs):
+                """Change state after cleanup to verify deletion revalidation.
+
+                Args:
+                    function: The cache cleanup operation.
+                    *args: Positional cleanup arguments.
+                    **kwargs: Keyword cleanup arguments.
+                """
+                await original(function, *args, **kwargs)
+                if problem == "restore":
+                    source.path.write_text("Restored")
+                elif problem == "ancestor":
+                    source.directory.rename(source.directory.with_name("Previous"))
+                    source.directory.mkdir()
+                elif problem == "ownership":
+                    await MediaItem.filter(id=item.id).update(
+                        path=str(source.path.with_name("Moved.txt"))
+                    )
+                elif problem == "new_child":
+                    await MediaItem.create(
+                        lib=lib,
+                        parent=item,
+                        path=str(source.directory / "New.txt"),
+                        dir=str(source.directory),
+                        name="New",
+                        format=MediaFormat.TXT,
+                    )
+
+            def failed_cache(_path):
+                """Simulate a cache permission error.
+
+                Args:
+                    _path: The cache directory requested for removal.
+
+                Raises:
+                    PermissionError: To retain database owners for retry.
+                """
+                raise PermissionError("denied")
+
+            delete = QuerySet.delete
+
+            def failed_write(query):
+                """Fail item deletion after history deletion in the same transaction.
+
+                Args:
+                    query: The queryset selecting histories or media items.
+
+                Returns:
+                    The original deletion query for histories.
+
+                Raises:
+                    RuntimeError: When deleting media items.
+                """
+                if query.model == MediaItem:
+                    raise RuntimeError("write failed")
+                return delete(query)
+
+            if problem == "cache":
+                monkeypatch.setattr(media_service.shutil, "rmtree", failed_cache)
+            elif problem == "write":
+                monkeypatch.setattr(QuerySet, "delete", failed_write)
+            else:
+                monkeypatch.setattr(media_service, "write_in_thread", changed)
+            with pytest.raises(RuntimeError if problem == "write" else ContentError):
+                await MediaItemService.remove_missing_reading_item(item.id)
+            if problem == "new_child":
+                assert await MediaItem.all().count() == 2
+            elif problem != "ownership":
+                assert await MediaItem.all().values() == rows
+            else:
+                assert (await MediaItem.get(id=item.id)).path.endswith("Moved.txt")
+            assert await UserHistory.all().values() == history
+            assert _cache(item).exists() == (problem == "cache")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("base", [False, True])
+def test_remove_reading_cache_link(tmp_path, base):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            directory = _cache(item).parent.parent if base else _cache(item).parent
+            outside = tmp_path / "Outside"
+            directory.rename(outside)
+            directory.symlink_to(outside, target_is_directory=True)
+            before = await MediaItem.all().values()
+            with pytest.raises(ContentError, match="content_not_ready"):
+                await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == before
+            assert _cache(item).is_dir() and outside.is_dir()
+
+    asyncio.run(run())
+
+
+def test_remove_reading_cancel(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            original = media_service._remove_reading_caches
+            started, finish = threading.Event(), threading.Event()
+            loop_thread = threading.get_ident()
+
+            def blocked(ids):
+                """Keep cache cleanup active while verifying cancellation and locks.
+
+                Args:
+                    ids: The item IDs selected for cache cleanup.
+                """
+                assert threading.get_ident() != loop_thread
+                started.set()
+                assert finish.wait(timeout=5)
+                original(ids)
+
+            monkeypatch.setattr(media_service, "_remove_reading_caches", blocked)
+            task = asyncio.create_task(
+                MediaItemService.remove_missing_reading_item(item.id)
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 5)
+                task.cancel()
+                with pytest.raises(Timeout):
+                    async with await library_lock(lib.dir).acquire(timeout=0):
+                        pass
+                assert not task.done()
+            finally:
+                finish.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert await MediaItem.filter(id=item.id).exists()
+            assert not _cache(item).parent.exists()
+            assert await MediaItemService.remove_missing_reading_item(item.id) == [
+                item.id
+            ]
 
     asyncio.run(run())
 

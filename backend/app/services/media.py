@@ -7,7 +7,7 @@ import shutil
 import stat
 from asyncio import create_task, to_thread
 from collections.abc import Generator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +42,14 @@ from app.models.media import (
     NFOType,
     ReadingMetadataSync,
 )
-from app.models.user import PermType, UserInfo, UserPermission, UserRole
+from app.models.user import (
+    HistoryType,
+    PermType,
+    UserHistory,
+    UserInfo,
+    UserPermission,
+    UserRole,
+)
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
 from app.utils.disk import delete_path, rename_exclusive
@@ -84,31 +91,22 @@ def _reading_identity(item: MediaItem) -> tuple:
     )
 
 
-@contextmanager
-def _reading_source(
-    item: MediaItem, *, require_candidate: bool = False
-) -> Generator[tuple[ReadingSource, _SourceStates, bool]]:
-    """Validate reading ownership and guard filesystem stability for one operation.
+def _reading_location(item: MediaItem) -> ReadingSource:
+    """Validate database ownership without requiring the source to exist.
 
     Args:
-        item: The owned reading item with its library and optional parent loaded.
-        require_candidate: Whether discovery must find the source; defaults to False
-            so already indexed empty sources can retain their identity and metadata.
+        item: The reading item with its library and optional parent loaded.
 
-    Yields:
-        The current source, mutable stability checks and whether its body is missing.
+    Returns:
+        The source path, format and collection described by this item.
 
     Raises:
-        ContentError: If paths, layout, file access or source stability are invalid.
+        ContentError: If the library, path, format or parent ownership is invalid.
     """
-    # handler registration imports this service through the video handlers
-    from app.core.media.handlers.base import get_handler
-    from app.core.media.handlers.reading import (
-        ReadingMediaHandler,
-        ReadingSource,
-        is_ignored_name,
-    )
+    from app.core.media.handlers.reading import ReadingSource, is_ignored_name
 
+    if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+        raise ContentError("unsupported_media_format")
     root, path = Path(item.lib.dir), Path(item.path)
     parent = item.parent if item.parent_id is not None else None
     if (
@@ -149,6 +147,34 @@ def _reading_source(
         or (parent is not None and item.format is None)
     ):
         raise ContentError("unsupported_layout")
+    return source
+
+
+@contextmanager
+def _reading_source(
+    item: MediaItem, *, require_candidate: bool = False
+) -> Generator[tuple[ReadingSource, _SourceStates, bool]]:
+    """Validate reading ownership and guard filesystem stability for one operation.
+
+    Args:
+        item: The owned reading item with its library and optional parent loaded.
+        require_candidate: Whether discovery must find the source; defaults to False
+            so already indexed empty sources can retain their identity and metadata.
+
+    Yields:
+        The current source, mutable stability checks and whether its body is missing.
+
+    Raises:
+        ContentError: If paths, layout, file access or source stability are invalid.
+    """
+    # handler registration imports this service through the video handlers
+    from app.core.media.handlers.base import get_handler
+    from app.core.media.handlers.reading import ReadingMediaHandler
+
+    source = _reading_location(item)
+    root = Path(item.lib.dir)
+    parent = item.parent if item.parent_id is not None else None
+    parts = source.directory.relative_to(root).parts
     states = {}
     source_missing = False
     try:
@@ -169,10 +195,7 @@ def _reading_source(
                     raise ContentError("media_source_unavailable")
                 states[source.path] = file_state(info)
         try:
-            lib_type = item.lib.lib_type
-            if lib_type not in (LibType.NOVEL, LibType.COMIC):
-                raise ContentError("unsupported_media_format")
-            handler = get_handler(lib_type)
+            handler = get_handler(item.lib.lib_type)
             if not isinstance(handler, ReadingMediaHandler):
                 raise ContentError("unsupported_media_format")
             scan = handler.scan_sources(str(root), work_path=root / parts[0])
@@ -269,6 +292,79 @@ def _validate_previous_path(
         or states[src_path.parent][:2] != states[dest_path.parent][:2]
     ):
         raise ContentError("content_changed")
+
+
+def _missing_reading_sources(items: list[MediaItem]) -> _SourceStates | None:
+    """Confirm absent sources while retaining the identities of surviving ancestors.
+
+    Args:
+        items: The selected items with libraries and parents loaded.
+
+    Returns:
+        Ancestor snapshots when all sources are absent, or None if any source exists.
+        Existing empty directories and same-path replacements are retained.
+
+    Raises:
+        ContentError: If ownership is invalid, an ancestor changes, a link or invalid
+            file type is encountered, or the library cannot be accessed.
+    """
+    states: _SourceStates = {}
+    try:
+        for item in items:
+            source = _reading_location(item)
+            root = Path(item.lib.dir)
+            for path in (*reversed(source.path.parents), source.path):
+                try:
+                    info = path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    if path == root or not path.is_relative_to(root):
+                        raise ContentError("media_source_unavailable") from None
+                    break
+                directory = path != source.path or source.format in (
+                    None,
+                    MediaFormat.DIR,
+                )
+                if not (
+                    stat.S_ISDIR(info.st_mode)
+                    if directory
+                    else stat.S_ISREG(info.st_mode)
+                ):
+                    raise ContentError("media_source_unavailable")
+                if path == source.path:
+                    return None
+                if path.is_relative_to(root):
+                    current = file_state(info)
+                    if path in states and states[path] != current:
+                        raise ContentError("content_changed")
+                    states[path] = current
+    except OSError as error:
+        raise ContentError("media_source_unavailable") from error
+    return states
+
+
+def _remove_reading_caches(ids: list[int]):
+    """Remove rebuildable caches before deleting their database owners.
+
+    Args:
+        ids: The validated reading item IDs whose sources are absent.
+
+    Raises:
+        ContentError: If a cache cannot be removed or its directory is a link.
+    """
+    directory = Path(KaloscopeConfig.get_workspace("temp")) / "media_index"
+    try:
+        for parent in (directory.parent, directory):
+            try:
+                info = parent.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                raise ContentError("content_not_ready")
+        for id in ids:
+            with suppress(FileNotFoundError):
+                shutil.rmtree(directory / str(id))
+    except OSError as error:
+        raise ContentError("content_not_ready") from error
 
 
 def _validate_reading_source(
@@ -1113,6 +1209,80 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     ],
                 )
             return items
+
+    @classmethod
+    async def remove_missing_reading_item(cls, id: int) -> list[int]:
+        """Remove an absent reading source, its owned children, caches and histories.
+
+        Call from the serial consumer after stable observations and reliable moves
+        have been applied, and any owned companion cleanup has completed. Recheck
+        absence instead of treating discovery as deletion. Files in the library stay
+        untouched. Existing empty containers are retained; a surviving collection is
+        summarized by subsequent work ingestion.
+
+        Args:
+            id: The registered reading item selected for missing-source reconciliation.
+
+        Returns:
+            Removed item IDs, or an empty list if the item is gone or a source exists.
+
+        Raises:
+            ContentError: If ownership, absence or cache cleanup cannot be confirmed.
+                Failed cleanup keeps database owners for retry; a later failure may
+                leave their rebuildable caches partially or fully removed.
+            asyncio.CancelledError: After any active cache writer stops.
+        """
+        original = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
+        if original is None:
+            return []
+        async with library_lock(original.lib.dir):
+            items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related(
+                "lib", "parent"
+            )
+            item = next((row for row in items if row.id == id), None)
+            if item is None:
+                return []
+            if _reading_identity(item) != _reading_identity(original):
+                raise ContentError("content_changed")
+            ids = [row.id for row in items]
+            if await MediaItem.filter(parent_id__in=ids).exclude(id__in=ids).exists():
+                raise ContentError("unsupported_layout")
+            states = await to_thread(_missing_reading_sources, items)
+            if states is None:
+                return []
+            await write_in_thread(_remove_reading_caches, ids)
+            async with in_transaction():
+                current = await MediaItem.filter(
+                    Q(id__in=ids) | Q(parent_id__in=ids)
+                ).select_related("lib", "parent")
+                if {row.id: _reading_identity(row) for row in current} != {
+                    row.id: _reading_identity(row) for row in items
+                }:
+                    raise ContentError("content_changed")
+                parents = {
+                    row.id: row.parent_id for row in items if row.parent_id is not None
+                }
+                history_type = (
+                    HistoryType.TEXT
+                    if item.lib.lib_type == LibType.NOVEL
+                    else HistoryType.IMAGE
+                )
+                histories = await UserHistory.filter(
+                    rel_type=history_type, rel_id__in=set(ids) | set(parents.values())
+                ).only("id", "rel_id", "locator")
+                history_ids = []
+                for history in histories:
+                    chapter_id = (history.locator or {}).get("chapter_item_id")
+                    if history.rel_id in ids or (
+                        type(chapter_id) is int
+                        and parents.get(chapter_id) == history.rel_id
+                    ):
+                        history_ids.append(history.id)
+                if await to_thread(_missing_reading_sources, items) != states:
+                    raise ContentError("content_changed")
+                await UserHistory.filter(id__in=history_ids).delete()
+                await MediaItem.filter(id__in=ids).delete()
+            return ids
 
     @classmethod
     async def sync_metadata(cls, id: int) -> MediaItem:
