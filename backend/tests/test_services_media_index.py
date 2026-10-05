@@ -1256,7 +1256,8 @@ def test_create_library(tmp_path, missing):
     ]
     + [(format, True) for format in (MediaFormat.CBZ, MediaFormat.ZIP)],
 )
-def test_rename_reading_file(tmp_path, monkeypatch, format, chapter):
+@pytest.mark.parametrize("cross_container", [False, True])
+def test_move_reading_file(tmp_path, monkeypatch, format, chapter, cross_container):
     async def run():
         async with _database():
             lib, source = await _source(tmp_path, format, chapter=chapter)
@@ -1290,6 +1291,11 @@ def test_rename_reading_file(tmp_path, monkeypatch, format, chapter):
             history = await UserHistory.all().values()
             body = source.path.read_bytes()
             destination = source.path.with_name(f"Renamed.{format.value.upper()}")
+            if cross_container:
+                directory = source.directory.with_name("Moved")
+                directory.mkdir()
+                destination = directory / destination.name
+                (directory / metadata.name).write_text(xml.replace("Manual", "Current"))
             source.path.rename(destination)
             monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
             await MediaEvent.create(
@@ -1299,15 +1305,18 @@ def test_rename_reading_file(tmp_path, monkeypatch, format, chapter):
                 dest_path=str(destination),
                 is_directory=False,
             )
-            task = (await coalesce_reading_events(lib.id))[0]
+            tasks = await coalesce_reading_events(lib.id)
+            target_work = source.parent_path or destination.parent
+            task = next(task for task in tasks if task.src_path == str(target_work))
             payload = ReadingReconcile.model_validate(task.payload)
             move = payload.moves[0]
-            current = await MediaItemService.rename_reading_file(
+            current = await MediaItemService.move_reading_file(
                 lib.id, Path(move.src_path), Path(move.dest_path)
             )
             assert current is not None and current.id == first.id
             assert current.path == str(destination) and current.name == "Renamed"
-            assert current.dir == first.dir and current.parent_id == first.parent_id
+            assert current.dir == str(destination.parent)
+            assert current.parent_id == first.parent_id
             assert current.index_state == IndexState.PENDING
             assert current.index_error is None and not current.visible
             assert current.title == "Manual" and current.extra == first.extra
@@ -1315,7 +1324,7 @@ def test_rename_reading_file(tmp_path, monkeypatch, format, chapter):
             assert current.size == first.size and _cache(first).is_dir()
             saved = await MediaItem.all().values()
             assert (
-                await MediaItemService.rename_reading_file(
+                await MediaItemService.move_reading_file(
                     lib.id, source.path, destination
                 )
                 is None
@@ -1323,7 +1332,7 @@ def test_rename_reading_file(tmp_path, monkeypatch, format, chapter):
             assert await MediaItem.all().values() == saved
             assert not await MediaItemService.ingest_reading_work(
                 lib.id,
-                work,
+                target_work,
                 targets={Path(path) for path in payload.targets},
                 force_targets={Path(path) for path in payload.force_targets},
             )
@@ -1331,11 +1340,19 @@ def test_rename_reading_file(tmp_path, monkeypatch, format, chapter):
             assert rebuilt.index_state == IndexState.READY
             assert rebuilt.index_version != first.index_version
             assert rebuilt.path == str(destination) and not rebuilt.visible
-            assert rebuilt.title == "Manual" and rebuilt.parent_id == first.parent_id
+            assert rebuilt.title == ("Current" if cross_container else "Manual")
+            assert rebuilt.parent_id == first.parent_id
             assert await MediaItem.all().count() == (2 if chapter else 1)
             assert await UserHistory.all().values() == history
             assert destination.read_bytes() == body and metadata.read_text() == xml
+            if cross_container:
+                assert (destination.parent / metadata.name).read_text() == xml.replace(
+                    "Manual", "Current"
+                )
             assert await MediaEvent.filter(id=task.id).exists()
+            assert await MediaEvent.all().count() == (
+                2 if cross_container and not chapter else 1
+            )
 
     asyncio.run(run())
 
@@ -1357,7 +1374,7 @@ def test_rename_metadata(tmp_path, format):
             assert first.title == "Local"
             destination = source.path.with_name(f"Renamed.{format}")
             source.path.rename(destination)
-            await MediaItemService.rename_reading_file(lib.id, source.path, destination)
+            await MediaItemService.move_reading_file(lib.id, source.path, destination)
             assert not await MediaItemService.ingest_reading_work(
                 lib.id, source.directory
             )
@@ -1388,7 +1405,7 @@ def test_rename_case(tmp_path):
             first = await MediaItemService.create_reading(lib.id, source)
             destination = source.path.with_name(source.path.name.lower())
             source.path.rename(destination)
-            current = await MediaItemService.rename_reading_file(
+            current = await MediaItemService.move_reading_file(
                 lib.id, source.path, destination
             )
             assert current is not None and current.id == first.id
@@ -1448,7 +1465,7 @@ def test_rename_conflict(tmp_path, problem, code):
                 destination = new_format
             before = await MediaItem.all().values()
             with pytest.raises(ContentError, match=code):
-                await MediaItemService.rename_reading_file(
+                await MediaItemService.move_reading_file(
                     lib.id, source.path, destination
                 )
             assert await MediaItem.all().values() == before
@@ -1457,9 +1474,9 @@ def test_rename_conflict(tmp_path, problem, code):
 
 
 @pytest.mark.parametrize(
-    "problem", ["relative", "outside", "hidden", "same", "container", "traversal"]
+    "problem", ["relative", "outside", "hidden", "same", "level", "traversal"]
 )
-def test_rename_paths(tmp_path, problem):
+def test_move_file_paths(tmp_path, problem):
     async def run():
         async with _database():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
@@ -1476,15 +1493,13 @@ def test_rename_paths(tmp_path, problem):
                 destination = destination.with_name(".Renamed.txt")
             elif problem == "same":
                 destination = previous
-            elif problem == "container":
-                destination = Path(lib.dir) / "Other/Renamed.txt"
+            elif problem == "level":
+                destination = Path(lib.dir) / "Other/Chapter/Renamed.txt"
             else:
                 destination = source.directory / "../Work/Renamed.txt"
             before = await MediaItem.all().values()
-            with pytest.raises(ValueError, match="rename paths"):
-                await MediaItemService.rename_reading_file(
-                    lib.id, previous, destination
-                )
+            with pytest.raises(ValueError, match="move paths"):
+                await MediaItemService.move_reading_file(lib.id, previous, destination)
             assert await MediaItem.all().values() == before
             assert source.path.read_text() == "Body"
 
@@ -1513,14 +1528,14 @@ def test_rename_source_type(tmp_path, kind):
             before = await MediaItem.all().values()
             if kind == "unknown":
                 assert (
-                    await MediaItemService.rename_reading_file(
+                    await MediaItemService.move_reading_file(
                         lib.id, previous, destination
                     )
                     is None
                 )
             else:
                 with pytest.raises(ContentError, match="unsupported_media_format"):
-                    await MediaItemService.rename_reading_file(
+                    await MediaItemService.move_reading_file(
                         lib.id, previous, destination
                     )
             assert await MediaItem.all().values() == before
@@ -1564,7 +1579,7 @@ def test_rename_library_changed(tmp_path, monkeypatch, change, work):
                 rename = (
                     MediaItemService.rename_reading_directory
                     if work
-                    else MediaItemService.rename_reading_file
+                    else MediaItemService.move_reading_file
                 )
                 await rename(lib.id, previous, destination)
             assert await MediaItem.all().values() == (
@@ -1575,12 +1590,17 @@ def test_rename_library_changed(tmp_path, monkeypatch, change, work):
 
 
 @pytest.mark.parametrize("change", ["remove", "replace", "reuse", "cancel"])
-def test_rename_unstable(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("move", [False, True])
+def test_move_file_unstable(tmp_path, monkeypatch, change, move):
     async def run():
         async with _database():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.create_reading(lib.id, source)
             destination = source.path.with_name("Renamed.txt")
+            if move:
+                directory = source.directory.with_name("Moved")
+                directory.mkdir()
+                destination = directory / destination.name
             source.path.rename(destination)
             before = await MediaItem.all().values()
             handler = get_handler(LibType.NOVEL)
@@ -1616,7 +1636,118 @@ def test_rename_unstable(tmp_path, monkeypatch, change):
             with pytest.raises(
                 asyncio.CancelledError if change == "cancel" else ContentError
             ):
-                await MediaItemService.rename_reading_file(
+                await MediaItemService.move_reading_file(
+                    lib.id, source.path, destination
+                )
+            assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("problem", "code"),
+    [
+        ("reused", "content_changed"),
+        ("hardlink", "content_changed"),
+        ("source_link", "content_changed"),
+        ("container_link", "media_source_unavailable"),
+        ("owned", "ambiguous_layout"),
+        ("ambiguous", "ambiguous_layout"),
+        ("directory", "unsupported_layout"),
+    ],
+)
+def test_move_file_conflict(tmp_path, problem, code):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            first = await MediaItemService.create_reading(lib.id, source)
+            directory = source.directory.with_name("Moved")
+            directory.mkdir()
+            destination = directory / source.path.name
+            source.path.rename(destination)
+            if problem == "reused":
+                source.path.write_text("Reused source")
+            elif problem == "hardlink":
+                source.path.hardlink_to(destination)
+            elif problem == "source_link":
+                source.path.symlink_to(destination)
+            elif problem == "container_link":
+                outside = tmp_path / "Outside"
+                source.directory.rename(outside)
+                source.directory.symlink_to(outside, target_is_directory=True)
+            elif problem == "owned":
+                await MediaItem.create(
+                    lib=lib,
+                    path=str(directory / "Other.txt"),
+                    dir=str(directory),
+                    name="Other",
+                    format=MediaFormat.TXT,
+                    visible=False,
+                )
+            elif problem == "ambiguous":
+                (directory / "Other.txt").write_text("Another body")
+            else:
+                await MediaItem.filter(id=first.id).update(dir=str(directory))
+            before = await MediaItem.all().values()
+            with pytest.raises(ContentError, match=code):
+                await MediaItemService.move_reading_file(
+                    lib.id, source.path, destination
+                )
+            assert await MediaItem.all().values() == before
+            assert destination.read_text() == "Body"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["removed", "case", "new_body"])
+def test_move_file_source_container(tmp_path, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            first = await MediaItemService.create_reading(lib.id, source)
+            directory = source.directory.with_name("Moved")
+            if change == "case":
+                directory = source.directory.with_name(source.directory.name.lower())
+                source.directory.rename(directory)
+            else:
+                directory.mkdir()
+                source.path.rename(directory / source.path.name)
+                if change == "removed":
+                    source.directory.rmdir()
+                else:
+                    (source.directory / "Other.txt").write_text("New work")
+            destination = directory / source.path.name
+            current = await MediaItemService.move_reading_file(
+                lib.id, source.path, destination
+            )
+            assert current is not None and current.id == first.id
+            assert current.dir == str(directory) and current.path == str(destination)
+            assert not await MediaItemService.ingest_reading_work(lib.id, directory)
+            if change == "new_body":
+                assert not await MediaItemService.ingest_reading_work(
+                    lib.id, source.directory
+                )
+                other = await MediaItem.get(path=str(source.directory / "Other.txt"))
+                assert other.id != first.id
+            assert destination.read_text() == "Body"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+def test_move_file_parent_change(tmp_path, standalone):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.ZIP, chapter=True)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory.parent)
+            other = Path(lib.dir) / "Other"
+            directory = other if standalone else other / "Chapter"
+            directory.mkdir(parents=True)
+            destination = directory / source.path.name
+            source.path.rename(destination)
+            before = await MediaItem.all().values()
+            with pytest.raises(ValueError, match="move paths"):
+                await MediaItemService.move_reading_file(
                     lib.id, source.path, destination
                 )
             assert await MediaItem.all().values() == before

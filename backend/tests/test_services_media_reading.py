@@ -769,6 +769,69 @@ def test_parent_scope(tmp_path, parent_state):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.CBZ, MediaFormat.ZIP]
+)
+@pytest.mark.parametrize("external", [False, True])
+def test_moved_file_metadata(tmp_path, format, external):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            novel = item.lib.lib_type == LibType.NOVEL
+            previous = Path(item.path)
+            old_metadata = Path(item.dir) / (
+                "metadata.opf" if novel else "ComicInfo.xml"
+            )
+            xml = (
+                _opf("Original")
+                if novel
+                else b"<ComicInfo><Title>Original</Title></ComicInfo>"
+            )
+            old_metadata.write_bytes(xml)
+            old_cover = Path(item.dir) / "cover.png"
+            old_cover.write_bytes(_PNG + b"old")
+            directory = Path(item.lib.dir) / "Moved"
+            directory.mkdir()
+            destination = directory / f"Moved.{format}"
+            previous.rename(destination)
+            if external:
+                (directory / old_metadata.name).write_bytes(
+                    xml.replace(b"Original", b"Current")
+                )
+                (directory / "cover.png").write_bytes(_PNG + b"new")
+            moved = await MediaItemService.move_reading_file(
+                item.lib_id, previous, destination
+            )
+            assert moved is not None and moved.id == item.id
+            details = await MediaItemService.get_details(item.id, _user([item.lib_id]))
+            title = (
+                "Current"
+                if external
+                else "Moved"
+                if format == MediaFormat.TXT
+                else "Embedded"
+            )
+            assert details["title"] == title
+            cover = await MediaItemService.get_cover(item.id, _user([item.lib_id]))
+            if external:
+                assert cover is not None and cover.path == directory / "cover.png"
+                assert cover.data == _PNG + b"new"
+            else:
+                assert cover is None or (
+                    cover.path == destination and cover.data == _PNG
+                )
+            current = await MediaItemService.sync_metadata(item.id)
+            assert current.title == title and current.extra is not None
+            assert current.extra["metadata_sync"]["state"] == (
+                "ready" if external else "none"
+            )
+            assert old_metadata.read_bytes() == xml
+            assert old_cover.read_bytes() == _PNG + b"old"
+            assert await MediaItem.all().count() == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
 def test_renamed_chapter_metadata(tmp_path, format):
     async def run():

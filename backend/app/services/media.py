@@ -235,8 +235,8 @@ def _validate_reading_source(
     Args:
         item: The proposed reading item with its library and optional parent loaded.
         require_candidate: Whether discovery must still find this new source.
-        previous_path: The old filename in the same container for an observed rename;
-            None skips checking that the previous path has disappeared.
+        previous_path: The validated old body path in this library for an observed
+            move; None skips checking that the previous path has disappeared.
 
     Raises:
         ContentError: If source ownership, discovery or stability is invalid.
@@ -247,6 +247,20 @@ def _validate_reading_source(
         _,
     ):
         if previous_path is not None:
+            for directory in (
+                *reversed(previous_path.parent.parents),
+                previous_path.parent,
+            ):
+                if not directory.is_relative_to(item.lib.dir):
+                    continue
+                try:
+                    info = directory.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    return
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ContentError("media_source_unavailable")
+                # retain earlier observations when both paths share an ancestor
+                states.setdefault(directory, file_state(info))
             try:
                 info = previous_path.stat(follow_symlinks=False)
             except FileNotFoundError:
@@ -254,8 +268,9 @@ def _validate_reading_source(
             else:
                 # case-only renames can still resolve through the old spelling
                 if (
-                    previous_path.name.casefold() != source.path.name.casefold()
+                    str(previous_path).casefold() != str(source.path).casefold()
                     or file_state(info) != states[source.path]
+                    or states[previous_path.parent][:2] != states[source.directory][:2]
                 ):
                     raise ContentError("content_changed")
 
@@ -799,20 +814,20 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return candidate
 
     @classmethod
-    async def rename_reading_file(
+    async def move_reading_file(
         cls, lib_id: int, src_path: Path, dest_path: Path
     ) -> MediaItem | None:
-        """Apply an observed body-file rename within the same reading container.
+        """Apply an observed body-file move without changing its registered parent.
 
-        Call from the serial library consumer before ingesting the renamed source,
-        using a persisted filesystem move. Only update the registered identity;
-        files and histories stay untouched. The existing cache remains available for
-        cleanup, while pending state requires indexing at the new path.
+        Call from the serial library consumer before destination ingestion, using a
+        persisted filesystem move. Accept renames or moves between sibling work or
+        chapter containers. Files and histories stay untouched. Retain the old cache
+        for cleanup and mark the item pending for indexing at its new path.
 
         Args:
-            lib_id: The novel or comic library containing the renamed file.
+            lib_id: The novel or comic library containing the moved file.
             src_path: The absolute previous body path from the move event.
-            dest_path: The absolute new body path in the same work or chapter.
+            dest_path: The absolute new body path in the same or a sibling container.
 
         Returns:
             The updated item with its original ID, or None if the previous path is
@@ -820,7 +835,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Raises:
             DoesNotExist: If the library no longer exists.
-            ValueError: If paths are hidden, outside the library or change containers.
+            ValueError: If paths are hidden, outside the library or change the parent
+                of the work or chapter container.
             ContentError: If ownership, format, layout or source stability is invalid,
                 the previous path is reused, or another item owns the destination.
         """
@@ -832,7 +848,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             not root.is_absolute()
             or ".." in root.parts
             or src_path == dest_path
-            or src_path.parent != dest_path.parent
+            or src_path.parent.parent != dest_path.parent.parent
             or any(
                 not path.is_relative_to(root)
                 or ".." in path.parts
@@ -840,7 +856,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 for path in (src_path, dest_path)
             )
         ):
-            raise ValueError("rename paths must share a visible reading container")
+            raise ValueError("move paths must select the same or sibling containers")
         async with library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
@@ -862,9 +878,18 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 for path in (src_path, dest_path)
             ):
                 raise ContentError("unsupported_media_format")
-            if await MediaItem.filter(lib_id=lib_id, path=str(dest_path)).exists():
+            if item.dir != str(src_path.parent):
+                raise ContentError("unsupported_layout")
+            if (
+                await MediaItem.filter(
+                    Q(path=str(dest_path)) | Q(dir=str(dest_path.parent)), lib_id=lib_id
+                )
+                .exclude(id=item.id)
+                .exists()
+            ):
                 raise ContentError("ambiguous_layout")
             item.path = str(dest_path)
+            item.dir = str(dest_path.parent)
             item.name = dest_path.stem
             await to_thread(
                 _validate_reading_source,
@@ -875,7 +900,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             item.index_state = IndexState.PENDING
             item.index_error = None
             await item.save(
-                update_fields=["path", "name", "index_state", "index_error"]
+                update_fields=["path", "dir", "name", "index_state", "index_error"]
             )
             return item
 
