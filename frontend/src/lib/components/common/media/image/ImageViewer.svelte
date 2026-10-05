@@ -578,10 +578,13 @@
           bind:this={imageEls[i]}
           {src}
           alt=""
-          class={zoomClass}
+          class="scroll-image {zoomClass}"
           loading={i < 3 ? 'eager' : 'lazy'}
           draggable="false"
-          onload={handleImageScroll}
+          onload={(e) => {
+            e.currentTarget.setAttribute('data-loaded', 'true');
+            handleImageScroll();
+          }}
           onerror={handleImageError}
         />
       {/each}
@@ -776,6 +779,12 @@
 {/snippet}
 
 <style>
+  /* reserve space until the browser knows the image dimensions */
+  .scroll-image:not([data-loaded]) {
+    width: 100%;
+    height: 100dvh;
+  }
+
   .btn-ghost {
     &:not(*:disabled) {
       color: color-mix(in oklab, #fff 80%, transparent);
