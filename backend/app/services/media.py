@@ -1946,7 +1946,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             version: The expected published version, or None for the current one.
 
         Yields:
-            The accessible, ready novel or comic source for one read operation.
+            An accessible collection or ready reading source for one operation.
 
         Raises:
             NotFoundException: If the item is hidden, missing or not reading media.
@@ -1960,22 +1960,24 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         formats = (
             (MediaFormat.TXT, MediaFormat.EPUB)
             if item.lib.lib_type == LibType.NOVEL
-            else (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+            else (None, MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
         )
         if item.format not in formats:
             raise ContentError("unsupported_media_format")
-        if (
-            item.index_state != IndexState.READY
-            or item.index_version is None
-            or re.fullmatch(r"[0-9a-f]{64}", item.index_version) is None
-        ):
-            raise ContentError(
-                "empty_content"
-                if item.index_state == IndexState.EMPTY
-                else "content_not_ready"
-            )
-        if version is not None and version != item.index_version:
-            raise ContentError("content_changed")
+        # collections have no body version; validate the selected chapter instead
+        if item.format is not None:
+            if (
+                item.index_state != IndexState.READY
+                or item.index_version is None
+                or re.fullmatch(r"[0-9a-f]{64}", item.index_version) is None
+            ):
+                raise ContentError(
+                    "empty_content"
+                    if item.index_state == IndexState.EMPTY
+                    else "content_not_ready"
+                )
+            if version is not None and version != item.index_version:
+                raise ContentError("content_changed")
         failure = None
         try:
             yield item
@@ -1989,14 +1991,109 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ).exists()
         ):
             raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
-        if (
-            _reading_identity(current) != _reading_identity(item)
-            or current.index_state != IndexState.READY
-            or current.index_version != item.index_version
+        if _reading_identity(current) != _reading_identity(item) or (
+            item.format is not None
+            and (
+                current.index_state != IndexState.READY
+                or current.index_version != item.index_version
+            )
         ):
             raise ContentError("content_changed")
         if failure is not None:
             raise failure
+
+    @classmethod
+    async def _collection_content(
+        cls, item: MediaItem, user: UserInfo, query: MediaContentQuery
+    ) -> ImageContent:
+        """Select a comic chapter and keep the collection directory current.
+
+        Args:
+            item: The accessible collection guarded by the caller during this read.
+            user: The authenticated user used to revalidate chapter access.
+            query: The optional child selection, expected child version and page range.
+
+        Returns:
+            The selected chapter's content with the collection ID and ready chapters.
+
+        Raises:
+            NotFoundException: If the selected chapter or collection becomes hidden.
+            ForbiddenException: If access to the library is revoked.
+            ContentError: If the selection is invalid, no chapter is ready,
+                the directory changes, or the selected source cannot be read.
+        """
+        from app.core.media.handlers.reading import natural_key
+
+        _reading_location(item)
+        children = MediaItem.filter(
+            parent_id=item.id,
+            lib_id=item.lib_id,
+            visible=True,
+            format__in=(MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP),
+        ).order_by("id")
+        fields = (
+            "id",
+            "dir",
+            "path",
+            "format",
+            "title",
+            "index_state",
+            "index_version",
+        )
+        chapters = await children.values(*fields)
+        ready = sorted(
+            (
+                chapter
+                for chapter in chapters
+                if chapter["index_state"] == IndexState.READY
+                and re.fullmatch(r"[0-9a-f]{64}", chapter["index_version"] or "")
+            ),
+            key=lambda chapter: (natural_key(Path(chapter["dir"]).name), chapter["id"]),
+        )
+        if query.chapter_id is not None:
+            selected = next(
+                (
+                    chapter
+                    for chapter in chapters
+                    if query.chapter_id == f"item:{chapter['id']}"
+                ),
+                None,
+            )
+            if selected is None:
+                raise ContentError("bad_request")
+        elif ready:
+            selected = ready[0]
+        else:
+            raise ContentError(
+                "empty_content"
+                if all(
+                    chapter["index_state"] == IndexState.EMPTY for chapter in chapters
+                )
+                else "content_not_ready"
+            )
+        async with cls._content_item(selected["id"], user, query.version) as source:
+            if source.parent_id != item.id or source.lib_id != item.lib_id:
+                raise ContentError("content_changed")
+            content = await to_thread(
+                _read_image_content, source, query.offset, query.limit
+            )
+        if await children.values(*fields) != chapters:
+            raise ContentError("content_changed")
+        return content.model_copy(
+            update={
+                "item_id": item.id,
+                "chapters": [
+                    ContentChapter(
+                        id=f"item:{chapter['id']}",
+                        title=content.title
+                        if chapter["id"] == source.id
+                        else chapter["title"] or Path(chapter["dir"]).name,
+                        part=1,
+                    )
+                    for chapter in ready
+                ],
+            }
+        )
 
     @classmethod
     async def get_content(
@@ -2005,7 +2102,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """Read published content without indexing, metadata writes or history updates.
 
         Args:
-            id: The requested reading source ID.
+            id: The requested reading source or comic collection ID.
             user: The authenticated user with loaded library permissions.
             query: The optional chapter, expected version and comic pagination.
 
@@ -2019,6 +2116,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         async with cls._content_item(id, user, query.version) as item:
             if item.lib.lib_type == LibType.COMIC:
+                if item.format is None:
+                    return await cls._collection_content(item, user, query)
                 if query.chapter_id not in (None, f"item:{item.id}"):
                     raise ContentError("bad_request")
                 return await to_thread(
@@ -2051,9 +2150,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ContentError: If the source, version or resource cannot be read safely.
         """
         async with cls._content_item(id, user, version) as item:
-            if (
-                re.fullmatch(r"[0-9a-f]{32}", asset_id) is None
-                or item.format == MediaFormat.TXT
+            if re.fullmatch(r"[0-9a-f]{32}", asset_id) is None or item.format in (
+                None,
+                MediaFormat.TXT,
             ):
                 raise ContentError("not_found")
             return await to_thread(_read_content_asset, item, asset_id)

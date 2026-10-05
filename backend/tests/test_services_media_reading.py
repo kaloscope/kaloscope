@@ -28,6 +28,7 @@ from app.core.media.handlers.reading import ReadingSource
 from app.core.middleware import on_request, on_response
 from app.models.media import (
     EpubContent,
+    ImageContent,
     IndexState,
     LibType,
     MediaContentQuery,
@@ -2399,5 +2400,536 @@ def test_comic_read_race(tmp_path, monkeypatch, asset, change):
                 else:
                     with pytest.raises(ContentError, match="content_changed"):
                         await asyncio.wait_for(request, timeout=3)
+
+    asyncio.run(run())
+
+
+async def _indexed_collection(tmp_path: Path) -> tuple[MediaItem, dict[int, MediaItem]]:
+    """Publish mixed comic chapters in an order different from their directory names.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+
+    Returns:
+        The collection without an aggregate index and its ready chapters by number.
+    """
+    parent = await _item(tmp_path, None)
+    chapters = {}
+    for number, format in (
+        (10, MediaFormat.ZIP),
+        (2, MediaFormat.CBZ),
+        (1, MediaFormat.DIR),
+    ):
+        directory = Path(parent.path) / f"Chapter {number}"
+        directory.mkdir()
+        path = directory if format == MediaFormat.DIR else directory / f"Book.{format}"
+        if format == MediaFormat.DIR:
+            for page in (1, 2):
+                (directory / f"{page}.png").write_bytes(
+                    _PNG + f"{number}:{page}".encode()
+                )
+        else:
+            with zipfile.ZipFile(path, "w") as archive:
+                for page in (1, 2):
+                    archive.writestr(f"{page}.png", _PNG + f"{number}:{page}".encode())
+        (directory / "ComicInfo.xml").write_text(
+            f"<ComicInfo><Title>Live {number}</Title></ComicInfo>"
+        )
+        chapter = await MediaItem.create(
+            lib_id=parent.lib_id,
+            parent=parent,
+            path=str(path),
+            dir=str(directory),
+            name="Book",
+            title=f"Summary {number}" if number != 2 else None,
+            format=format,
+        )
+        chapters[number] = await MediaItemService.index_content(chapter.id)
+    return parent, chapters
+
+
+def test_collection_content_http(tmp_path, monkeypatch):
+    """Select naturally ordered chapters and retain their versions through pagination.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture observing live metadata reads.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            before = await MediaItem.all().order_by("id").values()
+            assert (
+                parent.index_version is None
+                and parent.index_state == IndexState.PENDING
+            )
+            reader = Mock(wraps=metadata_reader.read_metadata)
+            monkeypatch.setattr(metadata_reader, "read_metadata", reader)
+            async with _client(_user()) as client:
+                url = f"/_api/media/{parent.id}/content"
+                response = await client.get(url, params={"limit": 1})
+                assert response.status_code == 200, response.text
+                content = ImageContent.model_validate(response.json()["data"])
+                assert (
+                    content.item_id == parent.id
+                    and content.source_item_id == chapters[1].id
+                )
+                assert content.version == chapters[1].index_version
+                assert content.title == "Live 1" and content.next_offset == 1
+                assert [entry.id for entry in content.chapters] == [
+                    f"item:{chapters[number].id}" for number in (1, 2, 10)
+                ]
+                assert [entry.title for entry in content.chapters] == [
+                    "Live 1",
+                    "Chapter 2",
+                    "Summary 10",
+                ]
+                assert reader.call_count == 1 and reader.call_args.args[0].path == Path(
+                    chapters[1].path
+                )
+                assert response.headers["cache-control"] == "private, no-store"
+                assert str(tmp_path) not in response.text
+                assert (await client.get(content.images[0])).content == _PNG + b"1:1"
+                last = await client.get(
+                    url,
+                    params={
+                        "chapter_id": content.chapter_id,
+                        "version": content.version,
+                        "offset": 1,
+                    },
+                )
+                assert (
+                    last.status_code == 200
+                    and last.json()["data"]["next_offset"] is None
+                )
+                assert (
+                    await client.get(last.json()["data"]["images"][0])
+                ).content == _PNG + b"1:2"
+                for number in (2, 10):
+                    chapter = chapters[number]
+                    (Path(chapter.dir) / "ComicInfo.xml").write_text(
+                        f"<ComicInfo><Title>Updated {number}</Title></ComicInfo>"
+                    )
+                    selected = await client.get(
+                        url,
+                        params={
+                            "chapter_id": f"item:{chapter.id}",
+                            "version": str(chapter.index_version),
+                        },
+                    )
+                    assert selected.status_code == 200, selected.text
+                    data = selected.json()["data"]
+                    assert (
+                        data["item_id"] == parent.id
+                        and data["source_item_id"] == chapter.id
+                    )
+                    assert (
+                        data["version"] == chapter.index_version
+                        and data["format"] == chapter.format
+                    )
+                    assert data["title"] == f"Updated {number}"
+                    assert (
+                        await client.get(data["images"][0])
+                    ).content == _PNG + f"{number}:1".encode()
+                stale = await client.get(
+                    url,
+                    params={
+                        "chapter_id": f"item:{chapters[2].id}",
+                        "version": content.version,
+                    },
+                )
+                assert (
+                    stale.status_code == 409
+                    and stale.json()["message"] == "content_changed"
+                )
+                parent_asset = content.images[0].replace(
+                    f"/media/{chapters[1].id}/", f"/media/{parent.id}/"
+                )
+                assert (await client.get(parent_asset)).status_code == 404
+            assert await MediaItem.all().order_by("id").values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "states,selected,code",
+    [
+        (("pending", "ready", "ready"), 2, None),
+        (("empty", "empty", "ready"), 10, None),
+        (("error", "ready", "pending"), 2, None),
+        (("empty", "empty", "empty"), None, "empty_content"),
+        (("pending", "pending", "pending"), None, "content_not_ready"),
+        (("empty", "pending", "empty"), None, "content_not_ready"),
+        (("error", "error", "error"), None, "content_not_ready"),
+        ((None, None, None), None, "content_not_ready"),
+    ],
+)
+def test_collection_selection(tmp_path, states, selected, code):
+    """Select only published ready chapters and report unavailable selections.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        states: Chapter states in natural directory order.
+        selected: The expected automatic chapter number, or None when unavailable.
+        code: The expected error when no chapter is ready.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            for number, state in zip((1, 2, 10), states, strict=True):
+                await MediaItem.filter(id=chapters[number].id).update(index_state=state)
+            async with _client(_user()) as client:
+                url = f"/_api/media/{parent.id}/content"
+                response = await client.get(url)
+                if selected is None:
+                    assert response.status_code == (
+                        422 if code == "empty_content" else 409
+                    )
+                    assert response.json()["message"] == code
+                else:
+                    assert response.status_code == 200, response.text
+                    data = response.json()["data"]
+                    assert data["source_item_id"] == chapters[selected].id
+                    assert [chapter["id"] for chapter in data["chapters"]] == [
+                        f"item:{chapters[number].id}"
+                        for number, state in zip((1, 2, 10), states, strict=True)
+                        if state == "ready"
+                    ]
+                explicit = await client.get(
+                    url, params={"chapter_id": f"item:{chapters[1].id}"}
+                )
+                assert explicit.status_code == (422 if states[0] == "empty" else 409)
+                assert explicit.json()["message"] == (
+                    "empty_content" if states[0] == "empty" else "content_not_ready"
+                )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "scope", ["hidden", "foreign_library", "other_parent", "nested", "invalid_format"]
+)
+def test_collection_scope(tmp_path, scope):
+    """Exclude chapters outside the collection's visible direct comic sources.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        scope: The ownership or visibility change excluding the first chapter.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            if scope == "foreign_library":
+                foreign = await MediaLib.create(
+                    name="Foreign",
+                    dir=str(tmp_path / "Foreign"),
+                    lib_type=LibType.COMIC,
+                    priority=2,
+                )
+                fields = {"lib_id": foreign.id}
+            elif scope == "other_parent":
+                other = await MediaItem.create(
+                    lib_id=parent.lib_id,
+                    path=str(tmp_path / "Library/Other"),
+                    dir=str(tmp_path / "Library/Other"),
+                    name="Other",
+                )
+                fields = {"parent_id": other.id}
+            else:
+                fields = {
+                    "hidden": {"visible": False},
+                    "nested": {"parent_id": chapters[2].id},
+                    "invalid_format": {"format": MediaFormat.TXT},
+                }[scope]
+            await MediaItem.filter(id=chapters[1].id).update(**fields)
+            async with _client(_user()) as client:
+                url = f"/_api/media/{parent.id}/content"
+                response = await client.get(url)
+                assert response.status_code == 200, response.text
+                data = response.json()["data"]
+                assert data["source_item_id"] == chapters[2].id
+                assert [entry["id"] for entry in data["chapters"]] == [
+                    f"item:{chapters[number].id}" for number in (2, 10)
+                ]
+                response = await client.get(
+                    url, params={"chapter_id": f"item:{chapters[1].id}"}
+                )
+                assert (
+                    response.status_code == 400
+                    and response.json()["message"] == "bad_request"
+                )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "case,status,code",
+    [
+        ("empty", 422, "empty_content"),
+        ("unknown", 400, "bad_request"),
+        ("novel_chapter", 400, "bad_request"),
+        ("parent_chapter", 400, "bad_request"),
+        ("huge_id", 400, "bad_request"),
+        ("cache", 409, "content_not_ready"),
+        ("hidden", 404, "not_found"),
+        ("outside", 503, "media_source_unavailable"),
+    ],
+)
+def test_collection_errors(tmp_path, case, status, code):
+    """Reject invalid collection requests without selecting unrelated sources.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        case: The invalid collection state or chapter query.
+        status: The expected HTTP status.
+        code: The expected controlled error.
+    """
+
+    async def run():
+        async with _database():
+            if case == "empty":
+                parent = await _item(tmp_path, None)
+            else:
+                parent, chapters = await _indexed_collection(tmp_path)
+                if case == "cache":
+                    chapter = chapters[1]
+                    (
+                        tmp_path
+                        / "cache/media_index"
+                        / str(chapter.id)
+                        / str(chapter.index_version)
+                        / "index.json"
+                    ).unlink()
+                elif case == "hidden":
+                    await MediaItem.filter(id=parent.id).update(visible=False)
+                elif case == "outside":
+                    await MediaItem.filter(id=parent.id).update(
+                        path=str(tmp_path / "Outside")
+                    )
+            selections = {
+                "unknown": "item:9999",
+                "novel_chapter": "f" * 32,
+                "parent_chapter": f"item:{parent.id}",
+                "huge_id": "item:" + "9" * 200,
+            }
+            params = {"chapter_id": selections[case]} if case in selections else {}
+            async with _client(_user()) as client:
+                response = await client.get(
+                    f"/_api/media/{parent.id}/content", params=params
+                )
+                assert response.status_code == status, response.text
+                assert response.json()["message"] == code
+                assert response.headers["cache-control"] == "private, no-store"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change,status",
+    [
+        ("parent_hidden", 404),
+        ("parent_deleted", 404),
+        ("parent_path", 409),
+        ("parent_format", 409),
+        ("parent_state", 200),
+        ("selected_hidden", 404),
+        ("selected_version", 409),
+        ("selected_pending", 409),
+        ("sibling_hidden", 409),
+        ("sibling_title", 409),
+        ("sibling_added", 409),
+        ("permission", 403),
+    ],
+)
+def test_collection_read_race(tmp_path, monkeypatch, change, status):
+    """Recheck collection access and directory membership after an unlocked read.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture wrapping worker dispatch.
+        change: The database mutation after the selected chapter is read.
+        status: The expected HTTP status after revalidation.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            user = _user([parent.lib_id])
+            await User.create(
+                id=user.id, username="Reader", password="unused", role=UserRole.USER
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=parent.lib_id
+            )
+            dispatch = asyncio.to_thread
+
+            async def changed(func, *args):
+                """Mutate the database between actual file reading and revalidation.
+
+                Args:
+                    func: The synchronous chapter reader.
+                    *args: Its original arguments.
+
+                Returns:
+                    The original content before database revalidation.
+                """
+                result = await dispatch(func, *args)
+                if change == "permission":
+                    await UserPermission.all().delete()
+                elif change == "parent_deleted":
+                    await parent.delete()
+                elif change == "sibling_added":
+                    await MediaItem.create(
+                        lib_id=parent.lib_id,
+                        parent=parent,
+                        path=str(Path(parent.path) / "New"),
+                        dir=str(Path(parent.path) / "New"),
+                        name="New",
+                        format=MediaFormat.DIR,
+                        index_state=IndexState.READY,
+                        index_version="d" * 64,
+                    )
+                else:
+                    changes = {
+                        "parent_hidden": (parent.id, {"visible": False}),
+                        "parent_path": (
+                            parent.id,
+                            {"path": str(Path(parent.path).with_name("Moved"))},
+                        ),
+                        "parent_format": (parent.id, {"format": MediaFormat.DIR}),
+                        "parent_state": (parent.id, {"index_state": IndexState.EMPTY}),
+                        "selected_hidden": (chapters[1].id, {"visible": False}),
+                        "selected_version": (
+                            chapters[1].id,
+                            {"index_version": "f" * 64},
+                        ),
+                        "selected_pending": (
+                            chapters[1].id,
+                            {"index_state": IndexState.PENDING},
+                        ),
+                        "sibling_hidden": (chapters[2].id, {"visible": False}),
+                        "sibling_title": (chapters[2].id, {"title": "Updated"}),
+                    }
+                    id, fields = changes[change]
+                    await MediaItem.filter(id=id).update(**fields)
+                return result
+
+            monkeypatch.setattr(media_service, "to_thread", changed)
+            async with _client(user) as client, library_lock(parent.lib.dir):
+                response = await asyncio.wait_for(
+                    client.get(f"/_api/media/{parent.id}/content"), timeout=3
+                )
+                assert response.status_code == status, response.text
+                assert response.headers["cache-control"] == "private, no-store"
+
+    asyncio.run(run())
+
+
+def test_collection_reparented(tmp_path, monkeypatch):
+    """Reject a chapter moved after selection before attempting any content read.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+        monkeypatch: The fixture moving a chapter just before access is loaded.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            other = await MediaItem.create(
+                lib_id=parent.lib_id,
+                path=str(tmp_path / "Library/Other"),
+                dir=str(tmp_path / "Library/Other"),
+                name="Other",
+            )
+            accessible = MediaItemService.get_accessible
+
+            async def moved(cls, id, user):
+                """Move the selected chapter before loading its current ownership.
+
+                Args:
+                    id: The item being authorized.
+                    user: The current user.
+
+                Returns:
+                    The currently accessible item after the move.
+                """
+                if id == chapters[1].id:
+                    await MediaItem.filter(id=id).update(parent_id=other.id)
+                return await accessible(id, user)
+
+            reader = Mock(side_effect=AssertionError("unexpected content read"))
+            monkeypatch.setattr(MediaItemService, "get_accessible", classmethod(moved))
+            monkeypatch.setattr(media_service, "_read_image_content", reader)
+            async with _client(_user()) as client:
+                response = await client.get(f"/_api/media/{parent.id}/content")
+                assert response.status_code == 409, response.text
+                assert response.json()["message"] == "content_changed"
+            reader.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_collection_versions(tmp_path):
+    """Exclude malformed unpublished versions from automatic chapter selection.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            await MediaItem.filter(id=chapters[1].id).update(index_version="invalid")
+            async with _client(_user()) as client:
+                url = f"/_api/media/{parent.id}/content"
+                response = await client.get(url)
+                assert response.status_code == 200, response.text
+                assert response.json()["data"]["source_item_id"] == chapters[2].id
+                response = await client.get(
+                    url, params={"chapter_id": f"item:{chapters[1].id}"}
+                )
+                assert response.status_code == 409
+                assert response.json()["message"] == "content_not_ready"
+
+    asyncio.run(run())
+
+
+def test_collection_content_limit(tmp_path):
+    """Include the complete collection directory in the content response limit.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+
+    async def run():
+        async with _database():
+            parent, chapters = await _indexed_collection(tmp_path)
+            await MediaItem.bulk_create(
+                [
+                    MediaItem(
+                        lib_id=parent.lib_id,
+                        parent_id=parent.id,
+                        path=str(Path(parent.path) / f"Extra {number}"),
+                        dir=str(Path(parent.path) / f"Extra {number}"),
+                        name=f"Extra {number}",
+                        title="长" * 255,
+                        format=MediaFormat.DIR,
+                        index_state=IndexState.READY,
+                        index_version="a" * 64,
+                    )
+                    for number in range(1500)
+                ]
+            )
+            async with _client(_user()) as client:
+                response = await client.get(
+                    f"/_api/media/{parent.id}/content",
+                    params={"chapter_id": f"item:{chapters[1].id}"},
+                )
+                assert response.status_code == 422, response.text
+                assert response.json()["message"] == "media_limit_exceeded"
 
     asyncio.run(run())
