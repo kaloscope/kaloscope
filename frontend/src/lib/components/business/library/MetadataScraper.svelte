@@ -14,7 +14,7 @@
     rating: number | null;
   } & Record<string, unknown>;
 
-  const NFO_TYPES: Record<keyof typeof LibType, string> = {
+  const NFO_TYPES: Partial<Record<keyof typeof LibType, string>> = {
     movie: 'movie',
     tv_show: 'tvshow'
   };

@@ -91,7 +91,9 @@
     },
     "lib_type": {
       "movie": "电影",
-      "tv_show": "电视剧"
+      "tv_show": "电视剧",
+      "novel": "小说",
+      "comic": "漫画"
     },
     "download_state": {
       "downloading": "下载中",
@@ -403,6 +405,13 @@
     }
   },
   "media": {
+    "play": "播放",
+    "read": "阅读",
+    "reader": {
+      "loading": "正在加载正文",
+      "chapter": "正文 {0}",
+      "part": "第 {0} 段"
+    },
     "scan_on_startup": "启动时全量扫描",
     "rename": {
       "template": "自动重命名模板",

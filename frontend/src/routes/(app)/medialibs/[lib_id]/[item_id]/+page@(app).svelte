@@ -1,14 +1,26 @@
 <script lang="ts">
+  import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import { Backdrop, Container, Image, MediaActions, mediaTitle, Rating, VideoPlayer } from '$lib/components';
+  import {
+    Backdrop,
+    Container,
+    Image,
+    ImageViewer,
+    MediaActions,
+    mediaTitle,
+    Rating,
+    TextViewer,
+    VideoPlayer
+  } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { historyBack, user } from '$lib/stores';
-  import type { MediaItem, MediaMeta, Resp } from '$lib/types';
+  import type { BaseResp, Chapter, MediaContent, MediaContentQuery, MediaItem, MediaMeta, Resp } from '$lib/types';
   import { buildStreamUrl } from '$lib/utils';
-  import { onMount, tick } from 'svelte';
+  import { isHTTPError } from 'ky';
+  import { onDestroy, onMount, tick } from 'svelte';
 
   // the loading state
   const loading = createLoading();
@@ -25,6 +37,159 @@
   let player: VideoPlayer | null = $state(null);
   let playing = $state(false);
 
+  // local reading uses the parent entry to retain the comic chapter directory
+  let reading = $state(false);
+  let readerDialog: HTMLDialogElement | undefined = $state();
+  let textViewer: TextViewer | undefined = $state();
+  let imageViewer: ImageViewer | undefined = $state();
+  let readingLoading = $state(false);
+  let readingError = $state<string | null>(null);
+  let readingChapterId: string | undefined;
+  let readingController: AbortController | undefined;
+  const mediaType = $derived.by(() => media?.media_type ?? 'video');
+
+  /**
+   * Open the local reader at the selected chapter or the first available chapter.
+   *
+   * @param item - The comic chapter to select; omitted for the work's first chapter.
+   */
+  function read(item?: MediaItem) {
+    if (!media || mediaType === 'video') return;
+    reading = true;
+    loadContent(item ? `item:${item.id}` : undefined);
+  }
+
+  /**
+   * Extract a localized content error, including a fallback for network failures.
+   *
+   * @param error - The failed content request.
+   * @returns The API error code or the generic reading failure code.
+   */
+  function contentError(error: unknown): string {
+    const response = isHTTPError(error) ? (error.data as BaseResp | undefined) : undefined;
+    return response?.message || 'resource_load_failed';
+  }
+
+  /** Clear the old content and keep the local return action available. */
+  function clearContent() {
+    textViewer?.mount({ text: [], back: closeReader });
+    imageViewer?.mount({ images: [], back: closeReader });
+  }
+
+  /** Cancel pending requests before closing the reading overlay. */
+  function closeReader() {
+    readingController?.abort();
+    reading = false;
+  }
+
+  /**
+   * Read content through the shared API without a duplicate error notification.
+   *
+   * @param id - The parent work or standalone reading source ID.
+   * @param query - The selected chapter, expected version and optional image range.
+   * @param signal - Cancellation for this reading session or image request.
+   * @returns The validated kind of content for the current reader.
+   */
+  async function getContent(id: number, query: MediaContentQuery, signal: AbortSignal): Promise<MediaContent> {
+    const { data } = await api
+      .get(`media/${id}/content`, {
+        searchParams: query,
+        signal,
+        retry: 0,
+        context: { silentErrors: true }
+      })
+      .json<Resp<MediaContent>>();
+    if (data.media_type !== mediaType) {
+      throw new Error('Unexpected media type');
+    }
+    return data;
+  }
+
+  /**
+   * Replace the chapter and its directory, ignoring responses from cancelled loads.
+   *
+   * @param selectedId - The requested chapter, or undefined for the first chapter.
+   * @param version - The expected novel version; omitted when switching comic sources.
+   * @param refresh - Allow one automatic refresh after a content change; defaults to true.
+   */
+  async function loadContent(selectedId?: string, version?: string, refresh = true): Promise<void> {
+    const item = media;
+    if (!reading || !item) return;
+    readingController?.abort();
+    readingController = new AbortController();
+    const { signal } = readingController;
+    readingChapterId = selectedId;
+    readingLoading = true;
+    readingError = null;
+    clearContent();
+    // wait for the conditional viewers before loading the first chapter
+    await tick();
+    if (signal.aborted) return;
+    if (readerDialog && !readerDialog.open) readerDialog.showModal();
+    try {
+      const data = await getContent(item.id, { chapter_id: selectedId, version }, signal);
+      if (signal.aborted) return;
+      readingChapterId = data.chapter_id;
+      const chapters = data.chapters.map((chapter, index) => ({
+        id: chapter.id,
+        title:
+          (chapter.title || $_('media.reader.chapter', index + 1)) +
+          (chapter.part > 1 ? ` · ${$_('media.reader.part', chapter.part)}` : ''),
+        volume: chapter.volume
+      }));
+      const options = {
+        title: data.title,
+        chapters,
+        chapterId: data.chapter_id,
+        chapterChange: (chapter: Chapter) =>
+          loadContent(chapter.id ?? undefined, data.media_type === 'text' ? data.version : undefined),
+        back: closeReader
+      };
+      if (data.content_type === 'images') {
+        imageViewer?.mount({
+          ...options,
+          images: data.images,
+          image_count: data.image_count,
+          next_offset: data.next_offset,
+          version: data.version,
+          signal,
+          loadImages: async ({ offset, limit, version, signal }) => {
+            try {
+              const next = await getContent(item.id, { chapter_id: data.chapter_id, offset, limit, version }, signal);
+              if (next.content_type !== 'images') throw new Error('Unexpected content type');
+              return next;
+            } catch (error) {
+              if (!signal.aborted && contentError(error) === 'content_changed') {
+                if (refresh) {
+                  void loadContent(data.chapter_id, undefined, false);
+                } else {
+                  readingController?.abort();
+                  clearContent();
+                  readingError = 'content_changed';
+                }
+              }
+              throw error;
+            }
+          }
+        });
+      } else if (data.content_type === 'blocks') {
+        textViewer?.mount({ ...options, blocks: data.blocks });
+      } else {
+        textViewer?.mount({ ...options, text: data.text });
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      if (refresh && contentError(error) === 'content_changed') {
+        // novel chapter ids may change with the index; comic item ids stay stable
+        await loadContent(mediaType === 'image' ? selectedId : undefined, undefined, false);
+      } else {
+        readingError = contentError(error);
+      }
+    } finally {
+      if (!signal.aborted) readingLoading = false;
+    }
+  }
+
   // the sorted child media items
   let parts: MediaItem[] = $derived.by(() => {
     const items = media?.children;
@@ -34,6 +199,9 @@
     return items
       .filter((i) => i.visible)
       .sort((a, b) => {
+        if (mediaType === 'image') {
+          return a.dir.localeCompare(b.dir, undefined, { numeric: true, sensitivity: 'base' }) || a.id - b.id;
+        }
         if (a.season !== b.season) {
           return (a.season ?? 0) - (b.season ?? 0);
         }
@@ -105,6 +273,11 @@
     }
   }
 
+  beforeNavigate(({ from, to }) => {
+    if (from && (from.url.origin !== to?.url.origin || from.url.pathname !== to?.url.pathname)) closeReader();
+  });
+  onDestroy(closeReader);
+
   // load the parent media item details on mount
   onMount(() => {
     loading.start();
@@ -153,12 +326,12 @@
         <!-- poster -->
         <div class="relative self-center sm:self-start">
           <Image proxy="store" src={media?.poster} width="14rem" ratio="2/3" class="shadow-lg" />
-          {#if !media.children || media.children.length === 0}
+          {#if !parts.length}
             <div class="absolute inset-0 flex-center">
               <button
                 class="group btn btn-circle size-20 btn-enlarge bg-black/30 text-white/60"
-                aria-label="Play"
-                onclick={play}
+                aria-label={$_(mediaType === 'video' ? 'media.play' : 'media.read')}
+                onclick={() => (mediaType === 'video' ? play() : read())}
               >
                 <iconify-icon icon={icons.play} width="2.5rem"> </iconify-icon>
               </button>
@@ -262,7 +435,13 @@
       {#if parts.length}
         <div class="mt-6">
           <h2 class="mb-3 text-lg font-semibold">
-            {media.lib?.lib_type === 'tv_show' ? $_('media.episodes') : $_('media.parts')}
+            {#if mediaType === 'image'}
+              {$_('media.image.chapters')}
+            {:else if media.lib?.lib_type === 'tv_show'}
+              {$_('media.episodes')}
+            {:else}
+              {$_('media.parts')}
+            {/if}
           </h2>
           <div class="flex max-h-144 flex-col gap-2 overflow-y-scroll px-2 py-3">
             {#each parts as part (part.id)}
@@ -276,20 +455,27 @@
                 <Image proxy="store" src={part.poster} text={part.name} width="5rem" ratio="16/9" />
                 <div class="flex min-w-0 flex-1 flex-col gap-0.5 px-3">
                   <span class="truncate text-sm font-medium {transClass}" class:text-primary={active}>
-                    {mediaTitle(part)}
+                    {mediaType === 'video' ? mediaTitle(part) : (part.title ?? part.name)}
                   </span>
                   <span class="text-xs opacity-50">{part.aired}</span>
                 </div>
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
                   tabindex="0"
                   role="button"
+                  aria-label={$_(mediaType === 'video' ? 'media.play' : 'media.read')}
                   class="btn btn-circle btn-enlarge shadow-sm btn-sm {transClass}"
                   class:btn-active={active}
                   class:btn-subtle={!active}
                   onclick={(event) => {
                     event.stopPropagation();
-                    selectMedia(part).then(play);
+                    if (mediaType === 'video') selectMedia(part).then(play);
+                    else read(part);
+                  }}
+                  onkeydown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      event.currentTarget.click();
+                    }
                   }}
                 >
                   <iconify-icon icon={icons.play} width="1.25rem"></iconify-icon>
@@ -336,4 +522,42 @@
   <div class="fixed inset-0 layer-1 max-sm:bottom-(--ks-dock-h)">
     <VideoPlayer bind:this={player} />
   </div>
+{/if}
+
+<!-- reader overlay -->
+{#if reading && media && (mediaType === 'text' || mediaType === 'image')}
+  <dialog
+    bind:this={readerDialog}
+    class="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none border-0 p-0"
+    aria-label={$_('media.read')}
+    oncancel={(event) => {
+      event.preventDefault();
+      closeReader();
+    }}
+  >
+    <div
+      inert={readingLoading || !!readingError}
+      aria-hidden={readingLoading || !!readingError}
+      class:hidden={readingLoading || !!readingError}
+    >
+      {#if mediaType === 'text'}
+        <TextViewer bind:this={textViewer} />
+      {:else}
+        <ImageViewer bind:this={imageViewer} />
+      {/if}
+    </div>
+    {#if readingLoading || readingError}
+      <div class="absolute inset-0 layer-3 flex-center flex-col gap-5 bg-base-100 p-6 text-center">
+        <button class="btn absolute top-2 left-2 btn-circle btn-ghost" aria-label="Back" onclick={closeReader}>
+          <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
+        </button>
+        {#if readingLoading}
+          <span class="loading loading-lg loading-bars" role="status" aria-label={$_('media.reader.loading')}></span>
+        {:else if readingError}
+          <p role="alert">{$_(`alert.${readingError}`, { default: $_('alert.resource_load_failed') })}</p>
+          <button class="btn btn-primary" onclick={() => loadContent(readingChapterId)}>{$_('action.retry')}</button>
+        {/if}
+      </div>
+    {/if}
+  </dialog>
 {/if}

@@ -91,7 +91,9 @@
     },
     "lib_type": {
       "movie": "Movie",
-      "tv_show": "TV Show"
+      "tv_show": "TV Show",
+      "novel": "Novel",
+      "comic": "Comic"
     },
     "download_state": {
       "downloading": "Downloading",
@@ -403,6 +405,13 @@
     }
   },
   "media": {
+    "play": "Play",
+    "read": "Read",
+    "reader": {
+      "loading": "Loading content",
+      "chapter": "Content {0}",
+      "part": "Part {0}"
+    },
     "scan_on_startup": "Full scan on startup",
     "rename": {
       "template": "Automatic rename template",

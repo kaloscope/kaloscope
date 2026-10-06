@@ -71,6 +71,7 @@ const fluentUISystemIcons = {
   globeSearchFilled: 'fluent:globe-search-24-filled',
   grid: 'fluent:grid-24-regular',
   image: 'fluent:image-24-regular',
+  imageMultiple: 'fluent:image-multiple-24-regular',
   imageSearch: 'fluent:image-search-24-regular',
   imageSearchFilled: 'fluent:image-search-24-filled',
   info: 'fluent:info-24-regular',
@@ -137,6 +138,7 @@ const fluentUISystemIcons = {
  */
 const mageIcons = {
   alignRight: 'mage:align-right',
+  bookText: 'mage:book-text',
   box3d: 'mage:box-3d',
   box3dDownload: 'mage:box-3d-download',
   box3dDownloadFill: 'mage:box-3d-download-fill',

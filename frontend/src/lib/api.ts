@@ -40,7 +40,7 @@ export const api = ky.create({
       }
     ],
     beforeError: [
-      async ({ error }) => {
+      async ({ error, options }) => {
         if (isHTTPError(error)) {
           const resp = error.data as BaseResp;
 
@@ -50,8 +50,12 @@ export const api = ky.create({
             goto('/login');
           }
 
-          // alert error message
           error.message = resp.message;
+          // allow callers to display errors in place while preserving login handling
+          if (options.context.silentErrors && resp.status !== 401) {
+            return error;
+          }
+          // alert error message
           if (resp.message || resp.status === 500) {
             alert({
               level: 'error',

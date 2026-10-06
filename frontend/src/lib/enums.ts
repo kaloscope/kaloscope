@@ -60,6 +60,16 @@ export const LibType = createEnum({
     label: 'enum.lib_type.tv_show',
     icon: icons.deviceTvOld,
     iconColor: null
+  },
+  novel: {
+    label: 'enum.lib_type.novel',
+    icon: icons.bookText,
+    iconColor: null
+  },
+  comic: {
+    label: 'enum.lib_type.comic',
+    icon: icons.imageMultiple,
+    iconColor: null
   }
 });
 

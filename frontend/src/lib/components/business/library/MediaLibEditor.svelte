@@ -17,7 +17,7 @@
   }>;
 
   const DANMAKU_SERVER_PRESET = 'danmaku.kaloscope.org';
-  const RENAME_EXAMPLES = {
+  const RENAME_EXAMPLES: Partial<Record<keyof typeof LibType, string>> = {
     movie: '{{title}} ({{year}})/{{title}} ({{year}})',
     tv_show: '{{show_title}}/S{{season}}/{{episode_code}}'
   };
@@ -117,7 +117,7 @@
       <Label required>{$_('field.type')}</Label>
       <Select
         translate
-        options={enumToOptions(LibType, false)}
+        options={enumToOptions(LibType, false).filter(({ value }) => id || value === 'movie' || value === 'tv_show')}
         bind:value={lib_type}
         name="lib_type"
         class="w-full"
