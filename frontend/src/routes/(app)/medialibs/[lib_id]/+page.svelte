@@ -13,6 +13,7 @@
     Search,
     type PaginatorProps
   } from '$lib/components';
+  import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { captureScrollPosition, compactRecord, restorePosition, subroutes, user } from '$lib/stores';
@@ -27,6 +28,7 @@
 
   // the library ID
   let libId: string = $derived(page.params.lib_id ?? '');
+  const lib = $derived(data.libs.find((lib) => lib.id === Number(libId)));
 
   // the URL query parameters
   const query = queryParameters(
@@ -193,6 +195,7 @@
         <Image
           proxy="store"
           src={item.poster}
+          icon={lib ? LibType[lib.lib_type].icon : undefined}
           width="100%"
           ratio="2/3"
           class="shadow-sm group-hover:brightness-60 hover:shadow-lg {transClass}"

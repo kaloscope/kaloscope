@@ -13,6 +13,7 @@
     TextViewer,
     VideoPlayer
   } from '$lib/components';
+  import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -37,6 +38,7 @@
   // the parent media item and its metadata
   let media: MediaItem | null = $state(null);
   let meta: MediaMeta | null = $state(null);
+  const posterIcon = $derived.by(() => (media?.lib ? LibType[media.lib.lib_type].icon : undefined));
 
   // the selected child media item and its metadata
   let _media: MediaItem | null = $state(null);
@@ -393,7 +395,7 @@
       <div class="flex flex-col gap-6 sm:flex-row">
         <!-- poster -->
         <div class="relative self-center sm:self-start">
-          <Image proxy="store" src={media?.poster} width="14rem" ratio="2/3" class="shadow-lg" />
+          <Image proxy="store" src={media?.poster} icon={posterIcon} width="14rem" ratio="2/3" class="shadow-lg" />
           {#if !parts.length && !hasTextChapters}
             <div class="absolute inset-0 flex-center">
               <button
@@ -520,7 +522,7 @@
                 class="media-part flex items-center rounded-lg px-3 py-2 text-left {transClass} {activeClass}"
                 onclick={() => selectMedia(part)}
               >
-                <Image proxy="store" src={part.poster} text={part.name} width="5rem" ratio="16/9" />
+                <Image proxy="store" src={part.poster} icon={posterIcon} width="5rem" ratio="16/9" />
                 <div class="flex min-w-0 flex-1 flex-col gap-0.5 px-3">
                   <span class="truncate text-sm font-medium {transClass}" class:text-primary={active}>
                     {mediaType === 'video' ? mediaTitle(part) : (part.title ?? part.name)}

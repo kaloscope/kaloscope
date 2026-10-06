@@ -154,6 +154,7 @@
         class="size-full object-cover"
         loading="lazy"
         draggable={false}
+        onerror={() => (src = null)}
         in:fade
       />
     {/key}

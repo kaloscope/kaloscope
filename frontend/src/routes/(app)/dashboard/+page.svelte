@@ -13,6 +13,7 @@
     VideoPlayer,
     ViewSwitcher
   } from '$lib/components';
+  import { LibType } from '$lib/enums';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { restorePosition, user } from '$lib/stores';
@@ -420,7 +421,13 @@
                   onclick={() => playMedia(item)}
                   title={parent?.title ?? parent?.name ?? mediaTitle(media)}
                 >
-                  <Image proxy="store" src={parent?.poster ?? media?.poster} width="3rem" ratio="2/3" />
+                  <Image
+                    proxy="store"
+                    src={parent?.poster ?? media?.poster}
+                    icon={media?.lib ? LibType[media.lib.lib_type].icon : undefined}
+                    width="3rem"
+                    ratio="2/3"
+                  />
                   <div class="flex min-w-0 flex-col gap-1">
                     {#if parent}
                       <span class="truncate text-sm font-medium group-hover:text-primary">
