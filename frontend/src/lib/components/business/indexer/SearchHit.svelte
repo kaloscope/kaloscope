@@ -255,7 +255,9 @@
       {#if rsrc.category || rsrc.misc}
         <div class="absolute bottom-0 h-8 w-full bg-linear-to-t from-black/50 to-transparent">
           <div class="flex h-full items-end justify-between gap-2 px-2 pb-1 text-xs text-white">
-            <span class="whitespace-nowrap">{rsrc.category}</span>
+            <span class="shrink-0 truncate {rsrc.misc ? 'max-w-1/2' : 'max-w-full'}" title={rsrc.category}>
+              {rsrc.category}
+            </span>
             <span class="truncate" title={rsrc.misc}>{rsrc.misc}</span>
           </div>
         </div>
