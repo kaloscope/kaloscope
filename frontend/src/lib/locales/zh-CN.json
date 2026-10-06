@@ -409,6 +409,7 @@
     "read": "阅读",
     "reader": {
       "loading": "正在加载正文",
+      "loading_chapters": "正在加载章节",
       "chapter": "正文 {0}",
       "part": "第 {0} 段"
     },

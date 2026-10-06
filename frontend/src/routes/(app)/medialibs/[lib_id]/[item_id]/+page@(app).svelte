@@ -17,7 +17,16 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { historyBack, user } from '$lib/stores';
-  import type { BaseResp, Chapter, MediaContent, MediaContentQuery, MediaItem, MediaMeta, Resp } from '$lib/types';
+  import type {
+    BaseResp,
+    Chapter,
+    ContentChapter,
+    MediaContent,
+    MediaContentQuery,
+    MediaItem,
+    MediaMeta,
+    Resp
+  } from '$lib/types';
   import { buildStreamUrl } from '$lib/utils';
   import { isHTTPError } from 'ky';
   import { onDestroy, onMount, tick } from 'svelte';
@@ -48,15 +57,58 @@
   let readingController: AbortController | undefined;
   const mediaType = $derived.by(() => media?.media_type ?? 'video');
 
+  // novel sections belong to the content index, not child media records
+  let textChapters = $state<ContentChapter[]>([]);
+  let textVersion = $state<string | undefined>();
+  let chaptersLoading = $state(false);
+  let chaptersError = $state<string | null>(null);
+  let chaptersController: AbortController | undefined;
+  const hasTextChapters = $derived(textChapters.length > 1 || textChapters.some((chapter) => !!chapter.title));
+
   /**
    * Open the local reader at the selected chapter or the first available chapter.
    *
-   * @param item - The comic chapter to select; omitted for the work's first chapter.
+   * @param chapterId - The content chapter ID; omitted for the first chapter.
+   * @param version - The novel directory version; omitted for a fresh reading request.
    */
-  function read(item?: MediaItem) {
+  function read(chapterId?: string, version?: string) {
     if (!media || mediaType === 'video') return;
     reading = true;
-    loadContent(item ? `item:${item.id}` : undefined);
+    loadContent(chapterId, version);
+  }
+
+  /**
+   * Format the same section label in the detail page and reader directory.
+   *
+   * @param chapter - The published section label and split-part number.
+   * @param index - The zero-based section position used for missing titles.
+   * @returns The localized title with an optional split-part suffix.
+   */
+  function chapterTitle(chapter: ContentChapter, index: number): string {
+    return (
+      (chapter.title || $_('media.reader.chapter', index + 1)) +
+      (chapter.part > 1 ? ` · ${$_('media.reader.part', chapter.part)}` : '')
+    );
+  }
+
+  /** Load the novel directory without mounting a reader or retaining its body. */
+  async function loadTextChapters() {
+    if (!media || mediaType !== 'text') return;
+    chaptersController?.abort();
+    chaptersController = new AbortController();
+    const { signal } = chaptersController;
+    chaptersLoading = true;
+    chaptersError = null;
+    try {
+      const data = await getContent(media.id, {}, signal);
+      if (signal.aborted) return;
+      textChapters = data.chapters;
+      textVersion = data.version;
+    } catch (error) {
+      if (!signal.aborted) chaptersError = contentError(error);
+    } finally {
+      if (!signal.aborted) chaptersLoading = false;
+    }
   }
 
   /**
@@ -130,11 +182,17 @@
       const data = await getContent(item.id, { chapter_id: selectedId, version }, signal);
       if (signal.aborted) return;
       readingChapterId = data.chapter_id;
+      if (data.media_type === 'text') {
+        // a fresh reading response supersedes an older directory request
+        chaptersController?.abort();
+        chaptersLoading = false;
+        chaptersError = null;
+        textChapters = data.chapters;
+        textVersion = data.version;
+      }
       const chapters = data.chapters.map((chapter, index) => ({
         id: chapter.id,
-        title:
-          (chapter.title || $_('media.reader.chapter', index + 1)) +
-          (chapter.part > 1 ? ` · ${$_('media.reader.part', chapter.part)}` : ''),
+        title: chapterTitle(chapter, index),
         volume: chapter.volume
       }));
       const options = {
@@ -274,21 +332,31 @@
   }
 
   beforeNavigate(({ from, to }) => {
-    if (from && (from.url.origin !== to?.url.origin || from.url.pathname !== to?.url.pathname)) closeReader();
+    if (from && (from.url.origin !== to?.url.origin || from.url.pathname !== to?.url.pathname)) {
+      chaptersController?.abort();
+      closeReader();
+    }
   });
   onDestroy(closeReader);
 
   // load the parent media item details on mount
   onMount(() => {
+    let active = true;
     loading.start();
     getDetails(Number(page.params.item_id))
       .then((data) => {
+        if (!active) return;
         media = data;
         meta = data.metadata ?? null;
+        if (data.media_type === 'text') void loadTextChapters();
       })
       .finally(() => {
         loading.end();
       });
+    return () => {
+      active = false;
+      chaptersController?.abort();
+    };
   });
 </script>
 
@@ -326,7 +394,7 @@
         <!-- poster -->
         <div class="relative self-center sm:self-start">
           <Image proxy="store" src={media?.poster} width="14rem" ratio="2/3" class="shadow-lg" />
-          {#if !parts.length}
+          {#if !parts.length && !hasTextChapters}
             <div class="absolute inset-0 flex-center">
               <button
                 class="group btn btn-circle size-20 btn-enlarge bg-black/30 text-white/60"
@@ -469,7 +537,7 @@
                   onclick={(event) => {
                     event.stopPropagation();
                     if (mediaType === 'video') selectMedia(part).then(play);
-                    else read(part);
+                    else read(`item:${part.id}`);
                   }}
                   onkeydown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
@@ -499,6 +567,42 @@
               </button>
             {/each}
           </div>
+        </div>
+      {/if}
+
+      <!-- novel chapters -->
+      {#if mediaType === 'text' && (chaptersLoading || chaptersError || hasTextChapters)}
+        <div class="mt-6">
+          <h2 class="mb-3 text-lg font-semibold">{$_('media.text.chapters')}</h2>
+          {#if chaptersLoading}
+            <div class="flex-center gap-3 py-6" role="status">
+              <span class="loading loading-sm loading-spinner" aria-hidden="true"></span>
+              <span class="text-sm opacity-60">{$_('media.reader.loading_chapters')}</span>
+            </div>
+          {:else if chaptersError}
+            <div class="flex-center flex-col gap-3 py-6">
+              <p class="text-sm" role="alert">
+                {$_(`alert.${chaptersError}`, { default: $_('alert.resource_load_failed') })}
+              </p>
+              <button class="btn btn-sm" onclick={loadTextChapters}>{$_('action.retry')}</button>
+            </div>
+          {:else}
+            <div class="flex max-h-144 flex-col gap-2 overflow-y-auto px-2 py-3">
+              {#each textChapters as chapter, index (chapter.id)}
+                <button
+                  class="flex items-center gap-3 rounded-lg bg-gradient px-3 py-3 text-left transition-colors hover:bg-base-content/15"
+                  title={chapterTitle(chapter, index)}
+                  onclick={() => read(chapter.id, textVersion)}
+                >
+                  <span class="w-8 shrink-0 text-center text-sm tabular-nums opacity-50">{index + 1}</span>
+                  <span class="min-w-0 flex-1 truncate text-sm font-medium">{chapterTitle(chapter, index)}</span>
+                  <span class="btn btn-circle btn-enlarge btn-subtle shadow-sm transition-colors duration-300 btn-sm">
+                    <iconify-icon icon={icons.play} width="1.25rem" aria-hidden="true"></iconify-icon>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
 

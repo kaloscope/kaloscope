@@ -409,6 +409,7 @@
     "read": "Read",
     "reader": {
       "loading": "Loading content",
+      "loading_chapters": "Loading chapters",
       "chapter": "Content {0}",
       "part": "Part {0}"
     },
