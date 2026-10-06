@@ -80,6 +80,22 @@
   }
 
   /**
+   * Format a publication date up to its available precision.
+   *
+   * @param metadata - The current work or chapter metadata.
+   * @returns The date through the last consecutive part, or null without a year.
+   */
+  function publicationDate(metadata: MediaMeta): string | null {
+    if (!metadata.year) return null;
+    let value = String(metadata.year).padStart(4, '0');
+    if (metadata.month) {
+      value += `-${String(metadata.month).padStart(2, '0')}`;
+      if (metadata.day) value += `-${String(metadata.day).padStart(2, '0')}`;
+    }
+    return value;
+  }
+
+  /**
    * Format the same section label in the detail page and reader directory.
    *
    * @param chapter - The published section label and split-part number.
@@ -374,6 +390,9 @@
 
 <Container class="pull-to-refresh history-back navbar-hidden" loading={$loading}>
   {#if media}
+    <!-- selected chapter details already include server-side inheritance -->
+    {@const readingMeta = mediaType === 'video' ? null : _media ? _meta : meta}
+
     <!-- backdrop -->
     <Backdrop
       proxy="store"
@@ -412,6 +431,29 @@
         <div class="flex min-w-0 flex-1 flex-col gap-3">
           <!-- titles -->
           <h1 class="text-2xl font-bold sm:text-3xl">{media?.title ?? media?.name}</h1>
+          {#if readingMeta && (readingMeta.series || readingMeta.volume || readingMeta.number)}
+            <p class="font-medium break-words opacity-70">
+              {#if readingMeta.series}{readingMeta.series}{/if}
+              {#if readingMeta.volume}
+                {#if readingMeta.series}
+                  ·
+                {/if}
+                {$_('media.volume', readingMeta.volume)}
+              {/if}
+              {#if readingMeta.number}
+                {#if readingMeta.series || readingMeta.volume}
+                  ·
+                {/if}
+                {#if mediaType === 'text'}
+                  {$_('media.series_index', readingMeta.number)}
+                {:else if Number.isFinite(Number(readingMeta.number))}
+                  {$_('media.issue', readingMeta.number)}
+                {:else}
+                  {readingMeta.number}
+                {/if}
+              {/if}
+            </p>
+          {/if}
           {#if meta?.originaltitle && meta.originaltitle !== meta.title}
             <h4 class="text-sm opacity-60">{meta.originaltitle}</h4>
           {/if}
@@ -453,6 +495,58 @@
           <p class="mt-1 text-sm leading-relaxed opacity-80">{_meta?.plot ?? meta?.plot}</p>
         </div>
       </div>
+
+      <!-- reading metadata -->
+      {#if readingMeta}
+        {@const authors = readingMeta.authors?.join(', ')}
+        {@const illustrators = readingMeta.illustrators?.join(', ')}
+        {@const cols = [authors, illustrators, readingMeta.publisher].filter(Boolean).length}
+        {@const published = publicationDate(readingMeta)}
+        {@const facts = [
+          published ? $_('media.published', published) : null,
+          readingMeta.language,
+          mediaType === 'image' && readingMeta.page_count != null
+            ? $_('media.page_count', readingMeta.page_count)
+            : null,
+          mediaType === 'image' && readingMeta.black_and_white != null
+            ? $_(readingMeta.black_and_white ? 'media.black_and_white' : 'media.full_color')
+            : null
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+        {#if cols || facts || readingMeta.isbn}
+          <div class="mt-6 space-y-3">
+            {#if cols}
+              <dl class="grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
+                {#if authors}
+                  <div class="min-w-0">
+                    <dt class="font-semibold text-primary/80">{$_('media.author')}</dt>
+                    <dd class="text-sm break-words whitespace-pre-wrap opacity-70">{authors}</dd>
+                  </div>
+                {/if}
+                {#if illustrators}
+                  <div class="min-w-0">
+                    <dt class="font-semibold text-primary/80">{$_('media.illustrator')}</dt>
+                    <dd class="text-sm break-words whitespace-pre-wrap opacity-70">{illustrators}</dd>
+                  </div>
+                {/if}
+                {#if readingMeta.publisher}
+                  <div class="min-w-0">
+                    <dt class="font-semibold text-primary/80">{$_('media.publisher')}</dt>
+                    <dd class="text-sm break-words whitespace-pre-wrap opacity-70">{readingMeta.publisher}</dd>
+                  </div>
+                {/if}
+              </dl>
+            {/if}
+            {#if facts}
+              <p class="text-sm leading-relaxed break-words opacity-60">{facts}</p>
+            {/if}
+            {#if readingMeta.isbn}
+              <p class="text-xs break-words opacity-50">{$_('media.isbn')} {readingMeta.isbn}</p>
+            {/if}
+          </div>
+        {/if}
+      {/if}
 
       <!-- staff -->
       {#if meta?.directors?.length || meta?.writers?.length || meta?.studios?.length}
