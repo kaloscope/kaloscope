@@ -30,8 +30,11 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
+from app.core.media.events import coalesce_reading_events
 from app.core.media.handlers.base import MediaPathInfo, get_handler
+from app.core.media.handlers.reading import is_ignored_name, list_source_entries
 from app.core.media.organizer import (
     OrganizeDeferredError,
     OrganizePendingError,
@@ -353,9 +356,9 @@ class LibWatcher:
         backfill_nfo_events: bool = True,
         validate_request: bool = False,
     ):
-        """Scan the directory for existing files and create events.
+        """Scan video files or enqueue reading work directories for reconciliation.
 
-        Recover pending organization before comparing files with indexed paths.
+        Recover pending video organization before comparing indexed paths.
 
         Args:
             target: The media library instance or the directory path to scan.
@@ -365,6 +368,7 @@ class LibWatcher:
         Raises:
             KaloscopeException: If the requested scan is already in progress.
             OrganizePendingError: If pending organization cannot finish safely.
+            ContentError: If a reading root is unavailable or its ownership changes.
         """
         lib = None
         if isinstance(target, MediaLib):
@@ -387,12 +391,57 @@ class LibWatcher:
         try:
             if lib is None:
                 lib = await MediaLib.filter(dir=path).get()
-            async with library_lock(lib.dir):
-                await recover_organizing(lib)
-                await self._enqueue_events(lib, backfill_nfo_events=backfill_nfo_events)
+            if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+                await self._enqueue_reading_events(lib)
+            else:
+                async with library_lock(lib.dir):
+                    await recover_organizing(lib)
+                    await self._enqueue_events(
+                        lib, backfill_nfo_events=backfill_nfo_events
+                    )
         finally:
             if path in self._scanning_paths:
                 self._scanning_paths.remove(path)
+
+    async def _enqueue_reading_events(self, lib: MediaLib):
+        """Queue incremental work scans without inferring source deletion.
+
+        Enumerate only the library's direct directories in a worker thread. Each
+        task uses existing source discovery during ingestion; registered empty or
+        missing works still need reconciliation. Coalescing retains pending moves
+        and body-change facts under the library lock.
+
+        Args:
+            lib: The observed reading library with a pending-event queue.
+
+        Raises:
+            ContentError: If the root is invalid, inaccessible or the library changes.
+            DoesNotExist: If the library is removed during enumeration.
+        """
+        logger.info(f"Scanning directory: {Colors.GREEN}%s{Colors.END}", lib.dir)
+        root = Path(lib.dir)
+        if not root.is_absolute() or ".." in root.parts:
+            raise ContentError("media_source_unavailable")
+        try:
+            _, directories = await asyncio.to_thread(list_source_entries, root)
+        except OSError as error:
+            raise ContentError("media_source_unavailable") from error
+        current = await MediaLib.get(id=lib.id)
+        if (current.dir, current.lib_type) != (lib.dir, lib.lib_type):
+            raise ContentError("content_changed")
+        works = set(directories)
+        for (directory,) in await MediaItem.filter(lib_id=lib.id).values_list("dir"):
+            path = Path(directory)
+            if not path.is_relative_to(root):
+                continue
+            parts = path.relative_to(root).parts
+            if parts and ".." not in parts and not any(map(is_ignored_name, parts)):
+                works.add(root / parts[0])
+        tasks = await coalesce_reading_events(lib.id, scan_works=works)
+        _, events = self._observers[lib.dir]
+        for event in tasks:
+            event.lib = lib
+            events.put(event)
 
     async def _enqueue_events(self, lib: MediaLib, *, backfill_nfo_events: bool = True):
         """Enqueue scan events under the caller's library lock.

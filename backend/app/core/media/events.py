@@ -12,6 +12,7 @@ from watchdog.events import FileSystemEvent
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock, notify_media_events
 from app.core.media.handlers.base import get_handler
+from app.core.media.handlers.reading import is_ignored_name
 from app.models.media import LibType, MediaEvent, MediaLib
 
 _SOURCE_EVENTS = ("created", "modified", "deleted", "moved")
@@ -86,23 +87,28 @@ def _defer_reading_task(payload: ReadingReconcile, error: ContentError):
     )
 
 
-async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
-    """Atomically replace selected raw events with one task per affected work.
+async def coalesce_reading_events(
+    lib_id: int, *, scan_works: set[Path] | None = None
+) -> list[MediaEvent]:
+    """Merge filesystem events and scan scopes into one task per affected work.
 
-    Call outside the library lock, from its serial consumer. Existing reconcile
-    tasks are merged without reading sources or invoking content indexing. Only
+    Call outside the library lock, from the serial consumer or scanner. Existing
+    reconcile tasks merge without reading sources or invoking content indexing. Only
     selected IDs are removed; later arrivals remain available for the next call.
     This preparation step does not execute or acknowledge reconciliation tasks.
 
     Args:
         lib_id: The reading library whose persisted events should be coalesced.
+        scan_works: Work directories to check incrementally, including missing
+            registered works. None merges only filesystem events. Scans preserve
+            pending moves and forced rebuilds without forcing unchanged bodies.
 
     Returns:
-        The created or updated work tasks, ordered by their first selected event.
-        An empty list means no selected event affected a supported reading scope.
+        Tasks ordered by scan path, then by their first selected filesystem event.
+        An empty list means neither input selected a supported reading scope.
 
     Raises:
-        ValueError: If the library is not a reading type or a saved payload is invalid.
+        ValueError: If the library type, scan scopes or a saved payload is invalid.
         ContentError: If the library path or type changes while acquiring its lock.
         DoesNotExist: If the library no longer exists.
     """
@@ -115,14 +121,26 @@ async def coalesce_reading_events(lib_id: int) -> list[MediaEvent]:
         current = await MediaLib.get(id=lib_id)
         if (current.dir, current.lib_type) != (lib.dir, lib.lib_type):
             raise ContentError("content_changed")
+        root = Path(lib.dir)
+        if scan_works is not None and (
+            not root.is_absolute()
+            or ".." in root.parts
+            or any(
+                work.parent != root or is_ignored_name(work.name) for work in scan_works
+            )
+        ):
+            raise ValueError("scan works must be visible direct library directories")
         handler = get_handler(lib.lib_type)
         events = await MediaEvent.filter(
             lib_id=lib_id, event_type__in=_SOURCE_EVENTS
         ).order_by("id")
-        if not events:
+        if not events and not scan_works:
             return []
 
-        grouped: dict[str, ReadingReconcile] = {}
+        grouped = {
+            str(work): ReadingReconcile(targets=[str(work)], force_targets=[])
+            for work in sorted(scan_works or ())
+        }
         for event in events:
             source = FileSystemEvent(event.src_path, event.dest_path or "")
             source.event_type = event.event_type

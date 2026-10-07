@@ -1,21 +1,26 @@
 """Tests for durable reading events, stability, completion and bounded retries."""
 
 import asyncio
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
 from queue import Queue
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from filelock import Timeout
+from sanic import Sanic
 from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
 from watchdog.events import FileCreatedEvent, FileModifiedEvent
 
 from app.core.config import KaloscopeConfig
 from app.core.media import events as media_events
+from app.core.media import watcher as media_watcher
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.events import (
@@ -26,8 +31,15 @@ from app.core.media.events import (
 )
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingMediaHandler
-from app.core.media.watcher import EventHandler, consume_event
-from app.models.media import IndexState, LibType, MediaEvent, MediaItem, MediaLib
+from app.core.media.watcher import EventHandler, LibWatcher, consume_event
+from app.models.media import (
+    IndexState,
+    LibType,
+    MediaEvent,
+    MediaFormat,
+    MediaItem,
+    MediaLib,
+)
 from app.services.media import MediaItemService
 
 
@@ -73,6 +85,346 @@ async def _library(tmp_path: Path, lib_type: LibType = LibType.COMIC) -> MediaLi
     return await MediaLib.create(
         name="Reading", dir=str(tmp_path / "Library"), lib_type=lib_type, priority=1
     )
+
+
+def _monitor(monkeypatch: pytest.MonkeyPatch, lib: MediaLib) -> LibWatcher:
+    """Provide a local scan queue without starting a filesystem observer.
+
+    Args:
+        monkeypatch: The fixture restoring the isolated watcher state.
+        lib: The library whose scan is observed.
+
+    Returns:
+        A watcher with an isolated event queue and scan status.
+    """
+    monitor = LibWatcher(cast(Sanic, SimpleNamespace()))
+    monkeypatch.setattr(monitor, "_observers", {lib.dir: (Mock(), Queue())})
+    monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
+    return monitor
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("initial", [False, True])
+def test_reading_scan(tmp_path, monkeypatch, lib_type, initial):
+    """Queue work scopes once while retaining registered empty and missing sources.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture observing worker execution and video isolation.
+        lib_type: The reading library type to scan.
+        initial: Whether to enter through the initial-scan path.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path, lib_type)
+            root = Path(lib.dir)
+            for name in ("New", "Empty", ".hidden", "copy.part"):
+                (root / name).mkdir(parents=True)
+            if lib_type == LibType.NOVEL:
+                (root / "New/Book.txt").write_text("Body")
+            else:
+                for chapter in ("1", "2"):
+                    directory = root / "New" / chapter
+                    directory.mkdir()
+                    for page in range(20):
+                        (directory / f"{page}.png").write_bytes(b"image")
+            (root / "loose.txt").write_text("Not a work directory")
+            outside = tmp_path / "Outside"
+            outside.mkdir()
+            (root / "Link").symlink_to(outside, target_is_directory=True)
+            for name, directory in (
+                ("Empty", root / "Empty"),
+                ("Missing", root / "Missing"),
+                ("Outside", outside),
+                ("Escape", root / ".." / "Outside"),
+                ("Hidden", root / ".registered"),
+            ):
+                await MediaItem.create(
+                    lib=lib,
+                    path=str(directory / "Book.txt")
+                    if lib_type == LibType.NOVEL
+                    else str(directory),
+                    dir=str(directory),
+                    name=name,
+                    format=MediaFormat.TXT
+                    if lib_type == LibType.NOVEL
+                    else MediaFormat.DIR,
+                    visible=False,
+                )
+            before = await MediaItem.all().values()
+            monitor = _monitor(monkeypatch, lib)
+            video = AsyncMock(side_effect=AssertionError("unexpected video scan"))
+            monkeypatch.setattr(monitor, "_enqueue_events", video)
+            monkeypatch.setattr(media_watcher, "recover_organizing", video)
+            enumerate_sources = media_watcher.list_source_entries
+            main_thread = threading.get_ident()
+
+            def enumerate_in_worker(directory):
+                """Check that filesystem enumeration runs off the event loop.
+
+                Args:
+                    directory: The library root being enumerated.
+
+                Returns:
+                    Its visible files and directories.
+                """
+                assert threading.get_ident() != main_thread
+                return enumerate_sources(directory)
+
+            monkeypatch.setattr(
+                media_watcher, "list_source_entries", enumerate_in_worker
+            )
+            if initial:
+                await monitor._delay_scan(lib)
+            else:
+                await monitor.scan_directory(lib.dir)
+            tasks = await MediaEvent.all().order_by("id")
+            assert [task.src_path for task in tasks] == [
+                str(root / name) for name in ("Empty", "Missing", "New")
+            ]
+            for task in tasks:
+                assert task.event_type == "reconcile" and task.is_directory
+                assert task.payload == ReadingReconcile(
+                    targets=[task.src_path], force_targets=[]
+                ).model_dump(mode="json", exclude_none=True)
+            queue = monitor._observers[lib.dir][1]
+            assert [queue.get_nowait().id for _ in tasks] == [task.id for task in tasks]
+            assert queue.empty()
+            await monitor.scan_directory(lib)
+            assert await MediaEvent.all().order_by("id").values_list(
+                "id", flat=True
+            ) == [task.id for task in tasks]
+            assert await MediaItem.all().values() == before
+            assert not monitor.is_scanning(lib.dir)
+            video.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_scan_pending(tmp_path, monkeypatch):
+    """Merge a scan with pending moves and newly arrived body modifications.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture providing the watcher queue.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            work = Path(lib.dir) / "Work"
+            work.mkdir(parents=True)
+            moved = await MediaEvent.create(
+                lib=lib,
+                event_type="moved",
+                src_path=str(work / "Old"),
+                dest_path=str(work / "A"),
+                is_directory=True,
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            previous = ReadingReconcile.model_validate(task.payload)
+            task.payload = previous.model_copy(
+                update={"state": "failed", "attempts": 5, "error_code": "bad_body"}
+            ).model_dump(mode="json", exclude_none=True)
+            await task.save()
+            other_path = str(Path(lib.dir) / "Unselected")
+            other = await MediaEvent.create(
+                lib=lib,
+                event_type="reconcile",
+                src_path=other_path,
+                is_directory=True,
+                payload=ReadingReconcile(
+                    targets=[other_path],
+                    force_targets=[],
+                    state="failed",
+                    attempts=5,
+                    error_code="bad_body",
+                ).model_dump(mode="json", exclude_none=True),
+            )
+            untouched = await MediaEvent.get(id=other.id).values()
+            await MediaEvent.create(
+                lib=lib, event_type="modified", src_path=str(work / "B/1.png")
+            )
+            monitor = _monitor(monkeypatch, lib)
+            await monitor.scan_directory(lib)
+            current = await MediaEvent.get(id=task.id)
+            payload = ReadingReconcile.model_validate(current.payload)
+            assert payload.targets == [str(work)]
+            assert payload.force_targets == [
+                str(work / name) for name in ("A", "B", "Old")
+            ]
+            assert payload.moves == previous.moves
+            assert payload.moves[0].event_id == moved.id
+            assert payload.state == "pending" and payload.attempts == 0
+            assert payload.error_code is None and payload.observed_snapshot is None
+            assert payload.not_before is None
+            assert await MediaEvent.all().count() == 2
+            assert await MediaEvent.get(id=other.id).values() == untouched
+            assert monitor._observers[lib.dir][1].get_nowait().id == task.id
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("problem", ["missing", "file", "symlink", "denied"])
+def test_scan_unavailable(tmp_path, monkeypatch, problem):
+    """Retain media and pending tasks when the root cannot be enumerated safely.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture simulating access failure.
+        problem: The root access or file-type failure.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            root = Path(lib.dir)
+            if problem == "file":
+                root.write_bytes(b"not a directory")
+            elif problem == "symlink":
+                root.symlink_to(tmp_path, target_is_directory=True)
+            elif problem == "denied":
+                root.mkdir()
+                monkeypatch.setattr(
+                    media_watcher,
+                    "list_source_entries",
+                    Mock(side_effect=PermissionError),
+                )
+            await MediaItem.create(
+                lib=lib, path=str(root / "Work"), dir=str(root / "Work"), name="Work"
+            )
+            await MediaEvent.create(
+                lib=lib, src_path=str(root / "Work/1.png"), event_type="modified"
+            )
+            items = await MediaItem.all().values()
+            events = await MediaEvent.all().values()
+            monitor = _monitor(monkeypatch, lib)
+            with pytest.raises(ContentError, match="media_source_unavailable"):
+                await monitor.scan_directory(lib, validate_request=True)
+            assert await MediaItem.all().values() == items
+            assert await MediaEvent.all().values() == events
+            assert monitor._observers[lib.dir][1].empty()
+            assert not monitor.is_scanning(lib.dir)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["path", "type", "delete"])
+def test_scan_ownership(tmp_path, monkeypatch, change):
+    """Reject an enumeration after its library changes or is deleted.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture changing ownership after the worker returns.
+        change: The database change concurrent with enumeration.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            (Path(lib.dir) / "Work").mkdir(parents=True)
+            monitor = _monitor(monkeypatch, lib)
+            to_thread = media_watcher.asyncio.to_thread
+
+            async def changed(function, *args):
+                """Change library ownership after filesystem enumeration.
+
+                Args:
+                    function: The synchronous worker operation.
+                    args: The worker's positional arguments.
+
+                Returns:
+                    The original directory listing with now-stale ownership.
+                """
+                result = await to_thread(function, *args)
+                if change == "delete":
+                    await MediaLib.filter(id=lib.id).delete()
+                else:
+                    fields = (
+                        {"dir": str(tmp_path / "Other")}
+                        if change == "path"
+                        else {"lib_type": LibType.MOVIE}
+                    )
+                    await MediaLib.filter(id=lib.id).update(**fields)
+                return result
+
+            monkeypatch.setattr(media_watcher.asyncio, "to_thread", changed)
+            with pytest.raises(DoesNotExist if change == "delete" else ContentError):
+                await monitor.scan_directory(lib)
+            assert not await MediaEvent.all().exists()
+            assert monitor._observers[lib.dir][1].empty()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", [".", "..", "Work/Chapter", ".hidden", "copy.tmp"])
+def test_scan_scope(tmp_path, scope):
+    """Reject invalid scan scopes before modifying persisted filesystem events.
+
+    Args:
+        tmp_path: The isolated library root.
+        scope: The invalid relative scan scope.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(Path(lib.dir) / "Work/1.png"),
+                event_type="created",
+            )
+            before = await MediaEvent.all().values()
+            with pytest.raises(ValueError, match="scan works"):
+                await coalesce_reading_events(
+                    lib.id, scan_works={Path(lib.dir) / scope}
+                )
+            assert await MediaEvent.all().values() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_scan_ingest(tmp_path, monkeypatch, lib_type):
+    """Pass scan tasks to ingestion and reuse an unchanged published body index.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture providing the watcher queue.
+        lib_type: The novel or comic source ingested from the scan task.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path, lib_type)
+            work = Path(lib.dir) / "Work"
+            work.mkdir(parents=True)
+            if lib_type == LibType.NOVEL:
+                (work / "Book.txt").write_text("A complete chapter.")
+            else:
+                (work / "1.png").write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            monitor = _monitor(monkeypatch, lib)
+            version = None
+            for _ in range(2):
+                await monitor.scan_directory(lib)
+                task = await MediaEvent.get(lib=lib, event_type="reconcile")
+                payload = ReadingReconcile.model_validate(task.payload)
+                if version is None:
+                    assert not await MediaItem.all().exists()
+                assert not await MediaItemService.ingest_reading_work(
+                    lib.id,
+                    Path(task.src_path),
+                    targets={Path(path) for path in payload.targets},
+                    force_targets={Path(path) for path in payload.force_targets},
+                )
+                item = await MediaItem.get(lib=lib)
+                assert item.index_state == IndexState.READY
+                if version is not None:
+                    assert item.index_version == version
+                version = item.index_version
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
