@@ -428,13 +428,15 @@ def test_scan_ingest(tmp_path, monkeypatch, lib_type):
 
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
-def test_coalesce_burst(tmp_path, monkeypatch, lib_type):
+@pytest.mark.parametrize("entry", ["direct", "live", "restart"])
+def test_coalesce_burst(tmp_path, monkeypatch, lib_type, entry):
     """Collapse a producer burst and pass its scope to real work ingestion.
 
     Args:
         tmp_path: The isolated filesystem root.
         monkeypatch: The fixture used to observe post-commit notifications.
         lib_type: The reading type whose body and metadata are imported.
+        entry: Whether to merge directly, consume live events or recover a queue.
     """
 
     async def run():
@@ -459,7 +461,8 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type):
                 "ComicInfo.xml" if lib_type == LibType.COMIC else "metadata.opf"
             )
             metadata.write_text(xml)
-            handler = EventHandler(lib, asyncio.get_running_loop(), Queue())
+            events = Queue()
+            handler = EventHandler(lib, asyncio.get_running_loop(), events)
             await handler._persist(FileCreatedEvent(str(body)))
             for _ in range(200):
                 await handler._persist(FileModifiedEvent(str(body)))
@@ -471,7 +474,41 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type):
             monkeypatch.setattr(
                 media_events, "notify_media_events", notifications.append
             )
-            tasks = await coalesce_reading_events(lib.id)
+            video = AsyncMock(side_effect=AssertionError("unexpected video processing"))
+            monkeypatch.setattr(media_watcher, "recover_organizing", video)
+            monkeypatch.setattr(media_watcher, "_consume_event", video)
+            if entry == "direct":
+                tasks = await coalesce_reading_events(lib.id)
+            else:
+                monitor = _monitor(monkeypatch, lib)
+                if entry == "restart":
+                    await MediaLib.filter(id=lib.id).update(scan_on_startup=False)
+                    events = await monitor._create_events(lib)
+                monkeypatch.setitem(monitor.__dict__, "_event_changes", {})
+
+                async def consume(event):
+                    """Stop the loop once it reloads the saved reading task.
+
+                    Args:
+                        event: The raw event or saved task dequeued by the consumer.
+
+                    Returns:
+                        Whether the consumer performed work for this queued event.
+
+                    Raises:
+                        asyncio.CancelledError: After the merged task is reached.
+                    """
+                    processed = await consume_event(event)
+                    if event.event_type == "reconcile":
+                        raise asyncio.CancelledError
+                    return processed
+
+                monkeypatch.setattr(media_watcher, "consume_event", consume)
+                pause = AsyncMock()
+                monkeypatch.setattr(media_watcher.asyncio, "sleep", pause)
+                await asyncio.wait_for(monitor._event_consumer(lib.id, events), 5)
+                pause.assert_awaited_once_with(1)
+                tasks = await MediaEvent.filter(lib=lib, event_type="reconcile")
             assert len(tasks) == 1
             task = tasks[0]
             payload = ReadingReconcile.model_validate(task.payload)
@@ -479,6 +516,7 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type):
             assert task.is_directory
             assert task.event_type == "reconcile"
             assert payload.targets == [str(target)]
+            assert payload.force_targets == [str(target)]
             assert payload.moves == []
             assert await MediaEvent.all().count() == 1
             assert notifications == [lib.id]
@@ -488,8 +526,9 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type):
             # a stale queue object must not route a saved task through video handling
             queued = await MediaEvent.get(id=task.id)
             queued.event_type = "created"
-            await consume_event(queued)
+            assert not await consume_event(queued)
             assert await MediaEvent.filter(id=task.id).exists()
+            video.assert_not_awaited()
 
             # task execution and acknowledgement belong to the later consumer
             assert await MediaItem.all().count() == 0
@@ -505,6 +544,116 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type):
             assert item.index_state == IndexState.READY
             assert item.title == "Local"
             assert await MediaEvent.filter(id=task.id).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["created", "modified", "deleted", "moved"])
+def test_consume_reading_scope(tmp_path, kind):
+    """Merge live body events into failed tasks without changing other work scopes.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        kind: The incoming filesystem event type.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path)
+            root = Path(lib.dir)
+            pending = []
+            for name in ("Work", "Other"):
+                pending.append(
+                    await MediaEvent.create(
+                        lib=lib,
+                        src_path=str(root / name),
+                        event_type="reconcile",
+                        is_directory=True,
+                        payload=ReadingReconcile(
+                            targets=[str(root / name / "A")],
+                            force_targets=[],
+                            observed_snapshot="a" * 64,
+                            state="failed",
+                            attempts=5,
+                            error_code="content_changed",
+                        ).model_dump(mode="json", exclude_none=True),
+                    )
+                )
+            original = await MediaEvent.create(
+                lib=lib,
+                src_path=str(root / "Work/A/1.png"),
+                dest_path=str(root / "Work/B/1.png") if kind == "moved" else None,
+                event_type=kind,
+            )
+            # dispatch uses persisted event data instead of the queued object's type
+            queued = await MediaEvent.get(id=original.id)
+            queued.event_type = "reconcile"
+            assert await consume_event(queued)
+            task = await MediaEvent.get(id=pending[0].id)
+            payload = ReadingReconcile.model_validate(task.payload)
+            targets = [str(root / "Work/A")]
+            if kind == "moved":
+                targets.append(str(root / "Work/B"))
+                assert len(payload.moves) == 1
+                move = payload.moves[0]
+                assert (move.event_id, move.src_path, move.dest_path) == (
+                    original.id,
+                    original.src_path,
+                    original.dest_path,
+                )
+            else:
+                assert not payload.moves
+            assert payload.targets == payload.force_targets == targets
+            assert payload.state == "pending" and payload.attempts == 0
+            assert payload.observed_snapshot is None
+            assert payload.not_before is None and payload.error_code is None
+            assert not await MediaEvent.filter(id=original.id).exists()
+            other = await MediaEvent.get(id=pending[1].id)
+            assert (other.payload, other.updated_at) == (
+                pending[1].payload,
+                pending[1].updated_at,
+            )
+            # replaying an already merged queue entry must not reset the task again
+            assert not await consume_event(original)
+            current = await MediaEvent.get(id=task.id)
+            assert (current.payload, current.updated_at) == (
+                task.payload,
+                task.updated_at,
+            )
+            assert not await MediaItem.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "kind", ["reconcile", "ingest", "organize", "metadata", "unknown"]
+)
+def test_consume_reading_pending(tmp_path, monkeypatch, kind):
+    """Retain pending task protocols without invoking video or resetting retries.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture rejecting processing beyond raw event coalescing.
+        kind: The persisted task protocol to retain.
+    """
+
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path, LibType.NOVEL)
+            task = await MediaEvent.create(
+                lib=lib,
+                src_path=str(Path(lib.dir) / "Work"),
+                event_type=kind,
+                payload={"state": "failed", "attempts": 5},
+            )
+            before = await MediaEvent.all().values()
+            unexpected = AsyncMock(side_effect=AssertionError("unexpected processing"))
+            monkeypatch.setattr(media_watcher, "recover_organizing", unexpected)
+            monkeypatch.setattr(media_watcher, "coalesce_reading_events", unexpected)
+            monkeypatch.setattr(media_watcher, "_consume_event", unexpected)
+            assert not await consume_event(task)
+            assert await MediaEvent.all().values() == before
+            unexpected.assert_not_awaited()
 
     asyncio.run(run())
 
@@ -774,13 +923,15 @@ def test_coalesce_isolation(tmp_path):
 
 
 @pytest.mark.parametrize("failure", [None, RuntimeError, asyncio.CancelledError])
-def test_coalesce_transaction(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("consumer", [False, True])
+def test_coalesce_transaction(tmp_path, monkeypatch, failure, consumer):
     """Keep late arrivals and roll back task writes on failure or cancellation.
 
     Args:
         tmp_path: The isolated filesystem root.
         monkeypatch: The fixture injecting a late write or interruption.
         failure: The exception after a task write, or None to commit normally.
+        consumer: Whether to enter through the live watcher consumer.
     """
 
     async def run():
@@ -814,12 +965,19 @@ def test_coalesce_transaction(tmp_path, monkeypatch, failure):
             )
             if failure:
                 with pytest.raises(failure):
-                    await coalesce_reading_events(lib.id)
+                    if consumer:
+                        await consume_event(original)
+                    else:
+                        await coalesce_reading_events(lib.id)
                 assert await MediaEvent.all().count() == 1
                 assert await MediaEvent.filter(id=original.id).exists()
                 assert notifications == []
             else:
-                tasks = await coalesce_reading_events(lib.id)
+                if consumer:
+                    await consume_event(original)
+                    tasks = await MediaEvent.filter(lib=lib, event_type="reconcile")
+                else:
+                    tasks = await coalesce_reading_events(lib.id)
                 assert len(tasks) == len(late) == 1
                 assert not await MediaEvent.filter(id=original.id).exists()
                 assert await MediaEvent.filter(id=late[0].id).exists()

@@ -14,6 +14,7 @@ from tortoise.transactions import in_transaction
 from watchdog.events import (
     EVENT_TYPE_CREATED,
     EVENT_TYPE_DELETED,
+    EVENT_TYPE_MODIFIED,
     EVENT_TYPE_MOVED,
     DirCreatedEvent,
     DirDeletedEvent,
@@ -267,9 +268,10 @@ class LibWatcher:
             self._watcher_lock.release()
 
     async def _create_events(self, lib: MediaLib) -> Queue:
-        """Recover organization and queue pending media events.
+        """Queue pending events and recover video organization when applicable.
 
-        Log recovery conflicts so other libraries can start.
+        Reading events resume through the same coalescing path as live events.
+        Log video recovery conflicts so other libraries can start.
 
         Args:
             lib: The media library instance.
@@ -278,15 +280,16 @@ class LibWatcher:
             A queue of pending events excluding organization journals.
         """
         events = Queue()
-        try:
-            async with library_lock(lib.dir):
-                await recover_organizing(lib)
-        except OrganizePendingError:
-            logger.error(
-                "Media library %s has an organization awaiting recovery",
-                lib.id,
-                exc_info=True,
-            )
+        if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+            try:
+                async with library_lock(lib.dir):
+                    await recover_organizing(lib)
+            except OrganizePendingError:
+                logger.error(
+                    "Media library %s has an organization awaiting recovery",
+                    lib.id,
+                    exc_info=True,
+                )
         for event in await MediaEvent.filter(lib_id=lib.id).exclude(
             event_type="organize"
         ):
@@ -318,7 +321,9 @@ class LibWatcher:
                         reload = False
                 if not events.empty():
                     event: MediaEvent = events.get_nowait()
-                    await consume_event(event)
+                    # merged or removed events must not delay the remaining queue
+                    if not await consume_event(event):
+                        continue
                 await asyncio.sleep(1)
             except queue.Empty:
                 continue
@@ -570,33 +575,51 @@ def _ingest_params(info: MediaPathInfo) -> dict:
     }
 
 
-async def consume_event(event: MediaEvent):
-    """Consume a media event under its library lock.
+async def consume_event(event: MediaEvent) -> bool:
+    """Route reading events to coalescing or consume video events under their lock.
 
-    Recover organization and persist ingest work under the lock. Run workflows
-    after releasing it, saving progress after each successful trigger.
+    Reading coalescing owns its lock and retains tasks for later execution. For
+    video, recover organization and persist ingest work under the lock, then run
+    workflows after releasing it, saving progress after each successful trigger.
 
     Args:
         event: The persisted media event to process.
 
+    Returns:
+        True after processing raw events or video work; False if the queued entry
+        is stale or its task protocol is not handled here.
+
     Raises:
+        ContentError: If the reading library changes during coalescing.
+        ValueError: If a persisted reading task is invalid.
         OrganizePendingError: If organization cannot finish safely.
         OrganizeDeferredError: If a group is waiting for its remaining transfers.
     """
     lib = await MediaLib.get_or_none(id=event.lib_id)
     if lib is None:
-        return
+        return False
+    if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+        current = await MediaEvent.get_or_none(id=event.id, lib_id=lib.id)
+        if current is not None and current.event_type in (
+            EVENT_TYPE_CREATED,
+            EVENT_TYPE_MODIFIED,
+            EVENT_TYPE_DELETED,
+            EVENT_TYPE_MOVED,
+        ):
+            await coalesce_reading_events(lib.id)
+            return True
+        return False
     async with library_lock(lib.dir):
         lib = await MediaLib.get_or_none(id=lib.id)
         if lib is None:
-            return
+            return False
         await recover_organizing(lib)
         current = await MediaEvent.get_or_none(id=event.id)
         if current is None:
-            return
-        # retain reading tasks until their dedicated consumer is connected
+            return False
+        # reconcile tasks are not video events
         if current.event_type == "reconcile":
-            return
+            return False
         event = current
         event.lib = lib
         pending = await _consume_event(event)
@@ -608,6 +631,7 @@ async def consume_event(event: MediaEvent):
         event.payload = {"bootparams": pending[index + 1 :], "organize_ids": []}
         await event.save(update_fields=["payload"])
     await event.delete()
+    return True
 
 
 async def _consume_event(event: MediaEvent) -> list[dict]:

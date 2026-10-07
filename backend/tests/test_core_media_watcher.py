@@ -67,6 +67,7 @@ def test_idle_wakeup(tmp_path, monkeypatch):
 
             async def consume(event):
                 await event.delete()
+                return True
 
             async def pause(_seconds):
                 scans.append(queries.call_count)
@@ -689,9 +690,10 @@ def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
         return await update_metadata(lib, path)
 
     async def finish(event):
-        await consume_event(event)
+        processed = await consume_event(event)
         if events.empty():
             raise asyncio.CancelledError
+        return processed
 
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
     monkeypatch.setattr(watcher, "update_metadata", update)
