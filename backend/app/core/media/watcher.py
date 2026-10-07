@@ -38,6 +38,7 @@ from app.core.media.events import (
     ReadingReconcile,
     _reading_event_identity,
     coalesce_reading_events,
+    finish_reading_event,
     prepare_reading_event,
 )
 from app.core.media.handlers.base import MediaPathInfo, get_handler
@@ -307,9 +308,9 @@ class LibWatcher:
         """Consume events and reload persisted work only when necessary.
 
         Recover once on startup, after failures, and after committed-event
-        notifications. Reading observations resume at their persisted deadlines;
-        waiting and failed tasks do not block other work. An idle queue does not
-        query the database until notified or a deadline arrives.
+        notifications. Reading observations and execution retries resume at their
+        persisted deadlines; waiting and failed tasks do not block other work. An
+        idle queue does not query the database until notified or a deadline arrives.
 
         Args:
             lib_id: The media library whose persisted events are consumed.
@@ -347,9 +348,21 @@ class LibWatcher:
                         failure = None
                         try:
                             ready = await prepare_reading_event(event.id)
+                            if ready:
+                                current = await MediaEvent.get_or_none(
+                                    id=event.id, lib_id=lib_id
+                                ).select_related("lib")
+                                if (
+                                    current is not None
+                                    and _reading_event_identity(current)
+                                    == _reading_event_identity(event)
+                                    and (current.lib.dir, current.lib.lib_type)
+                                    == (event.lib.dir, event.lib.lib_type)
+                                ):
+                                    await consume_event(event)
                         except ContentError as error:
                             ready, failure = False, error
-                        # preparation may save a deadline or be superseded by new input
+                        # observation and execution both persist their own deadlines
                         event = await MediaEvent.get_or_none(
                             id=event.id, lib_id=lib_id, event_type="reconcile"
                         ).select_related("lib")
@@ -363,10 +376,13 @@ class LibWatcher:
                             event.lib.lib_type,
                         ) == (original.lib.dir, original.lib.lib_type)
                         if failure is not None:
-                            if unchanged or payload.state not in ("deferred", "failed"):
+                            if (
+                                event.payload == original.payload
+                                or payload.state not in ("deferred", "failed")
+                            ):
                                 raise failure
                             logger.warning(
-                                "Failed to observe reading task %s: %s",
+                                "Failed to process reading task %s: %s",
                                 event.id,
                                 failure.code,
                             )
@@ -380,7 +396,7 @@ class LibWatcher:
                             continue
                         if not ready or not unchanged:
                             reload = True
-                            continue
+                        continue
                     # merged or removed events must not delay the remaining queue
                     if not await consume_event(event or queued):
                         continue
@@ -636,21 +652,24 @@ def _ingest_params(info: MediaPathInfo) -> dict:
 
 
 async def consume_event(event: MediaEvent) -> bool:
-    """Route reading events to coalescing or consume video events under their lock.
+    """Coalesce or ingest reading events and consume video events under their lock.
 
-    Reading coalescing owns its lock and retains tasks for later execution. For
-    video, recover organization and persist ingest work under the lock, then run
-    workflows after releasing it, saving progress after each successful trigger.
+    Reading services manage their own locks. Execute only the prepared task version;
+    moves remain pending until identity reconciliation is available. For video,
+    recover organization and persist ingest work under the lock, then run workflows
+    after releasing it, saving progress after each successful trigger.
 
     Args:
-        event: The persisted media event to process.
+        event: The persisted media event to process. Prepared reading tasks must
+            retain the library and task snapshot captured before execution.
 
     Returns:
-        True after processing raw events or video work; False if the queued entry
-        is stale or its task protocol is not handled here.
+        True after processing raw events, reading ingestion or video work. False
+        for stale, unprepared or unsupported tasks, including pending reading moves.
 
     Raises:
-        ContentError: If the reading library changes during coalescing.
+        ContentError: If the reading library changes or completion cannot observe
+            its sources. Controlled ingestion failures persist bounded retries.
         ValueError: If a persisted reading task is invalid.
         OrganizePendingError: If organization cannot finish safely.
         OrganizeDeferredError: If a group is waiting for its remaining transfers.
@@ -668,7 +687,46 @@ async def consume_event(event: MediaEvent) -> bool:
         ):
             await coalesce_reading_events(lib.id)
             return True
-        return False
+        if current is None or current.event_type != "reconcile":
+            return False
+        payload = ReadingReconcile.model_validate(current.payload)
+        if (
+            _reading_event_identity(current) != _reading_event_identity(event)
+            or payload.moves
+            or payload.state == "failed"
+            or payload.observed_snapshot is None
+            or payload.not_before is None
+            or payload.not_before > time()
+            or (event.lib.dir, event.lib.lib_type) != (lib.dir, lib.lib_type)
+        ):
+            return False
+        # merge already persisted changes before registering any new source
+        await coalesce_reading_events(lib.id)
+        current = await MediaEvent.get_or_none(id=event.id).select_related("lib")
+        if (
+            current is None
+            or _reading_event_identity(current) != _reading_event_identity(event)
+            or (current.lib.dir, current.lib.lib_type) != (lib.dir, lib.lib_type)
+        ):
+            return False
+        failure = None
+        try:
+            issues = await MediaItemService.ingest_reading_work(
+                lib.id,
+                Path(event.src_path),
+                targets={Path(path) for path in payload.targets},
+                force_targets={Path(path) for path in payload.force_targets},
+            )
+            if issues:
+                failure = ContentError(next(iter(issues.values())))
+        except ContentError as error:
+            failure = error
+        await finish_reading_event(event, error=failure)
+        if failure is not None:
+            logger.warning(
+                "Failed to ingest reading task %s: %s", event.id, failure.code
+            )
+        return True
     async with library_lock(lib.dir):
         lib = await MediaLib.get_or_none(id=lib.id)
         if lib is None:

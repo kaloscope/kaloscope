@@ -20,10 +20,15 @@ from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
 from app.core.media import events as media_events
+from app.core.media import watcher as media_watcher
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.epub.cache import EpubContent
-from app.core.media.events import ReadingReconcile, coalesce_reading_events
+from app.core.media.events import (
+    ReadingReconcile,
+    coalesce_reading_events,
+    prepare_reading_event,
+)
 from app.core.media.handlers import reading as reading_handler
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingMediaHandler, ReadingSource
@@ -636,6 +641,8 @@ def test_ingest_undiscovered(tmp_path, problem):
                 if problem == "ambiguous"
                 else {source.directory: "media_source_unavailable"}
                 if problem in ("missing", "symlink")
+                else {source.path: "media_source_unavailable"}
+                if problem == "empty"
                 else {}
             )
             assert await MediaItem.all().values() == before
@@ -705,6 +712,136 @@ def test_ingest_empty_images(tmp_path, monkeypatch, chapter, hidden):
                 assert parent.index_state == (
                     IndexState.EMPTY if hidden else IndexState.READY
                 )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat if format != MediaFormat.DIR]
+    + [(MediaFormat.CBZ, True), (MediaFormat.ZIP, True)],
+)
+def test_ingest_file_events(tmp_path, monkeypatch, format, chapter):
+    """Execute file ingestion while preserving missing owners and their cache.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture controlling task time and application notifications.
+        format: The body format ingested and then removed externally.
+        chapter: Whether the source belongs to a comic collection.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            content = source.path.read_bytes()
+            clock = [100.0]
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            first = None
+            for removed in (False, True, False):
+                if removed:
+                    source.path.unlink()
+                else:
+                    source.path.write_bytes(content)
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source.path),
+                    event_type="deleted" if removed else "created",
+                )
+                task = (await coalesce_reading_events(lib.id))[0]
+                assert not await prepare_reading_event(task.id)
+                clock[0] += 2
+                assert await prepare_reading_event(task.id)
+                task = await MediaEvent.get(id=task.id).select_related("lib")
+                assert await media_watcher.consume_event(task)
+                item = await MediaItem.get(path=str(source.path))
+                assert item.index_state == IndexState.READY
+                if first is not None:
+                    assert item.id == first.id
+                if removed:
+                    payload = ReadingReconcile.model_validate(
+                        (await MediaEvent.get(id=task.id)).payload
+                    )
+                    assert payload.state == "deferred" and payload.attempts == 1
+                    assert payload.error_code == "media_source_unavailable"
+                    assert (
+                        first is not None and item.index_version == first.index_version
+                    )
+                    assert _cache(first).is_dir()
+                else:
+                    assert not await MediaEvent.exists()
+                    first = item
+                assert await MediaItem.all().count() == (2 if chapter else 1)
+                assert Path(work).is_dir()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat]
+    + [(MediaFormat.CBZ, True), (MediaFormat.ZIP, True)],
+)
+def test_ingest_replacement(tmp_path, format, chapter):
+    """Require identity reconciliation before registering another body in a container.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        format: The previously indexed body format.
+        chapter: Whether the replaced source belongs to a comic collection.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            item = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=item.id).update(visible=False)
+            if format == MediaFormat.DIR:
+                (source.path / "1.png").unlink()
+                with zipfile.ZipFile(source.path / "Replaced.cbz", "w") as archive:
+                    archive.writestr("1.png", _PNG)
+            else:
+                source.path.rename(source.path.with_stem("Renamed"))
+            before = await MediaItem.filter(id=item.id).values()
+            assert await MediaItemService.ingest_reading_work(lib.id, work) == {
+                source.directory: "content_changed"
+            }
+            assert await MediaItem.filter(id=item.id).values() == before
+            assert await MediaItem.all().count() == (2 if chapter else 1)
+            assert _cache(item).is_dir()
+
+    asyncio.run(run())
+
+
+def test_ingest_missing_sibling(tmp_path):
+    """Keep a missing chapter pending without blocking another selected chapter.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.CBZ, chapter=True)
+            work = source.directory.parent
+            other = work / "Other"
+            other.mkdir()
+            (other / "Book.cbz").write_bytes(source.path.read_bytes())
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            before = await MediaItem.all().values()
+            source.path.unlink()
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, work, targets={other}
+            )
+            assert await MediaItemService.ingest_reading_work(lib.id, work) == {
+                source.path: "media_source_unavailable"
+            }
+            assert await MediaItem.all().values() == before
 
     asyncio.run(run())
 

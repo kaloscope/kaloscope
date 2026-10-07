@@ -1000,7 +1000,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Returns:
             Selected source or scope paths mapped to discovery, metadata or body
-            errors. Body errors take precedence for a source with multiple failures.
+            errors, including registered bodies missing from discovery. Ownership
+            conflicts require reconciliation before registering a replacement.
+            Body errors take precedence for a source with multiple failures.
 
         Raises:
             DoesNotExist: If the library no longer exists.
@@ -1054,24 +1056,40 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             raise ContentError("content_changed")
         issues = {path: error for path, error in scan.issues.items() if selected(path)}
         sources = [source for source in scan.sources if selected(source.directory)]
-        known: list[MediaItem] = []
-        if lib.lib_type == LibType.COMIC:
-            known = await MediaItem.filter(
-                Q(path=str(work_path)) | Q(parent__path=str(work_path)),
-                Q(format=MediaFormat.DIR) | Q(format__isnull=True),
-                lib_id=lib_id,
-            ).select_related("parent")
-            discovered = {source.directory for source in sources}
-            # discovery omits empty containers, but indexed ones still need updates
-            sources.extend(
-                ReadingSource(
-                    Path(item.path),
-                    item.format,
-                    Path(item.parent.path) if item.parent is not None else None,
-                )
-                for item in known
-                if Path(item.dir) not in discovered and selected(Path(item.dir))
+        known = await MediaItem.filter(
+            Q(dir=str(work_path)) | Q(parent__path=str(work_path)), lib_id=lib_id
+        ).select_related("parent")
+        discovered = {source.directory: source for source in sources}
+        conflicts: set[Path] = set()
+        for item in known:
+            directory = Path(item.dir)
+            if (
+                item.format is not None
+                and targets is not None
+                and not any(directory.is_relative_to(target) for target in targets)
+            ):
+                continue
+            source = ReadingSource(
+                Path(item.path),
+                item.format,
+                Path(item.parent.path) if item.parent is not None else None,
             )
+            candidate = discovered.get(directory)
+            if candidate is not None:
+                if (candidate.path, candidate.format, candidate.parent_path) != (
+                    source.path,
+                    source.format,
+                    source.parent_path,
+                ):
+                    issues[directory] = "content_changed"
+                    conflicts.add(directory)
+            elif item.format in (None, MediaFormat.DIR):
+                # discovery omits empty containers, but indexed ones still need updates
+                sources.append(source)
+            elif not any(directory.is_relative_to(scope) for scope in issues):
+                # a missing registered body still needs deletion or move reconciliation
+                issues[source.path] = "media_source_unavailable"
+        sources = [source for source in sources if source.directory not in conflicts]
         if not any(source.format is not None for source in sources) and not any(
             item.path == str(work_path) and item.format is None for item in known
         ):
