@@ -893,6 +893,7 @@
     "invalid_epub": "The EPUB structure is invalid!",
     "invalid_image": "The image format is invalid!",
     "invalid_metadata": "The metadata file is invalid!",
+    "metadata_write_failed": "The metadata file could not be saved!",
     "ambiguous_metadata": "The metadata source is ambiguous!"
   }
 }

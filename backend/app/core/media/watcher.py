@@ -686,6 +686,8 @@ async def consume_event(event: MediaEvent) -> bool:
         return False
     if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
         current = await MediaEvent.get_or_none(id=event.id, lib_id=lib.id)
+        if current is not None and current.event_type == "metadata":
+            return await MediaItemService.consume_metadata(current.id)
         if current is not None and current.event_type in (
             EVENT_TYPE_CREATED,
             EVENT_TYPE_MODIFIED,

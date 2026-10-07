@@ -153,14 +153,17 @@ async def gen_nfo(
     """
     if item_id is not None:
         item = await MediaItem.get_or_none(id=item_id).select_related("lib")
-        if item is None:
+        if item is None or item.lib.lib_type not in (LibType.MOVIE, LibType.TV_SHOW):
             return False
         async with library_lock(item.lib.dir):
             from app.core.media.organizer import recover_organizing
 
             await recover_organizing(item.lib)
             item = await MediaItem.get_or_none(id=item_id).select_related("lib")
-            if item is None:
+            if item is None or item.lib.lib_type not in (
+                LibType.MOVIE,
+                LibType.TV_SHOW,
+            ):
                 return False
             # the workflow may still hold a path from before organization
             if not Path(item.path).exists():

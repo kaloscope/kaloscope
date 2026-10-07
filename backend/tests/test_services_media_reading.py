@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from filelock import Timeout
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
 from tortoise import Tortoise
@@ -21,10 +22,11 @@ from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import ForbiddenException, NotFoundException, error_handler
-from app.core.media import reader
+from app.core.media import reader, shelver, watcher, writer
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.reading import ReadingSource
+from app.core.media.metadata import parse_comicinfo, parse_opf
 from app.core.middleware import on_request, on_response
 from app.models.media import (
     EpubContent,
@@ -32,6 +34,7 @@ from app.models.media import (
     IndexState,
     LibType,
     MediaContentQuery,
+    MediaEvent,
     MediaFormat,
     MediaItem,
     MediaLib,
@@ -532,8 +535,10 @@ def test_sync_worker(tmp_path, monkeypatch, cancel):
             task = asyncio.create_task(MediaItemService.sync_metadata(item.id))
             try:
                 assert await asyncio.to_thread(started.wait, 5)
-                async with await library_lock(item.lib.dir).acquire(timeout=0):
-                    assert await MediaItem.get(id=item.id).values() == before
+                with pytest.raises(Timeout):
+                    async with await library_lock(item.lib.dir).acquire(timeout=0):
+                        pass
+                assert await MediaItem.get(id=item.id).values() == before
                 if cancel:
                     task.cancel()
                     with pytest.raises(asyncio.CancelledError):
@@ -3080,5 +3085,760 @@ def test_collection_content_limit(tmp_path):
                 )
                 assert response.status_code == 422, response.text
                 assert response.json()["message"] == "media_limit_exceeded"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_save_metadata(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            directory = Path(item.dir)
+            novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
+            xml = directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            xml.write_bytes(
+                _opf("Old", "<dc:publisher>Remove me</dc:publisher>")
+                if novel
+                else b"<ComicInfo><Publisher>Remove me</Publisher></ComicInfo>"
+            )
+            (directory / "cover.png").write_bytes(_PNG)
+            (directory / "notes.md").write_text("Unrelated")
+            before = {
+                path: path.read_bytes()
+                for path in directory.iterdir()
+                if path.is_file() and path != xml
+            }
+            await MediaItem.filter(id=item.id).update(
+                visible=False,
+                index_state=IndexState.READY,
+                index_version="a" * 64,
+                extra={"content": {"chapter_count": 2}},
+            )
+            assert await MediaItemService.save_metadata(
+                item.id,
+                {
+                    "title": "New & <title>",
+                    "plot": "New plot",
+                    "authors": ["Author"],
+                    "rating": 0,
+                },
+                overwrite=True,
+            )
+            parsed = (parse_opf if novel else parse_comicinfo)(xml.read_bytes()).data
+            assert parsed.title == "New & <title>" and parsed.authors == ("Author",)
+            assert (
+                parsed.publisher is None and parsed.year is None and parsed.rating == 0
+            )
+            assert all(path.read_bytes() == data for path, data in before.items())
+            assert not list(directory.glob(".metadata-*.tmp"))
+            current = await MediaItem.get(id=item.id)
+            assert (
+                current.title == parsed.title
+                and current.year is None
+                and current.rating == 0
+            )
+            assert current.visible is False and current.index_version == "a" * 64
+            assert current.index_state == IndexState.READY and current.nfo_path is None
+            assert current.extra is not None and set(current.extra) == {
+                "content",
+                "schema_version",
+                "metadata_sync",
+            }
+            assert current.extra["metadata_sync"]["state"] == "ready"
+            assert not await MediaEvent.all().exists()
+            await MediaItem.filter(id=item.id).update(visible=True)
+            details = await MediaItemService.get_details(item.id, _user())
+            assert (
+                details["title"] == "New & <title>"
+                and details["metadata"]["plot"] == "New plot"
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "name", ["Book.opf", "content.opf", "metadata.opf", "Metadata.OPF"]
+)
+def test_save_opf_priority(tmp_path, name):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            directory = Path(item.dir)
+            target = directory / name
+            target.write_bytes(
+                _opf("External edit", "<dc:publisher>Removed</dc:publisher>")
+            )
+            target.chmod(0o640)
+            if name.casefold() != "metadata.opf":
+                (directory / "metadata.opf").write_bytes(_opf("Lower priority"))
+            (directory / "other.opf").write_bytes(_opf("Unrelated"))
+            assert await MediaItemService.save_metadata(
+                item.id, {"title": "Confirmed"}, overwrite=True
+            )
+            assert (directory / "other.opf").read_bytes() == _opf("Unrelated")
+            if name.casefold() != "metadata.opf":
+                assert not target.exists()
+            else:
+                assert target.stat().st_mode & 0o777 == 0o640
+            details = await MediaItemService.get_details(item.id, _user())
+            assert (
+                details["title"] == "Confirmed"
+                and details["metadata"]["publisher"] is None
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "format",
+    [
+        MediaFormat.TXT,
+        MediaFormat.DIR,
+        MediaFormat.EPUB,
+        MediaFormat.CBZ,
+        MediaFormat.ZIP,
+    ],
+)
+def test_auto_metadata_existing(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            directory = Path(item.dir)
+            if format == MediaFormat.TXT:
+                (directory / "content.opf").write_bytes(_opf("Local"))
+            elif format == MediaFormat.DIR:
+                (directory / "ComicInfo.xml").write_text(
+                    "<ComicInfo><Title>Local</Title></ComicInfo>"
+                )
+            before = {
+                path: path.read_bytes()
+                for path in directory.iterdir()
+                if path.is_file()
+            }
+            assert not await MediaItemService.save_metadata(
+                item.id, {"title": "Automatic"}
+            )
+            assert before == {
+                path: path.read_bytes()
+                for path in directory.iterdir()
+                if path.is_file()
+            }
+            current = await MediaItem.get(id=item.id)
+            assert current.title == (
+                "Local" if format in (MediaFormat.TXT, MediaFormat.DIR) else "Embedded"
+            )
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "format", [None, MediaFormat.TXT, MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP]
+)
+def test_auto_metadata_create(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            if format in (MediaFormat.CBZ, MediaFormat.ZIP):
+                with zipfile.ZipFile(item.path, "w") as archive:
+                    archive.writestr("1.png", _PNG)
+            assert await MediaItemService.save_metadata(item.id, {"title": "Automatic"})
+            assert not await MediaEvent.all().exists()
+            assert (await MediaItem.get(id=item.id)).title == "Automatic"
+
+    asyncio.run(run())
+
+
+def test_save_chapter_metadata(tmp_path):
+    async def run():
+        async with _database():
+            parent = await _item(tmp_path, None)
+            parent_xml = Path(parent.dir) / "ComicInfo.xml"
+            parent_xml.write_text(
+                "<ComicInfo><Title>Series</Title>"
+                "<Writer>Parent author</Writer></ComicInfo>"
+            )
+            directory = Path(parent.dir) / "Chapter"
+            directory.mkdir()
+            (directory / "1.png").write_bytes(_PNG)
+            chapter = await MediaItem.create(
+                lib_id=parent.lib_id,
+                parent_id=parent.id,
+                path=str(directory),
+                dir=str(directory),
+                name="Chapter",
+                format=MediaFormat.DIR,
+            )
+            before = parent_xml.read_bytes()
+            assert await MediaItemService.save_metadata(
+                chapter.id, {"title": "Chapter title"}
+            )
+            xml = directory / "ComicInfo.xml"
+            assert not parse_comicinfo(xml.read_bytes()).data.authors
+            assert parent_xml.read_bytes() == before
+            details = await MediaItemService.get_details(chapter.id, _user())
+            assert details["metadata"]["authors"] == ("Parent author",)
+            assert (await MediaItem.get(id=parent.id)).title == "Old database title"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["validation", "publish"])
+def test_auto_metadata_arrives(tmp_path, monkeypatch, stage):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            xml = Path(item.dir) / "metadata.opf"
+            read = writer._read_local
+            rename = writer.rename_exclusive
+
+            def read_local(path, parser):
+                if stage == "validation" and path.suffix == ".tmp":
+                    xml.write_bytes(_opf("External"))
+                return read(path, parser)
+
+            def publish(src, dest):
+                xml.write_bytes(_opf("External"))
+                return rename(src, dest)
+
+            monkeypatch.setattr(writer, "_read_local", read_local)
+            if stage == "publish":
+                monkeypatch.setattr(writer, "rename_exclusive", publish)
+            assert not await MediaItemService.save_metadata(
+                item.id, {"title": "Automatic"}
+            )
+            assert xml.read_bytes() == _opf("External")
+            assert (await MediaItem.get(id=item.id)).title == "External"
+            assert not await MediaEvent.all().exists()
+            assert not list(Path(item.dir).glob(".metadata-*.tmp"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {},
+        {"title": "   "},
+        {"title": "New", "authors": "Bad"},
+        {"title": "New", "output_path": "/tmp/metadata.opf"},
+        {"title": "New", "overwrite": True},
+        {"title": "New", "volume": "4"},
+        {"title": "New", "rating": 11},
+        {"title": "New", "year": "2026"},
+    ],
+)
+def test_save_metadata_invalid(tmp_path, candidate):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            xml = Path(item.dir) / "metadata.opf"
+            xml.write_bytes(_opf("Original"))
+            with pytest.raises(ContentError, match="invalid_metadata"):
+                await MediaItemService.save_metadata(item.id, candidate, overwrite=True)
+            assert xml.read_bytes() == _opf("Original")
+            assert not await MediaEvent.all().exists()
+            assert (await MediaItem.get(id=item.id)).title == "Old database title"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem", ["missing", "body_link", "xml_link", "xml_directory", "ambiguous"]
+)
+def test_save_metadata_source(tmp_path, problem):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            directory = Path(item.dir)
+            xml = directory / "metadata.opf"
+            outside = tmp_path / "Outside"
+            outside.write_bytes(_opf("Protected"))
+            if problem == "missing":
+                Path(item.path).unlink()
+            elif problem == "body_link":
+                Path(item.path).unlink()
+                Path(item.path).symlink_to(outside)
+            elif problem == "xml_link":
+                xml.symlink_to(outside)
+            elif problem == "xml_directory":
+                xml.mkdir()
+            else:
+                (directory / "Other.txt").write_text("Ambiguous body")
+            with pytest.raises(ContentError):
+                await MediaItemService.save_metadata(
+                    item.id, {"title": "New"}, overwrite=True
+                )
+            assert outside.read_bytes() == _opf("Protected")
+            assert (await MediaItem.get(id=item.id)).title == "Old database title"
+            event = await MediaEvent.get()
+            assert event.payload is not None and event.payload["error_code"]
+            assert not await watcher.consume_event(event)
+            assert not list(directory.glob(".metadata-*.tmp"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "cover.png",
+        "images/cover.png",
+        "../cover.png",
+        "https://example.com/cover.png",
+        "missing.png",
+        "linked.png",
+    ],
+)
+def test_save_metadata_cover(tmp_path, href):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            directory = Path(item.dir)
+            (directory / "cover.png").write_bytes(_PNG)
+            (directory / "images").mkdir()
+            (directory / "images/cover.png").write_bytes(_PNG)
+            (directory / "linked.png").symlink_to(directory / "cover.png")
+            values = {"title": "New", "cover": {"href": href}}
+            if href in ("cover.png", "images/cover.png"):
+                assert await MediaItemService.save_metadata(
+                    item.id, values, overwrite=True
+                )
+                cover = await MediaItemService.get_cover(item.id, _user())
+                assert cover is not None
+                assert cover.data == _PNG and cover.mime_type == "image/png"
+            else:
+                with pytest.raises(ContentError):
+                    await MediaItemService.save_metadata(
+                        item.id, values, overwrite=True
+                    )
+                assert not (directory / "metadata.opf").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["replace", "retire"])
+def test_save_metadata_retry(tmp_path, monkeypatch, stage):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            directory = Path(item.dir)
+            xml = directory / "metadata.opf"
+            xml.write_bytes(_opf("Original"))
+            old = directory / "Book.opf"
+            old.write_bytes(_opf("Original"))
+            unlink = Path.unlink
+
+            def denied_replace(*args):
+                raise PermissionError("read only")
+
+            def denied_unlink(path, *args, **kwargs):
+                if path == old:
+                    raise PermissionError("read only")
+                return unlink(path, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                if stage == "replace":
+                    patch.setattr(writer.os, "replace", denied_replace)
+                else:
+                    patch.setattr(Path, "unlink", denied_unlink)
+                with pytest.raises(ContentError, match="metadata_write_failed"):
+                    await MediaItemService.save_metadata(
+                        item.id, {"title": "New"}, overwrite=True
+                    )
+            assert old.read_bytes() == _opf("Original")
+            assert parse_opf(xml.read_bytes()).data.title == (
+                "Original" if stage == "replace" else "New"
+            )
+            assert (await MediaItem.get(id=item.id)).title == "Old database title"
+            event = await MediaEvent.get()
+            assert (
+                event.payload is not None
+                and event.payload["error_code"] == "metadata_write_failed"
+            )
+            assert not await watcher.consume_event(event)
+            assert not list(directory.glob(".metadata-*.tmp"))
+            assert await MediaItemService.save_metadata(
+                item.id, {"title": "Retry"}, overwrite=True
+            )
+            assert (await MediaItem.get(id=item.id)).title == "Retry"
+            assert not old.exists() and not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_save_metadata_recovery(tmp_path, monkeypatch, published):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            xml = Path(item.dir) / "metadata.opf"
+            if published:
+
+                async def fail(*args, **kwargs):
+                    raise RuntimeError("database interrupted")
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(media_service, "_save_summary", fail)
+                    with pytest.raises(RuntimeError, match="interrupted"):
+                        await MediaItemService.save_metadata(
+                            item.id, {"title": "Candidate"}, overwrite=True
+                        )
+                event = await MediaEvent.get()
+                assert event.payload is not None and event.payload["published"] is True
+                xml.write_bytes(_opf("External after publication"))
+                expected = "External after publication"
+            else:
+
+                async def interrupted(*args, **kwargs):
+                    raise asyncio.CancelledError
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(media_service, "write_in_thread", interrupted)
+                    with pytest.raises(asyncio.CancelledError):
+                        await MediaItemService.save_metadata(
+                            item.id, {"title": "Candidate"}, overwrite=True
+                        )
+                event = await MediaEvent.get()
+                assert event.payload is not None and event.payload["published"] is False
+                xml.write_bytes(_opf("External before publication"))
+                expected = "Candidate"
+            assert await watcher.consume_event(event)
+            assert parse_opf(xml.read_bytes()).data.title == expected
+            assert (await MediaItem.get(id=item.id)).title == expected
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+def test_auto_metadata_recovery(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+
+            async def interrupted(*args, **kwargs):
+                raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                patch.setattr(media_service, "write_in_thread", interrupted)
+                with pytest.raises(asyncio.CancelledError):
+                    await MediaItemService.save_metadata(
+                        item.id, {"title": "Automatic"}
+                    )
+            event = await MediaEvent.get()
+            xml = Path(item.dir) / "content.opf"
+            xml.write_bytes(_opf("Arrived during shutdown"))
+            assert await watcher.consume_event(event)
+            assert xml.read_bytes() == _opf("Arrived during shutdown")
+            assert not (Path(item.dir) / "metadata.opf").exists()
+            assert (await MediaItem.get(id=item.id)).title == "Arrived during shutdown"
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_save_metadata_http(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            user = _user()
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            async with _client(user) as client:
+                response = await client.post(
+                    f"/_api/media/{item.id}/metadata",
+                    json={
+                        "graph_id": 1,
+                        "metadata": {"title": "Confirmed", "authors": ["Writer"]},
+                    },
+                )
+                assert response.status_code == 204, response.text
+                assert response.headers["Cache-Control"] == "private, no-store"
+                details = await client.get(f"/_api/media/{item.id}")
+                assert details.status_code == 200, details.text
+                assert details.json()["data"]["title"] == "Confirmed"
+                assert details.json()["data"]["metadata"]["authors"] == ["Writer"]
+                assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem,status",
+    [
+        ("permission", 403),
+        ("unauthenticated", 401),
+        ("missing", 404),
+        ("invalid", 422),
+        ("video", 422),
+        ("publish", 503),
+    ],
+)
+def test_save_metadata_http_error(tmp_path, monkeypatch, problem, status):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            user = _user([item.lib_id] if problem == "permission" else None)
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            if problem == "video":
+                await MediaLib.filter(id=item.lib_id).update(lib_type=LibType.MOVIE)
+            if problem == "publish":
+
+                def denied(*args):
+                    raise PermissionError("read only")
+
+                monkeypatch.setattr(writer.os, "replace", denied)
+            async with _client(user) as client:
+                if problem == "unauthenticated":
+                    client.headers.pop("Authorization")
+                response = await client.post(
+                    f"/_api/media/{item.id + (problem == 'missing')}/metadata",
+                    json={
+                        "graph_id": 1,
+                        "metadata": {}
+                        if problem == "invalid"
+                        else {"title": "Confirmed"},
+                    },
+                )
+                assert response.status_code == status, response.text
+                assert not (Path(item.dir) / "metadata.opf").exists()
+                assert (await MediaItem.get(id=item.id)).title == "Old database title"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_reading_rejects_nfo(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            nfo = Path(item.dir) / "movie.nfo"
+            assert not await shelver.gen_nfo(
+                "movie",
+                str(nfo),
+                {"title": "Wrong format"},
+                item_id=item.id,
+                overwrite=True,
+                refresh=True,
+            )
+            assert not nfo.exists() and not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+def test_save_metadata_cancel(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            directory = Path(item.dir)
+            xml = directory / "metadata.opf"
+            started, released = threading.Event(), threading.Event()
+            replace = writer.os.replace
+
+            def delayed(src, dest):
+                started.set()
+                assert released.wait(5)
+                replace(src, dest)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(writer.os, "replace", delayed)
+                saving = asyncio.create_task(
+                    MediaItemService.save_metadata(
+                        item.id, {"title": "Saved"}, overwrite=True
+                    )
+                )
+                try:
+                    assert await asyncio.to_thread(started.wait, 5)
+                    saving.cancel()
+                    await asyncio.sleep(0)
+                    assert not saving.done()
+                finally:
+                    released.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await saving
+            assert parse_opf(xml.read_bytes()).data.title == "Saved"
+            assert (await MediaItem.get(id=item.id)).title == "Old database title"
+            event = await MediaEvent.get()
+            assert event.payload is not None and event.payload["published"] is False
+            published_state = xml.stat()
+            assert await watcher.consume_event(event)
+            assert xml.stat().st_ino == published_state.st_ino
+            assert xml.stat().st_mtime_ns == published_state.st_mtime_ns
+            assert not list(directory.glob(".metadata-*.tmp"))
+            assert (await MediaItem.get(id=item.id)).title == "Saved"
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+def test_save_metadata_body_change(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            xml = Path(item.dir) / "metadata.opf"
+            xml.write_bytes(_opf("Original"))
+            read = writer._read_local
+
+            def changed(path, parser):
+                if path.suffix == ".tmp":
+                    Path(item.path).write_text("Changed during publication")
+                return read(path, parser)
+
+            monkeypatch.setattr(writer, "_read_local", changed)
+            with pytest.raises(ContentError, match="content_changed"):
+                await MediaItemService.save_metadata(
+                    item.id, {"title": "Candidate"}, overwrite=True
+                )
+            assert xml.read_bytes() == _opf("Original")
+            assert (await MediaItem.get(id=item.id)).title == "Old database title"
+            assert not list(Path(item.dir).glob(".metadata-*.tmp"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change", ["move", "remove", "failed_remove", "replace_task", "automatic"]
+)
+def test_metadata_pending(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+
+            async def interrupted(*args, **kwargs):
+                raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                patch.setattr(media_service, "write_in_thread", interrupted)
+                with pytest.raises(asyncio.CancelledError):
+                    await MediaItemService.save_metadata(
+                        item.id, {"title": "First"}, overwrite=True
+                    )
+            event = await MediaEvent.get()
+            directory = Path(item.dir)
+            if change == "move":
+                target = directory.with_name("Moved")
+                directory.rename(target)
+                await MediaItem.filter(id=item.id).update(
+                    dir=str(target), path=str(target / "Book.txt")
+                )
+                assert await watcher.consume_event(event)
+                assert (
+                    parse_opf((target / "metadata.opf").read_bytes()).data.title
+                    == "First"
+                )
+                assert not directory.exists()
+            elif change in ("remove", "failed_remove"):
+                if change == "failed_remove":
+                    assert event.payload is not None
+                    event.payload["error_code"] = "metadata_write_failed"
+                    await event.save(update_fields=["payload"])
+                await item.delete()
+                assert await watcher.consume_event(event)
+                assert not (directory / "metadata.opf").exists()
+            elif change == "replace_task":
+                assert await MediaItemService.save_metadata(
+                    item.id, {"title": "Second"}, overwrite=True
+                )
+                assert not await watcher.consume_event(event)
+                assert (
+                    parse_opf((directory / "metadata.opf").read_bytes()).data.title
+                    == "Second"
+                )
+            else:
+                with pytest.raises(ContentError, match="content_not_ready"):
+                    await MediaItemService.save_metadata(
+                        item.id, {"title": "Automatic"}
+                    )
+                assert (await MediaEvent.get(id=event.id)).payload == event.payload
+                assert await watcher.consume_event(event)
+                assert (
+                    parse_opf((directory / "metadata.opf").read_bytes()).data.title
+                    == "First"
+                )
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+def test_auto_metadata_invalid_local(tmp_path):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            xml = Path(item.dir) / "metadata.opf"
+            xml.write_text("<invalid")
+            with pytest.raises(ContentError, match="invalid_metadata"):
+                await MediaItemService.save_metadata(item.id, {"title": "Automatic"})
+            assert xml.read_text() == "<invalid"
+            assert (await MediaItem.get(id=item.id)).title == "Old database title"
+            assert await MediaItemService.save_metadata(
+                item.id, {"title": "Confirmed"}, overwrite=True
+            )
+            assert parse_opf(xml.read_bytes()).data.title == "Confirmed"
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "payload", [None, {}, {"item_id": "invalid"}, {"schema_version": 2, "item_id": 1}]
+)
+def test_metadata_task_invalid(tmp_path, payload):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            event = await MediaEvent.create(
+                lib_id=item.lib_id,
+                src_path=item.path,
+                event_type="metadata",
+                payload=payload,
+            )
+            assert not await watcher.consume_event(event)
+            current = await MediaEvent.get(id=event.id)
+            assert (
+                current.payload is not None
+                and current.payload["error_code"] == "invalid_metadata"
+            )
+            assert not await watcher.consume_event(current)
+            assert (await MediaEvent.get(id=event.id)).updated_at == current.updated_at
+            assert not (Path(item.dir) / "metadata.opf").exists()
+
+    asyncio.run(run())
+
+
+def test_sync_after_manual_save(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            xml = Path(item.dir) / "metadata.opf"
+            xml.write_bytes(_opf("Before save"))
+            read = media_service._read_metadata
+            reached = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def observe(*args, **kwargs):
+                loop.call_soon_threadsafe(reached.set)
+                return read(*args, **kwargs)
+
+            monkeypatch.setattr(media_service, "_read_metadata", observe)
+            async with library_lock(item.lib.dir):
+                sync = asyncio.create_task(MediaItemService.sync_metadata(item.id))
+                try:
+                    # a waiting synchronization must not capture pre-save metadata
+                    with pytest.raises(TimeoutError):
+                        await asyncio.wait_for(reached.wait(), timeout=0.1)
+                    xml.write_bytes(_opf("After save"))
+                    await MediaItem.filter(id=item.id).update(title="After save")
+                except BaseException:
+                    sync.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await sync
+                    raise
+            assert (await sync).title == "After save"
+            assert (await MediaItem.get(id=item.id)).title == "After save"
 
     asyncio.run(run())

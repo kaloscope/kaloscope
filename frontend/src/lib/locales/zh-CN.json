@@ -893,6 +893,7 @@
     "invalid_epub": "EPUB 文件结构无效！",
     "invalid_image": "图片格式无效！",
     "invalid_metadata": "元数据文件无效！",
+    "metadata_write_failed": "元数据文件保存失败！",
     "ambiguous_metadata": "存在多个无法确定归属的元数据文件！"
   }
 }

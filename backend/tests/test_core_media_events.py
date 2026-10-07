@@ -637,9 +637,7 @@ def test_consume_reading_scope(tmp_path, kind):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "kind", ["reconcile", "ingest", "organize", "metadata", "unknown"]
-)
+@pytest.mark.parametrize("kind", ["reconcile", "ingest", "organize", "unknown"])
 def test_consume_reading_pending(tmp_path, monkeypatch, kind):
     """Retain pending task protocols without invoking video or resetting retries.
 

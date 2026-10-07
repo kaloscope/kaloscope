@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import shutil
@@ -11,8 +12,10 @@ from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import aiofiles
+from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
 from tortoise.exceptions import DoesNotExist
@@ -28,8 +31,12 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.media.common import ContentError, file_state
-from app.core.media.coordination import library_lock, write_in_thread
-from app.core.media.metadata import ReadingMetadata
+from app.core.media.coordination import (
+    library_lock,
+    notify_media_events,
+    write_in_thread,
+)
+from app.core.media.metadata import ReadingMetadata, render_metadata
 from app.core.media.naming import validate_template
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import (
@@ -39,6 +46,7 @@ from app.models.media import (
     IndexState,
     LibType,
     MediaContentQuery,
+    MediaEvent,
     MediaFormat,
     MediaItem,
     MediaLib,
@@ -68,6 +76,7 @@ if TYPE_CHECKING:
     from app.core.media.image import ImageIndex
     from app.core.media.reader import MetadataRead
     from app.core.media.text import TextIndex
+    from app.core.media.writer import MetadataWrite
 
 type _SourceStates = dict[Path, tuple[int, ...]]
 
@@ -710,6 +719,79 @@ def _read_metadata(
             raise ContentError("media_source_unavailable")
         cover = read_cover(source, metadata) if with_cover else None
         return metadata, cover, "media_source_unavailable" if missing else None
+
+
+def _publish_metadata(item: MediaItem, data: bytes, *, overwrite: bool) -> bool:
+    """Write an external reading sidecar while preserving source ownership checks.
+
+    Args:
+        item: The current reading item with library and parent relations loaded.
+        data: Fully rendered and validated candidate XML.
+        overwrite: Whether this is an explicitly confirmed replacement.
+
+    Returns:
+        Whether XML was published rather than an automatic task using local metadata.
+
+    Raises:
+        ContentError: If source validation or external metadata publication fails.
+    """
+    from app.core.media.writer import write_metadata
+
+    with _reading_source(item) as (source, states, missing):
+        if missing:
+            raise ContentError("media_source_unavailable")
+        written = write_metadata(source, data, states, overwrite=overwrite)
+        _validate_reading_source(item, require_candidate=False)
+        return written
+
+
+async def _save_summary(
+    item: MediaItem, metadata: MetadataRead, source_error: str | None
+) -> str | None:
+    """Save current reading summaries and metadata state under the library lock.
+
+    Args:
+        item: The current item whose ownership has already been verified.
+        metadata: The freshly read external and embedded metadata.
+        source_error: An independent source error, or None for an available source.
+
+    Returns:
+        The error preserving old summaries, or None after a successful summary update.
+    """
+    external = metadata.external
+    error = source_error or next(
+        (
+            origin.error
+            for origin in (external, metadata.embedded)
+            if origin and origin.error
+        ),
+        None,
+    )
+    sync = ReadingMetadataSync(
+        state="error" if error else "ready" if external else "none",
+        format=("opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo")
+        if external
+        else None,
+        relative_path=external.path.relative_to(item.dir).as_posix()
+        if external and external.error != "ambiguous_metadata"
+        else None,
+        file_signature=external.signature if external and not error else None,
+        error=error,
+    )
+    fields = ["extra"]
+    if not error:
+        for name, value in metadata.summary().items():
+            setattr(item, name, value)
+            fields.append(name)
+        item.poster = f"/_api/media/{item.id}/assets/cover"
+        fields.append("poster")
+    item.extra = {
+        **(item.extra or {}),
+        "schema_version": 1,
+        "metadata_sync": sync.model_dump(),
+    }
+    await item.save(update_fields=fields)
+    return error
 
 
 def _check_image_pages(source: ReadingSource, index: ImageIndex, states: _SourceStates):
@@ -1800,8 +1882,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     async def sync_metadata(cls, id: int) -> MediaItem:
         """Synchronize reading list summaries without rebuilding content or writing XML.
 
-        The library's single event consumer must await synchronization serially.
-        Read files outside the library lock, then recheck ownership before saving.
+        Hold the library lock while reading and saving so a concurrent manual save
+        cannot be followed by older list summaries. Recheck ownership after reading.
         Failed item-owned reads preserve summaries; parent metadata stays read-only.
 
         Args:
@@ -1817,47 +1899,188 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         item = await MediaItem.get(id=id).select_related("lib", "parent")
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise ContentError("unsupported_media_format")
-        metadata, _, source_error = await to_thread(
-            _read_metadata, item, with_cover=False
+        async with library_lock(item.lib.dir):
+            metadata, _, source_error = await to_thread(
+                _read_metadata, item, with_cover=False
+            )
+            current = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
+            if current is None or _source_identity(item) != _source_identity(current):
+                raise ContentError("content_changed")
+            await _save_summary(current, metadata, source_error)
+            return current
+
+    @classmethod
+    async def save_metadata(
+        cls, id: int, data: dict, *, overwrite: bool = False
+    ) -> bool:
+        """Persist and execute an OPF or ComicInfo save for the current reading item.
+
+        Args:
+            id: The existing reading item ID, including a comic collection or chapter.
+            data: The complete candidate, without paths or fields from old metadata.
+            overwrite: False for automatic creation; True after manual confirmation.
+
+        Returns:
+            Whether metadata was published, rather than skipped for valid local data.
+
+        Raises:
+            ContentError: If the candidate, source, publication or summary is invalid.
+        """
+        from app.core.media.writer import MetadataWrite
+
+        try:
+            candidate = ReadingMetadata.model_validate_json(
+                json.dumps(data, allow_nan=False)
+            )
+        except (ValidationError, TypeError, ValueError) as error:
+            raise ContentError("invalid_metadata") from error
+        item = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
+        if item is None:
+            raise ContentError("not_found")
+        _resolve_source(item)
+        task = MetadataWrite(
+            item_id=id, metadata=candidate, overwrite=overwrite, identifier=uuid4()
         )
-        external = metadata.external
-        error = source_error or next(
-            (
-                origin.error
-                for origin in (external, metadata.embedded)
-                if origin is not None and origin.error is not None
-            ),
-            None,
-        )
-        sync = ReadingMetadataSync(
-            state="error" if error else "ready" if external else "none",
-            format=("opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo")
-            if external
-            else None,
-            relative_path=external.path.relative_to(item.dir).as_posix()
-            if external and external.error != "ambiguous_metadata"
-            else None,
-            file_signature=external.signature if external and not error else None,
-            error=error,
+        # reject unrepresentable candidates before replacing any pending save
+        await to_thread(
+            render_metadata,
+            candidate,
+            "opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo",
+            identifier=task.identifier,
         )
         async with library_lock(item.lib.dir):
             current = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
             if current is None or _source_identity(item) != _source_identity(current):
                 raise ContentError("content_changed")
-            fields = ["extra"]
-            if not error:
-                for name, value in metadata.summary().items():
-                    setattr(current, name, value)
-                    fields.append(name)
-                current.poster = f"/_api/media/{id}/assets/cover"
-                fields.append("poster")
-            current.extra = {
-                **(current.extra or {}),
-                "schema_version": 1,
-                "metadata_sync": sync.model_dump(),
-            }
-            await current.save(update_fields=fields)
-            return current
+            async with in_transaction():
+                for pending in await MediaEvent.filter(
+                    lib_id=current.lib_id, event_type="metadata"
+                ):
+                    if (pending.payload or {}).get("item_id") == id:
+                        if not overwrite:
+                            raise ContentError("content_not_ready")
+                        await pending.delete()
+                event = await MediaEvent.create(
+                    lib_id=current.lib_id,
+                    event_type="metadata",
+                    src_path=current.path,
+                    payload=task.model_dump(mode="json"),
+                )
+            try:
+                return await cls._write_metadata(event, current, task)
+            finally:
+                # an interrupted writer leaves durable work for the library consumer
+                notify_media_events(current.lib_id)
+
+    @classmethod
+    async def _write_metadata(
+        cls, event: MediaEvent, item: MediaItem, task: MetadataWrite
+    ) -> bool:
+        """Publish a candidate and complete its summary under the library lock.
+
+        Args:
+            event: The current save task, loaded again by the caller holding the lock.
+            item: The current item in the task's library, with its parent loaded.
+            task: The validated candidate and publication state stored in the event.
+
+        Returns:
+            Whether this task published metadata instead of using valid local data.
+
+        Raises:
+            ContentError: If task validation, file writing or summary reading fails.
+        """
+        try:
+            if task.item_id != item.id or event.lib_id != item.lib_id:
+                raise ContentError("content_changed")
+            _resolve_source(item)
+            written = task.published
+            if not task.published:
+                data = await to_thread(
+                    render_metadata,
+                    task.metadata,
+                    "opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo",
+                    identifier=task.identifier,
+                )
+                written = await write_in_thread(
+                    _publish_metadata, item, data, overwrite=task.overwrite
+                )
+                if written:
+                    task.published = True
+                    event.payload = task.model_dump(mode="json")
+                    await event.save(update_fields=["payload"])
+            # recovery after publication only reads current files, never replays XML
+            metadata, _, source_error = await to_thread(
+                _read_metadata, item, with_cover=False
+            )
+            async with in_transaction():
+                current = await MediaItem.get_or_none(id=item.id).select_related(
+                    "lib", "parent"
+                )
+                if current is None or _source_identity(current) != _source_identity(
+                    item
+                ):
+                    raise ContentError("content_changed")
+                error = await _save_summary(current, metadata, source_error)
+                if error:
+                    raise ContentError(error)
+                await event.delete()
+            return written
+        except ContentError as error:
+            event.payload = {**(event.payload or {}), "error_code": error.code}
+            await event.save(update_fields=["payload"])
+            raise
+
+    @classmethod
+    async def consume_metadata(cls, id: int) -> bool:
+        """Resume an interrupted metadata save without replaying a completed file phase.
+
+        Args:
+            id: The persisted metadata event ID selected by the library consumer.
+
+        Returns:
+            True when the task finishes or its item was removed; False for absent or
+            failed tasks. A new explicit save replaces failed work for the same item.
+
+        Raises:
+            ContentError: If execution fails; its error is persisted to prevent loops.
+        """
+        from app.core.media.writer import MetadataWrite
+
+        event = await MediaEvent.get_or_none(
+            id=id, event_type="metadata"
+        ).select_related("lib")
+        if event is None:
+            return False
+        directory = event.lib.dir
+        async with library_lock(directory):
+            event = await MediaEvent.get_or_none(
+                id=id, event_type="metadata"
+            ).select_related("lib")
+            if event is None:
+                return False
+            if event.lib.dir != directory:
+                raise ContentError("content_changed")
+            try:
+                task = MetadataWrite.model_validate_json(json.dumps(event.payload))
+            except (ValidationError, TypeError, ValueError):
+                if (event.payload or {}).get("error_code") == "invalid_metadata":
+                    return False
+                event.payload = {
+                    **(event.payload or {}),
+                    "error_code": "invalid_metadata",
+                }
+                await event.save(update_fields=["payload"])
+                return False
+            item = await MediaItem.get_or_none(
+                id=task.item_id, lib_id=event.lib_id
+            ).select_related("lib", "parent")
+            if item is None:
+                await event.delete()
+                return True
+            if task.error_code:
+                return False
+            await cls._write_metadata(event, item, task)
+            return True
 
     @classmethod
     async def sync_collection(cls, id: int) -> MediaItem:

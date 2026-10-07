@@ -77,6 +77,7 @@ def _content_error(error: ContentError, headers: dict[str, str]) -> KaloscopeExc
         "content_changed": 409,
         "content_not_ready": 409,
         "media_source_unavailable": 503,
+        "metadata_write_failed": 503,
     }.get(error.code, 422)
     return KaloscopeException(error.code, status_code=status, headers=headers)
 
@@ -329,6 +330,31 @@ async def get_item_asset(
     ):
         return empty(status=304, headers=headers)
     return HTTPResponse(data, content_type=mime, headers=headers)
+
+
+@media.post("/<id:int>/metadata")
+@authorize(role=UserRole.ADMIN)
+@validate(json=MediaMetadata)
+async def save_metadata(_, body: MediaMetadata, id: int) -> HTTPResponse:
+    """Save a confirmed reading candidate before reporting success.
+
+    Args:
+        _: The authenticated administrator's request.
+        body: The selected workflow and complete metadata candidate.
+        id: The existing reading work or comic chapter to update.
+
+    Returns:
+        An empty response after file publication and list-summary synchronization.
+
+    Raises:
+        KaloscopeException: If the candidate, source or metadata save is invalid.
+    """
+    headers = {"Cache-Control": "private, no-store"}
+    try:
+        await MediaItemService.save_metadata(id, body.metadata, overwrite=True)
+    except ContentError as error:
+        raise _content_error(error, headers) from error
+    return empty(headers=headers)
 
 
 @media.post("/<id:int>/gen_nfo")

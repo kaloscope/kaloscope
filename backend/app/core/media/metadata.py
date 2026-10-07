@@ -1,11 +1,13 @@
-"""Parse reading metadata and fill missing fields without persistence or file I/O."""
+"""Parse, render and combine reading metadata without persistence or file I/O."""
 
+import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
-from typing import Annotated, Self
+from decimal import Decimal, InvalidOperation
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from lxml import etree
 from pydantic import (
@@ -13,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -103,17 +106,31 @@ class ReadingMetadata(BaseModel):
 
     @field_validator("*", mode="before")
     @classmethod
-    def normalize_text(cls, value: object) -> object:
+    def normalize_text(cls, value: object, info: ValidationInfo) -> object:
         """Normalize absent text and stable, whole-field list values.
 
         Args:
             value: An input field before its declared type is validated.
+            info: The field and input mode, used for JSON arrays and decimal numbers.
 
         Returns:
             Stripped text, an ordered distinct tuple, or the unchanged value.
         """
         if isinstance(value, str):
-            return value.strip() or None
+            value = value.strip() or None
+        if info.mode == "json":
+            if info.field_name in {"authors", "illustrators", "genres", "tags"}:
+                if isinstance(value, list):
+                    value = tuple(value)
+            elif (
+                info.field_name == "rating"
+                and isinstance(value, (str, int, float))
+                and not isinstance(value, bool)
+            ):
+                try:
+                    value = Decimal(str(value))
+                except InvalidOperation as error:
+                    raise ValueError("invalid rating") from error
         if isinstance(value, tuple) and all(isinstance(part, str) for part in value):
             return tuple(dict.fromkeys(part.strip() for part in value if part.strip()))
         return value
@@ -526,3 +543,142 @@ def merge_metadata(
                     values[name] = value
                     break
     return ReadingMetadata.model_validate(values)
+
+
+def render_metadata(
+    metadata: ReadingMetadata, format: Literal["opf", "comicinfo"], *, identifier: UUID
+) -> bytes:
+    """Rebuild an external metadata document using only the selected candidate.
+
+    Unsupported or lossy field mappings fail round-trip validation. This generates
+    a descriptive OPF sidecar, not an EPUB package containing readable body files.
+
+    Args:
+        metadata: The normalized candidate with a nonempty title.
+        format: The external OPF or ComicInfo format selected by the library.
+        identifier: A stable local UUID for OPF without ISBN, retained by the caller
+            across publication retries and ignored for ComicInfo.
+
+    Returns:
+        Bounded UTF-8 XML bytes that can be read back without losing candidate fields.
+
+    Raises:
+        ContentError: If fields cannot be represented, XML is invalid or too large.
+    """
+    if metadata.title is None:
+        raise ContentError("invalid_metadata")
+    try:
+        if format == "opf":
+            metadata = metadata.model_copy(
+                update={"language": metadata.language or "und"}
+            )
+            root = etree.Element(
+                f"{_OPF}package",
+                nsmap={"opf": _OPF[1:-1], "dc": _DC[1:-1]},
+                attrib={"version": "2.0", "unique-identifier": "bookid"},
+            )
+            group = etree.SubElement(root, f"{_OPF}metadata")
+            value = f"urn:isbn:{metadata.isbn}" if metadata.isbn else identifier.urn
+            etree.SubElement(group, f"{_DC}identifier", id="bookid").text = value
+            for name, tag in (
+                ("title", "title"),
+                ("plot", "description"),
+                ("publisher", "publisher"),
+                ("language", "language"),
+            ):
+                value = getattr(metadata, name)
+                if value is not None:
+                    etree.SubElement(group, f"{_DC}{tag}").text = value
+            for names, tag, role in (
+                (metadata.authors, "creator", "aut"),
+                (metadata.illustrators, "contributor", "ill"),
+            ):
+                for name in names:
+                    etree.SubElement(
+                        group, f"{_DC}{tag}", {f"{_OPF}role": role}
+                    ).text = name
+            for genre in metadata.genres:
+                etree.SubElement(group, f"{_DC}subject").text = genre
+            if metadata.year is not None:
+                published = f"{metadata.year:04}"
+                if metadata.month is not None:
+                    published += f"-{metadata.month:02}"
+                    if metadata.day is not None:
+                        published += f"-{metadata.day:02}"
+                etree.SubElement(group, f"{_DC}date").text = published
+            for name, tag in (
+                ("series", "series"),
+                ("number", "series_index"),
+                ("rating", "rating"),
+            ):
+                value = getattr(metadata, name)
+                if value is not None:
+                    etree.SubElement(
+                        group, f"{_OPF}meta", name=f"calibre:{tag}", content=str(value)
+                    )
+            manifest = etree.SubElement(root, f"{_OPF}manifest")
+            if metadata.cover and metadata.cover.href:
+                href = metadata.cover.href
+                mime = mimetypes.guess_file_type(urlsplit(href).path)[0]
+                if not mime or not mime.startswith("image/"):
+                    raise ContentError("invalid_metadata")
+                etree.SubElement(group, f"{_OPF}meta", name="cover", content="cover")
+                etree.SubElement(
+                    manifest,
+                    f"{_OPF}item",
+                    {"id": "cover", "href": href, "media-type": mime},
+                )
+            etree.SubElement(root, f"{_OPF}spine")
+            parser = parse_opf
+        elif format == "comicinfo":
+            root = etree.Element("ComicInfo")
+            for name, tag in (
+                ("title", "Title"),
+                ("series", "Series"),
+                ("number", "Number"),
+                ("volume", "Volume"),
+                ("plot", "Summary"),
+                ("year", "Year"),
+                ("month", "Month"),
+                ("day", "Day"),
+                ("authors", "Writer"),
+                ("illustrators", "Penciller"),
+                ("publisher", "Publisher"),
+                ("genres", "Genre"),
+                ("tags", "Tags"),
+                ("page_count", "PageCount"),
+                ("language", "LanguageISO"),
+                ("isbn", "GTIN"),
+            ):
+                value = getattr(metadata, name)
+                if value is not None and value != ():
+                    etree.SubElement(root, tag).text = (
+                        ", ".join(value) if isinstance(value, tuple) else str(value)
+                    )
+            if metadata.black_and_white is not None:
+                etree.SubElement(root, "BlackAndWhite").text = (
+                    "Yes" if metadata.black_and_white else "No"
+                )
+            if metadata.rating is not None:
+                etree.SubElement(root, "CommunityRating").text = str(
+                    metadata.rating / 2
+                )
+            if metadata.cover and metadata.cover.page is not None:
+                pages = etree.SubElement(root, "Pages")
+                etree.SubElement(
+                    pages, "Page", Image=str(metadata.cover.page), Type="FrontCover"
+                )
+            parser = parse_comicinfo
+        else:
+            raise ContentError("unsupported_media_format")
+        data = etree.tostring(
+            root, encoding="utf-8", xml_declaration=True, pretty_print=True
+        )
+    except (ValueError, etree.LxmlError) as error:
+        if isinstance(error, ContentError):
+            raise
+        raise ContentError("invalid_metadata") from error
+    result = parser(data)
+    if result.invalid_fields or result.data != metadata:
+        raise ContentError("invalid_metadata")
+    return data
