@@ -658,12 +658,13 @@ def _ingest_params(info: MediaPathInfo) -> dict:
 
 
 async def consume_event(event: MediaEvent) -> bool:
-    """Coalesce or ingest reading events and consume video events under their lock.
+    """Reconcile reading events and consume video events under their lock.
 
     Reading services manage their own locks. Execute only the prepared task version;
-    unsupported move sequences wait for identity reconciliation. For video,
-    recover organization and persist ingest work under the lock, then run workflows
-    after releasing it, saving progress after each successful trigger.
+    unsupported move sequences wait for identity reconciliation. Remove absent
+    reading containers after applying moves, then ingest the remaining scopes.
+    For video, recover organization and persist ingest work under the lock, then
+    run workflows after releasing it, saving progress after each successful trigger.
 
     Args:
         event: The persisted media event to process. Prepared reading tasks must
@@ -719,17 +720,31 @@ async def consume_event(event: MediaEvent) -> bool:
             if not await _handle_reading_moves(event, payload):
                 return False
             work = Path(event.src_path)
-            relocated = False
-            if (
-                any(
-                    move.is_directory and move.src_path == event.src_path
-                    for move in payload.moves
+            targets = {Path(path) for path in payload.targets}
+            items = await MediaItem.filter(
+                Q(dir=event.src_path) | Q(parent__path=event.src_path), lib_id=lib.id
+            ).order_by("parent_id")
+            try:
+                missing = await asyncio.to_thread(
+                    lambda: [
+                        item
+                        for item in items
+                        if any(
+                            Path(item.dir).is_relative_to(target) for target in targets
+                        )
+                        and not Path(item.dir).exists(follow_symlinks=False)
+                    ]
                 )
-                and not await MediaItem.filter(
-                    Q(dir=event.src_path) | Q(parent__path=event.src_path),
-                    lib_id=lib.id,
-                ).exists()
-            ):
+            except OSError as error:
+                raise ContentError("media_source_unavailable") from error
+            for item in missing:
+                await MediaItemService.remove_missing_reading_item(
+                    item.id, directory=Path(item.dir)
+                )
+            absent = False
+            if not await MediaItem.filter(
+                Q(dir=event.src_path) | Q(parent__path=event.src_path), lib_id=lib.id
+            ).exists():
                 # only a real directory entry can become a new work at the old path
                 # case-only renames may still resolve through the old spelling
                 try:
@@ -738,14 +753,14 @@ async def consume_event(event: MediaEvent) -> bool:
                     )
                 except OSError as error:
                     raise ContentError("media_source_unavailable") from error
-                relocated = work not in directories
+                absent = work not in directories
             issues = (
                 {}
-                if relocated
+                if absent
                 else await MediaItemService.ingest_reading_work(
                     lib.id,
                     work,
-                    targets={Path(path) for path in payload.targets},
+                    targets=targets,
                     force_targets={Path(path) for path in payload.force_targets},
                 )
             )

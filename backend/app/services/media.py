@@ -301,17 +301,19 @@ def _validate_previous_path(
 
 
 def _missing_reading_sources(
-    items: list[MediaItem], work_paths: set[Path]
+    items: list[MediaItem], work_paths: set[Path], *, directories_only: bool = False
 ) -> _SourceStates | None:
     """Confirm absent sources while retaining the identities of surviving ancestors.
 
     Args:
         items: The selected items with libraries and parents loaded.
         work_paths: Registered top-level work directories in the same library.
+        directories_only: Require absent containers as well as bodies. The default
+            False allows missing files whose companions were already handled.
 
     Returns:
-        Ancestor snapshots when all sources are absent, or None if any source exists.
-        Existing empty directories and same-path replacements are retained.
+        Ancestor snapshots when all required paths are absent, or None if a source
+        or required container exists. Empty directories and replacements are retained.
 
     Raises:
         ContentError: If ownership is invalid, an ancestor changes, a link or invalid
@@ -342,7 +344,9 @@ def _missing_reading_sources(
                     else stat.S_ISREG(info.st_mode)
                 ):
                     raise ContentError("media_source_unavailable")
-                if path == source.path:
+                if path == source.path or (
+                    directories_only and path == source.directory
+                ):
                     return None
                 if path.is_relative_to(root):
                     current = file_state(info)
@@ -1482,18 +1486,24 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return items
 
     @classmethod
-    async def remove_missing_reading_item(cls, id: int) -> list[int]:
+    async def remove_missing_reading_item(
+        cls, id: int, *, directory: Path | None = None
+    ) -> list[int]:
         """Remove an absent reading source, its owned children, caches and histories.
 
         Call from the serial consumer after stable observations and reliable moves
-        have been applied, and any owned companion cleanup has completed. Recheck
-        absence instead of treating discovery as deletion. Files in the library stay
-        untouched. Existing empty containers are retained; a surviving collection is
+        have been applied, and any owned companion cleanup has completed. When the
+        whole container disappeared, require that captured directory to remain absent
+        so a restored container cannot lose its record. Recheck absence instead of
+        treating discovery as deletion. Files in the library stay untouched.
+        Existing empty containers are retained; a surviving collection is
         summarized by subsequent work ingestion. If every registered work directory
         disappears, retain records until library access can be confirmed again.
 
         Args:
             id: The registered reading item selected for missing-source reconciliation.
+            directory: The captured container that must still belong to this item and
+                be absent. None allows missing bodies after companion cleanup.
 
         Returns:
             Removed item IDs, or an empty list if the item is gone or a source exists.
@@ -1507,6 +1517,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         original = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
         if original is None:
             return []
+        if directory is not None and Path(original.dir) != directory:
+            raise ContentError("content_changed")
         async with library_lock(original.lib.dir):
             items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related(
                 "lib", "parent"
@@ -1525,7 +1537,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     lib_id=item.lib_id, parent_id__isnull=True
                 ).values_list("dir")
             }
-            states = await to_thread(_missing_reading_sources, items, work_paths)
+            states = await to_thread(
+                _missing_reading_sources,
+                items,
+                work_paths,
+                directories_only=directory is not None,
+            )
             if states is None:
                 return []
             await write_in_thread(_remove_reading_caches, ids)
@@ -1557,7 +1574,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     ):
                         history_ids.append(history.id)
                 if (
-                    await to_thread(_missing_reading_sources, items, work_paths)
+                    await to_thread(
+                        _missing_reading_sources,
+                        items,
+                        work_paths,
+                        directories_only=directory is not None,
+                    )
                     != states
                 ):
                     raise ContentError("content_changed")

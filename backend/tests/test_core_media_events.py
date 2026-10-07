@@ -1,6 +1,7 @@
 """Tests for durable reading events, stability, completion and bounded retries."""
 
 import asyncio
+import shutil
 import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -1904,6 +1905,168 @@ def test_consume_observed_directory(tmp_path, moment, lib_type):
                 for id, item in after.items()
             )
             assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("problem", ["missing", "empty", "last_work", "link"])
+def test_consume_deleted_library(tmp_path, moment, lib_type, problem):
+    """Preserve records if the library disappears after a task becomes ready.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        lib_type: The reading type whose library becomes unavailable.
+        problem: A missing root, empty mount, last missing work or linked root.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path, lib_type)
+            assert await consume_event(await _ready(task, moment))
+            root, work = Path(lib.dir), Path(task.src_path)
+            before = await MediaItem.all().values()
+            task = (await coalesce_reading_events(lib.id, scan_works={work}))[0]
+            task = await _ready(task, moment)
+            offline = tmp_path / "Offline"
+            (work if problem == "last_work" else root).rename(offline)
+            if problem == "empty":
+                root.mkdir()
+            elif problem == "link":
+                root.symlink_to(offline, target_is_directory=True)
+            if problem in ("missing", "link"):
+                with pytest.raises(ContentError, match="media_source_unavailable"):
+                    await consume_event(task)
+            else:
+                assert await consume_event(task)
+            assert await MediaItem.all().values() == before
+            assert await MediaEvent.filter(id=task.id).exists()
+
+    asyncio.run(run())
+
+
+def test_consume_delete_scope(tmp_path, moment):
+    """Remove only the selected missing chapter and retain other missing chapters.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path, LibType.COMIC)
+            work = Path(task.src_path)
+            sibling = work / "Other"
+            sibling.mkdir()
+            (sibling / "1.png").write_bytes(body.read_bytes())
+            assert await consume_event(await _ready(task, moment))
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            child = await MediaItem.get(path=str(body.parent))
+            other = await MediaItem.get(path=str(sibling))
+            shutil.rmtree(body.parent)
+            shutil.rmtree(sibling)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(body.parent),
+                event_type="deleted",
+                is_directory=True,
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            assert not await MediaItem.filter(id=child.id).exists()
+            retained = await MediaItem.get(id=other.id)
+            assert (
+                retained.path == other.path
+                and retained.index_version == other.index_version
+            )
+            assert await MediaItem.filter(id=child.parent_id).exists()
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, RuntimeError])
+def test_consume_delete_recovery(tmp_path, monkeypatch, moment, failure):
+    """Acknowledge an absent work after interruption following database cleanup.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture interrupting after deletion finishes.
+        moment: The controllable task clock.
+        failure: The cancellation or error interrupting the original task.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            work = body.parent
+            other = work.with_name("Other")
+            shutil.copytree(work, other)
+            assert not await MediaItemService.ingest_reading_work(lib.id, other)
+            retained = await MediaItem.filter(dir=str(other)).values()
+            shutil.rmtree(work)
+            await MediaEvent.create(
+                lib=lib, src_path=str(work), event_type="deleted", is_directory=True
+            )
+            task = await _ready((await coalesce_reading_events(lib.id))[0], moment)
+            operation = MediaItemService.remove_missing_reading_item
+
+            async def interrupted(*args, **kwargs):
+                """Interrupt after database deletion but before task completion.
+
+                Args:
+                    args: Positional cleanup arguments.
+                    kwargs: Keyword cleanup arguments.
+
+                Raises:
+                    BaseException: The injected consumer interruption.
+                """
+                await operation(*args, **kwargs)
+                raise failure
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    MediaItemService, "remove_missing_reading_item", interrupted
+                )
+                with pytest.raises(failure):
+                    await consume_event(task)
+            assert await MediaItem.all().values() == retained
+            assert (await MediaEvent.get(id=task.id)).payload == task.payload
+            assert await consume_event(task)
+            assert not await MediaEvent.exists()
+            assert await MediaItem.all().values() == retained
+
+    asyncio.run(run())
+
+
+def test_consume_missing_body(tmp_path, moment):
+    """Retain a missing body whose existing directory still contains companions.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            before = await MediaItem.all().values()
+            metadata = body.with_name("metadata.opf")
+            metadata.write_text("<package><metadata/></package>")
+            body.unlink()
+            await MediaEvent.create(lib=lib, src_path=str(body), event_type="deleted")
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            assert await MediaItem.all().values() == before
+            assert metadata.read_text() == "<package><metadata/></package>"
+            saved = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert saved.state == "deferred" and saved.attempts == 1
 
     asyncio.run(run())
 

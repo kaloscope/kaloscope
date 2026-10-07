@@ -2964,6 +2964,117 @@ def test_move_empty_chapter(tmp_path, parent_body):
 
 
 @pytest.mark.parametrize(
+    ("format", "scope"),
+    [(format, "work") for format in MediaFormat]
+    + [
+        (format, scope)
+        for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+        for scope in ("chapter", "last_chapter", "collection")
+    ],
+)
+@pytest.mark.parametrize("scan", [False, True])
+def test_consume_directory_delete(tmp_path, monkeypatch, format, scope, scan):
+    """Reconcile absent containers while preserving other works and histories.
+
+    Args:
+        tmp_path: The isolated library and cache root.
+        monkeypatch: The fixture controlling notifications and event time.
+        format: The body format in the removed container.
+        scope: A standalone work, comic chapter, last chapter or whole collection.
+        scan: Whether startup scanning rediscovers the loss without a delete event.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=scope != "work")
+            work = source.parent_path or source.directory
+            if scope in ("chapter", "collection"):
+                sibling = work / "Sibling"
+                sibling.mkdir()
+                (sibling / "1.png").write_bytes(_PNG)
+            note = work / "notes.md"
+            note.write_text("Keep me")
+            other = work.with_name("Other")
+            other.mkdir()
+            novel = lib.lib_type == LibType.NOVEL
+            (other / ("Other.txt" if novel else "1.png")).write_bytes(
+                b"Other body" if novel else _PNG
+            )
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            assert not await MediaItemService.ingest_reading_work(lib.id, other)
+            item = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=item.id).update(visible=False)
+            directory = source.directory if "chapter" in scope else work
+            owned = [
+                row
+                for row in await MediaItem.all()
+                if Path(row.dir).is_relative_to(directory)
+            ]
+            retained = await MediaItem.exclude(
+                id__in=[row.id for row in owned]
+                + ([item.parent_id] if item.parent_id else [])
+            ).values()
+            caches = [_cache(row).parent for row in owned if row.format is not None]
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_id=item.parent_id or item.id,
+                rel_type=HistoryType.TEXT if novel else HistoryType.IMAGE,
+                locator={"chapter_item_id": item.id},
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_id=item.id,
+                rel_type=HistoryType.VIDEO,
+            )
+            shutil.rmtree(directory)
+            clock = [100.0]
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            if not scan:
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(directory),
+                    event_type="deleted",
+                    is_directory=True,
+                )
+            tasks = await coalesce_reading_events(
+                lib.id, scan_works={work} if scan else None
+            )
+            assert len(tasks) == 1
+            task = tasks[0]
+            assert not await prepare_reading_event(task.id)
+            clock[0] += 2
+            assert await prepare_reading_event(task.id)
+            assert await media_watcher.consume_event(
+                await MediaEvent.get(id=task.id).select_related("lib")
+            )
+            assert not await MediaItem.filter(id__in=[row.id for row in owned]).exists()
+            assert all(not cache.exists() for cache in caches)
+            assert (
+                await MediaItem.filter(id__in=[row["id"] for row in retained]).values()
+                == retained
+            )
+            assert await UserHistory.all().values_list("id", flat=True) == [history.id]
+            if "chapter" in scope:
+                parent = await MediaItem.get(id=item.parent_id)
+                assert parent.index_state == (
+                    IndexState.READY if scope == "chapter" else IndexState.EMPTY
+                )
+                assert parent.extra is not None
+                assert parent.extra["content"]["chapter_count"] == int(
+                    scope == "chapter"
+                )
+                assert note.read_text() == "Keep me"
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
     ("format", "directory"),
     [(format, True) for format in MediaFormat]
     + [(format, False) for format in MediaFormat if format != MediaFormat.DIR],
@@ -3283,6 +3394,77 @@ def test_remove_reading_library_change(tmp_path, monkeypatch, stage):
             assert await UserHistory.all().values() == histories
             assert _cache(item).is_dir() == (stage == "enumeration")
             assert _cache(await MediaItem.get(dir=str(other))).is_dir()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["present", "restore", "ownership"])
+def test_remove_directory_guard(tmp_path, monkeypatch, stage):
+    """Keep ownership and histories if an observed missing directory is restored.
+
+    Args:
+        tmp_path: The isolated library and cache root.
+        monkeypatch: The fixture restoring a directory during cache cleanup.
+        stage: An existing container, a late restoration or a changed item directory.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            other = source.directory.with_name("Other")
+            shutil.copytree(source.directory, other)
+            await MediaItemService.ingest_reading_work(lib.id, other)
+            item = await MediaItem.get(path=str(source.path))
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user, rel_id=item.id, rel_type=HistoryType.TEXT
+            )
+            history = await UserHistory.all().values()
+            xml = "<package><metadata/></package>"
+            if stage == "present":
+                source.path.unlink()
+                (source.directory / "metadata.opf").write_text(xml)
+            else:
+                shutil.rmtree(source.directory)
+            if stage == "ownership":
+                directory = source.directory.with_name("Changed")
+                await MediaItem.filter(id=item.id).update(
+                    dir=str(directory), path=str(directory / source.path.name)
+                )
+            elif stage == "restore":
+                write = media_service.write_in_thread
+
+                async def restored(function, *args, **kwargs):
+                    """Restore only the container and its XML after cache cleanup.
+
+                    Args:
+                        function: The cache cleanup operation.
+                        args: Positional cleanup arguments.
+                        kwargs: Keyword cleanup arguments.
+                    """
+                    await write(function, *args, **kwargs)
+                    source.directory.mkdir()
+                    (source.directory / "metadata.opf").write_text(xml)
+
+                monkeypatch.setattr(media_service, "write_in_thread", restored)
+            rows = await MediaItem.all().values()
+            if stage == "present":
+                assert not await MediaItemService.remove_missing_reading_item(
+                    item.id, directory=source.directory
+                )
+            else:
+                with pytest.raises(ContentError, match="content_changed"):
+                    await MediaItemService.remove_missing_reading_item(
+                        item.id, directory=source.directory
+                    )
+            assert await MediaItem.all().values() == rows
+            assert await UserHistory.all().values() == history
+            assert _cache(item).exists() == (stage != "restore")
+            if stage != "ownership":
+                assert (source.directory / "metadata.opf").read_text() == xml
 
     asyncio.run(run())
 
