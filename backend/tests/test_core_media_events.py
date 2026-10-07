@@ -16,7 +16,13 @@ from filelock import Timeout
 from sanic import Sanic
 from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
-from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileMovedEvent
+from watchdog.events import (
+    DirMovedEvent,
+    FileCreatedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+    generate_sub_moved_events,
+)
 
 from app.core.config import KaloscopeConfig
 from app.core.media import events as media_events
@@ -1857,6 +1863,46 @@ def test_consume_chain_recovery(
             )
             assert current.index_state == IndexState.READY
             assert await MediaItem.all().count() == 1
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_consume_observed_directory(tmp_path, moment, lib_type):
+    """Consume a directory move with watchdog's inferred descendant events.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        lib_type: The reading library containing the moved work.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path, lib_type)
+            assert await consume_event(await _ready(task, moment))
+            before = {item.id: item.path for item in await MediaItem.all()}
+            source, destination = Path(task.src_path), Path(lib.dir) / "Moved"
+            source.rename(destination)
+            events = Queue()
+            handler = EventHandler(lib, asyncio.get_running_loop(), events)
+            await handler._persist(DirMovedEvent(str(source), str(destination)))
+            descendants = list(generate_sub_moved_events(str(source), str(destination)))
+            assert descendants and all(event.is_synthetic for event in descendants)
+            for event in descendants:
+                await handler._persist(event)
+            assert events.qsize() == 1
+            assert await MediaEvent.all().count() == 1
+            for task in await coalesce_reading_events(lib.id):
+                assert await consume_event(await _ready(task, moment))
+            after = {item.id: item for item in await MediaItem.all()}
+            assert after.keys() == before.keys()
+            assert all(
+                item.path == str(destination / Path(before[id]).relative_to(source))
+                and item.index_state == IndexState.READY
+                for id, item in after.items()
+            )
             assert not await MediaEvent.exists()
 
     asyncio.run(run())

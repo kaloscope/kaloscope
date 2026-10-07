@@ -569,6 +569,37 @@ def test_ignored_events(tmp_path, lib_type, relative):
     assert get_handler(lib_type).filter_event(event, base_path=str(tmp_path)) is None
 
 
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FileCreatedEvent,
+        FileModifiedEvent,
+        FileDeletedEvent,
+        FileMovedEvent,
+        DirCreatedEvent,
+        DirModifiedEvent,
+        DirDeletedEvent,
+        DirMovedEvent,
+    ],
+)
+def test_synthetic_events(tmp_path, lib_type, event_type):
+    """Ignore only inferred moves while preserving other source notifications.
+
+    Args:
+        tmp_path: The isolated library root.
+        lib_type: The reading library receiving the event.
+        event_type: The filesystem notification whose inferred flag is set.
+    """
+    event = event_type(
+        str(tmp_path / "Old/Chapter/1.jpg"),
+        str(tmp_path / "New/Chapter/1.jpg"),
+        is_synthetic=True,
+    )
+    result = get_handler(lib_type).filter_event(event, base_path=str(tmp_path))
+    assert result is (None if event.event_type == "moved" else event)
+
+
 @pytest.mark.parametrize("event_type", [FileMovedEvent, DirMovedEvent])
 def test_moved_events(tmp_path, event_type):
     suffix = "/1.jpg" if event_type is FileMovedEvent else ""

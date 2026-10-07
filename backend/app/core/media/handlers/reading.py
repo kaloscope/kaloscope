@@ -521,7 +521,7 @@ class ReadingMediaHandler(MediaHandler):
     def filter_event(
         self, event: FileSystemEvent, *, base_path: str
     ) -> FileSystemEvent | None:
-        """Accept relevant events while preserving the original move facts.
+        """Accept relevant events while retaining only original move facts.
 
         Args:
             event: The filesystem event to classify without mutation.
@@ -530,6 +530,9 @@ class ReadingMediaHandler(MediaHandler):
         Returns:
             The original event when it affects a work, otherwise None.
         """
+        # inferred descendants are already covered by the original directory move
+        if event.event_type == EVENT_TYPE_MOVED and event.is_synthetic:
+            return None
         return event if self.resolve_event_targets(event, base_path=base_path) else None
 
 
