@@ -393,7 +393,7 @@ def test_local_delete_lock(tmp_path, monkeypatch, delete_parent, pending_recover
                     task.cancel()
                     raise
             await asyncio.wait_for(task, timeout=3)
-            assert deleted_paths == [tmp_path / "New.mkv"]
+            assert deleted_paths == [tmp_path / "New.mkv", tmp_path / "New.nfo"]
             assert not await MediaItem.filter(id=item.id).exists()
             assert not await MediaEvent.filter(event_type="organize").exists()
             assert not (tmp_path / "New.mkv").exists()

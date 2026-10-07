@@ -3710,7 +3710,7 @@ def test_delete_reading_retry(tmp_path, monkeypatch, stage):
                     asyncio.CancelledError: After media files have been removed.
                 """
                 result = await write(function, *args, **kwargs)
-                if function is media_service._delete_reading_files:
+                if function is media_service._delete_media_files:
                     raise asyncio.CancelledError()
                 return result
 
@@ -4000,7 +4000,7 @@ def test_delete_reading_changed(tmp_path, monkeypatch, change):
                     The original filesystem result.
                 """
                 result = await write(function, *args, **kwargs)
-                if function is media_service._delete_reading_files:
+                if function is media_service._delete_media_files:
                     await MediaItem.filter(id=item.id).update(
                         path=str(source.path.with_name("Moved")),
                         dir=str(source.path.with_name("Moved")),

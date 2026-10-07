@@ -73,10 +73,10 @@ type _SourceStates = dict[Path, tuple[int, ...]]
 
 
 def _source_identity(item: MediaItem) -> tuple:
-    """Identify the database attributes that bind an item to its reading source.
+    """Identify the database attributes that bind an item to its media source.
 
     Args:
-        item: The reading item with its library and optional parent loaded.
+        item: The media item with its library and optional parent loaded.
 
     Returns:
         The source and parent attributes that must remain current during file I/O.
@@ -390,19 +390,18 @@ def _remove_reading_caches(ids: list[int]):
         raise ContentError("content_not_ready") from error
 
 
-async def _remove_reading_records(items: list[MediaItem]):
-    """Remove selected reading items and their scoped history inside a transaction.
+async def _remove_media_records(items: list[MediaItem]):
+    """Remove selected media items and their scoped history inside a transaction.
 
     Args:
         items: The nonempty, validated same-library deletion scope with parents loaded.
     """
     ids = {item.id for item in items}
     parents = {item.id: item.parent_id for item in items if item.parent_id is not None}
-    history_type = (
-        HistoryType.TEXT
-        if items[0].lib.lib_type == LibType.NOVEL
-        else HistoryType.IMAGE
-    )
+    history_type = {
+        LibType.NOVEL: HistoryType.TEXT,
+        LibType.COMIC: HistoryType.IMAGE,
+    }.get(items[0].lib.lib_type, HistoryType.VIDEO)
     histories = await UserHistory.filter(
         rel_type=history_type, rel_id__in=ids | set(parents.values())
     ).only("id", "rel_id", "locator")
@@ -410,29 +409,52 @@ async def _remove_reading_records(items: list[MediaItem]):
     for history in histories:
         chapter_id = (history.locator or {}).get("chapter_item_id")
         if history.rel_id in ids or (
-            type(chapter_id) is int and parents.get(chapter_id) == history.rel_id
+            history_type == HistoryType.IMAGE
+            and type(chapter_id) is int
+            and parents.get(chapter_id) == history.rel_id
         ):
             history_ids.append(history.id)
     await UserHistory.filter(id__in=history_ids).delete()
     await MediaItem.filter(id__in=ids).delete()
 
 
-def _check_reading_deleted(items: list[MediaItem], states: _SourceStates):
+def _media_files(items: list[MediaItem], others: list[MediaItem]):
+    """Collect owned files using the library's reading or video rules.
+
+    Args:
+        items: The nonempty deletion scope with library and parent relations loaded.
+        others: Other library items used to protect shared video companions.
+
+    Returns:
+        Directory, body and companion snapshots.
+
+    Raises:
+        ContentError: If source ownership or library access cannot be confirmed.
+        OSError: If files cannot be inspected.
+    """
+    from app.core.media.cleanup import reading_files, video_files
+
+    root = Path(items[0].lib.dir)
+    if items[0].lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+        return reading_files(root, [_resolve_source(item) for item in items])
+    return video_files(root, items, others)
+
+
+def _check_media_deleted(
+    items: list[MediaItem], states: _SourceStates, others: list[MediaItem]
+):
     """Confirm selected files remain absent and surviving directories are unchanged.
 
     Args:
-        items: The same-library reading scope whose files were removed.
+        items: The same-library scope whose files were removed.
         states: Directory snapshots after deletion, including cover folders.
+        others: Other library items used to protect shared video companions.
 
     Raises:
         ContentError: If a body, companion or directory changes or cannot be inspected.
     """
-    from app.core.media.cleanup import reading_files
-
     try:
-        _, bodies, companions = reading_files(
-            Path(items[0].lib.dir), [_resolve_source(item) for item in items]
-        )
+        _, bodies, companions = _media_files(items, others)
         if (
             bodies
             or companions
@@ -446,11 +468,14 @@ def _check_reading_deleted(items: list[MediaItem], states: _SourceStates):
         raise ContentError("media_source_unavailable") from error
 
 
-def _delete_reading_files(items: list[MediaItem]) -> tuple[_SourceStates, list[Path]]:
+def _delete_media_files(
+    items: list[MediaItem], others: list[MediaItem]
+) -> tuple[_SourceStates, list[Path]]:
     """Delete selected bodies before companions without deleting whole directories.
 
     Args:
-        items: The nonempty reading scope with validated library and parent ownership.
+        items: The nonempty scope with validated library and parent ownership.
+        others: Other library items used to protect shared video companions.
 
     Returns:
         Surviving directory snapshots and removed files for database and folder cleanup.
@@ -459,15 +484,11 @@ def _delete_reading_files(items: list[MediaItem]) -> tuple[_SourceStates, list[P
         ContentError: If files change or cannot be removed. Earlier completed writes
             are retained so retry can finish the remaining scope.
     """
-    from app.core.media.cleanup import reading_files
-
-    sources = [_resolve_source(item) for item in items]
-    root = Path(items[0].lib.dir)
     removed = []
     try:
-        states, bodies, companions = reading_files(root, sources)
+        states, bodies, companions = _media_files(items, others)
         for group in (bodies, companions):
-            if reading_files(root, sources) != (states, bodies, companions):
+            if _media_files(items, others) != (states, bodies, companions):
                 raise ContentError("content_changed")
             for path, expected in list(group.items()):
                 if (
@@ -485,7 +506,7 @@ def _delete_reading_files(items: list[MediaItem]) -> tuple[_SourceStates, list[P
                 states[path.parent] = file_state(
                     path.parent.stat(follow_symlinks=False)
                 )
-        _check_reading_deleted(items, states)
+        _check_media_deleted(items, states, others)
         return states, removed
     except OSError as error:
         raise ContentError("media_source_unavailable") from error
@@ -542,14 +563,14 @@ def _remove_reading_companions(
         raise ContentError("media_source_unavailable") from error
 
 
-def _prune_reading_directories(
+def _prune_media_directories(
     directory: Path, removed: list[Path], states: _SourceStates
 ):
     """Best-effort removal of empty companion folders and their owned container.
 
     Args:
         directory: The former body container strictly below the library root.
-        removed: Companion paths whose parent directories may now be empty.
+        removed: File paths whose parent directories may now be empty.
         states: Surviving ancestor identities captured before database cleanup.
     """
     parents = {directory}
@@ -1768,10 +1789,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     != states
                 ):
                     raise ContentError("content_changed")
-                await _remove_reading_records(items)
+                await _remove_media_records(items)
             if Path(item.dir) in states:
                 await write_in_thread(
-                    _prune_reading_directories, Path(item.dir), removed, states
+                    _prune_media_directories, Path(item.dir), removed, states
                 )
             return ids
 
@@ -2457,7 +2478,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     async def delete(cls, id: int, local: bool = False):
         """Delete or hide a media item under its library lock.
 
-        Recover video organization before resolving current paths. Reading deletion
+        Recover video organization before resolving current paths. Local deletion
         removes owned files individually. Retain the original child scope across
         parent changes and summarize surviving comic collections.
 
@@ -2468,7 +2489,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Raises:
             DoesNotExist: If the item is missing before a local deletion.
             OrganizePendingError: If pending organization cannot finish safely.
-            ContentError: If reading ownership or file cleanup cannot be confirmed.
+            ContentError: If ownership or file cleanup cannot be confirmed.
         """
         from app.core.media.organizer import recover_organizing
 
@@ -2481,12 +2502,11 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         child_ids = [row.id for row in items if row.id != id]
         reading = item.lib.lib_type in (LibType.NOVEL, LibType.COMIC)
         async with library_lock(item.lib.dir):
-            if reading:
-                lib = await MediaLib.get(id=item.lib_id)
-                if (lib.dir, lib.lib_type) != (item.lib.dir, item.lib.lib_type):
-                    raise ContentError("content_changed")
-            else:
-                await recover_organizing(item.lib)
+            lib = await MediaLib.get(id=item.lib_id)
+            if (lib.dir, lib.lib_type) != (item.lib.dir, item.lib.lib_type):
+                raise ContentError("content_changed")
+            if not reading:
+                await recover_organizing(lib)
             items = await MediaItem.filter(
                 id__in=[id, *child_ids], lib_id=item.lib_id
             ).select_related("lib", "parent")
@@ -2494,21 +2514,19 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             # a surviving parent may have received children outside the requested scope
             if await MediaItem.filter(parent_id=id).exclude(id__in=child_ids).exists():
                 items = [row for row in items if row.id != id]
-            if local and reading:
-                await cls._delete_reading(items)
-            elif local:
-                if any(row.id == id for row in items):
-                    items = [row for row in items if row.parent_id != id]
-                for current in items:
-                    path = Path(current.path)
-                    if path.exists():
-                        delete_path(path)
-                    await current.delete()
-                for parent_id in parent_ids:
-                    if not await MediaItem.filter(parent_id=parent_id).exists():
-                        await MediaItem.filter(
-                            id=parent_id, lib_id=item.lib_id
-                        ).delete()
+            if local:
+                if not reading:
+                    ids = {row.id for row in items}
+                    for parent in await MediaItem.filter(
+                        id__in=parent_ids - ids, lib_id=item.lib_id
+                    ).select_related("lib", "parent"):
+                        if (
+                            not await MediaItem.filter(parent_id=parent.id)
+                            .exclude(id__in=ids)
+                            .exists()
+                        ):
+                            items.append(parent)
+                await cls._delete_local(items)
             else:
                 await MediaItem.filter(id__in=[row.id for row in items]).update(
                     visible=False
@@ -2526,8 +2544,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     await cls.sync_collection(parent_id)
 
     @classmethod
-    async def _delete_reading(cls, items: list[MediaItem]):
-        """Delete captured reading items while the caller holds the library lock.
+    async def _delete_local(cls, items: list[MediaItem]):
+        """Delete captured media items while the caller holds the library lock.
 
         Args:
             items: Current rows from the originally requested scope, with library and
@@ -2539,22 +2557,29 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         if not items:
             return
+        reading = items[0].lib.lib_type in (LibType.NOVEL, LibType.COMIC)
         ids = {item.id for item in items}
-        directories = {Path(item.dir) for item in items}
+        root = Path(items[0].lib.dir)
+        directories = {Path(item.dir) for item in items} - {root}
         others = (
             await MediaItem.filter(lib_id=items[0].lib_id)
             .exclude(id__in=ids)
-            .only("dir")
+            .only("dir", "path", "nfo_path")
         )
-        if await MediaItem.filter(parent_id__in=ids).exclude(
-            id__in=ids
-        ).exists() or any(
-            any(Path(other.dir).is_relative_to(directory) for directory in directories)
-            for other in others
+        if await MediaItem.filter(parent_id__in=ids).exclude(id__in=ids).exists() or (
+            reading
+            and any(
+                any(
+                    Path(other.dir).is_relative_to(directory)
+                    for directory in directories
+                )
+                for other in others
+            )
         ):
             raise ContentError("content_changed")
-        states, removed = await write_in_thread(_delete_reading_files, items)
-        await write_in_thread(_remove_reading_caches, list(ids))
+        states, removed = await write_in_thread(_delete_media_files, items, others)
+        if reading:
+            await write_in_thread(_remove_reading_caches, list(ids))
         async with in_transaction():
             current = await MediaItem.filter(
                 Q(id__in=ids) | Q(parent_id__in=ids)
@@ -2563,13 +2588,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 row.id: _source_identity(row) for row in items
             }:
                 raise ContentError("content_changed")
-            await to_thread(_check_reading_deleted, items, states)
-            await _remove_reading_records(items)
+            await to_thread(_check_media_deleted, items, states, others)
+            await _remove_media_records(items)
+        directories.update(path.parent for path in removed if path.parent != root)
         for directory in sorted(
             directories, key=lambda path: len(path.parts), reverse=True
         ):
             await write_in_thread(
-                _prune_reading_directories,
+                _prune_media_directories,
                 directory,
                 removed,
                 {
