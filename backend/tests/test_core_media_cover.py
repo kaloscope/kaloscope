@@ -14,7 +14,7 @@ from app.core.media.common import ContentError
 from app.core.media.cover import read_cover
 from app.core.media.handlers.reading import ReadingSource
 from app.core.media.image import build_image_index
-from app.core.media.metadata_reader import read_metadata
+from app.core.media.reader import read_metadata
 from app.models.media import MediaFormat
 
 _PNG = b"\x89PNG\r\n\x1a\nprimary image"

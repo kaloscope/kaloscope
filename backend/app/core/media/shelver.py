@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import aiofiles
 from lxml import etree
-from sanic.log import Colors, logger
+from sanic.log import logger
 from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
@@ -282,35 +282,36 @@ async def _write_nfo(
 
 
 def parse_nfo(lib_type: LibType, path: Path | str) -> MediaMeta | None:
-    """Parse the NFO file at the given path.
+    """Parse current NFO fields without recovering malformed XML.
 
     Args:
         lib_type: The media library type.
         path: The path to the NFO file.
 
     Returns:
-        The parsed metadata as a MediaMeta object.
+        Parsed metadata, or None when the file is missing or cannot be parsed.
     """
-    data = None
-    if not isinstance(path, Path):
-        path = Path(path)
-    if path.exists() and path.is_file():
-        try:
-            data = etree.parse(path, parser=etree.XMLParser(recover=True))
-        except Exception:
-            logger.error(
-                f"Failed to parse the NFO file: {Colors.RED}%s{Colors.END}",
-                path,
-                exc_info=True,
+    path = Path(path)
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as file:
+            data = etree.parse(
+                file, parser=etree.XMLParser(resolve_entities=False, no_network=True)
             )
+    except (OSError, etree.XMLSyntaxError):
+        logger.warning("Failed to parse NFO file: %s", path, exc_info=True)
+        return None
 
-    # extract metadata from the NFO file
-    meta = None
-    if data is not None:
-        handler = get_handler(lib_type)
-        meta = handler.extract_meta(data)
-        meta.nfo_path = str(path)
+    root = data.getroot()
+    roots = ("movie",) if lib_type == LibType.MOVIE else ("tvshow", "episodedetails")
+    if root is None or root.tag not in roots:
+        return None
 
+    meta = get_handler(lib_type).extract_meta(data)
+    meta.nfo_path = str(path)
+    if meta.rating is not None and not 0 <= meta.rating <= 10:
+        meta.rating = None
     return meta
 
 

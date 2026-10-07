@@ -1,4 +1,4 @@
-"""Unit tests for NFO publication and media shelving."""
+"""Unit tests for NFO reading, publication and media shelving."""
 
 import asyncio
 import hashlib
@@ -36,6 +36,50 @@ from app.services.media import MediaItemService
 def workspace(monkeypatch, tmp_path_factory):
     directory = tmp_path_factory.mktemp("workspace-temp")
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
+@pytest.mark.parametrize(
+    "content", ["", "not XML", "<ComicInfo/>", "<movie><title>Incomplete</title>"]
+)
+def test_nfo_invalid(tmp_path, content):
+    path = tmp_path / "movie.nfo"
+    path.write_text(content)
+    assert shelver.parse_nfo(LibType.MOVIE, path) is None
+    assert path.read_text() == content
+
+
+def test_nfo_unavailable(tmp_path, monkeypatch):
+    path = tmp_path / "movie.nfo"
+    assert shelver.parse_nfo(LibType.MOVIE, path) is None
+    assert shelver.parse_nfo(LibType.MOVIE, tmp_path) is None
+    path.write_text("<movie/>")
+    monkeypatch.setattr(Path, "open", Mock(side_effect=PermissionError))
+    assert shelver.parse_nfo(LibType.MOVIE, path) is None
+
+
+@pytest.mark.parametrize("rating", ["NaN", "sNaN", "Infinity", "1e999", "11", "-1"])
+def test_nfo_invalid_fields(tmp_path, rating):
+    path = tmp_path / "episode.nfo"
+    path.write_text(
+        f"<episodedetails><title>Available</title><rating>{rating}</rating>"
+        "<year>²</year><season>unknown</season><episode>?</episode></episodedetails>"
+    )
+    result = shelver.parse_nfo(LibType.TV_SHOW, path)
+    assert result is not None and result.title == "Available"
+    assert result.rating is None and result.year is None
+    assert result.season is None and result.episode is None
+
+
+def test_nfo_empty_fields(tmp_path):
+    path = tmp_path / "episode.nfo"
+    path.write_text(
+        "<episodedetails><rating>0</rating><year> </year>"
+        "<season>0</season><episode>0</episode></episodedetails>"
+    )
+    result = shelver.parse_nfo(LibType.TV_SHOW, path)
+    assert result is not None and result.rating == 0
+    assert result.year is None
+    assert result.season == 0 and result.episode == 0
 
 
 def test_nfo_publish(tmp_path, monkeypatch):

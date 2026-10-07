@@ -21,8 +21,8 @@ from app.core.media.handlers.reading import (
 )
 from app.core.media.image import list_image_members
 from app.core.media.metadata import METADATA_BYTES
-from app.core.media.metadata_reader import MetadataRead, MetadataSource
 from app.core.media.raster import IMAGE_BYTES, ImageMime, image_mime, read_image_file
+from app.core.media.reader import MetadataRead, MetadataSource
 from app.models.media import MediaFormat
 
 

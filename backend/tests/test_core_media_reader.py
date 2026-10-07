@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.media import metadata_reader
+from app.core.media import reader
 from app.core.media.epub import package as epub_package
 from app.core.media.handlers.reading import ReadingSource
-from app.core.media.metadata_reader import read_metadata
+from app.core.media.reader import read_metadata
 from app.models.media import MediaFormat
 
 
@@ -148,9 +148,7 @@ def test_external_case_collision(tmp_path, monkeypatch):
         SimpleNamespace(name=name, path=str(source.directory / name))
         for name in ("metadata.opf", "Metadata.OPF")
     ]
-    monkeypatch.setattr(
-        metadata_reader.os, "scandir", lambda path: nullcontext(entries)
-    )
+    monkeypatch.setattr(reader.os, "scandir", lambda path: nullcontext(entries))
     result = read_metadata(source)
     assert result.external is not None and result.external.error == "ambiguous_metadata"
 
@@ -213,7 +211,7 @@ def test_external_errors(tmp_path, monkeypatch, kind):
         source.path.unlink()
         source.directory.rmdir()
     elif kind == "oversized":
-        monkeypatch.setattr(metadata_reader, "METADATA_BYTES", 64)
+        monkeypatch.setattr(reader, "METADATA_BYTES", 64)
         path.write_bytes(b" " * 65)
         expected = "media_limit_exceeded"
     else:
@@ -230,7 +228,7 @@ def test_external_errors(tmp_path, monkeypatch, kind):
             """
             raise PermissionError
 
-        monkeypatch.setattr(metadata_reader, "_read_local", denied)
+        monkeypatch.setattr(reader, "_read_local", denied)
     result = read_metadata(source)
     assert result.state == "error" and result.data.title == "Book"
     assert result.external is not None and result.external.error == expected
@@ -241,7 +239,7 @@ def test_external_changes(tmp_path, monkeypatch, change):
     source = _source(tmp_path, MediaFormat.TXT)
     path = source.directory / "metadata.opf"
     path.write_bytes(_opf("<dc:title>Old</dc:title>"))
-    parse = metadata_reader.parse_opf
+    parse = reader.parse_opf
     calls = []
 
     def changing(data):
@@ -263,7 +261,7 @@ def test_external_changes(tmp_path, monkeypatch, change):
             replacement.replace(path)
         return result
 
-    monkeypatch.setattr(metadata_reader, "parse_opf", changing)
+    monkeypatch.setattr(reader, "parse_opf", changing)
     result = read_metadata(source)
     if change == "replace":
         assert result.data.title == "New" and result.state == "ready"
@@ -419,7 +417,7 @@ def test_comic_selection(tmp_path, monkeypatch, scenario):
             source.path.read_bytes().replace(b"Metadata", b"Corruptd", 1)
         )
     elif scenario == "oversized":
-        monkeypatch.setattr(metadata_reader, "METADATA_BYTES", len(data) - 1)
+        monkeypatch.setattr(reader, "METADATA_BYTES", len(data) - 1)
     result = read_metadata(source)
     if scenario == "root":
         assert result.data.title == "Root" and result.state == "ready"
@@ -466,7 +464,7 @@ def test_embedded_not_needed(tmp_path):
 def test_embedded_changes(tmp_path, monkeypatch, continuous):
     source = _source(tmp_path, MediaFormat.CBZ)
     _archive(source, {"ComicInfo.xml": _comic("<Title>Old</Title>")})
-    parse = metadata_reader.parse_comicinfo
+    parse = reader.parse_comicinfo
     calls = []
 
     def changing(data):
@@ -486,7 +484,7 @@ def test_embedded_changes(tmp_path, monkeypatch, continuous):
             replacement.path.replace(source.path)
         return result
 
-    monkeypatch.setattr(metadata_reader, "parse_comicinfo", changing)
+    monkeypatch.setattr(reader, "parse_comicinfo", changing)
     result = read_metadata(source)
     assert len(calls) == 2
     if continuous:

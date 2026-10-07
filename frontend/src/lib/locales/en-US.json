@@ -407,35 +407,17 @@
   "media": {
     "play": "Play",
     "read": "Read",
-    "reader": {
-      "loading": "Loading content",
-      "loading_chapters": "Loading chapters",
-      "chapter": "Content {0}",
-      "part": "Part {0}"
-    },
-    "scan_on_startup": "Full scan on startup",
+    "part": "Part {0}",
+    "chapter": "Content {0}",
+    "parts": "Parts",
+    "episodes": "Episodes",
     "rename": {
       "template": "Automatic rename template",
       "tip": "Automatically rename and organize media files using a template; leave blank to disable."
     },
-    "director": "Director",
-    "writer": "Writer",
-    "cast": "Cast",
-    "studio": "Studio",
-    "author": "Author",
-    "illustrator": "Illustrator",
-    "publisher": "Publisher",
-    "published": "Published {0}",
-    "isbn": "ISBN",
-    "volume": "Volume {0}",
-    "series_index": "Series No. {0}",
-    "issue": "Issue {0}",
-    "page_count": "{0, plural, one {# page} other {# pages}}",
-    "black_and_white": "Black and White",
-    "full_color": "Full Color",
-    "episodes": "Episodes",
-    "parts": "Parts",
-    "tags": "Tags",
+    "scan_on_startup": "Full scan on startup",
+    "loading": "Loading content",
+    "loading_chapters": "Loading chapters",
     "delete_local": "Also delete the local files",
     "delete_local_confirm": "Are you sure you want to delete the local files?",
     "text": {
@@ -622,6 +604,26 @@
       "forward": "Forward",
       "live_tip": "Live"
     }
+  },
+  "metadata": {
+    "fields": {
+      "authors": "Author",
+      "illustrators": "Illustrator",
+      "publisher": "Publisher",
+      "isbn": "ISBN",
+      "tags": "Tags",
+      "directors": "Director",
+      "writers": "Writer",
+      "actors": "Cast",
+      "studios": "Studio"
+    },
+    "published": "Published {0}",
+    "volume": "Volume {0}",
+    "series_index": "Series No. {0}",
+    "issue": "Issue {0}",
+    "page_count": "{0, plural, one {# page} other {# pages}}",
+    "black_and_white": "Black and White",
+    "full_color": "Full Color"
   },
   "ffmpeg": {
     "title": "FFmpeg",

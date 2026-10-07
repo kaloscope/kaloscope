@@ -407,35 +407,17 @@
   "media": {
     "play": "播放",
     "read": "阅读",
-    "reader": {
-      "loading": "正在加载正文",
-      "loading_chapters": "正在加载章节",
-      "chapter": "正文 {0}",
-      "part": "第 {0} 段"
-    },
-    "scan_on_startup": "启动时全量扫描",
+    "part": "第 {0} 段",
+    "chapter": "正文 {0}",
+    "parts": "分段",
+    "episodes": "剧集",
     "rename": {
       "template": "自动重命名模板",
       "tip": "按模板自动重命名并整理媒体文件，留空关闭。"
     },
-    "director": "导演",
-    "writer": "编剧",
-    "cast": "演员阵容",
-    "studio": "制片公司",
-    "author": "作者",
-    "illustrator": "绘者",
-    "publisher": "出版社",
-    "published": "{0} 出版",
-    "isbn": "ISBN",
-    "volume": "第 {0} 卷",
-    "series_index": "系列序号 {0}",
-    "issue": "第 {0} 话",
-    "page_count": "{0} 页",
-    "black_and_white": "黑白",
-    "full_color": "彩色",
-    "episodes": "剧集",
-    "parts": "分段",
-    "tags": "标签",
+    "scan_on_startup": "启动时全量扫描",
+    "loading": "正在加载正文",
+    "loading_chapters": "正在加载章节",
     "delete_local": "同时删除本地文件",
     "delete_local_confirm": "是否确认删除本地文件？",
     "text": {
@@ -622,6 +604,26 @@
       "forward": "快进中",
       "live_tip": "直播"
     }
+  },
+  "metadata": {
+    "fields": {
+      "authors": "作者",
+      "illustrators": "绘者",
+      "publisher": "出版社",
+      "isbn": "ISBN",
+      "tags": "标签",
+      "directors": "导演",
+      "writers": "编剧",
+      "actors": "演员阵容",
+      "studios": "制片公司"
+    },
+    "published": "{0} 出版",
+    "volume": "第 {0} 卷",
+    "series_index": "系列序号 {0}",
+    "issue": "第 {0} 话",
+    "page_count": "{0} 页",
+    "black_and_white": "黑白",
+    "full_color": "彩色"
   },
   "ffmpeg": {
     "title": "FFmpeg",

@@ -1,6 +1,6 @@
 """XML element parsing utilities."""
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from lxml import etree
 from sanic.log import logger
@@ -78,7 +78,10 @@ def get_integer(element: etree._Element | None, tag_name: str) -> int | None:
     """
     text = get_text(element, tag_name)
     if text and text.isdigit():
-        return int(text)
+        try:
+            return int(text)
+        except ValueError:
+            return None
     return None
 
 
@@ -95,7 +98,10 @@ def get_decimal(element: etree._Element | None, tag_name: str) -> Decimal | None
     text = get_text(element, tag_name)
     if text:
         try:
-            return Decimal(text)
-        except Exception:
-            logger.warning("Invalid decimal value for tag '%s': %s", tag_name, text)
+            value = Decimal(text)
+            if value.is_finite():
+                return value
+        except InvalidOperation:
+            pass
+        logger.warning("Invalid decimal value for tag '%s': %s", tag_name, text)
     return None

@@ -21,7 +21,7 @@ from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import ForbiddenException, NotFoundException, error_handler
-from app.core.media import metadata_reader
+from app.core.media import reader
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.reading import ReadingSource
@@ -335,7 +335,7 @@ def test_sync_failure(tmp_path, monkeypatch, problem, code):
                 path.unlink()
             with monkeypatch.context() as patcher:
                 if problem == "ambiguous":
-                    patcher.setattr(metadata_reader, "_find_external", ambiguous)
+                    patcher.setattr(reader, "_find_external", ambiguous)
                 current = await MediaItemService.sync_metadata(item.id)
             assert (current.title, current.year, current.rating, current.poster) == (
                 item.title,
@@ -507,7 +507,7 @@ def test_sync_worker(tmp_path, monkeypatch, cancel):
                 threading.Event(),
             )
             loop_thread = threading.get_ident()
-            reader = media_service._read_reading
+            reader = media_service._read_metadata
 
             def blocked(*args, **kwargs):
                 """Keep a read active while checking cancellation and library locking.
@@ -528,7 +528,7 @@ def test_sync_worker(tmp_path, monkeypatch, cancel):
                 finally:
                     stopped.set()
 
-            monkeypatch.setattr(media_service, "_read_reading", blocked)
+            monkeypatch.setattr(media_service, "_read_metadata", blocked)
             task = asyncio.create_task(MediaItemService.sync_metadata(item.id))
             try:
                 assert await asyncio.to_thread(started.wait, 5)
@@ -648,7 +648,7 @@ def test_access_before_files(tmp_path, monkeypatch, access, method):
         """
         raise AssertionError("unauthorized file read")
 
-    monkeypatch.setattr(media_service, "_read_reading", unexpected)
+    monkeypatch.setattr(media_service, "_read_metadata", unexpected)
 
     async def run():
         async with _database():
@@ -1002,7 +1002,7 @@ def test_read_revalidation(tmp_path, monkeypatch, change):
         async with _database():
             item = await _item(tmp_path, MediaFormat.TXT)
             main_thread = threading.get_ident()
-            reader = metadata_reader.read_metadata
+            read_metadata = reader.read_metadata
 
             def in_worker(source):
                 """Assert that synchronous metadata I/O runs off the event loop.
@@ -1014,7 +1014,7 @@ def test_read_revalidation(tmp_path, monkeypatch, change):
                     Current metadata from the original reader.
                 """
                 assert threading.get_ident() != main_thread
-                return reader(source)
+                return read_metadata(source)
 
             async def modify(function, *args, **kwargs):
                 """Change database ownership immediately after worker completion.
@@ -1042,7 +1042,7 @@ def test_read_revalidation(tmp_path, monkeypatch, change):
                     )
                 return result
 
-            monkeypatch.setattr(metadata_reader, "read_metadata", in_worker)
+            monkeypatch.setattr(reader, "read_metadata", in_worker)
             monkeypatch.setattr(media_service, "to_thread", modify)
             if change == "hide":
                 with pytest.raises(NotFoundException):
@@ -1142,14 +1142,20 @@ def test_reading_http(tmp_path, format):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
-def test_video_details_http(tmp_path, lib_type):
+@pytest.mark.parametrize(
+    ("lib_type", "root"),
+    [
+        (LibType.MOVIE, "movie"),
+        (LibType.TV_SHOW, "tvshow"),
+        (LibType.TV_SHOW, "episodedetails"),
+    ],
+)
+def test_video_details_http(tmp_path, lib_type, root):
     async def run():
         async with _database():
             item = await _item(tmp_path, MediaFormat.TXT)
             await MediaLib.filter(id=item.lib_id).update(lib_type=lib_type)
             path = Path(item.dir) / "video.nfo"
-            root = "movie" if lib_type == LibType.MOVIE else "tvshow"
             path.write_text(
                 f"<{root}><title>Video metadata</title><plot>NFO plot</plot></{root}>"
             )
@@ -1162,8 +1168,42 @@ def test_video_details_http(tmp_path, lib_type):
                 assert data["title"] == "Old database title"
                 assert data["metadata"]["title"] == "Video metadata"
                 assert data["metadata"]["plot"] == "NFO plot"
-                assert data["media_type"] == "video" and "metadata_state" not in data
+                assert data["media_type"] == "video"
+                assert response.headers["cache-control"] == "private, no-store"
                 assert (await client.get(url + "/assets/cover")).status_code == 404
+
+                # unchanged timestamps do not hide external NFO edits
+                before = path.stat()
+                path.write_text(
+                    f"<{root}><title>Fresh metadata</title><plot>New plot</plot>"
+                    f"<year>unknown</year><rating>NaN</rating></{root}>"
+                )
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                response = await client.get(url)
+                assert response.status_code == 200, response.text
+                data = response.json()["data"]
+                assert data["metadata"]["title"] == "Fresh metadata"
+                assert data["metadata"]["plot"] == "New plot"
+                assert data["metadata"]["rating"] is None
+                assert data["metadata"]["year"] is None
+
+                # malformed NFO contributes no detail fields
+                damaged = f"<{root}><title>Recovered</title><plot>Partial plot</plot>"
+                path.write_text(damaged)
+                response = await client.get(url)
+                assert response.status_code == 200, response.text
+                data = response.json()["data"]
+                assert data["metadata"] is None
+                assert path.read_text() == damaged
+
+                path.unlink()
+                for nfo_path in (str(path), None):
+                    await MediaItem.filter(id=item.id).update(nfo_path=nfo_path)
+                    data = (await client.get(url)).json()["data"]
+                    assert data["metadata"] is None
+                    assert data["title"] == "Old database title"
+                await item.refresh_from_db()
+                assert item.title == "Old database title" and item.year == 1980
                 await MediaItem.filter(id=item.id).update(visible=False)
                 assert (await client.get(url)).status_code == 404
 
@@ -2350,7 +2390,7 @@ def test_comic_read_race(tmp_path, monkeypatch, asset, change):
         change: The file changed before the read's stability check.
     """
     from app.core.media import image as image_media
-    from app.core.media import metadata_reader
+    from app.core.media import reader
 
     async def run():
         async with _database():
@@ -2358,7 +2398,7 @@ def test_comic_read_race(tmp_path, monkeypatch, asset, change):
             cache = (
                 tmp_path / "cache/media_index" / str(item.id) / str(item.index_version)
             )
-            module = image_media if asset else metadata_reader
+            module = image_media if asset else reader
             name = "read_image_resource" if asset else "read_metadata"
             read = getattr(module, name)
             loop_thread = threading.get_ident()
@@ -2475,8 +2515,8 @@ def test_collection_content_http(tmp_path, monkeypatch):
                 parent.index_version is None
                 and parent.index_state == IndexState.PENDING
             )
-            reader = Mock(wraps=metadata_reader.read_metadata)
-            monkeypatch.setattr(metadata_reader, "read_metadata", reader)
+            read_metadata = Mock(wraps=reader.read_metadata)
+            monkeypatch.setattr(reader, "read_metadata", read_metadata)
             async with _client(_user()) as client:
                 url = f"/_api/media/{parent.id}/content"
                 response = await client.get(url, params={"limit": 1})
@@ -2496,9 +2536,9 @@ def test_collection_content_http(tmp_path, monkeypatch):
                     "Chapter 2",
                     "Summary 10",
                 ]
-                assert reader.call_count == 1 and reader.call_args.args[0].path == Path(
-                    chapters[1].path
-                )
+                assert read_metadata.call_count == 1 and read_metadata.call_args.args[
+                    0
+                ].path == Path(chapters[1].path)
                 assert response.headers["cache-control"] == "private, no-store"
                 assert str(tmp_path) not in response.text
                 assert (await client.get(content.images[0])).content == _PNG + b"1:1"

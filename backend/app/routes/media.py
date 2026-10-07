@@ -25,7 +25,6 @@ from app.core.media.shelver import (
     gen_nfo,
     get_nfo_path,
     get_nfo_type,
-    parse_nfo,
 )
 from app.core.media.watcher import LibWatcher
 from app.core.transcode import (
@@ -199,11 +198,6 @@ async def get_item_details(request: Request, id: int) -> HTTPResponse:
         lib["triggers"] = await FlowTriggerService.get_triggers(
             GraphCategory.INGEST, lib["id"]
         )
-        # attach the metadata
-        if lib["lib_type"] in (LibType.MOVIE, LibType.TV_SHOW) and (
-            nfo_path := item.get("nfo_path")
-        ):
-            item["metadata"] = parse_nfo(lib["lib_type"], nfo_path)
     return json(item, headers={"Cache-Control": "private, no-store"})
 
 

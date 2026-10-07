@@ -461,7 +461,7 @@ def test_ingest_metadata_events(tmp_path, monkeypatch, format):
             original = await MediaItem.get(lib_id=lib.id, path=str(source.path))
             monkeypatch.setattr(
                 media_service,
-                "_build_content",
+                "_build_index",
                 lambda *_args: pytest.fail("metadata must reuse the body index"),
             )
             novel = lib.lib_type == LibType.NOVEL
@@ -3144,7 +3144,7 @@ def test_reuse_content(tmp_path, monkeypatch, format, chapter):
             cached = {path.name: path.read_bytes() for path in _cache(first).iterdir()}
             monkeypatch.setattr(
                 media_service,
-                "_build_content",
+                "_build_index",
                 lambda *_args: pytest.fail("unchanged bodies must not be parsed"),
             )
             metadata = Path(item.dir) / (
@@ -3475,7 +3475,7 @@ def test_changed_build(tmp_path, monkeypatch, change):
                     The original operation result.
                 """
                 result = await worker(function, *args, **kwargs)
-                if function is media_service._build_content:
+                if function is media_service._build_index:
                     if change in ("edit", "page"):
                         path = Path(item.path)
                         if change == "page":
@@ -3518,7 +3518,7 @@ def test_cancel_publication(tmp_path, monkeypatch, phase):
             item = await _item(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.index_content(item.id)
             started, finish = threading.Event(), threading.Event()
-            name = "_build_content" if phase == "build" else "_publish_content"
+            name = "_build_index" if phase == "build" else "_publish_index"
             operation = getattr(media_service, name)
             loop_thread = threading.get_ident()
 

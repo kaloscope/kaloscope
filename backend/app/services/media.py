@@ -8,6 +8,7 @@ import stat
 from asyncio import create_task, to_thread
 from collections.abc import AsyncGenerator, Generator
 from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -65,17 +66,17 @@ if TYPE_CHECKING:
     from app.core.media.handlers.base import MediaPathInfo
     from app.core.media.handlers.reading import ReadingSource
     from app.core.media.image import ImageIndex
-    from app.core.media.metadata_reader import MetadataRead
+    from app.core.media.reader import MetadataRead
     from app.core.media.text import TextIndex
 
 type _SourceStates = dict[Path, tuple[int, ...]]
 
 
-def _reading_identity(item: MediaItem) -> tuple:
-    """Identify the current database ownership used by a reading request.
+def _source_identity(item: MediaItem) -> tuple:
+    """Identify the database attributes that bind an item to its reading source.
 
     Args:
-        item: An accessible item with its library and optional parent loaded.
+        item: The reading item with its library and optional parent loaded.
 
     Returns:
         The source and parent attributes that must remain current during file I/O.
@@ -96,8 +97,8 @@ def _reading_identity(item: MediaItem) -> tuple:
     )
 
 
-def _reading_location(item: MediaItem) -> ReadingSource:
-    """Validate database ownership without requiring the source to exist.
+def _resolve_source(item: MediaItem) -> ReadingSource:
+    """Resolve and validate a reading source without requiring files to exist.
 
     Args:
         item: The reading item with its library and optional parent loaded.
@@ -176,7 +177,7 @@ def _reading_source(
     from app.core.media.handlers.base import get_handler
     from app.core.media.handlers.reading import ReadingMediaHandler
 
-    source = _reading_location(item)
+    source = _resolve_source(item)
     root = Path(item.lib.dir)
     parent = item.parent if item.parent_id is not None else None
     parts = source.directory.relative_to(root).parts
@@ -316,7 +317,7 @@ def _missing_reading_sources(items: list[MediaItem]) -> _SourceStates | None:
     states: _SourceStates = {}
     try:
         for item in items:
-            source = _reading_location(item)
+            source = _resolve_source(item)
             root = Path(item.lib.dir)
             for path in (*reversed(source.path.parents), source.path):
                 try:
@@ -417,10 +418,10 @@ def _validate_reading_directory_move(
         _validate_previous_path(Path(items[0].lib.dir), src_path, dest_path, states)
 
 
-async def _reading_destination_parent(
+async def _get_target_parent(
     item: MediaItem, src_directory: Path, dest_directory: Path
 ) -> MediaItem:
-    """Resolve the registered collection for a chapter moving between works.
+    """Get the registered target collection for a moved comic chapter.
 
     Args:
         item: The original chapter with library and parent loaded under the lock.
@@ -459,13 +460,13 @@ async def _reading_destination_parent(
     return destination
 
 
-def _read_reading(
+def _read_metadata(
     item: MediaItem, *, with_cover: bool
 ) -> tuple[MetadataRead, CoverImage | None, str | None]:
-    """Read current metadata and optional cover bytes in a worker thread.
+    """Read OPF or ComicInfo metadata and optional cover bytes in a worker thread.
 
     Args:
-        item: The permission-checked item with its library and parent loaded.
+        item: The reading item with its library and optional parent loaded.
         with_cover: Whether to read the selected cover bytes after metadata.
 
     Returns:
@@ -475,7 +476,7 @@ def _read_reading(
         ContentError: If source ownership, file reading or stability is invalid.
     """
     from app.core.media.cover import read_cover
-    from app.core.media.metadata_reader import read_metadata
+    from app.core.media.reader import read_metadata
 
     with _reading_source(item) as (source, _, missing):
         metadata = read_metadata(source)
@@ -525,7 +526,7 @@ def _check_image_pages(source: ReadingSource, index: ImageIndex, states: _Source
         states[path] = file_state(info)
 
 
-def _content_is_current(item: MediaItem) -> bool:
+def _index_is_current(item: MediaItem) -> bool:
     """Check whether a ready body index still matches its source without parsing it.
 
     Compare source sizes and modification times, plus ordered page names for image
@@ -664,7 +665,7 @@ def _read_text_content(
         ContentError: If the source or cache is unavailable, changed or invalid,
             or the chapter is absent from the current index.
     """
-    from app.core.media.metadata_reader import read_metadata
+    from app.core.media.reader import read_metadata
     from app.core.media.text import EpubIndex, TextIndex, read_text_chapter
 
     with _content_index(item) as (source, cache, index):
@@ -712,7 +713,7 @@ def _read_image_content(item: MediaItem, offset: int, limit: int) -> ImageConten
             or the requested offset exceeds the page count.
     """
     from app.core.media.image import ImageIndex
-    from app.core.media.metadata_reader import read_metadata
+    from app.core.media.reader import read_metadata
 
     with _content_index(item) as (source, _, index):
         assert isinstance(index, ImageIndex)
@@ -739,7 +740,7 @@ def _read_image_content(item: MediaItem, offset: int, limit: int) -> ImageConten
         )
 
 
-def _read_content_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
+def _read_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
     """Read one indexed EPUB or comic image within the source and cache guards.
 
     Args:
@@ -764,10 +765,10 @@ def _read_content_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
         return read(source.path, cache, asset_id)
 
 
-def _build_content(
+def _build_index(
     item: MediaItem, staging: Path
 ) -> tuple[TextIndex | EpubIndex | ImageIndex, _SourceStates]:
-    """Build a private content cache while retaining publication stability checks.
+    """Build a content index and cache while retaining source stability checks.
 
     Args:
         item: The reading item whose source ownership is checked before parsing.
@@ -806,10 +807,8 @@ def _build_content(
     return index, states
 
 
-def _publish_content(
-    item: MediaItem, staging: Path, version: str, states: _SourceStates
-):
-    """Publish a completed cache after revalidating the source under the library lock.
+def _publish_index(item: MediaItem, staging: Path, version: str, states: _SourceStates):
+    """Publish an index cache after revalidating the source under the library lock.
 
     Args:
         item: The current database item with its library and parent loaded.
@@ -1160,7 +1159,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             current = await MediaItem.get_or_none(
                 lib_id=lib_id, path=candidate.path
             ).select_related("lib", "parent")
-            if current is not None and _reading_identity(current) != _reading_identity(
+            if current is not None and _source_identity(current) != _source_identity(
                 candidate
             ):
                 raise ContentError("ambiguous_layout")
@@ -1248,7 +1247,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             if item.dir != str(src_path.parent):
                 raise ContentError("unsupported_layout")
             if src_path.parent.parent != dest_path.parent.parent:
-                item.parent = await _reading_destination_parent(
+                item.parent = await _get_target_parent(
                     item, src_path.parent, dest_path.parent
                 )
             if (
@@ -1385,9 +1384,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 ).is_relative_to(src_path):
                     raise ContentError("unsupported_layout")
                 if src_path.parent != dest_path.parent:
-                    item.parent = await _reading_destination_parent(
-                        item, src_path, dest_path
-                    )
+                    item.parent = await _get_target_parent(item, src_path, dest_path)
                 elif item.parent_id is not None:
                     if item.parent_id in by_id:
                         item.parent = by_id[item.parent_id]
@@ -1453,7 +1450,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             item = next((row for row in items if row.id == id), None)
             if item is None:
                 return []
-            if _reading_identity(item) != _reading_identity(original):
+            if _source_identity(item) != _source_identity(original):
                 raise ContentError("content_changed")
             ids = [row.id for row in items]
             if await MediaItem.filter(parent_id__in=ids).exclude(id__in=ids).exists():
@@ -1466,8 +1463,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 current = await MediaItem.filter(
                     Q(id__in=ids) | Q(parent_id__in=ids)
                 ).select_related("lib", "parent")
-                if {row.id: _reading_identity(row) for row in current} != {
-                    row.id: _reading_identity(row) for row in items
+                if {row.id: _source_identity(row) for row in current} != {
+                    row.id: _source_identity(row) for row in items
                 }:
                     raise ContentError("content_changed")
                 parents = {
@@ -1517,7 +1514,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise ContentError("unsupported_media_format")
         metadata, _, source_error = await to_thread(
-            _read_reading, item, with_cover=False
+            _read_metadata, item, with_cover=False
         )
         external = metadata.external
         error = source_error or next(
@@ -1541,7 +1538,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         )
         async with library_lock(item.lib.dir):
             current = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
-            if current is None or _reading_identity(item) != _reading_identity(current):
+            if current is None or _source_identity(item) != _source_identity(current):
                 raise ContentError("content_changed")
             fields = ["extra"]
             if not error:
@@ -1668,7 +1665,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 or item.format is None
             ):
                 raise ContentError("unsupported_media_format")
-            if not force and await to_thread(_content_is_current, item):
+            if not force and await to_thread(_index_is_current, item):
                 return item
             item.index_state = IndexState.PENDING
             item.index_error = None
@@ -1681,17 +1678,17 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             / f"building_{secrets.token_hex(16)}.tmp"
         )
         try:
-            index, states = await write_in_thread(_build_content, item, staging)
+            index, states = await write_in_thread(_build_index, item, staging)
             async with library_lock(directory):
                 current = await MediaItem.get_or_none(id=id).select_related(
                     "lib", "parent"
                 )
-                if current is None or _reading_identity(item) != _reading_identity(
+                if current is None or _source_identity(item) != _source_identity(
                     current
                 ):
                     raise ContentError("content_changed")
                 await write_in_thread(
-                    _publish_content, current, staging, index.index_version, states
+                    _publish_index, current, staging, index.index_version, states
                 )
                 extra = dict(current.extra or {})
                 extra["schema_version"] = 1
@@ -1730,7 +1727,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 current = await MediaItem.get_or_none(id=id).select_related(
                     "lib", "parent"
                 )
-                if current is not None and _reading_identity(item) == _reading_identity(
+                if current is not None and _source_identity(item) == _source_identity(
                     current
                 ):
                     current.index_state = (
@@ -1784,10 +1781,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         return item
 
     @classmethod
-    async def _read_current(
+    async def _get_metadata(
         cls, item: MediaItem, user: UserInfo, *, with_cover: bool
     ) -> tuple[MediaItem, MetadataRead, CoverImage | None, str | None]:
-        """Read current metadata with one retry for source or ownership changes.
+        """Get reading metadata and an optional cover with access revalidation.
+
+        Retry once if the source or database ownership changes during the read.
 
         Args:
             item: The initially accessible reading item.
@@ -1805,28 +1804,28 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         for attempt in range(2):
             try:
                 metadata, cover, source_error = await to_thread(
-                    _read_reading, item, with_cover=with_cover
+                    _read_metadata, item, with_cover=with_cover
                 )
             except ContentError as error:
                 if error.code != "content_changed" or attempt:
                     raise
             else:
                 current = await cls.get_accessible(item.id, user)
-                if _reading_identity(current) == _reading_identity(item):
+                if _source_identity(current) == _source_identity(item):
                     return current, metadata, cover, source_error
             item = await cls.get_accessible(item.id, user)
         raise ContentError("content_changed")
 
     @classmethod
     async def get_details(cls, id: int, user: UserInfo) -> dict[str, Any]:
-        """Build accessible details, reading current OPF or ComicInfo for reading media.
+        """Build accessible details from current NFO, OPF or ComicInfo metadata.
 
         Args:
             id: The media item ID.
             user: The authenticated user with loaded library permissions.
 
         Returns:
-            Details with current reading metadata and controlled source issues.
+            Details with current metadata and controlled source issues.
 
         Raises:
             NotFoundException: If the item or its parent is unavailable.
@@ -1835,15 +1834,28 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         item = await cls.get_accessible(id, user)
         reading = item.lib.lib_type in (LibType.NOVEL, LibType.COMIC)
         metadata = None
+        nfo = None
         source_error = None
+
+        # read current metadata before assembling the shared details
         if reading:
             try:
-                item, metadata, _, source_error = await cls._read_current(
+                item, metadata, _, source_error = await cls._get_metadata(
                     item, user, with_cover=False
                 )
             except ContentError as error:
                 source_error = error.code
                 item = await cls.get_accessible(id, user)
+        else:
+            from app.core.media.shelver import parse_nfo
+
+            nfo = (
+                await to_thread(parse_nfo, item.lib.lib_type, item.nfo_path)
+                if item.nfo_path
+                else None
+            )
+            await cls.get_accessible(id, user)
+
         data = await cls.dump(item, exclude={"parent", "children"})
         data["parent"] = (
             await cls.dump(item.parent, exclude={"parent", "children", "lib"})
@@ -1865,6 +1877,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             else "video"
         )
         if not reading:
+            data["metadata"] = asdict(nfo) if nfo is not None else None
             return data
         path = Path(item.path)
         fields = (
@@ -1930,7 +1943,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         item = await cls.get_accessible(id, user)
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise NotFoundException()
-        _, _, cover, _ = await cls._read_current(item, user, with_cover=True)
+        _, _, cover, _ = await cls._get_metadata(item, user, with_cover=True)
         return cover
 
     @classmethod
@@ -1991,7 +2004,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ).exists()
         ):
             raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
-        if _reading_identity(current) != _reading_identity(item) or (
+        if _source_identity(current) != _source_identity(item) or (
             item.format is not None
             and (
                 current.index_state != IndexState.READY
@@ -2003,10 +2016,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             raise failure
 
     @classmethod
-    async def _collection_content(
+    async def _get_collection_content(
         cls, item: MediaItem, user: UserInfo, query: MediaContentQuery
     ) -> ImageContent:
-        """Select a comic chapter and keep the collection directory current.
+        """Get selected chapter content and the available comic chapter list.
 
         Args:
             item: The accessible collection guarded by the caller during this read.
@@ -2024,7 +2037,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         from app.core.media.handlers.reading import natural_key
 
-        _reading_location(item)
+        _resolve_source(item)
         children = MediaItem.filter(
             parent_id=item.id,
             lib_id=item.lib_id,
@@ -2117,7 +2130,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         async with cls._content_item(id, user, query.version) as item:
             if item.lib.lib_type == LibType.COMIC:
                 if item.format is None:
-                    return await cls._collection_content(item, user, query)
+                    return await cls._get_collection_content(item, user, query)
                 if query.chapter_id not in (None, f"item:{item.id}"):
                     raise ContentError("bad_request")
                 return await to_thread(
@@ -2155,7 +2168,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 MediaFormat.TXT,
             ):
                 raise ContentError("not_found")
-            return await to_thread(_read_content_asset, item, asset_id)
+            return await to_thread(_read_asset, item, asset_id)
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):

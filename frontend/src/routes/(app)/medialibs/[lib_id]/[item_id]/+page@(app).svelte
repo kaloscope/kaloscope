@@ -104,8 +104,8 @@
    */
   function chapterTitle(chapter: ContentChapter, index: number): string {
     return (
-      (chapter.title || $_('media.reader.chapter', index + 1)) +
-      (chapter.part > 1 ? ` · ${$_('media.reader.part', chapter.part)}` : '')
+      (chapter.title || $_('media.chapter', index + 1)) +
+      (chapter.part > 1 ? ` · ${$_('media.part', chapter.part)}` : '')
     );
   }
 
@@ -432,22 +432,22 @@
           <!-- titles -->
           <h1 class="text-2xl font-bold sm:text-3xl">{media?.title ?? media?.name}</h1>
           {#if readingMeta && (readingMeta.series || readingMeta.volume || readingMeta.number)}
-            <p class="font-medium break-words opacity-70">
+            <p class="font-medium wrap-break-word opacity-70">
               {#if readingMeta.series}{readingMeta.series}{/if}
               {#if readingMeta.volume}
                 {#if readingMeta.series}
                   ·
                 {/if}
-                {$_('media.volume', readingMeta.volume)}
+                {$_('metadata.volume', readingMeta.volume)}
               {/if}
               {#if readingMeta.number}
                 {#if readingMeta.series || readingMeta.volume}
                   ·
                 {/if}
                 {#if mediaType === 'text'}
-                  {$_('media.series_index', readingMeta.number)}
+                  {$_('metadata.series_index', readingMeta.number)}
                 {:else if Number.isFinite(Number(readingMeta.number))}
-                  {$_('media.issue', readingMeta.number)}
+                  {$_('metadata.issue', readingMeta.number)}
                 {:else}
                   {readingMeta.number}
                 {/if}
@@ -503,13 +503,13 @@
         {@const cols = [authors, illustrators, readingMeta.publisher].filter(Boolean).length}
         {@const published = publicationDate(readingMeta)}
         {@const facts = [
-          published ? $_('media.published', published) : null,
+          published ? $_('metadata.published', published) : null,
           readingMeta.language,
           mediaType === 'image' && readingMeta.page_count != null
-            ? $_('media.page_count', readingMeta.page_count)
+            ? $_('metadata.page_count', readingMeta.page_count)
             : null,
           mediaType === 'image' && readingMeta.black_and_white != null
-            ? $_(readingMeta.black_and_white ? 'media.black_and_white' : 'media.full_color')
+            ? $_(readingMeta.black_and_white ? 'metadata.black_and_white' : 'metadata.full_color')
             : null
         ]
           .filter(Boolean)
@@ -520,29 +520,29 @@
               <dl class="grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
                 {#if authors}
                   <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('media.author')}</dt>
-                    <dd class="text-sm break-words whitespace-pre-wrap opacity-70">{authors}</dd>
+                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.authors')}</dt>
+                    <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{authors}</dd>
                   </div>
                 {/if}
                 {#if illustrators}
                   <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('media.illustrator')}</dt>
-                    <dd class="text-sm break-words whitespace-pre-wrap opacity-70">{illustrators}</dd>
+                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.illustrators')}</dt>
+                    <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{illustrators}</dd>
                   </div>
                 {/if}
                 {#if readingMeta.publisher}
                   <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('media.publisher')}</dt>
-                    <dd class="text-sm break-words whitespace-pre-wrap opacity-70">{readingMeta.publisher}</dd>
+                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.publisher')}</dt>
+                    <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{readingMeta.publisher}</dd>
                   </div>
                 {/if}
               </dl>
             {/if}
             {#if facts}
-              <p class="text-sm leading-relaxed break-words opacity-60">{facts}</p>
+              <p class="text-sm leading-relaxed wrap-break-word opacity-60">{facts}</p>
             {/if}
             {#if readingMeta.isbn}
-              <p class="text-xs break-words opacity-50">{$_('media.isbn')} {readingMeta.isbn}</p>
+              <p class="text-xs wrap-break-word opacity-50">{$_('metadata.fields.isbn')} {readingMeta.isbn}</p>
             {/if}
           </div>
         {/if}
@@ -554,19 +554,19 @@
         <div class="mt-6 grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
           {#if meta?.directors?.length}
             <div>
-              <span class="font-semibold text-primary/80">{$_('media.director')}</span>
+              <span class="font-semibold text-primary/80">{$_('metadata.fields.directors')}</span>
               <p class="text-sm opacity-70">{meta.directors.join(', ')}</p>
             </div>
           {/if}
           {#if meta?.writers?.length}
             <div>
-              <span class="font-semibold text-primary/80">{$_('media.writer')}</span>
+              <span class="font-semibold text-primary/80">{$_('metadata.fields.writers')}</span>
               <p class="text-sm opacity-70">{meta.writers.join(', ')}</p>
             </div>
           {/if}
           {#if meta?.studios?.length}
             <div>
-              <span class="font-semibold text-primary/80">{$_('media.studio')}</span>
+              <span class="font-semibold text-primary/80">{$_('metadata.fields.studios')}</span>
               <p class="text-sm opacity-70">{meta.studios.join(', ')}</p>
             </div>
           {/if}
@@ -576,7 +576,7 @@
       <!-- actors -->
       {#if meta?.actors?.length}
         <div class="mt-6">
-          <h2 class="mb-3 text-lg font-semibold">{$_('media.cast')}</h2>
+          <h2 class="mb-3 text-lg font-semibold">{$_('metadata.fields.actors')}</h2>
           <div
             class="flex gap-3 overflow-x-auto pb-3"
             onwheel={(event) => {
@@ -673,7 +673,7 @@
           {#if chaptersLoading}
             <div class="flex-center gap-3 py-6" role="status">
               <span class="loading loading-sm loading-spinner" aria-hidden="true"></span>
-              <span class="text-sm opacity-60">{$_('media.reader.loading_chapters')}</span>
+              <span class="text-sm opacity-60">{$_('media.loading_chapters')}</span>
             </div>
           {:else if chaptersError}
             <div class="flex-center flex-col gap-3 py-6">
@@ -705,7 +705,7 @@
       <!-- tags -->
       {#if meta?.tags?.length}
         <div class="mt-6">
-          <h2 class="mb-3 text-lg font-semibold">{$_('media.tags')}</h2>
+          <h2 class="mb-3 text-lg font-semibold">{$_('metadata.fields.tags')}</h2>
           <div class="flex flex-wrap gap-1.5">
             {#each meta.tags as tag, i (i)}
               <span class="badge badge-soft badge-sm text-base-content/70">{tag}</span>
@@ -752,7 +752,7 @@
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if readingLoading}
-          <span class="loading loading-lg loading-bars" role="status" aria-label={$_('media.reader.loading')}></span>
+          <span class="loading loading-lg loading-bars" role="status" aria-label={$_('media.loading')}></span>
         {:else if readingError}
           <p role="alert">{$_(`alert.${readingError}`, { default: $_('alert.resource_load_failed') })}</p>
           <button class="btn btn-primary" onclick={() => loadContent(readingChapterId)}>{$_('action.retry')}</button>
