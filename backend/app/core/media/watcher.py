@@ -7,6 +7,7 @@ from multiprocessing.managers import DictProxy, ListProxy
 from multiprocessing.synchronize import Lock
 from pathlib import Path
 from queue import Queue
+from time import time
 
 from sanic import Sanic
 from sanic.log import Colors, logger
@@ -33,7 +34,12 @@ from watchdog.observers.api import BaseObserver
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
-from app.core.media.events import coalesce_reading_events
+from app.core.media.events import (
+    ReadingReconcile,
+    _reading_event_identity,
+    coalesce_reading_events,
+    prepare_reading_event,
+)
 from app.core.media.handlers.base import MediaPathInfo, get_handler
 from app.core.media.handlers.reading import is_ignored_name, list_source_entries
 from app.core.media.organizer import (
@@ -301,15 +307,22 @@ class LibWatcher:
         """Consume events and reload persisted work only when necessary.
 
         Recover once on startup, after failures, and after committed-event
-        notifications. An empty queue otherwise stays idle without querying.
+        notifications. Reading observations resume at their persisted deadlines;
+        waiting and failed tasks do not block other work. An idle queue does not
+        query the database until notified or a deadline arrives.
 
         Args:
             lib_id: The media library whose persisted events are consumed.
             events: The queue to store media events.
         """
         reload = True
+        deferred: dict[int, tuple[float, MediaEvent]] = {}
         while True:
             try:
+                for id, (deadline, pending) in list(deferred.items()):
+                    if deadline <= time():
+                        events.put(pending)
+                        del deferred[id]
                 if events.empty():
                     # clear before reading so concurrent writes trigger another reload
                     reload = self._event_changes.pop(lib_id, False) or reload
@@ -320,9 +333,56 @@ class LibWatcher:
                             events.put(pending)
                         reload = False
                 if not events.empty():
-                    event: MediaEvent = events.get_nowait()
+                    queued: MediaEvent = events.get_nowait()
+                    deferred.pop(queued.id, None)
+                    event = await MediaEvent.get_or_none(
+                        id=queued.id, lib_id=lib_id
+                    ).select_related("lib")
+                    if (
+                        event is not None
+                        and event.event_type == "reconcile"
+                        and event.lib.lib_type in (LibType.NOVEL, LibType.COMIC)
+                    ):
+                        original = event
+                        failure = None
+                        try:
+                            ready = await prepare_reading_event(event.id)
+                        except ContentError as error:
+                            ready, failure = False, error
+                        # preparation may save a deadline or be superseded by new input
+                        event = await MediaEvent.get_or_none(
+                            id=event.id, lib_id=lib_id, event_type="reconcile"
+                        ).select_related("lib")
+                        if event is None:
+                            continue
+                        payload = ReadingReconcile.model_validate(event.payload)
+                        unchanged = _reading_event_identity(
+                            event
+                        ) == _reading_event_identity(original) and (
+                            event.lib.dir,
+                            event.lib.lib_type,
+                        ) == (original.lib.dir, original.lib.lib_type)
+                        if failure is not None:
+                            if unchanged or payload.state not in ("deferred", "failed"):
+                                raise failure
+                            logger.warning(
+                                "Failed to observe reading task %s: %s",
+                                event.id,
+                                failure.code,
+                            )
+                        if payload.state == "failed":
+                            continue
+                        if (
+                            payload.not_before is not None
+                            and payload.not_before > time()
+                        ):
+                            deferred[event.id] = (payload.not_before, event)
+                            continue
+                        if not ready or not unchanged:
+                            reload = True
+                            continue
                     # merged or removed events must not delay the remaining queue
-                    if not await consume_event(event):
+                    if not await consume_event(event or queued):
                         continue
                 await asyncio.sleep(1)
             except queue.Empty:

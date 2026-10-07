@@ -100,6 +100,7 @@ def _monitor(monkeypatch: pytest.MonkeyPatch, lib: MediaLib) -> LibWatcher:
     monitor = LibWatcher(cast(Sanic, SimpleNamespace()))
     monkeypatch.setattr(monitor, "_observers", {lib.dir: (Mock(), Queue())})
     monkeypatch.setitem(monitor.__dict__, "_scanning_paths", [])
+    monkeypatch.setitem(monitor.__dict__, "_event_changes", {})
     return monitor
 
 
@@ -504,6 +505,10 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type, entry):
                     return processed
 
                 monkeypatch.setattr(media_watcher, "consume_event", consume)
+                # this test isolates event merging from the observation scheduler
+                monkeypatch.setattr(
+                    media_watcher, "prepare_reading_event", AsyncMock(return_value=True)
+                )
                 pause = AsyncMock()
                 monkeypatch.setattr(media_watcher.asyncio, "sleep", pause)
                 await asyncio.wait_for(monitor._event_consumer(lib.id, events), 5)
@@ -1129,6 +1134,7 @@ def moment(monkeypatch):
     """
     value = [100.0]
     monkeypatch.setattr(media_events, "time", lambda: value[0])
+    monkeypatch.setattr(media_watcher, "time", lambda: value[0])
     return value
 
 
@@ -1170,6 +1176,366 @@ async def _ready(task: MediaEvent, moment: list[float]) -> MediaEvent:
     moment[0] += 2
     assert await prepare_reading_event(task.id)
     return await MediaEvent.get(id=task.id).select_related("lib")
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("restart", [False, True])
+def test_reading_schedule(tmp_path, monkeypatch, moment, lib_type, restart):
+    """Observe stable work at its deadline without polling while idle.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture controlling the consumer clock and observations.
+        moment: The shared controllable observation and scheduling clock.
+        lib_type: The reading library type to schedule.
+        restart: Whether the first observation was saved before consumer startup.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path, lib_type)
+            if restart:
+                assert not await prepare_reading_event(task.id)
+                moment[0] = 101.0
+            monitor = _monitor(monkeypatch, lib)
+            handler = get_handler(lib_type)
+            assert isinstance(handler, ReadingMediaHandler)
+            snapshot = handler.snapshot_sources
+            observed, ready, idle = [], [], []
+            reads = Mock(wraps=MediaEvent.get_or_none)
+            monkeypatch.setattr(MediaEvent, "get_or_none", reads)
+
+            def observe(*args, **kwargs):
+                """Record when the consumer actually inspects the filesystem.
+
+                Args:
+                    *args: Positional source observation arguments.
+                    **kwargs: Keyword source observation arguments.
+
+                Returns:
+                    The current source snapshot.
+                """
+                observed.append(moment[0])
+                return snapshot(*args, **kwargs)
+
+            async def consume(event):
+                """Record stable tasks passed on for execution.
+
+                Args:
+                    event: The refreshed task after its quiet interval.
+
+                Returns:
+                    The current consumer result, which retains reconcile tasks.
+                """
+                ready.append((event.id, moment[0]))
+                return await consume_event(event)
+
+            async def pause(seconds):
+                """Advance time without adding real waiting to the test.
+
+                Args:
+                    seconds: The consumer's idle sleep duration.
+
+                Raises:
+                    asyncio.CancelledError: After checking two idle intervals.
+                """
+                assert seconds == 1
+                idle.append((moment[0], reads.call_count))
+                moment[0] += 1
+                if moment[0] >= 104:
+                    raise asyncio.CancelledError
+
+            monkeypatch.setattr(handler, "snapshot_sources", observe)
+            monkeypatch.setattr(media_watcher, "consume_event", consume)
+            monkeypatch.setattr(media_watcher.asyncio, "sleep", pause)
+            await monitor._event_consumer(lib.id, Queue())
+            assert observed == ([102.0] if restart else [100.0, 102.0])
+            assert ready == [(task.id, 102.0)]
+            queries = dict(idle)
+            if not restart:
+                assert queries[100.0] == queries[101.0]
+            assert queries[102.0] == queries[103.0]
+            payload = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert payload.observed_snapshot is not None
+            assert payload.not_before == 102.0 and payload.attempts == 0
+            assert not await MediaItem.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("restart", [False, True])
+def test_reading_schedule_retry(tmp_path, monkeypatch, moment, lib_type, restart):
+    """Retry unavailable work on schedule while another work becomes ready.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture injecting source failures and a controllable clock.
+        moment: The shared controllable observation and scheduling clock.
+        lib_type: The reading library type to schedule.
+        restart: Whether two failures were persisted before consumer startup.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path, lib_type)
+            other = Path(lib.dir) / "Other" / body.name
+            other.parent.mkdir()
+            other.write_bytes(body.read_bytes())
+            await MediaEvent.create(lib=lib, src_path=str(other), event_type="created")
+            healthy = (await coalesce_reading_events(lib.id))[0]
+            monitor = _monitor(monkeypatch, lib)
+            handler = get_handler(lib_type)
+            assert isinstance(handler, ReadingMediaHandler)
+            snapshot = handler.snapshot_sources
+            failures, ready = [], []
+
+            def observe(base_path, *, work_path, targets):
+                """Fail one work without delaying filesystem checks for the other.
+
+                Args:
+                    base_path: The library root being observed.
+                    work_path: The work selected by this task.
+                    targets: Its selected source containers.
+
+                Returns:
+                    The current snapshot for the healthy work.
+
+                Raises:
+                    ContentError: When observing the unavailable work.
+                """
+                if work_path == Path(task.src_path):
+                    failures.append(moment[0])
+                    raise ContentError("media_source_unavailable")
+                return snapshot(base_path, work_path=work_path, targets=targets)
+
+            async def consume(event):
+                """Record the healthy task reaching the execution boundary.
+
+                Args:
+                    event: The stable task selected by the consumer.
+
+                Returns:
+                    The current consumer result.
+                """
+                ready.append((event.id, moment[0]))
+                return await consume_event(event)
+
+            async def pause(seconds):
+                """Advance through every persisted retry deadline.
+
+                Args:
+                    seconds: The consumer's idle sleep duration.
+
+                Raises:
+                    asyncio.CancelledError: After the failed task has stayed idle.
+                """
+                assert seconds == 1
+                moment[0] += 1
+                if moment[0] >= 155:
+                    raise asyncio.CancelledError
+
+            monkeypatch.setattr(handler, "snapshot_sources", observe)
+            if restart:
+                for now in (100.0, 102.0):
+                    moment[0] = now
+                    with pytest.raises(ContentError, match="media_source_unavailable"):
+                        await prepare_reading_event(task.id)
+                moment[0] = 103.0
+            monkeypatch.setattr(media_watcher, "consume_event", consume)
+            monkeypatch.setattr(media_watcher.asyncio, "sleep", pause)
+            await monitor._event_consumer(lib.id, Queue())
+            assert failures == [100.0, 102.0, 107.0, 122.0, 152.0]
+            assert ready == [(healthy.id, 105.0 if restart else 102.0)]
+            payload = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert payload.state == "failed" and payload.attempts == 5
+            assert payload.error_code == "media_source_unavailable"
+            assert payload.not_before is None
+            assert await MediaEvent.all().count() == 2
+            assert not await MediaItem.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change", ["modify", "scan", "delete", "duplicate", "retry", "race"]
+)
+def test_reading_schedule_update(tmp_path, monkeypatch, moment, change):
+    """Replace cached deadlines when persisted tasks change during a wait.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture delivering notifications during an idle interval.
+        moment: The shared controllable observation and scheduling clock.
+        change: The new input or deletion affecting the waiting task.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            if change == "retry":
+                payload = ReadingReconcile.model_validate(task.payload)
+                payload.state, payload.attempts = "failed", 5
+                payload.error_code = "media_source_unavailable"
+                task.payload = payload.model_dump(mode="json", exclude_none=True)
+                await task.save()
+            monitor = _monitor(monkeypatch, lib)
+            events = monitor._observers[lib.dir][1]
+            producer = EventHandler(lib, asyncio.get_running_loop(), events)
+            monkeypatch.setattr(
+                media_events,
+                "notify_media_events",
+                lambda id: monitor._event_changes.__setitem__(id, True),
+            )
+            handler = get_handler(lib.lib_type)
+            assert isinstance(handler, ReadingMediaHandler)
+            snapshot = handler.snapshot_sources
+            observed, ready = [], []
+            reset = False
+
+            async def prepare(id):
+                """Reset a task just after its previous snapshot becomes ready.
+
+                Args:
+                    id: The task selected for stable observation.
+
+                Returns:
+                    Readiness of the observed version before the concurrent reset.
+                """
+                nonlocal reset
+                result = await prepare_reading_event(id)
+                if result and change == "race" and not reset:
+                    reset = True
+                    await coalesce_reading_events(
+                        lib.id, scan_works={Path(task.src_path)}
+                    )
+                return result
+
+            def observe(*args, **kwargs):
+                """Record source reads while the task is reset or removed.
+
+                Args:
+                    *args: Positional source observation arguments.
+                    **kwargs: Keyword source observation arguments.
+
+                Returns:
+                    The current source snapshot.
+                """
+                observed.append(moment[0])
+                return snapshot(*args, **kwargs)
+
+            async def consume(event):
+                """Record readiness while also processing new raw events.
+
+                Args:
+                    event: The task or raw event dequeued by the consumer.
+
+                Returns:
+                    The current consumer result.
+                """
+                if (
+                    event.event_type == "reconcile"
+                    and await MediaEvent.filter(id=event.id).exists()
+                ):
+                    ready.append(moment[0])
+                return await consume_event(event)
+
+            async def pause(seconds):
+                """Deliver one change before the original deadline expires.
+
+                Args:
+                    seconds: The consumer's idle or post-processing interval.
+
+                Raises:
+                    asyncio.CancelledError: After the updated task becomes ready.
+                """
+                assert seconds == 1
+                moment[0] += 1
+                if moment[0] == 101:
+                    if change in ("modify", "retry"):
+                        body.write_text("Changed body")
+                        await producer._persist(FileModifiedEvent(str(body)))
+                    elif change == "scan":
+                        await coalesce_reading_events(
+                            lib.id, scan_works={Path(task.src_path)}
+                        )
+                    elif change == "delete":
+                        await task.delete()
+                    elif change == "duplicate":
+                        task.event_type = "created"
+                        events.put(task)
+                if moment[0] >= 106:
+                    raise asyncio.CancelledError
+
+            monkeypatch.setattr(handler, "snapshot_sources", observe)
+            monkeypatch.setattr(media_watcher, "prepare_reading_event", prepare)
+            monkeypatch.setattr(media_watcher, "consume_event", consume)
+            monkeypatch.setattr(media_watcher.asyncio, "sleep", pause)
+            await monitor._event_consumer(lib.id, events)
+            assert (
+                ready
+                == {
+                    "modify": [104.0],
+                    "scan": [103.0],
+                    "delete": [],
+                    "duplicate": [102.0],
+                    "retry": [104.0],
+                    "race": [104.0],
+                }[change]
+            )
+            assert (
+                observed
+                == {
+                    "modify": [100.0, 102.0, 104.0],
+                    "scan": [100.0, 101.0, 103.0],
+                    "delete": [100.0],
+                    "duplicate": [100.0, 102.0],
+                    "retry": [102.0, 104.0],
+                    "race": [100.0, 102.0, 102.0, 104.0],
+                }[change]
+            )
+            assert await MediaEvent.all().count() == (0 if change == "delete" else 1)
+            assert not await MediaItem.exists()
+
+    asyncio.run(run())
+
+
+def test_reading_schedule_error(tmp_path, monkeypatch, moment):
+    """Use normal error recovery when preparation did not persist a retry.
+
+    Args:
+        tmp_path: The isolated library root.
+        monkeypatch: The fixture interrupting preparation without changing its task.
+        moment: The shared controllable observation and scheduling clock.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path)
+            payload = ReadingReconcile.model_validate(task.payload)
+            payload.state, payload.attempts = "deferred", 1
+            payload.not_before = moment[0]
+            payload.error_code = "media_source_unavailable"
+            task.payload = payload.model_dump(mode="json", exclude_none=True)
+            await task.save()
+            before = await MediaEvent.all().values()
+            monitor = _monitor(monkeypatch, lib)
+            prepare = AsyncMock(
+                side_effect=[ContentError("content_changed"), asyncio.CancelledError()]
+            )
+            pause = AsyncMock()
+            monkeypatch.setattr(media_watcher, "prepare_reading_event", prepare)
+            monkeypatch.setattr(media_watcher.asyncio, "sleep", pause)
+            await monitor._event_consumer(lib.id, Queue())
+            assert prepare.await_count == 2
+            pause.assert_awaited_once_with(5)
+            assert await MediaEvent.all().values() == before
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
