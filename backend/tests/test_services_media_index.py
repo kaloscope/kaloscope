@@ -675,12 +675,12 @@ def test_ingest_empty_images(tmp_path, monkeypatch, chapter, hidden):
             task = (await coalesce_reading_events(lib.id))[0]
             payload = ReadingReconcile.model_validate(task.payload)
             for _ in range(2):
-                assert await MediaItemService.ingest_reading_work(
+                assert not await MediaItemService.ingest_reading_work(
                     lib.id,
                     work,
                     targets={Path(path) for path in payload.targets},
                     force_targets={Path(path) for path in payload.force_targets},
-                ) == {source.path: "empty_content"}
+                )
                 current = await MediaItem.get(id=first.id)
                 assert current.index_state == IndexState.EMPTY
                 assert current.index_error == "empty_content"
@@ -1146,17 +1146,14 @@ def test_ingest_empty_scope(tmp_path):
             (empty / "ComicInfo.xml").write_text("<ComicInfo/>")
             for directory in (source.path, other):
                 (directory / "1.png").unlink()
-            assert await MediaItemService.ingest_reading_work(
+            assert not await MediaItemService.ingest_reading_work(
                 lib.id, work, targets={source.directory}
-            ) == {source.path: "empty_content"}
+            )
             assert await MediaItem.filter(id=sibling.id).values() == before
             parent = await MediaItem.get(path=str(work))
             assert parent.index_state == IndexState.READY
             assert not await MediaItem.filter(path=str(empty)).exists()
-            assert await MediaItemService.ingest_reading_work(lib.id, work) == {
-                source.path: "empty_content",
-                other: "empty_content",
-            }
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
             parent = await MediaItem.get(id=parent.id)
             assert parent.index_state == IndexState.EMPTY and parent.extra is not None
             assert parent.extra["content"]["chapter_count"] == 2
@@ -2316,7 +2313,7 @@ def test_rename_directory_empty(tmp_path, chapter, only_chapter):
             issues = await MediaItemService.ingest_reading_work(
                 lib.id, work if only_chapter else destination
             )
-            assert set(issues.values()) == {"empty_content"}
+            assert not issues
             await first.refresh_from_db()
             assert first.index_state == IndexState.EMPTY
             assert first.index_version is not None and _cache(first).is_dir()
@@ -2954,9 +2951,7 @@ def test_move_empty_chapter(tmp_path, parent_body):
                 )
                 assert [item.id for item in moved] == [child.id]
                 assert moved[0].parent_id == parent.id
-                assert await MediaItemService.ingest_reading_work(lib.id, other) == {
-                    destination: "empty_content"
-                }
+                assert not await MediaItemService.ingest_reading_work(lib.id, other)
                 await child.refresh_from_db()
                 assert child.index_state == IndexState.EMPTY
 

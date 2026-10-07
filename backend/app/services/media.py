@@ -1010,6 +1010,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             errors, including registered bodies missing from discovery. Ownership
             conflicts require reconciliation before registering a replacement.
             Body errors take precedence for a source with multiple failures.
+            Indexed empty bodies are normal states and do not add an error.
 
         Raises:
             DoesNotExist: If the library no longer exists.
@@ -1137,7 +1138,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     ),
                 )
             except ContentError as error:
-                issues[source.path] = error.code
+                # empty bodies wait for source changes; keep any metadata error
+                if error.code != "empty_content":
+                    issues[source.path] = error.code
             except DoesNotExist:
                 issues[source.path] = "content_changed"
         if collection is not None:

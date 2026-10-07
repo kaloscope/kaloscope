@@ -1266,6 +1266,97 @@ def test_consume_reading_ready(tmp_path, monkeypatch, moment, lib_type):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("invalid_metadata", [False, True])
+def test_consume_empty_body(tmp_path, moment, lib_type, invalid_metadata):
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path, lib_type)
+            assert await consume_event(await _ready(task, moment))
+            item = await MediaItem.get(lib=lib, format__isnull=False)
+            await MediaItem.filter(id=item.id).update(visible=False)
+            original = body.read_bytes()
+            metadata = body.parent / (
+                "metadata.opf" if lib_type == LibType.NOVEL else "ComicInfo.xml"
+            )
+            valid = (
+                '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                "<dc:title>Empty body</dc:title></metadata></package>"
+                if lib_type == LibType.NOVEL
+                else "<ComicInfo><Title>Empty body</Title></ComicInfo>"
+            )
+            metadata.write_text("<invalid" if invalid_metadata else valid)
+            if lib_type == LibType.NOVEL:
+                body.write_bytes(b"")
+            else:
+                body.unlink()
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(body),
+                event_type="modified" if lib_type == LibType.NOVEL else "deleted",
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            empty = await MediaItem.get(id=item.id)
+            assert empty.index_state == IndexState.EMPTY
+            assert empty.index_error == "empty_content" and not empty.visible
+            assert empty.index_version == item.index_version
+            if invalid_metadata:
+                task = await MediaEvent.get(id=task.id)
+                payload = ReadingReconcile.model_validate(task.payload)
+                assert payload.state == "deferred" and payload.attempts == 1
+                assert payload.error_code == "invalid_metadata"
+                metadata.write_text(valid)
+                await MediaEvent.create(
+                    lib=lib, src_path=str(metadata), event_type="modified"
+                )
+                task = (await coalesce_reading_events(lib.id))[0]
+                assert await consume_event(await _ready(task, moment))
+            assert not await MediaEvent.exists()
+            empty = await MediaItem.get(id=item.id)
+            assert empty.index_state == IndexState.EMPTY and empty.title == "Empty body"
+            assert metadata.read_text() == valid
+            body.write_bytes(original)
+            await MediaEvent.create(lib=lib, src_path=str(body), event_type="created")
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            restored = await MediaItem.get(id=item.id)
+            assert restored.index_state == IndexState.READY and not restored.visible
+            assert restored.index_error is None
+            assert restored.index_version != item.index_version
+            assert await MediaItem.filter(lib=lib, format__isnull=False).count() == 1
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+def test_consume_empty_and_invalid(tmp_path, moment):
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path, LibType.COMIC)
+            assert await consume_event(await _ready(task, moment))
+            item = await MediaItem.get(lib=lib, format=MediaFormat.DIR)
+            sibling = body.parent.with_name("Other")
+            sibling.mkdir()
+            (sibling / "1.png").write_text("not an image")
+            body.unlink()
+            task = (
+                await coalesce_reading_events(lib.id, scan_works={Path(task.src_path)})
+            )[0]
+            assert await consume_event(await _ready(task, moment))
+            await item.refresh_from_db()
+            assert item.index_state == IndexState.EMPTY
+            other = await MediaItem.get(path=str(sibling))
+            assert other.index_state == IndexState.ERROR
+            task = await MediaEvent.get(id=task.id)
+            payload = ReadingReconcile.model_validate(task.payload)
+            assert payload.state == "deferred" and payload.attempts == 1
+            assert payload.error_code == "invalid_image"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("change", ["move", "raw", "merged", "library", "removed"])
 def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
     """Retain moved or superseded scopes before touching reading items.
