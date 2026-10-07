@@ -2133,31 +2133,42 @@ def test_consume_delete_recovery(tmp_path, monkeypatch, moment, failure):
     asyncio.run(run())
 
 
-def test_consume_missing_body(tmp_path, moment):
-    """Retain a missing body whose existing directory still contains companions.
+def test_consume_missing_body(tmp_path, monkeypatch, moment):
+    """Remove owned companions and confirm the resulting empty scope after stability.
 
     Args:
         tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture isolating file deletion from application settings.
         moment: The controllable task clock.
     """
 
     async def run():
         async with _database():
+            from app.services import media as media_service
+
+            monkeypatch.setattr(
+                media_service, "delete_path", lambda path: path.unlink()
+            )
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
-            before = await MediaItem.all().values()
             metadata = body.with_name("metadata.opf")
             metadata.write_text("<package><metadata/></package>")
             body.unlink()
             await MediaEvent.create(lib=lib, src_path=str(body), event_type="deleted")
             task = (await coalesce_reading_events(lib.id))[0]
             assert await consume_event(await _ready(task, moment))
-            assert await MediaItem.all().values() == before
-            assert metadata.read_text() == "<package><metadata/></package>"
+            assert not await MediaItem.exists()
+            assert not body.parent.exists()
             saved = ReadingReconcile.model_validate(
                 (await MediaEvent.get(id=task.id)).payload
             )
-            assert saved.state == "deferred" and saved.attempts == 1
+            assert saved.state == "pending" and saved.attempts == 0
+            moment[0] += 2
+            assert await prepare_reading_event(task.id)
+            assert await consume_event(
+                await MediaEvent.get(id=task.id).select_related("lib")
+            )
+            assert not await MediaEvent.exists()
 
     asyncio.run(run())
 

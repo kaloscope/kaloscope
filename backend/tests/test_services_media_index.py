@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -722,7 +723,7 @@ def test_ingest_empty_images(tmp_path, monkeypatch, chapter, hidden):
     + [(MediaFormat.CBZ, True), (MediaFormat.ZIP, True)],
 )
 def test_ingest_file_events(tmp_path, monkeypatch, format, chapter):
-    """Execute file ingestion while preserving missing owners and their cache.
+    """Ingest file events and remove confirmed missing bodies before later reimport.
 
     Args:
         tmp_path: The isolated filesystem root.
@@ -745,6 +746,7 @@ def test_ingest_file_events(tmp_path, monkeypatch, format, chapter):
                 if removed:
                     source.path.unlink()
                 else:
+                    source.directory.mkdir(parents=True, exist_ok=True)
                     source.path.write_bytes(content)
                 await MediaEvent.create(
                     lib=lib,
@@ -757,25 +759,31 @@ def test_ingest_file_events(tmp_path, monkeypatch, format, chapter):
                 assert await prepare_reading_event(task.id)
                 task = await MediaEvent.get(id=task.id).select_related("lib")
                 assert await media_watcher.consume_event(task)
-                item = await MediaItem.get(path=str(source.path))
-                assert item.index_state == IndexState.READY
-                if first is not None:
-                    assert item.id == first.id
                 if removed:
+                    assert not await MediaItem.filter(path=str(source.path)).exists()
+                    assert first is not None and not _cache(first).parent.exists()
                     payload = ReadingReconcile.model_validate(
                         (await MediaEvent.get(id=task.id)).payload
                     )
-                    assert payload.state == "deferred" and payload.attempts == 1
-                    assert payload.error_code == "media_source_unavailable"
-                    assert (
-                        first is not None and item.index_version == first.index_version
+                    assert payload.state == "pending" and payload.attempts == 0
+                    assert payload.error_code is None
+                    clock[0] += 2
+                    assert await prepare_reading_event(task.id)
+                    assert await media_watcher.consume_event(
+                        await MediaEvent.get(id=task.id).select_related("lib")
                     )
-                    assert _cache(first).is_dir()
                 else:
-                    assert not await MediaEvent.exists()
+                    item = await MediaItem.get(path=str(source.path))
+                    assert item.index_state == IndexState.READY
+                    if first is not None:
+                        assert item.id != first.id
                     first = item
-                assert await MediaItem.all().count() == (2 if chapter else 1)
-                assert Path(work).is_dir()
+                assert not await MediaEvent.exists()
+                assert await MediaItem.all().count() == (
+                    int(chapter) + int(not removed)
+                )
+                assert source.directory.exists() != removed
+                assert Path(work).is_dir() == (chapter or not removed)
 
     asyncio.run(run())
 
@@ -3070,6 +3078,318 @@ def test_consume_directory_delete(tmp_path, monkeypatch, format, scope, scan):
 
 
 @pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat if format != MediaFormat.DIR]
+    + [(MediaFormat.CBZ, True), (MediaFormat.ZIP, True)],
+)
+@pytest.mark.parametrize("scan", [False, True])
+def test_consume_file_cleanup(tmp_path, monkeypatch, format, chapter, scan):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            novel = lib.lib_type == LibType.NOVEL
+            metadata = source.directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            metadata.write_text(
+                '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                '<metadata/><manifest><item id="cover" properties="cover-image" '
+                'href="art/custom.png" media-type="image/png"/></manifest></package>'
+                if novel
+                else "<ComicInfo><Title>Chapter</Title></ComicInfo>"
+            )
+            cover = source.directory / "cover.png"
+            cover.write_bytes(_PNG)
+            if novel:
+                (source.directory / "art").mkdir()
+                (source.directory / "art/custom.png").write_bytes(_PNG)
+            parent_xml = work / "ComicInfo.xml"
+            if chapter:
+                parent_xml.write_text(
+                    "<ComicInfo><Title>Collection</Title></ComicInfo>"
+                )
+            note = source.directory / "notes.md"
+            note.write_text("Keep me")
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            item = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=item.id).update(visible=False)
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_id=item.parent_id or item.id,
+                rel_type=HistoryType.TEXT if novel else HistoryType.IMAGE,
+                locator={"chapter_item_id": item.id},
+            )
+            kept = await UserHistory.create(
+                user=user, rel_id=item.id, rel_type=HistoryType.VIDEO
+            )
+            removed = []
+
+            def remove(path):
+                """Observe cleanup while isolating application trash settings.
+
+                Args:
+                    path: The owned companion selected for deletion.
+                """
+                removed.append(path)
+                path.unlink()
+
+            clock = [100.0]
+            monkeypatch.setattr(media_service, "delete_path", remove)
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            source.path.unlink()
+            if not scan:
+                await MediaEvent.create(
+                    lib=lib, src_path=str(source.path), event_type="deleted"
+                )
+            task = (
+                await coalesce_reading_events(
+                    lib.id, scan_works={work} if scan else None
+                )
+            )[0]
+            assert not await prepare_reading_event(task.id)
+            clock[0] += 2
+            assert await prepare_reading_event(task.id)
+            assert await media_watcher.consume_event(
+                await MediaEvent.get(id=task.id).select_related("lib")
+            )
+            assert not await MediaItem.filter(id=item.id).exists()
+            assert not _cache(item).parent.exists()
+            assert await UserHistory.all().values_list("id", flat=True) == [kept.id]
+            assert removed[-1] == metadata
+            assert set(removed) == {metadata, cover} | (
+                {source.directory / "art/custom.png"} if novel else set()
+            )
+            assert note.read_text() == "Keep me" and Path(lib.dir).is_dir()
+            if novel:
+                assert not (source.directory / "art").exists()
+            if chapter:
+                parent = await MediaItem.get(id=item.parent_id)
+                assert parent.index_state == IndexState.EMPTY
+                assert (
+                    parent_xml.read_text()
+                    == "<ComicInfo><Title>Collection</Title></ComicInfo>"
+                )
+            clock[0] += 2
+            assert await prepare_reading_event(task.id)
+            assert await media_watcher.consume_event(
+                await MediaEvent.get(id=task.id).select_related("lib")
+            )
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "replacement",
+        "hidden_body",
+        "owner",
+        "nested_owner",
+        "captured_path",
+        "metadata_link",
+    ],
+)
+def test_companion_ownership(tmp_path, monkeypatch, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            metadata = source.directory / "metadata.opf"
+            metadata.write_text("<package><metadata/></package>")
+            cover = source.directory / "cover.png"
+            cover.write_bytes(_PNG)
+            if problem in {"replacement", "hidden_body"}:
+                (
+                    source.directory
+                    / ("Other.epub" if problem == "replacement" else ".hidden.txt")
+                ).write_text("New body")
+            elif problem in {"owner", "nested_owner"}:
+                directory = (
+                    source.directory / "Nested"
+                    if problem == "nested_owner"
+                    else source.directory
+                )
+                await MediaItem.create(
+                    lib=lib,
+                    dir=str(directory),
+                    path=str(directory / "Other.txt"),
+                    name="Other",
+                    format=MediaFormat.TXT,
+                )
+            elif problem == "metadata_link":
+                metadata.unlink()
+                metadata.symlink_to(tmp_path / "missing.opf")
+            before = await MediaItem.all().values()
+            remove = AsyncMock(side_effect=AssertionError("unexpected deletion"))
+            monkeypatch.setattr(media_service, "delete_path", remove)
+            with pytest.raises(ContentError):
+                await MediaItemService.remove_missing_reading_item(
+                    item.id,
+                    source_path=source.path.with_name("Old.txt")
+                    if problem == "captured_path"
+                    else source.path,
+                )
+            assert await MediaItem.all().values() == before
+            assert _cache(item).is_dir() and cover.read_bytes() == _PNG
+            assert metadata.exists() or metadata.is_symlink()
+            remove.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["restore", "replace", "metadata", "permission"])
+def test_companion_retry(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            metadata = source.directory / "metadata.opf"
+            metadata.write_text("<package><metadata/></package>")
+            cover = source.directory / "cover.png"
+            cover.write_bytes(_PNG)
+            before = await MediaItem.all().values()
+
+            def remove(path):
+                """Change the source or fail between cover and metadata removal.
+
+                Args:
+                    path: The companion selected by the guarded cleanup.
+
+                Raises:
+                    PermissionError: Before deleting XML in the permission case.
+                """
+                if path == metadata and change == "permission":
+                    raise PermissionError("denied")
+                assert path == cover
+                path.unlink()
+                if change == "restore":
+                    source.path.write_text("Restored")
+                elif change == "replace":
+                    source.directory.rename(source.directory.with_name("Previous"))
+                    source.directory.mkdir()
+                    metadata.write_text("New owner's metadata")
+                elif change == "metadata":
+                    metadata.write_text("Updated metadata")
+
+            monkeypatch.setattr(media_service, "delete_path", remove)
+            with pytest.raises(ContentError):
+                await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == before
+            assert metadata.exists() and _cache(item).is_dir()
+            if change in {"permission", "metadata"}:
+                monkeypatch.setattr(
+                    media_service, "delete_path", lambda path: path.unlink()
+                )
+                assert await MediaItemService.remove_missing_reading_item(item.id) == [
+                    item.id
+                ]
+                assert (
+                    not source.directory.exists() and not _cache(item).parent.exists()
+                )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("trash", [False, True])
+def test_companion_trash(tmp_path, monkeypatch, trash):
+    async def run():
+        async with _database():
+            from app.utils import disk
+
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            metadata = source.directory / "metadata.opf"
+            metadata.write_text("<package><metadata/></package>")
+            cover = source.directory / "cover.png"
+            cover.write_bytes(_PNG)
+            recycled = tmp_path / "Trash"
+            recycled.mkdir()
+
+            def recycle(path):
+                """Model the OS trash without writing outside the isolated test root.
+
+                Args:
+                    path: The owned file passed to send2trash.
+                """
+                path.rename(recycled / path.name)
+
+            monkeypatch.setattr(
+                KaloscopeConfig,
+                "get",
+                lambda: SimpleNamespace(filesystem_trash_mode=trash),
+            )
+            monkeypatch.setattr(disk, "send2trash", recycle)
+            assert await MediaItemService.remove_missing_reading_item(item.id) == [
+                item.id
+            ]
+            assert not source.directory.exists() and Path(lib.dir).is_dir()
+            assert {path.name for path in recycled.iterdir()} == (
+                {"metadata.opf", "cover.png"} if trash else set()
+            )
+
+    asyncio.run(run())
+
+
+def test_companion_interrupted(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            source.path.unlink()
+            metadata = source.directory / "metadata.opf"
+            metadata.write_text("<package><metadata/></package>")
+            before = await MediaItem.all().values()
+            original = media_service.write_in_thread
+
+            async def interrupted(function, *args, **kwargs):
+                """Cancel after companion writes finish and before database cleanup.
+
+                Args:
+                    function: The filesystem worker being executed.
+                    *args: Positional worker arguments.
+                    **kwargs: Keyword worker arguments.
+
+                Returns:
+                    The result of workers other than companion cleanup.
+
+                Raises:
+                    asyncio.CancelledError: After companions have been removed.
+                """
+                result = await original(function, *args, **kwargs)
+                if function is media_service._remove_reading_companions:
+                    raise asyncio.CancelledError()
+                return result
+
+            monkeypatch.setattr(
+                media_service, "delete_path", lambda path: path.unlink()
+            )
+            with monkeypatch.context() as patch:
+                patch.setattr(media_service, "write_in_thread", interrupted)
+                with pytest.raises(asyncio.CancelledError):
+                    await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == before
+            assert not metadata.exists() and _cache(item).is_dir()
+            assert await MediaItemService.remove_missing_reading_item(item.id) == [
+                item.id
+            ]
+            assert not _cache(item).parent.exists() and not source.directory.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
     ("format", "directory"),
     [(format, True) for format in MediaFormat]
     + [(format, False) for format in MediaFormat if format != MediaFormat.DIR],
@@ -3089,7 +3409,7 @@ def test_remove_missing_reading(tmp_path, format, directory):
             cache = _cache(item).parent
             (cache / "old-version").mkdir()
             (cache / "old-version" / "index.json").write_text("old")
-            note = source.directory / "notes.txt"
+            note = source.directory / "notes.md"
             note.write_text("Keep me")
             user = await User.create(
                 username="reader", password="unused", role=UserRole.USER
@@ -3631,8 +3951,13 @@ def test_remove_reading_failure(tmp_path, monkeypatch, problem):
                     function: The cache cleanup operation.
                     *args: Positional cleanup arguments.
                     **kwargs: Keyword cleanup arguments.
+
+                Returns:
+                    The completed filesystem worker result.
                 """
-                await original(function, *args, **kwargs)
+                result = await original(function, *args, **kwargs)
+                if function is not media_service._remove_reading_caches:
+                    return result
                 if problem == "restore":
                     source.path.write_text("Restored")
                 elif problem == "ancestor":
@@ -3651,6 +3976,7 @@ def test_remove_reading_failure(tmp_path, monkeypatch, problem):
                         name="New",
                         format=MediaFormat.TXT,
                     )
+                return result
 
             def failed_cache(_path):
                 """Simulate a cache permission error.

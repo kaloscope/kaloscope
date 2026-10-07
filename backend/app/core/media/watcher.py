@@ -727,19 +727,26 @@ async def consume_event(event: MediaEvent) -> bool:
             try:
                 missing = await asyncio.to_thread(
                     lambda: [
-                        item
+                        (
+                            item,
+                            Path(item.dir)
+                            if not Path(item.dir).exists(follow_symlinks=False)
+                            else None,
+                        )
                         for item in items
                         if any(
                             Path(item.dir).is_relative_to(target) for target in targets
                         )
-                        and not Path(item.dir).exists(follow_symlinks=False)
+                        and not Path(item.path).exists(follow_symlinks=False)
                     ]
                 )
             except OSError as error:
                 raise ContentError("media_source_unavailable") from error
-            for item in missing:
+            for item, directory in missing:
                 await MediaItemService.remove_missing_reading_item(
-                    item.id, directory=Path(item.dir)
+                    item.id,
+                    directory=directory,
+                    source_path=Path(item.path),
                 )
             absent = False
             if not await MediaItem.filter(
