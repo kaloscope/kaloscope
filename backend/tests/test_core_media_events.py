@@ -1274,7 +1274,7 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
         async with _database():
             lib, body, task = await _pending(tmp_path)
             if change == "move":
-                destination = body.parent.with_name("Moved")
+                destination = tmp_path / "Moved"
                 body.parent.rename(destination)
                 await MediaEvent.create(
                     lib=lib,
@@ -1510,15 +1510,15 @@ def test_consume_file_conflict(tmp_path, moment, problem):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("order", ["files", "directory_first", "directory_last"])
 @pytest.mark.parametrize("reverse", [False, True])
-def test_consume_move_chain(tmp_path, moment, directory, reverse):
+def test_consume_move_chain(tmp_path, moment, order, reverse):
     """Keep linked move facts across work tasks without registering a second item.
 
     Args:
         tmp_path: The isolated filesystem root.
         moment: The controllable task clock.
-        directory: Whether the first move relocates the whole work directory.
+        order: Whether a directory move precedes or follows the file move.
         reverse: Whether the last work's task runs before the first work's task.
     """
 
@@ -1529,7 +1529,9 @@ def test_consume_move_chain(tmp_path, moment, directory, reverse):
             before = await MediaItem.all().values()
             middle = Path(lib.dir) / "Middle" / body.name
             destination = Path(lib.dir) / "Last" / body.name
-            destination.parent.mkdir()
+            if order != "directory_last":
+                destination.parent.mkdir()
+            directory = order == "directory_first"
             if directory:
                 body.parent.rename(middle.parent)
             else:
@@ -1542,12 +1544,17 @@ def test_consume_move_chain(tmp_path, moment, directory, reverse):
                 event_type="moved",
                 is_directory=directory,
             )
-            middle.rename(destination)
+            directory = order == "directory_last"
+            if directory:
+                middle.parent.rename(destination.parent)
+            else:
+                middle.rename(destination)
             await MediaEvent.create(
                 lib=lib,
-                src_path=str(middle),
-                dest_path=str(destination),
+                src_path=str(middle.parent if directory else middle),
+                dest_path=str(destination.parent if directory else destination),
                 event_type="moved",
+                is_directory=directory,
             )
             tasks = await coalesce_reading_events(lib.id)
             assert len(tasks) == 3
@@ -1560,6 +1567,181 @@ def test_consume_move_chain(tmp_path, moment, directory, reverse):
             assert await MediaItem.all().values() == before
             assert await MediaEvent.all().count() == 3
             assert destination.read_text() == "Body"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_consume_directory_publish(tmp_path, moment, lib_type):
+    """Ingest an unregistered work published from a temporary directory.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        lib_type: The type of work published by an external directory rename.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path, lib_type)
+            destination = Path(task.src_path)
+            temporary = destination.with_name(".incoming")
+            destination.rename(temporary)
+            temporary.rename(destination)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(temporary),
+                dest_path=str(destination),
+                event_type="moved",
+                is_directory=True,
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            assert await MediaItem.filter(lib=lib).count() == (
+                1 if lib_type == LibType.NOVEL else 2
+            )
+            assert not await MediaItem.exclude(index_state=IndexState.READY).exists()
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("problem", ["reused", "owned", "missing", "link"])
+def test_consume_directory_conflict(tmp_path, moment, problem):
+    """Retain directory move facts when source or destination ownership is unsafe.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        problem: The reused source, occupied target, missing target or target symlink.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            source, destination = body.parent, body.parent.with_name("Moved")
+            source.rename(destination)
+            if problem == "reused":
+                source.mkdir()
+            elif problem == "owned":
+                await MediaItem.create(
+                    lib=lib,
+                    path=str(destination / body.name),
+                    dir=str(destination),
+                    name="Other",
+                    format=MediaFormat.TXT,
+                    visible=False,
+                )
+            elif problem == "missing":
+                (destination / body.name).unlink()
+                destination.rmdir()
+            else:
+                outside = tmp_path / "Outside"
+                destination.rename(outside)
+                destination.symlink_to(outside, target_is_directory=True)
+            before = await MediaItem.all().values()
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(source),
+                dest_path=str(destination),
+                event_type="moved",
+                is_directory=True,
+            )
+            await coalesce_reading_events(lib.id)
+            task = await MediaEvent.get(event_type="reconcile", src_path=str(source))
+            assert await consume_event(await _ready(task, moment))
+            assert await MediaItem.all().values() == before
+            payload = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert payload.state == "deferred" and payload.attempts == 1
+            assert len(payload.moves) == 1
+            assert (
+                payload.error_code
+                == {
+                    "reused": "content_changed",
+                    "owned": "ambiguous_layout",
+                    "missing": "media_source_unavailable",
+                    "link": "media_source_unavailable",
+                }[problem]
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["cancel", "error", "root"])
+def test_consume_directory_recovery(tmp_path, monkeypatch, moment, failure):
+    """Resume a whole collection after binding or old-work verification fails.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture failing ingestion or old-work directory enumeration.
+        moment: The controllable task clock.
+        failure: Consumer cancellation, unexpected ingestion error or root read failure.
+    """
+
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path, LibType.COMIC)
+            assert await consume_event(await _ready(task, moment))
+            original = {item.id: item.path for item in await MediaItem.all()}
+            source, destination = Path(task.src_path), Path(lib.dir) / "Moved"
+            source.rename(destination)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(source),
+                dest_path=str(destination),
+                event_type="moved",
+                is_directory=True,
+            )
+            await coalesce_reading_events(lib.id)
+            task = await MediaEvent.get(
+                event_type="reconcile",
+                src_path=str(source if failure == "root" else destination),
+            )
+            task = await _ready(task, moment)
+            with monkeypatch.context() as patch:
+                if failure == "root":
+                    patch.setattr(
+                        media_watcher,
+                        "list_source_entries",
+                        Mock(side_effect=PermissionError),
+                    )
+                    assert await consume_event(task)
+                else:
+                    error = (
+                        asyncio.CancelledError if failure == "cancel" else RuntimeError
+                    )
+                    patch.setattr(
+                        MediaItemService,
+                        "ingest_reading_work",
+                        AsyncMock(side_effect=error),
+                    )
+                    with pytest.raises(error):
+                        await consume_event(task)
+            moved = await MediaItem.all()
+            assert {item.id for item in moved} == set(original)
+            assert all(
+                item.path
+                == str(destination / Path(original[item.id]).relative_to(source))
+                and item.index_state == IndexState.PENDING
+                for item in moved
+            )
+            saved = await MediaEvent.get(id=task.id).select_related("lib")
+            if failure == "root":
+                payload = ReadingReconcile.model_validate(saved.payload)
+                assert payload.state == "deferred" and payload.attempts == 1
+                moment[0] += 2
+                assert await prepare_reading_event(task.id)
+            else:
+                assert saved.payload == task.payload
+            assert await consume_event(saved)
+            remaining = await MediaEvent.get(event_type="reconcile")
+            assert await consume_event(await _ready(remaining, moment))
+            assert not await MediaEvent.exists()
+            assert not await MediaItem.exclude(index_state=IndexState.READY).exists()
+            assert await MediaItem.all().count() == len(original)
 
     asyncio.run(run())
 

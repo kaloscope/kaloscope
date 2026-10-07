@@ -960,6 +960,146 @@ def test_consume_file_move(tmp_path, monkeypatch, format, chapter, location, rev
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("format", "scope"),
+    [(format, "work") for format in MediaFormat]
+    + [
+        (format, scope)
+        for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+        for scope in ("collection", "chapter", "other_collection")
+    ]
+    + [
+        (MediaFormat.TXT, "case"),
+        (MediaFormat.DIR, "case"),
+        (MediaFormat.DIR, "collection_case"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse):
+    """Reconcile whole directories and chapters without duplicating old work paths.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture controlling event time and notifications.
+        format: The body format within the moved directory.
+        scope: A work, collection, chapter, cross-collection or case-only rename.
+        reverse: Whether the destination task is consumed before the source task.
+    """
+
+    async def run():
+        async with _database():
+            chapter = scope in (
+                "collection",
+                "chapter",
+                "other_collection",
+                "collection_case",
+            )
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            if chapter:
+                sibling = work / "Sibling"
+                sibling.mkdir()
+                (sibling / "1.png").write_bytes(_PNG)
+            novel = lib.lib_type == LibType.NOVEL
+            (
+                source.directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            ).write_text(
+                '<package xmlns="http://www.idpf.org/2007/opf"><metadata '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                "<dc:title>Original</dc:title></metadata></package>"
+                if novel
+                else "<ComicInfo><Title>Original</Title></ComicInfo>"
+            )
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            first = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=first.id).update(visible=False)
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.TEXT if novel else HistoryType.IMAGE,
+                rel_id=first.parent_id or first.id,
+                percentage=25,
+                locator={"chapter_item_id": first.id, "version": first.index_version},
+            )
+            history = await UserHistory.all().values()
+            before = {item.id: item for item in await MediaItem.all()}
+            previous = (
+                source.directory if scope in ("chapter", "other_collection") else work
+            )
+            if scope == "other_collection":
+                destination = work.with_name("Other") / "Moved"
+                destination.parent.mkdir()
+            else:
+                destination = previous.with_name(
+                    previous.name.lower() if "case" in scope else "Moved"
+                )
+            files = {
+                path.relative_to(previous): path.read_bytes()
+                for path in previous.rglob("*")
+                if path.is_file()
+            }
+            previous.rename(destination)
+            clock = [100.0]
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(previous),
+                dest_path=str(destination),
+                event_type="moved",
+                is_directory=True,
+            )
+            tasks = await coalesce_reading_events(lib.id)
+            if reverse:
+                tasks.reverse()
+            for task in tasks:
+                assert not await prepare_reading_event(task.id)
+                clock[0] += 2
+                assert await prepare_reading_event(task.id)
+                task = await MediaEvent.get(id=task.id).select_related("lib")
+                assert await media_watcher.consume_event(task)
+                assert not await MediaEvent.filter(id=task.id).exists()
+            after = {item.id: item for item in await MediaItem.all()}
+            assert set(before).issubset(after)
+            assert len(after) == len(before) + int(scope == "other_collection")
+            for id, original in before.items():
+                current = after[id]
+                assert current.visible == original.visible
+                if Path(original.path).is_relative_to(previous):
+                    assert current.path == str(
+                        destination / Path(original.path).relative_to(previous)
+                    )
+                    assert current.dir == str(
+                        destination / Path(original.dir).relative_to(previous)
+                    )
+                    if current.format is not None:
+                        assert current.index_state == IndexState.READY
+                        assert current.index_version != original.index_version
+                else:
+                    assert current.path == original.path and current.dir == original.dir
+                    assert current.index_version == original.index_version
+            current = after[first.id]
+            if scope == "other_collection":
+                assert current.parent_id is not None
+                assert current.parent_id != first.parent_id
+                assert after[current.parent_id].path == str(destination.parent)
+            else:
+                assert current.parent_id == first.parent_id
+            assert current.title == "Original"
+            assert await UserHistory.all().values() == history
+            assert {
+                path.relative_to(destination): path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            } == files
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
 def test_ingest_empty_scope(tmp_path):
     async def run():
         async with _database():

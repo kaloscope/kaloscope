@@ -11,6 +11,7 @@ from time import time
 
 from sanic import Sanic
 from sanic.log import Colors, logger
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 from watchdog.events import (
     EVENT_TYPE_CREATED,
@@ -659,7 +660,7 @@ async def consume_event(event: MediaEvent) -> bool:
     """Coalesce or ingest reading events and consume video events under their lock.
 
     Reading services manage their own locks. Execute only the prepared task version;
-    directory moves and move chains wait for identity reconciliation. For video,
+    linked move sequences wait for identity reconciliation. For video,
     recover organization and persist ingest work under the lock, then run workflows
     after releasing it, saving progress after each successful trigger.
 
@@ -716,11 +717,36 @@ async def consume_event(event: MediaEvent) -> bool:
         try:
             if not await _handle_reading_moves(event, payload):
                 return False
-            issues = await MediaItemService.ingest_reading_work(
-                lib.id,
-                Path(event.src_path),
-                targets={Path(path) for path in payload.targets},
-                force_targets={Path(path) for path in payload.force_targets},
+            work = Path(event.src_path)
+            relocated = False
+            if (
+                any(
+                    move.is_directory and move.src_path == event.src_path
+                    for move in payload.moves
+                )
+                and not await MediaItem.filter(
+                    Q(dir=event.src_path) | Q(parent__path=event.src_path),
+                    lib_id=lib.id,
+                ).exists()
+            ):
+                # only a real directory entry can become a new work at the old path
+                # case-only renames may still resolve through the old spelling
+                try:
+                    _, directories = await asyncio.to_thread(
+                        list_source_entries, Path(lib.dir)
+                    )
+                except OSError as error:
+                    raise ContentError("media_source_unavailable") from error
+                relocated = work not in directories
+            issues = (
+                {}
+                if relocated
+                else await MediaItemService.ingest_reading_work(
+                    lib.id,
+                    work,
+                    targets={Path(path) for path in payload.targets},
+                    force_targets={Path(path) for path in payload.force_targets},
+                )
             )
             if issues:
                 failure = ContentError(next(iter(issues.values())))
@@ -758,11 +784,11 @@ async def consume_event(event: MediaEvent) -> bool:
 
 
 async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) -> bool:
-    """Apply an isolated body-file move before registering destination sources.
+    """Apply an isolated body or directory move before registering new sources.
 
     The serial consumer calls this after checking its prepared task version.
-    Directory moves and linked moves remain pending until their complete sequence
-    can be reconciled. A move repeated in both work tasks is the same operation.
+    Linked moves remain pending until their complete sequence can be reconciled.
+    A move repeated in both work tasks is the same operation.
     Unregistered temporary files can publish or replace bodies without transferring
     another item's identity. This step never moves files or removes old companions.
 
@@ -771,8 +797,8 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
         payload: The task scopes and original filesystem move facts.
 
     Returns:
-        True if ingestion can continue after handling any file move; False if
-        directory moves, connected moves or unsupported boundaries need reconciliation.
+        True if ingestion can continue after handling the move; False if connected
+        moves or unsupported boundaries need reconciliation.
 
     Raises:
         ContentError: If source ownership, layout or destination validation fails.
@@ -790,7 +816,7 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
     ]
     if not moves:
         return True
-    if len(moves) != 1 or moves[0].is_directory:
+    if len(moves) != 1:
         return False
     move = moves[0]
     root = Path(event.lib.dir)
@@ -800,9 +826,11 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
         for path in (source, destination)
     ):
         return False
-    depth = len(source.relative_to(root).parts)
-    if depth != len(destination.relative_to(root).parts) or depth not in (
-        (2,) if event.lib.lib_type == LibType.NOVEL else (2, 3)
+    source_container = source if move.is_directory else source.parent
+    dest_container = destination if move.is_directory else destination.parent
+    depth = len(source_container.relative_to(root).parts)
+    if depth != len(dest_container.relative_to(root).parts) or depth not in (
+        (1,) if event.lib.lib_type == LibType.NOVEL else (1, 2)
     ):
         return False
     # a later leg must not register a new ID while an earlier leg owns the body
@@ -815,20 +843,34 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
             if any(
                 path == Path(endpoint)
                 or (other.is_directory and path.is_relative_to(endpoint))
+                or (move.is_directory and Path(endpoint).is_relative_to(path))
                 for path in (source, destination)
                 for endpoint in (other.src_path, other.dest_path)
             ):
                 return False
-    item = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(source))
+    if move.is_directory:
+        candidates = await MediaItem.filter(
+            Q(dir=str(source)) | Q(dir__startswith=f"{source}/"), lib_id=event.lib_id
+        )
+        item = next(
+            (item for item in candidates if Path(item.dir).is_relative_to(source)), None
+        )
+    else:
+        item = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(source))
     if item is not None and source != destination:
         if (
             item.parent_id is not None
-            and source.parent.parent != destination.parent.parent
+            and source_container.parent != dest_container.parent
         ):
             await MediaItemService.create_reading(
-                event.lib_id, ReadingSource(destination.parent.parent, None)
+                event.lib_id, ReadingSource(dest_container.parent, None)
             )
-        await MediaItemService.move_reading_file(event.lib_id, source, destination)
+        if move.is_directory:
+            await MediaItemService.move_reading_directory(
+                event.lib_id, source, destination
+            )
+        else:
+            await MediaItemService.move_reading_file(event.lib_id, source, destination)
     return True
 
 
