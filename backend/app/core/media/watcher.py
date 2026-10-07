@@ -655,7 +655,7 @@ async def consume_event(event: MediaEvent) -> bool:
     """Coalesce or ingest reading events and consume video events under their lock.
 
     Reading services manage their own locks. Execute only the prepared task version;
-    moves remain pending until identity reconciliation is available. For video,
+    body and directory moves wait for identity reconciliation. For video,
     recover organization and persist ingest work under the lock, then run workflows
     after releasing it, saving progress after each successful trigger.
 
@@ -665,7 +665,7 @@ async def consume_event(event: MediaEvent) -> bool:
 
     Returns:
         True after processing raw events, reading ingestion or video work. False
-        for stale, unprepared or unsupported tasks, including pending reading moves.
+        for stale, unprepared or unsupported tasks, including pending identity moves.
 
     Raises:
         ContentError: If the reading library changes or completion cannot observe
@@ -690,9 +690,17 @@ async def consume_event(event: MediaEvent) -> bool:
         if current is None or current.event_type != "reconcile":
             return False
         payload = ReadingReconcile.model_validate(current.payload)
+        body_suffixes = (
+            (".txt", ".epub") if lib.lib_type == LibType.NOVEL else (".cbz", ".zip")
+        )
         if (
             _reading_event_identity(current) != _reading_event_identity(event)
-            or payload.moves
+            or any(
+                move.is_directory
+                or Path(move.src_path).suffix.casefold() in body_suffixes
+                or Path(move.dest_path).suffix.casefold() in body_suffixes
+                for move in payload.moves
+            )
             or payload.state == "failed"
             or payload.observed_snapshot is None
             or payload.not_before is None

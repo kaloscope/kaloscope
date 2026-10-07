@@ -16,7 +16,7 @@ from filelock import Timeout
 from sanic import Sanic
 from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
-from watchdog.events import FileCreatedEvent, FileModifiedEvent
+from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileMovedEvent
 
 from app.core.config import KaloscopeConfig
 from app.core.media import events as media_events
@@ -1306,6 +1306,107 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
                     assert payload.observed_snapshot is None
                 else:
                     assert saved.payload == task.payload
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("asset", ["metadata", "cover"])
+def test_consume_reading_asset_move(tmp_path, moment, lib_type, asset):
+    """Ingest atomic sidecar replacements without rebuilding unchanged bodies.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        lib_type: The reading library receiving the replacement.
+        asset: The external metadata or named cover published by a rename.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path, lib_type)
+            assert await consume_event(await _ready(task, moment))
+            item = await MediaItem.get(lib=lib, format__isnull=False)
+            if asset == "metadata":
+                destination = body.parent / (
+                    "metadata.opf" if lib_type == LibType.NOVEL else "ComicInfo.xml"
+                )
+                data = (
+                    '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                    '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                    "<dc:title>Replaced</dc:title></metadata></package>"
+                    if lib_type == LibType.NOVEL
+                    else "<ComicInfo><Title>Replaced</Title></ComicInfo>"
+                ).encode()
+            else:
+                destination = body.parent / "cover.PNG"
+                data = b"\x89PNG\r\n\x1a\nimage"
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_bytes(data)
+            temporary.replace(destination)
+            queue = Queue()
+            producer = EventHandler(lib, asyncio.get_running_loop(), queue)
+            await producer._persist(FileMovedEvent(str(temporary), str(destination)))
+            assert await consume_event(queue.get_nowait())
+            task = await _ready(await MediaEvent.get(event_type="reconcile"), moment)
+            payload = ReadingReconcile.model_validate(task.payload)
+            assert len(payload.moves) == 1 and payload.force_targets == []
+            assert await consume_event(task)
+            current = await MediaItem.get(id=item.id)
+            assert current.index_state == IndexState.READY
+            assert current.index_version == item.index_version
+            assert current.title == ("Replaced" if asset == "metadata" else item.title)
+            assert destination.read_bytes() == data
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cross_chapter", [False, True])
+def test_consume_reading_page_move(tmp_path, moment, cross_chapter):
+    """Rebuild page lists after image moves while retaining directory item IDs.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        cross_chapter: Whether the page moves into another chapter in the same work.
+    """
+
+    async def run():
+        async with _database():
+            lib, page, task = await _pending(tmp_path, LibType.COMIC)
+            (page.parent / "2.png").write_bytes(page.read_bytes())
+            if cross_chapter:
+                other = page.parent.with_name("Other")
+                other.mkdir()
+                (other / "3.png").write_bytes(page.read_bytes())
+                task = (
+                    await coalesce_reading_events(lib.id, scan_works={other.parent})
+                )[0]
+                destination = other / "10.PNG"
+            else:
+                destination = page.with_name("10.PNG")
+            assert await consume_event(await _ready(task, moment))
+            before = {
+                item.id: item.index_version
+                for item in await MediaItem.filter(format=MediaFormat.DIR)
+            }
+            page.rename(destination)
+            raw = await MediaEvent.create(
+                lib=lib,
+                src_path=str(page),
+                dest_path=str(destination),
+                event_type="moved",
+            )
+            assert await consume_event(raw)
+            task = await _ready(await MediaEvent.get(event_type="reconcile"), moment)
+            assert await consume_event(task)
+            after = await MediaItem.filter(format=MediaFormat.DIR)
+            assert {item.id for item in after} == set(before)
+            assert all(item.index_version != before[item.id] for item in after)
+            assert all(item.index_state == IndexState.READY for item in after)
+            assert destination.is_file() and not page.exists()
+            assert not await MediaEvent.exists()
 
     asyncio.run(run())
 
