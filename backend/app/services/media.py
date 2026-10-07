@@ -300,11 +300,14 @@ def _validate_previous_path(
         raise ContentError("content_changed")
 
 
-def _missing_reading_sources(items: list[MediaItem]) -> _SourceStates | None:
+def _missing_reading_sources(
+    items: list[MediaItem], work_paths: set[Path]
+) -> _SourceStates | None:
     """Confirm absent sources while retaining the identities of surviving ancestors.
 
     Args:
         items: The selected items with libraries and parents loaded.
+        work_paths: Registered top-level work directories in the same library.
 
     Returns:
         Ancestor snapshots when all sources are absent, or None if any source exists.
@@ -312,8 +315,11 @@ def _missing_reading_sources(items: list[MediaItem]) -> _SourceStates | None:
 
     Raises:
         ContentError: If ownership is invalid, an ancestor changes, a link or invalid
-            file type is encountered, or the library cannot be accessed.
+            file type is encountered, the library cannot be listed, or every
+            registered work directory has disappeared.
     """
+    from app.core.media.handlers.reading import list_source_entries
+
     states: _SourceStates = {}
     try:
         for item in items:
@@ -343,6 +349,13 @@ def _missing_reading_sources(items: list[MediaItem]) -> _SourceStates | None:
                     if path in states and states[path] != current:
                         raise ContentError("content_changed")
                     states[path] = current
+        root = Path(items[0].lib.dir)
+        _, directories = list_source_entries(root)
+        # an accessible but empty mount point is not evidence of library deletion
+        if not work_paths.intersection(directories):
+            raise ContentError("media_source_unavailable")
+        if file_state(root.stat(follow_symlinks=False)) != states[root]:
+            raise ContentError("content_changed")
     except OSError as error:
         raise ContentError("media_source_unavailable") from error
     return states
@@ -1426,7 +1439,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         have been applied, and any owned companion cleanup has completed. Recheck
         absence instead of treating discovery as deletion. Files in the library stay
         untouched. Existing empty containers are retained; a surviving collection is
-        summarized by subsequent work ingestion.
+        summarized by subsequent work ingestion. If every registered work directory
+        disappears, retain records until library access can be confirmed again.
 
         Args:
             id: The registered reading item selected for missing-source reconciliation.
@@ -1455,7 +1469,13 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ids = [row.id for row in items]
             if await MediaItem.filter(parent_id__in=ids).exclude(id__in=ids).exists():
                 raise ContentError("unsupported_layout")
-            states = await to_thread(_missing_reading_sources, items)
+            work_paths = {
+                Path(directory)
+                for (directory,) in await MediaItem.filter(
+                    lib_id=item.lib_id, parent_id__isnull=True
+                ).values_list("dir")
+            }
+            states = await to_thread(_missing_reading_sources, items, work_paths)
             if states is None:
                 return []
             await write_in_thread(_remove_reading_caches, ids)
@@ -1486,7 +1506,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                         and parents.get(chapter_id) == history.rel_id
                     ):
                         history_ids.append(history.id)
-                if await to_thread(_missing_reading_sources, items) != states:
+                if (
+                    await to_thread(_missing_reading_sources, items, work_paths)
+                    != states
+                ):
                     raise ContentError("content_changed")
                 await UserHistory.filter(id__in=history_ids).delete()
                 await MediaItem.filter(id__in=ids).delete()

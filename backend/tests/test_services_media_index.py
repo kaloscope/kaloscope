@@ -24,6 +24,7 @@ from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.epub.cache import EpubContent
 from app.core.media.events import ReadingReconcile, coalesce_reading_events
+from app.core.media.handlers import reading as reading_handler
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingMediaHandler, ReadingSource
 from app.core.media.image import load_image_index, read_image_resource
@@ -2553,6 +2554,11 @@ def test_remove_missing_reading(tmp_path, format, directory):
             lib, source = await _source(tmp_path, format)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
+            if directory:
+                other = source.directory.with_name("Other")
+                shutil.copytree(source.directory, other)
+                await MediaItemService.ingest_reading_work(lib.id, other)
+            retained = await MediaItem.exclude(id=item.id).values()
             await MediaItem.filter(id=item.id).update(visible=False)
             cache = _cache(item).parent
             (cache / "old-version").mkdir()
@@ -2582,7 +2588,7 @@ def test_remove_missing_reading(tmp_path, format, directory):
             assert await MediaItemService.remove_missing_reading_item(item.id) == [
                 item.id
             ]
-            assert not await MediaItem.exists() and not cache.exists()
+            assert await MediaItem.all().values() == retained and not cache.exists()
             assert await UserHistory.all().values() == preserved
             assert await MediaEvent.filter(id=event.id).exists()
             assert not await MediaItemService.remove_missing_reading_item(item.id)
@@ -2606,6 +2612,14 @@ def test_remove_missing_comic(tmp_path, format, collection):
             parent = await MediaItem.get(path=str(work))
             child = await MediaItem.get(path=str(source.path))
             second = await MediaItem.get(path=str(sibling))
+            if collection:
+                other = work.with_name("Other")
+                other.mkdir()
+                (other / "1.png").write_bytes(_PNG)
+                await MediaItemService.ingest_reading_work(lib.id, other)
+            retained = await MediaItem.exclude(
+                id__in=[parent.id, child.id, second.id]
+            ).values()
             await MediaItem.filter(id=child.id).update(visible=False)
             preserved = await MediaItem.exclude(id=child.id).values()
             histories = []
@@ -2642,7 +2656,8 @@ def test_remove_missing_comic(tmp_path, format, collection):
             )
             if collection:
                 assert (
-                    not await MediaItem.exists() and not _cache(second).parent.exists()
+                    await MediaItem.all().values() == retained
+                    and not _cache(second).parent.exists()
                 )
                 assert not await UserHistory.filter(rel_type=HistoryType.IMAGE).exists()
             else:
@@ -2667,6 +2682,187 @@ def test_remove_missing_comic(tmp_path, format, collection):
                     and current.extra["content"]["chapter_count"] == 0
                 )
                 assert await MediaItem.all().count() == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
+@pytest.mark.parametrize(
+    "problem", ["empty", "unknown", "linked", "unreadable", "last_work"]
+)
+def test_remove_reading_library(tmp_path, monkeypatch, format, problem):
+    """Retain records, histories and caches when registered works all disappear.
+
+    Args:
+        tmp_path: The isolated library and cache root.
+        monkeypatch: The fixture checking enumeration and simulating access errors.
+        format: The novel or comic source format.
+        problem: The unavailable library state to simulate.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            if problem != "last_work":
+                other = source.directory.with_name("Other")
+                shutil.copytree(source.directory, other)
+                await MediaItemService.ingest_reading_work(lib.id, other)
+                await MediaItem.filter(dir=str(other)).update(visible=False)
+            item = await MediaItem.get(path=str(source.path))
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_id=item.id,
+                rel_type=HistoryType.TEXT
+                if format == MediaFormat.TXT
+                else HistoryType.IMAGE,
+            )
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(source.directory),
+                event_type="reconcile",
+                is_directory=True,
+                payload=ReadingReconcile(
+                    targets=[str(source.directory)], force_targets=[]
+                ).model_dump(mode="json", exclude_none=True),
+            )
+            rows = await MediaItem.all().values()
+            histories = await UserHistory.all().values()
+            events = await MediaEvent.all().values()
+            root, offline = Path(lib.dir), tmp_path / "Offline"
+            root.rename(offline)
+            root.mkdir()
+            if problem == "unknown":
+                (root / "Unknown").mkdir()
+                (root / ".hidden").mkdir()
+                (root / "copy.part").mkdir()
+                (root / "notes.txt").write_text("Not a registered work")
+            elif problem == "linked":
+                (root / "Other").symlink_to(offline / "Other", target_is_directory=True)
+            elif problem == "unreadable":
+                (root / "Other").mkdir()
+            main_thread = threading.get_ident()
+            list_entries = reading_handler.list_source_entries
+
+            def inspect(directory):
+                """Check library access in a worker thread.
+
+                Args:
+                    directory: The library root being listed.
+
+                Returns:
+                    The visible files and directories.
+
+                Raises:
+                    PermissionError: For the simulated unreadable library.
+                """
+                assert threading.get_ident() != main_thread
+                assert directory == root
+                if problem == "unreadable":
+                    raise PermissionError("denied")
+                return list_entries(directory)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(reading_handler, "list_source_entries", inspect)
+                for _ in range(2):
+                    with pytest.raises(ContentError, match="media_source_unavailable"):
+                        await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == rows
+            assert await UserHistory.all().values() == histories
+            assert await MediaEvent.all().values() == events
+            for current in await MediaItem.all():
+                assert _cache(current).is_dir()
+            shutil.rmtree(root)
+            offline.rename(root)
+            assert not await MediaItemService.remove_missing_reading_item(item.id)
+            if problem != "last_work":
+                shutil.rmtree(source.directory)
+                assert await MediaItemService.remove_missing_reading_item(item.id) == [
+                    item.id
+                ]
+                assert not _cache(item).parent.exists()
+                assert not await UserHistory.exists()
+                assert await MediaItem.all().count() == 1
+                assert await MediaEvent.all().values() == events
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["enumeration", "cleanup"])
+def test_remove_reading_library_change(tmp_path, monkeypatch, stage):
+    """Recheck library disappearance before caches and database rows are removed.
+
+    Args:
+        tmp_path: The isolated library and cache root.
+        monkeypatch: The fixture replacing the library during cleanup.
+        stage: Whether the root changes during enumeration or after cache cleanup.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            other = source.directory.with_name("Other")
+            shutil.copytree(source.directory, other)
+            await MediaItemService.ingest_reading_work(lib.id, other)
+            item = await MediaItem.get(path=str(source.path))
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user, rel_id=item.id, rel_type=HistoryType.TEXT
+            )
+            shutil.rmtree(source.directory)
+            rows = await MediaItem.all().values()
+            histories = await UserHistory.all().values()
+            root, offline = Path(lib.dir), tmp_path / "Offline"
+            list_entries = reading_handler.list_source_entries
+            write = media_service.write_in_thread
+
+            def replaced(directory):
+                """Replace the root after reading its previous entries.
+
+                Args:
+                    directory: The library root being listed.
+
+                Returns:
+                    Entries from the original root.
+                """
+                entries = list_entries(directory)
+                root.rename(offline)
+                root.mkdir()
+                return entries
+
+            async def changed(function, *args, **kwargs):
+                """Replace the root after removing rebuildable caches.
+
+                Args:
+                    function: The cache cleanup operation.
+                    *args: Positional cleanup arguments.
+                    **kwargs: Keyword cleanup arguments.
+                """
+                await write(function, *args, **kwargs)
+                root.rename(offline)
+                root.mkdir()
+
+            if stage == "enumeration":
+                monkeypatch.setattr(reading_handler, "list_source_entries", replaced)
+            else:
+                monkeypatch.setattr(media_service, "write_in_thread", changed)
+            with pytest.raises(
+                ContentError,
+                match="content_changed"
+                if stage == "enumeration"
+                else "media_source_unavailable",
+            ):
+                await MediaItemService.remove_missing_reading_item(item.id)
+            assert await MediaItem.all().values() == rows
+            assert await UserHistory.all().values() == histories
+            assert _cache(item).is_dir() == (stage == "enumeration")
+            assert _cache(await MediaItem.get(dir=str(other))).is_dir()
 
     asyncio.run(run())
 
