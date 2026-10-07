@@ -36,6 +36,7 @@ from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.events import (
+    ReadingMove,
     ReadingReconcile,
     _reading_event_identity,
     coalesce_reading_events,
@@ -660,7 +661,7 @@ async def consume_event(event: MediaEvent) -> bool:
     """Coalesce or ingest reading events and consume video events under their lock.
 
     Reading services manage their own locks. Execute only the prepared task version;
-    linked move sequences wait for identity reconciliation. For video,
+    unsupported move sequences wait for identity reconciliation. For video,
     recover organization and persist ingest work under the lock, then run workflows
     after releasing it, saving progress after each successful trigger.
 
@@ -784,11 +785,12 @@ async def consume_event(event: MediaEvent) -> bool:
 
 
 async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) -> bool:
-    """Apply an isolated body or directory move before registering new sources.
+    """Apply a body or directory move chain before registering new sources.
 
     The serial consumer calls this after checking its prepared task version.
-    Linked moves remain pending until their complete sequence can be reconciled.
-    A move repeated in both work tasks is the same operation.
+    Gather linked facts across pending works in arrival order, retaining duplicates
+    only once. Collapse a continuous chain of one kind to its current owner's final
+    path. Mixed, branching and cyclic moves remain pending.
     Unregistered temporary files can publish or replace bodies without transferring
     another item's identity. This step never moves files or removes old companions.
 
@@ -797,8 +799,8 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
         payload: The task scopes and original filesystem move facts.
 
     Returns:
-        True if ingestion can continue after handling the move; False if connected
-        moves or unsupported boundaries need reconciliation.
+        True if ingestion can continue after handling the moves; False if the chain
+        or its boundaries need further reconciliation.
 
     Raises:
         ContentError: If source ownership, layout or destination validation fails.
@@ -807,57 +809,87 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
     suffixes = (
         (".txt", ".epub") if event.lib.lib_type == LibType.NOVEL else (".cbz", ".zip")
     )
-    moves = [
-        move
+    moves = {
+        move.event_id: move
         for move in payload.moves
         if move.is_directory
         or Path(move.src_path).suffix.casefold() in suffixes
         or Path(move.dest_path).suffix.casefold() in suffixes
-    ]
+    }
     if not moves:
         return True
-    if len(moves) != 1:
-        return False
-    move = moves[0]
-    root = Path(event.lib.dir)
-    source, destination = Path(move.src_path), Path(move.dest_path)
-    if any(
-        not path.is_relative_to(root) or ".." in path.parts
-        for path in (source, destination)
-    ):
-        return False
-    source_container = source if move.is_directory else source.parent
-    dest_container = destination if move.is_directory else destination.parent
-    depth = len(source_container.relative_to(root).parts)
-    if depth != len(dest_container.relative_to(root).parts) or depth not in (
-        (1,) if event.lib.lib_type == LibType.NOVEL else (1, 2)
-    ):
-        return False
-    # a later leg must not register a new ID while an earlier leg owns the body
+    pending_moves: dict[int, ReadingMove] = {}
     for pending in await MediaEvent.filter(lib_id=event.lib_id, event_type="reconcile"):
-        for other in ReadingReconcile.model_validate(pending.payload).moves:
-            if other.event_id == move.event_id:
-                if other != move:
-                    raise ValueError("conflicting reading move records")
-                continue
-            if any(
-                path == Path(endpoint)
+        for move in ReadingReconcile.model_validate(pending.payload).moves:
+            if move.event_id in pending_moves and pending_moves[move.event_id] != move:
+                raise ValueError("conflicting reading move records")
+            pending_moves[move.event_id] = move
+    # a later leg must not register a new ID while an earlier leg owns the body
+    while True:
+        linked = {
+            id: other
+            for id, other in pending_moves.items()
+            if id not in moves
+            and any(
+                path == endpoint
                 or (other.is_directory and path.is_relative_to(endpoint))
-                or (move.is_directory and Path(endpoint).is_relative_to(path))
-                for path in (source, destination)
-                for endpoint in (other.src_path, other.dest_path)
-            ):
-                return False
-    if move.is_directory:
-        candidates = await MediaItem.filter(
-            Q(dir=str(source)) | Q(dir__startswith=f"{source}/"), lib_id=event.lib_id
-        )
-        item = next(
-            (item for item in candidates if Path(item.dir).is_relative_to(source)), None
-        )
-    else:
-        item = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(source))
-    if item is not None and source != destination:
+                or (move.is_directory and endpoint.is_relative_to(path))
+                for move in moves.values()
+                for path in (Path(move.src_path), Path(move.dest_path))
+                for endpoint in (Path(other.src_path), Path(other.dest_path))
+            )
+        }
+        if not linked:
+            break
+        moves.update(linked)
+    chain = sorted(moves.values(), key=lambda move: move.event_id)
+    directory = chain[0].is_directory
+    paths = [Path(chain[0].src_path)]
+    for move in chain:
+        if move.is_directory != directory or Path(move.src_path) != paths[-1]:
+            return False
+        paths.append(Path(move.dest_path))
+    if len(chain) > 1 and (
+        len(set(paths)) != len(paths)
+        or (not directory and len({path.suffix.casefold() for path in paths}) != 1)
+    ):
+        return False
+    root = Path(event.lib.dir)
+    if any(
+        path == root or not path.is_relative_to(root) or ".." in path.parts
+        for path in paths
+    ):
+        return False
+    depths = {
+        len((path if directory else path.parent).relative_to(root).parts)
+        for path in paths
+    }
+    if len(depths) != 1 or not depths.issubset(
+        {1} if event.lib.lib_type == LibType.NOVEL else {1, 2}
+    ):
+        return False
+    owners: list[tuple[Path, MediaItem]] = []
+    for path in paths if len(chain) > 1 else paths[:1]:
+        if directory:
+            candidates = await MediaItem.filter(
+                Q(dir=str(path)) | Q(dir__startswith=f"{path}/"), lib_id=event.lib_id
+            )
+            item = next(
+                (item for item in candidates if Path(item.dir).is_relative_to(path)),
+                None,
+            )
+        else:
+            item = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(path))
+        if item is not None:
+            owners.append((path, item))
+    if len(owners) > 1:
+        raise ContentError("ambiguous_layout")
+    if owners and owners[0][0] != paths[-1]:
+        source, item = owners[0]
+        destination = paths[-1]
+        source_container = source if directory else source.parent
+        dest_container = destination if directory else destination.parent
+        previous_paths = tuple(path for path in paths[:-1] if path != source)
         if (
             item.parent_id is not None
             and source_container.parent != dest_container.parent
@@ -865,12 +897,14 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
             await MediaItemService.create_reading(
                 event.lib_id, ReadingSource(dest_container.parent, None)
             )
-        if move.is_directory:
+        if directory:
             await MediaItemService.move_reading_directory(
-                event.lib_id, source, destination
+                event.lib_id, source, destination, previous_paths=previous_paths
             )
         else:
-            await MediaItemService.move_reading_file(event.lib_id, source, destination)
+            await MediaItemService.move_reading_file(
+                event.lib_id, source, destination, previous_paths=previous_paths
+            )
     return True
 
 

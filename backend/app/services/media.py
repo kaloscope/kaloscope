@@ -387,15 +387,15 @@ def _remove_reading_caches(ids: list[int]):
 
 
 def _validate_reading_source(
-    item: MediaItem, *, require_candidate: bool, previous_path: Path | None = None
+    item: MediaItem, *, require_candidate: bool, previous_paths: tuple[Path, ...] = ()
 ):
     """Check source ownership and discovery in a worker without reading its body.
 
     Args:
         item: The proposed reading item with its library and optional parent loaded.
         require_candidate: Whether discovery must still find this new source.
-        previous_path: The validated old body path in this library for an observed
-            move; None skips checking that the previous path has disappeared.
+        previous_paths: Validated former body paths from observed moves. The default
+            empty tuple skips checking that previous paths have disappeared.
 
     Raises:
         ContentError: If source ownership, discovery or stability is invalid.
@@ -405,30 +405,33 @@ def _validate_reading_source(
         states,
         _,
     ):
-        if previous_path is not None:
+        for previous_path in previous_paths:
             _validate_previous_path(
                 Path(item.lib.dir), previous_path, source.path, states
             )
 
 
 def _validate_reading_directory_move(
-    items: list[MediaItem], src_path: Path, dest_path: Path
+    items: list[MediaItem], previous_paths: tuple[Path, ...], dest_path: Path
 ):
     """Validate a moved container and retain source guards until checks finish.
 
     Args:
         items: The nonempty list of proposed items with library and parents loaded.
-        src_path: The previous work or chapter directory from the persisted move.
+        previous_paths: Previous work or chapter directories from persisted moves.
         dest_path: The new directory containing the same registered sources.
 
     Raises:
-        ContentError: If sources are invalid, unstable or the old directory is reused.
+        ContentError: If sources are invalid, unstable or a former directory is reused.
     """
     with _reading_source(items[0]) as (_, states, _), ExitStack() as stack:
         # ponytail: per-item discovery is quadratic; share scans for large works
         for item in items[1:]:
             stack.enter_context(_reading_source(item))
-        _validate_previous_path(Path(items[0].lib.dir), src_path, dest_path, states)
+        for previous_path in previous_paths:
+            _validate_previous_path(
+                Path(items[0].lib.dir), previous_path, dest_path, states
+            )
 
 
 async def _get_target_parent(
@@ -1204,7 +1207,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def move_reading_file(
-        cls, lib_id: int, src_path: Path, dest_path: Path
+        cls,
+        lib_id: int,
+        src_path: Path,
+        dest_path: Path,
+        *,
+        previous_paths: tuple[Path, ...] = (),
     ) -> MediaItem | None:
         """Apply an observed body-file move while retaining its registered identity.
 
@@ -1218,6 +1226,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             lib_id: The novel or comic library containing the moved file.
             src_path: The absolute previous body path from the move event.
             dest_path: The absolute new body path at the same depth in this library.
+            previous_paths: Other former paths in a continuous move chain, excluding
+                src_path. The default empty tuple handles a single move.
 
         Returns:
             The updated item with its original ID, or None if the previous path is
@@ -1238,19 +1248,20 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             not root.is_absolute()
             or ".." in root.parts
             or src_path == dest_path
-            or (
-                src_path.parent.parent != dest_path.parent.parent
+            or any(
+                path.parent.parent != dest_path.parent.parent
                 and not (
                     original.lib_type == LibType.COMIC
-                    and src_path.parent.parent.parent == root
+                    and path.parent.parent.parent == root
                     and dest_path.parent.parent.parent == root
                 )
+                for path in (src_path, *previous_paths)
             )
             or any(
                 not path.is_relative_to(root)
                 or ".." in path.parts
                 or any(is_ignored_name(part) for part in path.relative_to(root).parts)
-                for path in (src_path, dest_path)
+                for path in (src_path, dest_path, *previous_paths)
             )
         ):
             raise ValueError("move paths must select containers at the same depth")
@@ -1272,7 +1283,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 MediaFormat.ZIP,
             ) or any(
                 path.suffix.casefold() != f".{item.format}"
-                for path in (src_path, dest_path)
+                for path in (src_path, dest_path, *previous_paths)
             ):
                 raise ContentError("unsupported_media_format")
             if item.dir != str(src_path.parent):
@@ -1283,7 +1294,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 )
             if (
                 await MediaItem.filter(
-                    Q(path=str(dest_path)) | Q(dir=str(dest_path.parent)), lib_id=lib_id
+                    Q(path__in=[str(path) for path in (dest_path, *previous_paths)])
+                    | Q(dir=str(dest_path.parent)),
+                    lib_id=lib_id,
                 )
                 .exclude(id=item.id)
                 .exists()
@@ -1296,7 +1309,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 _validate_reading_source,
                 item,
                 require_candidate=True,
-                previous_path=src_path,
+                previous_paths=(src_path, *previous_paths),
             )
             item.index_state = IndexState.PENDING
             item.index_error = None
@@ -1314,7 +1327,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def move_reading_directory(
-        cls, lib_id: int, src_path: Path, dest_path: Path
+        cls,
+        lib_id: int,
+        src_path: Path,
+        dest_path: Path,
+        *,
+        previous_paths: tuple[Path, ...] = (),
     ) -> list[MediaItem]:
         """Apply an observed work or chapter directory move within the same library.
 
@@ -1329,6 +1347,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             lib_id: The novel or comic library containing the moved directory.
             src_path: The absolute previous work or comic chapter directory.
             dest_path: The absolute new directory at the same depth in this library.
+            previous_paths: Other former directories in a continuous move chain,
+                excluding src_path. The default empty tuple handles a single move.
 
         Returns:
             Updated items with their original IDs and parents loaded, or an empty
@@ -1349,7 +1369,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             not root.is_absolute()
             or ".." in root.parts
             or src_path == dest_path
-            or (src_path.parent == root) != (dest_path.parent == root)
+            or any(
+                (path.parent == root) != (dest_path.parent == root)
+                for path in (src_path, *previous_paths)
+            )
             or any(
                 path == root
                 or not path.is_relative_to(root)
@@ -1361,7 +1384,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     )
                 )
                 or any(is_ignored_name(part) for part in path.relative_to(root).parts)
-                for path in (src_path, dest_path)
+                for path in (src_path, dest_path, *previous_paths)
             )
         ):
             raise ValueError(
@@ -1396,17 +1419,23 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 .exists()
             ):
                 raise ContentError("unsupported_layout")
-            occupied = await MediaItem.filter(
-                Q(path=str(dest_path))
-                | Q(path__startswith=f"{dest_path}/")
-                | Q(dir=str(dest_path))
-                | Q(dir__startswith=f"{dest_path}/"),
-                lib_id=lib_id,
-            ).exclude(id__in=by_id)
+            destinations = (dest_path, *previous_paths)
+            occupied_query = Q()
+            for path in destinations:
+                occupied_query |= (
+                    Q(path=str(path))
+                    | Q(path__startswith=f"{path}/")
+                    | Q(dir=str(path))
+                    | Q(dir__startswith=f"{path}/")
+                )
+            occupied = await MediaItem.filter(occupied_query, lib_id=lib_id).exclude(
+                id__in=by_id
+            )
             if any(
-                Path(item.path).is_relative_to(dest_path)
-                or Path(item.dir).is_relative_to(dest_path)
+                Path(item.path).is_relative_to(path)
+                or Path(item.dir).is_relative_to(path)
                 for item in occupied
+                for path in destinations
             ):
                 raise ContentError("ambiguous_layout")
             for item in items:
@@ -1433,7 +1462,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 item.index_state = IndexState.PENDING
                 item.index_error = None
             await to_thread(
-                _validate_reading_directory_move, items, src_path, dest_path
+                _validate_reading_directory_move,
+                items,
+                (src_path, *previous_paths),
+                dest_path,
             )
             async with in_transaction():
                 await MediaItem.bulk_update(

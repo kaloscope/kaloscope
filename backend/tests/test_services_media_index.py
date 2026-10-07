@@ -865,7 +865,10 @@ def test_ingest_missing_sibling(tmp_path):
     ],
 )
 @pytest.mark.parametrize("reverse", [False, True])
-def test_consume_file_move(tmp_path, monkeypatch, format, chapter, location, reverse):
+@pytest.mark.parametrize("chained", [False, True])
+def test_consume_file_move(
+    tmp_path, monkeypatch, format, chapter, location, reverse, chained
+):
     """Apply observed file moves before ingestion regardless of work task order.
 
     Args:
@@ -875,6 +878,7 @@ def test_consume_file_move(tmp_path, monkeypatch, format, chapter, location, rev
         chapter: Whether the file belongs to a comic collection.
         location: A rename, another container or another comic collection.
         reverse: Whether to consume the destination work's task first.
+        chained: Whether the body passes through an intermediate file path.
     """
 
     async def run():
@@ -919,14 +923,25 @@ def test_consume_file_move(tmp_path, monkeypatch, format, chapter, location, rev
                 )
             destination = directory / f"Renamed.{format.value.upper()}"
             body = source.path.read_bytes()
-            source.path.rename(destination)
+            previous = source.path
+            if chained:
+                intermediate = source.directory / f"Middle.{format}"
+                previous.rename(intermediate)
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(previous),
+                    dest_path=str(intermediate),
+                    event_type="moved",
+                )
+                previous = intermediate
+            previous.rename(destination)
             clock = [100.0]
             monkeypatch.setattr(media_events, "time", lambda: clock[0])
             monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
             monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
             await MediaEvent.create(
                 lib=lib,
-                src_path=str(source.path),
+                src_path=str(previous),
                 dest_path=str(destination),
                 event_type="moved",
             )
@@ -975,7 +990,8 @@ def test_consume_file_move(tmp_path, monkeypatch, format, chapter, location, rev
     ],
 )
 @pytest.mark.parametrize("reverse", [False, True])
-def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse):
+@pytest.mark.parametrize("chained", [False, True])
+def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse, chained):
     """Reconcile whole directories and chapters without duplicating old work paths.
 
     Args:
@@ -984,6 +1000,7 @@ def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse):
         format: The body format within the moved directory.
         scope: A work, collection, chapter, cross-collection or case-only rename.
         reverse: Whether the destination task is consumed before the source task.
+        chained: Whether the directory passes through an intermediate path.
     """
 
     async def run():
@@ -1040,14 +1057,26 @@ def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse):
                 for path in previous.rglob("*")
                 if path.is_file()
             }
-            previous.rename(destination)
+            latest = previous
+            if chained:
+                intermediate = previous.with_name("Middle")
+                previous.rename(intermediate)
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(previous),
+                    dest_path=str(intermediate),
+                    event_type="moved",
+                    is_directory=True,
+                )
+                latest = intermediate
+            latest.rename(destination)
             clock = [100.0]
             monkeypatch.setattr(media_events, "time", lambda: clock[0])
             monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
             monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
             await MediaEvent.create(
                 lib=lib,
-                src_path=str(previous),
+                src_path=str(latest),
                 dest_path=str(destination),
                 event_type="moved",
                 is_directory=True,
