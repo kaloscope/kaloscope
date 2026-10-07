@@ -173,6 +173,8 @@ async def delete_items(_, body: MediaDel) -> HTTPResponse:
     for id in body.ids:
         try:
             await MediaItemService.delete(int(id), body.local)
+        except ContentError as error:
+            raise _content_error(error, {}) from error
         except Exception:
             if len(body.ids) == 1:
                 raise

@@ -17,6 +17,7 @@ import pytest
 from filelock import Timeout
 from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
+from tortoise.expressions import Q
 from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
@@ -3385,6 +3386,635 @@ def test_companion_interrupted(tmp_path, monkeypatch):
                 item.id
             ]
             assert not _cache(item).parent.exists() and not source.directory.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("format", "scope"),
+    [(format, "work") for format in MediaFormat]
+    + [
+        (format, scope)
+        for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+        for scope in ("chapter", "last_chapter", "collection")
+    ],
+)
+@pytest.mark.parametrize("local", [False, True])
+def test_delete_reading(tmp_path, monkeypatch, format, scope, local):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=scope != "work")
+            work = source.parent_path or source.directory
+            novel = lib.lib_type == LibType.NOVEL
+            bodies = [
+                source.path / "1.png" if format == MediaFormat.DIR else source.path
+            ]
+            directories = [source.directory]
+            if scope in {"chapter", "collection"}:
+                other = work / "Other"
+                other.mkdir()
+                (other / "1.png").write_bytes(_PNG)
+                directories.append(other)
+                bodies.append(other / "1.png")
+            if source.parent_path is not None:
+                directories.append(work)
+            for directory in directories:
+                (directory / "notes.md").write_text("Keep me")
+                (directory / "cover.png").write_bytes(_PNG)
+                (directory / ("metadata.opf" if novel else "ComicInfo.xml")).write_text(
+                    '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                    '<metadata/><manifest><item id="cover" properties="cover-image" '
+                    'href="art/front.png" media-type="image/png"/></manifest></package>'
+                    if novel
+                    else "<ComicInfo><Title>Owned</Title></ComicInfo>"
+                )
+            if novel:
+                (source.directory / "art").mkdir()
+                (source.directory / "art/front.png").write_bytes(_PNG)
+                (source.directory / "unrelated.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            item = await MediaItem.get(path=str(source.path))
+            target = item.parent_id if scope == "collection" else item.id
+            assert target is not None
+            selected = await MediaItem.filter(Q(id=target) | Q(parent_id=target))
+            selected_ids = {row.id for row in selected}
+            selected_dirs = {Path(row.dir) for row in selected}
+            caches = [_cache(row).parent for row in selected if row.format is not None]
+            if scope == "collection":
+                await MediaItem.filter(id=item.id).update(visible=False)
+            before = await MediaItem.all().count()
+            files = {
+                path: path.read_bytes() for path in work.rglob("*") if path.is_file()
+            }
+            owned = {
+                path
+                for path in files
+                if any(path.is_relative_to(directory) for directory in selected_dirs)
+            }
+            owned -= {
+                path for path in owned if path.name in {"notes.md", "unrelated.png"}
+            }
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            history = await UserHistory.create(
+                user=user,
+                rel_id=item.parent_id or item.id,
+                rel_type=HistoryType.TEXT if novel else HistoryType.IMAGE,
+                locator={"chapter_item_id": item.id},
+            )
+            video = await UserHistory.create(
+                user=user, rel_id=item.id, rel_type=HistoryType.VIDEO
+            )
+            history_before = await UserHistory.all().values()
+            removed = []
+            main_thread = threading.get_ident()
+
+            def remove(path):
+                """Delete only files in a filesystem worker.
+
+                Args:
+                    path: The body or companion selected by the real deletion path.
+                """
+                assert threading.get_ident() != main_thread
+                assert path.is_file()
+                removed.append(path)
+                path.unlink()
+
+            recover = AsyncMock(side_effect=AssertionError("unexpected video recovery"))
+            monkeypatch.setattr("app.core.media.organizer.recover_organizing", recover)
+            monkeypatch.setattr(media_service, "delete_path", remove)
+            await MediaItemService.delete(target, local=local)
+            recover.assert_not_awaited()
+            assert Path(lib.dir).is_dir()
+            if local:
+                assert set(removed) == owned
+                selected_bodies = set(bodies) & owned
+                assert set(removed[: len(selected_bodies)]) == selected_bodies
+                assert await MediaItem.all().count() == before - len(selected_ids)
+                assert not await MediaItem.filter(id__in=selected_ids).exists()
+                assert not await UserHistory.filter(id=history.id).exists()
+                assert await UserHistory.filter(id=video.id).exists()
+                assert all(not cache.exists() for cache in caches)
+                for path, content in files.items():
+                    assert (
+                        not path.exists()
+                        if path in owned
+                        else path.read_bytes() == content
+                    )
+                if novel:
+                    assert not (source.directory / "art").exists()
+            else:
+                assert not removed and await MediaItem.all().count() == before
+                assert not await MediaItem.filter(
+                    id__in=selected_ids, visible=True
+                ).exists()
+                assert await UserHistory.all().values() == history_before
+                assert all(cache.is_dir() for cache in caches)
+                assert all(
+                    path.read_bytes() == content for path, content in files.items()
+                )
+                assert not await MediaItemService.ingest_reading_work(lib.id, work)
+                assert not await MediaItem.filter(
+                    id__in=selected_ids, visible=True
+                ).exists()
+            if scope in {"chapter", "last_chapter"}:
+                parent = await MediaItem.get(id=item.parent_id)
+                assert parent.index_state == (
+                    IndexState.READY if scope == "chapter" else IndexState.EMPTY
+                )
+                assert parent.extra is not None
+                assert parent.extra["content"]["chapter_count"] == int(
+                    scope == "chapter"
+                )
+                assert parent.visible == (local or scope == "chapter")
+            if local:
+                clock = [100.0]
+                monkeypatch.setattr(media_events, "time", lambda: clock[0])
+                monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+                monkeypatch.setattr(
+                    media_events, "notify_media_events", lambda _id: None
+                )
+                await MediaEvent.bulk_create(
+                    [
+                        MediaEvent(lib=lib, src_path=str(path), event_type="deleted")
+                        for path in removed
+                    ]
+                )
+                tasks = await coalesce_reading_events(lib.id)
+                assert len(tasks) == 1
+                task = tasks[0]
+                assert not await prepare_reading_event(task.id)
+                clock[0] += 2
+                assert await prepare_reading_event(task.id)
+                assert await media_watcher.consume_event(
+                    await MediaEvent.get(id=task.id).select_related("lib")
+                )
+                assert not await MediaEvent.exists()
+                assert await MediaItem.all().count() == before - len(selected_ids)
+                assert not await MediaItem.filter(id__in=selected_ids).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
+def test_delete_reading_shared_cover(tmp_path, monkeypatch, format):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format)
+            metadata = source.directory / (
+                "metadata.opf" if format == MediaFormat.TXT else "ComicInfo.xml"
+            )
+            metadata.write_text(
+                '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                '<metadata/><manifest><item id="cover" properties="cover-image" '
+                'href="custom.png" media-type="image/png"/></manifest></package>'
+                if format == MediaFormat.TXT
+                else "<ComicInfo/>"
+            )
+            preserved = {"Other.nfo": b"<movie/>", "cover.png": _PNG}
+            if format == MediaFormat.TXT:
+                preserved["custom.png"] = _PNG
+            for name, content in preserved.items():
+                (source.directory / name).write_bytes(content)
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, source.directory
+            )
+            item = await MediaItem.get(path=str(source.path))
+            monkeypatch.setattr(
+                media_service, "delete_path", lambda path: path.unlink()
+            )
+            await MediaItemService.delete(item.id, local=True)
+            assert not await MediaItem.exists()
+            assert not metadata.exists() and not _cache(item).parent.exists()
+            assert {
+                path.name: path.read_bytes() for path in source.directory.iterdir()
+            } == preserved
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+@pytest.mark.parametrize("trash", [False, True])
+def test_delete_empty_container(tmp_path, monkeypatch, format, trash):
+    async def run():
+        async with _database():
+            from app.utils import disk
+
+            lib, source = await _source(tmp_path, format or MediaFormat.DIR)
+            if format is None:
+                (source.path / "1.png").unlink()
+                item = await MediaItem.create(
+                    lib=lib,
+                    path=str(source.path),
+                    dir=str(source.directory),
+                    name="Empty",
+                    format=None,
+                )
+            else:
+                await MediaItemService.ingest_reading_work(lib.id, source.directory)
+                item = await MediaItem.get(path=str(source.path))
+            metadata = source.directory / (
+                "metadata.opf" if lib.lib_type == LibType.NOVEL else "ComicInfo.xml"
+            )
+            metadata.write_text("<metadata/>")
+            before = {
+                path.name: path.read_bytes()
+                for path in source.directory.iterdir()
+                if path.is_file()
+            }
+            recycled = tmp_path / "Trash"
+            recycled.mkdir()
+
+            def recycle(path):
+                """Emulate file recycling inside the isolated test directory.
+
+                Args:
+                    path: The body or companion passed to the shared trash helper.
+                """
+                assert path.is_file()
+                path.rename(recycled / path.name)
+
+            monkeypatch.setattr(
+                KaloscopeConfig,
+                "get",
+                lambda: SimpleNamespace(filesystem_trash_mode=trash),
+            )
+            monkeypatch.setattr(disk, "send2trash", recycle)
+            await MediaItemService.delete(item.id, local=True)
+            assert not await MediaItem.exists()
+            assert not source.directory.exists() and Path(lib.dir).is_dir()
+            assert {path.name: path.read_bytes() for path in recycled.iterdir()} == (
+                before if trash else {}
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["body", "companion", "cache", "database", "cancel"])
+def test_delete_reading_retry(tmp_path, monkeypatch, stage):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.directory.parent
+            metadata = source.directory / "ComicInfo.xml"
+            metadata.write_text("<ComicInfo/>")
+            (source.path / "2.png").write_bytes(_PNG)
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            item = await MediaItem.get(path=str(source.path))
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_id=item.parent_id,
+                rel_type=HistoryType.IMAGE,
+                locator={"chapter_item_id": item.id},
+            )
+            histories = await UserHistory.all().values()
+            before = await MediaItem.all().values()
+            delete_query = QuerySet.delete
+            write = media_service.write_in_thread
+
+            def remove(path):
+                """Fail one selected file after earlier writes have completed.
+
+                Args:
+                    path: The selected body or companion.
+
+                Raises:
+                    PermissionError: At the requested body or companion stage.
+                """
+                if path.name == (
+                    "2.png"
+                    if stage == "body"
+                    else "ComicInfo.xml"
+                    if stage == "companion"
+                    else ""
+                ):
+                    raise PermissionError("denied")
+                path.unlink()
+
+            async def interrupted(function, *args, **kwargs):
+                """Interrupt after the writer has finished selected file deletion.
+
+                Args:
+                    function: The filesystem worker being awaited.
+                    *args: Its positional arguments.
+                    **kwargs: Its keyword arguments.
+
+                Returns:
+                    The filesystem worker result unless cancellation is injected.
+
+                Raises:
+                    asyncio.CancelledError: After media files have been removed.
+                """
+                result = await write(function, *args, **kwargs)
+                if function is media_service._delete_reading_files:
+                    raise asyncio.CancelledError()
+                return result
+
+            def fail_cache(_ids):
+                """Keep cache owners available for retry.
+
+                Args:
+                    _ids: The selected cache owner IDs.
+
+                Raises:
+                    ContentError: For the simulated cache failure.
+                """
+                raise ContentError("content_not_ready")
+
+            def fail_database(query):
+                """Fail media deletion after history changes enter the transaction.
+
+                Args:
+                    query: The deletion query under test.
+
+                Returns:
+                    The history deletion query.
+
+                Raises:
+                    RuntimeError: When removing media records.
+                """
+                if query.model == MediaItem:
+                    raise RuntimeError("database unavailable")
+                return delete_query(query)
+
+            monkeypatch.setattr(media_service, "delete_path", remove)
+            with monkeypatch.context() as patch:
+                if stage == "cache":
+                    patch.setattr(media_service, "_remove_reading_caches", fail_cache)
+                elif stage == "database":
+                    patch.setattr(QuerySet, "delete", fail_database)
+                elif stage == "cancel":
+                    patch.setattr(media_service, "write_in_thread", interrupted)
+                with pytest.raises(
+                    asyncio.CancelledError
+                    if stage == "cancel"
+                    else RuntimeError
+                    if stage == "database"
+                    else ContentError
+                ):
+                    await MediaItemService.delete(item.id, local=True)
+            assert await MediaItem.all().values() == before
+            assert await UserHistory.all().values() == histories
+            if stage == "body":
+                assert metadata.is_file() and (source.directory / "cover.png").is_file()
+            monkeypatch.setattr(
+                media_service, "delete_path", lambda path: path.unlink()
+            )
+            await MediaItemService.delete(item.id, local=True)
+            assert not await MediaItem.filter(id=item.id).exists()
+            assert not await UserHistory.exists() and not _cache(item).parent.exists()
+            assert not source.directory.exists()
+            parent = await MediaItem.get(id=item.parent_id)
+            assert parent.index_state == IndexState.EMPTY
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local", [False, True])
+@pytest.mark.parametrize("change", ["new_child", "moved_child", "library"])
+def test_delete_reading_scope(tmp_path, monkeypatch, local, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
+            work = source.directory.parent
+            metadata = work / "ComicInfo.xml"
+            metadata.write_text("<ComicInfo><Title>Collection</Title></ComicInfo>")
+            await MediaItemService.ingest_reading_work(lib.id, work)
+            parent = await MediaItem.get(path=str(work))
+            child = await MediaItem.get(path=str(source.path))
+            waiting = asyncio.Event()
+
+            def waiting_lock(directory):
+                """Notify the test when deletion has captured the requested IDs.
+
+                Args:
+                    directory: The library lock path.
+
+                Returns:
+                    The real library lock.
+                """
+                waiting.set()
+                return library_lock(directory)
+
+            monkeypatch.setattr(media_service, "library_lock", waiting_lock)
+            monkeypatch.setattr(
+                media_service, "delete_path", lambda path: path.unlink()
+            )
+            extra = None
+            current = source.path
+            async with library_lock(lib.dir):
+                task = asyncio.create_task(
+                    MediaItemService.delete(parent.id, local=local)
+                )
+                try:
+                    await asyncio.wait_for(waiting.wait(), timeout=3)
+                    assert not task.done()
+                    if change == "new_child":
+                        other = work / "New"
+                        other.mkdir()
+                        (other / "1.png").write_bytes(_PNG)
+                        extra = await MediaItem.create(
+                            lib=lib,
+                            parent=parent,
+                            name="New",
+                            path=str(other),
+                            dir=str(other),
+                            format=MediaFormat.DIR,
+                            index_state=IndexState.READY,
+                        )
+                    elif change == "moved_child":
+                        other = work.with_name("Other")
+                        other.mkdir()
+                        (other / "ComicInfo.xml").write_text("<ComicInfo/>")
+                        extra = await MediaItem.create(
+                            lib=lib,
+                            name="Other",
+                            path=str(other),
+                            dir=str(other),
+                            format=None,
+                        )
+                        current = other / source.path.name
+                        source.path.rename(current)
+                        await MediaItem.filter(id=child.id).update(
+                            parent_id=extra.id, path=str(current), dir=str(current)
+                        )
+                    else:
+                        await MediaLib.filter(id=lib.id).update(
+                            dir=str(work.with_name("Changed"))
+                        )
+                except BaseException:
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                    raise
+            if change == "library":
+                with pytest.raises(ContentError, match="content_changed"):
+                    await task
+                assert (current / "1.png").read_bytes() == _PNG and metadata.exists()
+                assert (await MediaItem.get(id=child.id)).visible
+                return
+            await asyncio.wait_for(task, timeout=3)
+            assert extra is not None and await MediaItem.filter(id=extra.id).exists()
+            if local:
+                assert not await MediaItem.filter(id=child.id).exists()
+                assert not current.exists()
+            else:
+                assert not (await MediaItem.get(id=child.id)).visible
+                assert (current / "1.png").read_bytes() == _PNG
+            if change == "new_child":
+                saved = await MediaItem.get(id=parent.id)
+                assert saved.visible and saved.extra is not None
+                assert saved.extra["content"]["chapter_count"] == 1
+                assert metadata.exists() and (work / "New/1.png").read_bytes() == _PNG
+            else:
+                assert (Path(extra.dir) / "ComicInfo.xml").exists()
+                saved = await MediaItem.get(id=extra.id)
+                assert saved.index_state == IndexState.EMPTY
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "body_link",
+        "metadata_link",
+        "directory_link",
+        "replacement",
+        "foreign_child",
+        "unregistered_chapter",
+    ],
+)
+def test_delete_reading_guard(tmp_path, monkeypatch, problem):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            metadata = source.directory / "ComicInfo.xml"
+            metadata.write_text("<ComicInfo/>")
+            outside = tmp_path / "Outside"
+            outside.mkdir()
+            sentinel = outside / "keep"
+            sentinel.write_bytes(b"Keep me")
+            if problem == "body_link":
+                (source.directory / "2.png").symlink_to(sentinel)
+            elif problem == "metadata_link":
+                metadata.unlink()
+                metadata.symlink_to(sentinel)
+            elif problem == "directory_link":
+                source.directory.rename(outside / "Source")
+                source.directory.symlink_to(
+                    outside / "Source", target_is_directory=True
+                )
+            elif problem == "replacement":
+                (source.directory / "New.cbz").write_bytes(b"new body")
+            elif problem == "foreign_child":
+                foreign = await MediaLib.create(
+                    name="Foreign", dir=str(outside), lib_type=LibType.COMIC, priority=2
+                )
+                await MediaItem.create(
+                    lib=foreign,
+                    parent=item,
+                    path=str(outside),
+                    dir=str(outside),
+                    name="Foreign",
+                    format=MediaFormat.DIR,
+                )
+            else:
+                chapter = source.directory / "New"
+                chapter.mkdir()
+                (chapter / "1.png").write_bytes(_PNG)
+            before = await MediaItem.all().values()
+            files = {
+                path: path.read_bytes()
+                for path in source.directory.rglob("*")
+                if path.is_file()
+            }
+
+            def refuse(_path):
+                """Reject any write before ownership checks have succeeded.
+
+                Args:
+                    _path: The unexpected deletion candidate.
+
+                Raises:
+                    AssertionError: For every attempted write.
+                """
+                raise AssertionError("unexpected deletion")
+
+            monkeypatch.setattr(media_service, "delete_path", refuse)
+            with pytest.raises(ContentError):
+                await MediaItemService.delete(item.id, local=True)
+            assert await MediaItem.all().values() == before
+            assert all(path.read_bytes() == content for path, content in files.items())
+            assert sentinel.read_bytes() == b"Keep me" and _cache(item).is_dir()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change", ["new_page", "body_restore", "directory", "database"]
+)
+def test_delete_reading_changed(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.DIR)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            item = await MediaItem.get(path=str(source.path))
+            metadata = source.directory / "ComicInfo.xml"
+            metadata.write_text("<ComicInfo/>")
+            write = media_service.write_in_thread
+
+            def remove(path):
+                """Change the source immediately after deleting its original page.
+
+                Args:
+                    path: The selected file being removed.
+                """
+                path.unlink()
+                if path.name != "1.png":
+                    return
+                if change == "new_page":
+                    (source.directory / "2.png").write_bytes(_PNG)
+                elif change == "body_restore":
+                    path.write_bytes(_PNG)
+                elif change == "directory":
+                    source.directory.rename(source.directory.with_name("Previous"))
+                    source.directory.mkdir()
+                    metadata.write_text("New metadata")
+
+            async def changed(function, *args, **kwargs):
+                """Change database ownership after the filesystem writer returns.
+
+                Args:
+                    function: The completed filesystem worker.
+                    *args: Its positional arguments.
+                    **kwargs: Its keyword arguments.
+
+                Returns:
+                    The original filesystem result.
+                """
+                result = await write(function, *args, **kwargs)
+                if function is media_service._delete_reading_files:
+                    await MediaItem.filter(id=item.id).update(
+                        path=str(source.path.with_name("Moved")),
+                        dir=str(source.path.with_name("Moved")),
+                    )
+                return result
+
+            monkeypatch.setattr(media_service, "delete_path", remove)
+            if change == "database":
+                monkeypatch.setattr(media_service, "write_in_thread", changed)
+            with pytest.raises(ContentError):
+                await MediaItemService.delete(item.id, local=True)
+            assert await MediaItem.filter(id=item.id).exists()
+            if change != "database":
+                assert metadata.is_file() and _cache(item).is_dir()
 
     asyncio.run(run())
 

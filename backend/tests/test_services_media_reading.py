@@ -1094,6 +1094,104 @@ async def _client(user: UserInfo) -> AsyncGenerator[httpx.AsyncClient]:
 
 
 @pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_delete_reading_http(tmp_path, monkeypatch, format):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            directory = Path(item.dir)
+            novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
+            xml = directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            xml.write_bytes(_opf("Owned") if novel else b"<ComicInfo/>")
+            (directory / "cover.png").write_bytes(_PNG)
+            (directory / "notes.md").write_text("Keep me")
+            monkeypatch.setattr(
+                media_service, "delete_path", lambda path: path.unlink()
+            )
+            user = _user()
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            async with _client(user) as client:
+                response = await client.post(
+                    "/_api/media/delete", json={"ids": [item.id], "local": True}
+                )
+                assert response.status_code == 204, response.text
+                assert not await MediaItem.filter(id=item.id).exists()
+                assert not xml.exists() and not (directory / "cover.png").exists()
+                assert (directory / "notes.md").read_text() == "Keep me"
+                assert (await client.get(f"/_api/media/{item.id}")).status_code == 404
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem", ["permission", "unauthenticated", "changed", "unavailable", "partial"]
+)
+def test_delete_reading_http_error(tmp_path, monkeypatch, problem):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.DIR)
+            directory = Path(item.dir)
+            metadata = directory / "ComicInfo.xml"
+            metadata.write_text("<ComicInfo/>")
+            user = _user([item.lib_id] if problem == "permission" else None)
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            if problem == "changed":
+                (directory / "New.cbz").write_bytes(b"new body")
+            elif problem == "unavailable":
+                directory.rename(directory.with_name("Offline"))
+                directory.symlink_to(
+                    directory.with_name("Offline"), target_is_directory=True
+                )
+            else:
+                (directory / "2.png").write_bytes(_PNG)
+
+            def fail(path):
+                """Allow one body deletion before a controlled I/O failure.
+
+                Args:
+                    path: The current selected file.
+
+                Raises:
+                    PermissionError: When the second page is reached.
+                """
+                assert problem == "partial"
+                if path.name == "2.png":
+                    raise PermissionError("denied")
+                path.unlink()
+
+            monkeypatch.setattr(media_service, "delete_path", fail)
+            async with _client(user) as client:
+                if problem == "unauthenticated":
+                    client.headers.clear()
+                response = await client.post(
+                    "/_api/media/delete", json={"ids": [item.id], "local": True}
+                )
+                status = {
+                    "permission": 403,
+                    "unauthenticated": 401,
+                    "changed": 409,
+                    "unavailable": 503,
+                    "partial": 503,
+                }[problem]
+                assert response.status_code == status, response.text
+                if problem in {"changed", "unavailable", "partial"}:
+                    assert response.json()["message"] == (
+                        "content_changed"
+                        if problem == "changed"
+                        else "media_source_unavailable"
+                    )
+                assert await MediaItem.filter(id=item.id).exists()
+                assert metadata.exists()
+                if problem != "partial":
+                    assert (directory / "1.png").read_bytes() == _PNG
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_reading_http(tmp_path, format):
     async def run():
         async with _database():
