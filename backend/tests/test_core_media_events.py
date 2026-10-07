@@ -1274,13 +1274,14 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
         async with _database():
             lib, body, task = await _pending(tmp_path)
             if change == "move":
-                destination = body.with_name("Moved.txt")
-                body.rename(destination)
+                destination = body.parent.with_name("Moved")
+                body.parent.rename(destination)
                 await MediaEvent.create(
                     lib=lib,
-                    src_path=str(body),
+                    src_path=str(body.parent),
                     dest_path=str(destination),
                     event_type="moved",
+                    is_directory=True,
                 )
                 task = (await coalesce_reading_events(lib.id))[0]
             task = await _ready(task, moment)
@@ -1406,6 +1407,211 @@ def test_consume_reading_page_move(tmp_path, moment, cross_chapter):
             assert all(item.index_version != before[item.id] for item in after)
             assert all(item.index_state == IndexState.READY for item in after)
             assert destination.is_file() and not page.exists()
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("temporary", ["Book.tmp", ".Book.txt"])
+def test_consume_file_publish(tmp_path, moment, existing, temporary):
+    """Publish temporary bodies without assigning an existing item a new identity.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        existing: Whether a previously indexed body is being replaced.
+        temporary: A temporary or hidden source name used by the external writer.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            first = None
+            if existing:
+                assert await consume_event(await _ready(task, moment))
+                first = await MediaItem.get(lib=lib)
+            source = body.with_name(temporary)
+            source.write_text("Published body")
+            source.replace(body)
+            await MediaEvent.create(
+                lib=lib, src_path=str(source), dest_path=str(body), event_type="moved"
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            current = await MediaItem.get(lib=lib)
+            assert current.path == str(body) and current.index_state == IndexState.READY
+            if first is not None:
+                assert current.id == first.id
+                assert current.index_version != first.index_version
+            assert body.read_text() == "Published body"
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("problem", ["reused", "occupied", "format", "source_link"])
+def test_consume_file_conflict(tmp_path, moment, problem):
+    """Persist retry state instead of transferring an ambiguous body identity.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        problem: The source reuse, target ownership, format or symlink conflict.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            destination = body.with_name(
+                "Moved.epub" if problem == "format" else "Moved.txt"
+            )
+            body.rename(destination)
+            if problem == "reused":
+                body.write_text("Another body")
+            elif problem == "occupied":
+                await MediaItem.create(
+                    lib=lib,
+                    path=str(destination),
+                    dir=str(body.parent),
+                    name="Other",
+                    format=MediaFormat.TXT,
+                    visible=False,
+                )
+            elif problem == "source_link":
+                body.symlink_to(destination)
+            before = await MediaItem.all().values()
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(body),
+                dest_path=str(destination),
+                event_type="moved",
+            )
+            task = (await coalesce_reading_events(lib.id))[0]
+            assert await consume_event(await _ready(task, moment))
+            assert await MediaItem.all().values() == before
+            payload = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=task.id)).payload
+            )
+            assert payload.state == "deferred" and payload.attempts == 1
+            assert payload.not_before == moment[0] + 2
+            assert (
+                payload.error_code
+                == {
+                    "reused": "ambiguous_layout",
+                    "occupied": "ambiguous_layout",
+                    "format": "unsupported_media_format",
+                    "source_link": "content_changed",
+                }[problem]
+            )
+            assert len(payload.moves) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_consume_move_chain(tmp_path, moment, directory, reverse):
+    """Keep linked move facts across work tasks without registering a second item.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        moment: The controllable task clock.
+        directory: Whether the first move relocates the whole work directory.
+        reverse: Whether the last work's task runs before the first work's task.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            before = await MediaItem.all().values()
+            middle = Path(lib.dir) / "Middle" / body.name
+            destination = Path(lib.dir) / "Last" / body.name
+            destination.parent.mkdir()
+            if directory:
+                body.parent.rename(middle.parent)
+            else:
+                middle.parent.mkdir()
+                body.rename(middle)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(body.parent if directory else body),
+                dest_path=str(middle.parent if directory else middle),
+                event_type="moved",
+                is_directory=directory,
+            )
+            middle.rename(destination)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(middle),
+                dest_path=str(destination),
+                event_type="moved",
+            )
+            tasks = await coalesce_reading_events(lib.id)
+            assert len(tasks) == 3
+            if reverse:
+                tasks.reverse()
+            for task in tasks:
+                task = await _ready(task, moment)
+                assert not await consume_event(task)
+                assert (await MediaEvent.get(id=task.id)).payload == task.payload
+            assert await MediaItem.all().values() == before
+            assert await MediaEvent.all().count() == 3
+            assert destination.read_text() == "Body"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_consume_move_interrupted(tmp_path, monkeypatch, moment, cancel):
+    """Resume a rebound file after interruption without rebinding or replacing its ID.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture interrupting ingestion after the move has committed.
+        moment: The controllable task clock.
+        cancel: Whether to simulate consumer cancellation instead of an exception.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            item = await MediaItem.get(lib=lib)
+            destination = body.with_name("Moved.txt")
+            body.rename(destination)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(body),
+                dest_path=str(destination),
+                event_type="moved",
+            )
+            task = await _ready((await coalesce_reading_events(lib.id))[0], moment)
+            failure = asyncio.CancelledError if cancel else RuntimeError
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    MediaItemService,
+                    "ingest_reading_work",
+                    AsyncMock(side_effect=failure),
+                )
+                with pytest.raises(failure):
+                    await consume_event(task)
+            moved = await MediaItem.get(id=item.id)
+            assert (
+                moved.path == str(destination)
+                and moved.index_state == IndexState.PENDING
+            )
+            assert moved.index_version == item.index_version
+            assert (await MediaEvent.get(id=task.id)).payload == task.payload
+            assert await consume_event(task)
+            current = await MediaItem.get(id=item.id)
+            assert (
+                current.path == str(destination)
+                and current.index_state == IndexState.READY
+            )
+            assert await MediaItem.all().count() == 1
             assert not await MediaEvent.exists()
 
     asyncio.run(run())

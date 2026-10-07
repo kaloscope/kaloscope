@@ -42,7 +42,11 @@ from app.core.media.events import (
     prepare_reading_event,
 )
 from app.core.media.handlers.base import MediaPathInfo, get_handler
-from app.core.media.handlers.reading import is_ignored_name, list_source_entries
+from app.core.media.handlers.reading import (
+    ReadingSource,
+    is_ignored_name,
+    list_source_entries,
+)
 from app.core.media.organizer import (
     OrganizeDeferredError,
     OrganizePendingError,
@@ -655,7 +659,7 @@ async def consume_event(event: MediaEvent) -> bool:
     """Coalesce or ingest reading events and consume video events under their lock.
 
     Reading services manage their own locks. Execute only the prepared task version;
-    body and directory moves wait for identity reconciliation. For video,
+    directory moves and move chains wait for identity reconciliation. For video,
     recover organization and persist ingest work under the lock, then run workflows
     after releasing it, saving progress after each successful trigger.
 
@@ -690,17 +694,8 @@ async def consume_event(event: MediaEvent) -> bool:
         if current is None or current.event_type != "reconcile":
             return False
         payload = ReadingReconcile.model_validate(current.payload)
-        body_suffixes = (
-            (".txt", ".epub") if lib.lib_type == LibType.NOVEL else (".cbz", ".zip")
-        )
         if (
             _reading_event_identity(current) != _reading_event_identity(event)
-            or any(
-                move.is_directory
-                or Path(move.src_path).suffix.casefold() in body_suffixes
-                or Path(move.dest_path).suffix.casefold() in body_suffixes
-                for move in payload.moves
-            )
             or payload.state == "failed"
             or payload.observed_snapshot is None
             or payload.not_before is None
@@ -719,6 +714,8 @@ async def consume_event(event: MediaEvent) -> bool:
             return False
         failure = None
         try:
+            if not await _handle_reading_moves(event, payload):
+                return False
             issues = await MediaItemService.ingest_reading_work(
                 lib.id,
                 Path(event.src_path),
@@ -757,6 +754,81 @@ async def consume_event(event: MediaEvent) -> bool:
         event.payload = {"bootparams": pending[index + 1 :], "organize_ids": []}
         await event.save(update_fields=["payload"])
     await event.delete()
+    return True
+
+
+async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) -> bool:
+    """Apply an isolated body-file move before registering destination sources.
+
+    The serial consumer calls this after checking its prepared task version.
+    Directory moves and linked moves remain pending until their complete sequence
+    can be reconciled. A move repeated in both work tasks is the same operation.
+    Unregistered temporary files can publish or replace bodies without transferring
+    another item's identity. This step never moves files or removes old companions.
+
+    Args:
+        event: The prepared task with its current reading library loaded.
+        payload: The task scopes and original filesystem move facts.
+
+    Returns:
+        True if ingestion can continue after handling any file move; False if
+        directory moves, connected moves or unsupported boundaries need reconciliation.
+
+    Raises:
+        ContentError: If source ownership, layout or destination validation fails.
+        ValueError: If a saved task payload or move path is invalid.
+    """
+    suffixes = (
+        (".txt", ".epub") if event.lib.lib_type == LibType.NOVEL else (".cbz", ".zip")
+    )
+    moves = [
+        move
+        for move in payload.moves
+        if move.is_directory
+        or Path(move.src_path).suffix.casefold() in suffixes
+        or Path(move.dest_path).suffix.casefold() in suffixes
+    ]
+    if not moves:
+        return True
+    if len(moves) != 1 or moves[0].is_directory:
+        return False
+    move = moves[0]
+    root = Path(event.lib.dir)
+    source, destination = Path(move.src_path), Path(move.dest_path)
+    if any(
+        not path.is_relative_to(root) or ".." in path.parts
+        for path in (source, destination)
+    ):
+        return False
+    depth = len(source.relative_to(root).parts)
+    if depth != len(destination.relative_to(root).parts) or depth not in (
+        (2,) if event.lib.lib_type == LibType.NOVEL else (2, 3)
+    ):
+        return False
+    # a later leg must not register a new ID while an earlier leg owns the body
+    for pending in await MediaEvent.filter(lib_id=event.lib_id, event_type="reconcile"):
+        for other in ReadingReconcile.model_validate(pending.payload).moves:
+            if other.event_id == move.event_id:
+                if other != move:
+                    raise ValueError("conflicting reading move records")
+                continue
+            if any(
+                path == Path(endpoint)
+                or (other.is_directory and path.is_relative_to(endpoint))
+                for path in (source, destination)
+                for endpoint in (other.src_path, other.dest_path)
+            ):
+                return False
+    item = await MediaItem.get_or_none(lib_id=event.lib_id, path=str(source))
+    if item is not None and source != destination:
+        if (
+            item.parent_id is not None
+            and source.parent.parent != destination.parent.parent
+        ):
+            await MediaItemService.create_reading(
+                event.lib_id, ReadingSource(destination.parent.parent, None)
+            )
+        await MediaItemService.move_reading_file(event.lib_id, source, destination)
     return True
 
 

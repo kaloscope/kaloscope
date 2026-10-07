@@ -846,6 +846,120 @@ def test_ingest_missing_sibling(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("format", "chapter", "location"),
+    [
+        (format, False, location)
+        for format in (
+            MediaFormat.TXT,
+            MediaFormat.EPUB,
+            MediaFormat.CBZ,
+            MediaFormat.ZIP,
+        )
+        for location in ("rename", "container")
+    ]
+    + [
+        (format, True, location)
+        for format in (MediaFormat.CBZ, MediaFormat.ZIP)
+        for location in ("rename", "container", "collection")
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_consume_file_move(tmp_path, monkeypatch, format, chapter, location, reverse):
+    """Apply observed file moves before ingestion regardless of work task order.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture controlling event time and notifications.
+        format: The body file format whose identity must survive the move.
+        chapter: Whether the file belongs to a comic collection.
+        location: A rename, another container or another comic collection.
+        reverse: Whether to consume the destination work's task first.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            novel = lib.lib_type == LibType.NOVEL
+            metadata = source.directory / ("metadata.opf" if novel else "ComicInfo.xml")
+            xml = (
+                '<package xmlns="http://www.idpf.org/2007/opf"><metadata '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                "<dc:title>Original</dc:title></metadata></package>"
+                if novel
+                else "<ComicInfo><Title>Original</Title></ComicInfo>"
+            )
+            metadata.write_text(xml)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            first = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=first.id).update(visible=False)
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.TEXT if novel else HistoryType.IMAGE,
+                rel_id=first.parent_id or first.id,
+                percentage=25,
+                locator={"chapter_item_id": first.id, "version": first.index_version},
+            )
+            history = await UserHistory.all().values()
+            if location == "rename":
+                directory = source.directory
+            elif location == "container":
+                directory = source.directory.with_name("Moved")
+                directory.mkdir()
+            else:
+                directory = work.with_name("Other") / "Moved"
+                directory.mkdir(parents=True)
+            if location != "rename":
+                (directory / metadata.name).write_text(
+                    xml.replace("Original", "Current")
+                )
+            destination = directory / f"Renamed.{format.value.upper()}"
+            body = source.path.read_bytes()
+            source.path.rename(destination)
+            clock = [100.0]
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(source.path),
+                dest_path=str(destination),
+                event_type="moved",
+            )
+            tasks = await coalesce_reading_events(lib.id)
+            if reverse:
+                tasks.reverse()
+            for task in tasks:
+                assert not await prepare_reading_event(task.id)
+                clock[0] += 2
+                assert await prepare_reading_event(task.id)
+                prepared = await MediaEvent.get(id=task.id).select_related("lib")
+                assert await media_watcher.consume_event(prepared)
+                assert not await MediaEvent.filter(id=task.id).exists()
+            current = await MediaItem.get(id=first.id)
+            assert current.path == str(destination) and current.dir == str(directory)
+            assert current.index_state == IndexState.READY and not current.visible
+            assert current.index_version != first.index_version
+            assert current.title == ("Original" if location == "rename" else "Current")
+            if location == "collection":
+                parent = await MediaItem.get(id=current.parent_id)
+                assert parent.path == str(directory.parent)
+                assert current.parent_id != first.parent_id
+            else:
+                assert current.parent_id == first.parent_id
+            assert await MediaItem.filter(format__isnull=False).count() == 1
+            assert await UserHistory.all().values() == history
+            assert metadata.read_text() == xml
+            assert destination.read_bytes() == body
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
 def test_ingest_empty_scope(tmp_path):
     async def run():
         async with _database():
