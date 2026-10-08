@@ -20,9 +20,9 @@ from watchdog.events import FileCreatedEvent, FileMovedEvent
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
 from app.core.flow.context import Context
-from app.core.flow.nodes.nfo.episode import EpisodeNode
-from app.core.flow.nodes.nfo.movie import MovieNode
-from app.core.flow.nodes.nfo.tvshow import TVShowNode
+from app.core.flow.nodes.metadata.episode import EpisodeNode
+from app.core.flow.nodes.metadata.movie import MovieNode
+from app.core.flow.nodes.metadata.tvshow import TVShowNode
 from app.core.media import organizer, shelver, watcher
 from app.core.media.coordination import library_lock, notify_media_events
 from app.core.media.handlers.base import get_handler

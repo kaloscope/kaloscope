@@ -709,6 +709,7 @@
         "movie": "Movie",
         "tv_show": "TV Show",
         "episode": "Episode",
+        "reading": "Reading",
         "schedule_start": "Start",
         "schedule_end": "End",
         "condition": "Condition",

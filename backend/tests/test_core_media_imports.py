@@ -1,4 +1,4 @@
-"""Unit tests for independent media and NFO module imports."""
+"""Unit tests for independent media and metadata node imports."""
 
 import subprocess
 import sys
@@ -12,7 +12,7 @@ import pytest
     [
         "app.services.media",
         "app.core.media.shelver",
-        "app.core.flow.nodes.nfo",
+        "app.core.flow.nodes.metadata",
         "app.core.media.handlers.reading",
         "app.core.media.common",
         "app.core.media.text",

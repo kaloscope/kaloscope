@@ -3538,6 +3538,28 @@ def test_auto_metadata_recovery(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("state", [None, *IndexState])
+def test_metadata_without_index(tmp_path, state):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            version = None if state is None else "0" * 64
+            await MediaItem.filter(id=item.id).update(
+                index_state=state, index_version=version
+            )
+            assert not (tmp_path / "cache" / "media_index").exists()
+            assert await MediaItemService.save_metadata(item.id, {"title": "Automatic"})
+            current = await MediaItem.get(id=item.id)
+            assert current.title == "Automatic"
+            assert current.index_state == state and current.index_version == version
+            metadata = parse_opf((Path(item.dir) / "metadata.opf").read_bytes())
+            assert metadata.data.title == "Automatic"
+            assert not (tmp_path / "cache" / "media_index").exists()
+            assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_save_metadata_http(tmp_path, format):
     async def run():

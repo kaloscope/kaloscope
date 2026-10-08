@@ -1,0 +1,23 @@
+[
+  {
+    "title": "",
+    "plot": "",
+    "rating": 9.0,
+    "year": 1999,
+    "month": 1,
+    "day": 1,
+    "authors": [""],
+    "illustrators": [""],
+    "publisher": "",
+    "language": "",
+    "isbn": "",
+    "series": "",
+    "number": "1", // OPF: series index; ComicInfo: issue number
+    "volume": "", // ComicInfo
+    "genres": [""],
+    "tags": [""], // ComicInfo
+    "page_count": null, // ComicInfo
+    "black_and_white": null, // ComicInfo
+    "cover": null // OPF: { "href": "cover.jpg" }; ComicInfo: { "page": 0 }
+  }
+]

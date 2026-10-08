@@ -1,3 +1,5 @@
+"""Workflow nodes for video and reading metadata output."""
+
 from app.core.flow.nodes.base import Node
 from app.utils.importer import import_subclasses
 

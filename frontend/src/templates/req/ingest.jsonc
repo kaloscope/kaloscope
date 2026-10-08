@@ -1,10 +1,15 @@
 {
+  "item_id": 1,
   "item_path": "/../Movie(2020).mp4",
   "item_name": "Movie(2020)",
+  "item_role": null, // book | collection | chapter
+  "lib_type": "movie", // movie | tv_show | novel | comic
   "nfo_path": "/../Movie(2020).nfo",
   "nfo_type": "movie", // movie | tvshow | episode
   "language": "en-US",
   "title": "Movie",
+  "series_title": null,
+  "number": null,
   "year": 2020,
   "season": null,
   "episode": null,

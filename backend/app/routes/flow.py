@@ -9,8 +9,13 @@ from tortoise.expressions import Q
 from app.core.constants import APP_NAME
 from app.core.cookiejar import SQLiteCookieJar
 from app.core.decorators import authorize
-from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeException
-from app.core.flow.context import AUTH_KEY
+from app.core.exceptions import (
+    BadRequestException,
+    ErrorCode,
+    ForbiddenException,
+    KaloscopeException,
+)
+from app.core.flow.context import AUTH_KEY, MANUAL_KEY
 from app.core.flow.engine import FlowEngine
 from app.core.flow.nodes.base import Node, start_config
 from app.models.base import IDs
@@ -21,6 +26,7 @@ from app.models.flow import (
     FlowTemplate,
     FlowVariable,
     GraphBasics,
+    GraphCategory,
     GraphImport,
     GraphQuery,
     GraphState,
@@ -212,6 +218,11 @@ async def execute_graph(request: Request, id: int) -> HTTPResponse:
     """Execute the flow graph."""
     engine: FlowEngine = request.app.ctx.flow_engine
     bootparams: dict = request.json or {}
+    if await FlowGraph.filter(id=id, category=GraphCategory.INGEST).exists():
+        if request.ctx.user.role != UserRole.ADMIN:
+            raise ForbiddenException
+        # interactive ingest execution only previews reading metadata candidates
+        bootparams[MANUAL_KEY] = True
     kwargs = {
         "graph_id": id,
         "bootparams": bootparams,
