@@ -666,6 +666,12 @@ def test_consume_reading_pending(tmp_path, monkeypatch, kind):
             monkeypatch.setattr(media_watcher, "recover_organizing", unexpected)
             monkeypatch.setattr(media_watcher, "coalesce_reading_events", unexpected)
             monkeypatch.setattr(media_watcher, "_consume_event", unexpected)
+            if kind == "ingest":
+                with pytest.raises(ValueError, match="invalid reading ingest"):
+                    await consume_event(task)
+                current = await MediaEvent.get(id=task.id)
+                assert (current.payload or {})["error_code"] == "invalid_metadata"
+                before = await MediaEvent.all().values()
             assert not await consume_event(task)
             assert await MediaEvent.all().values() == before
             unexpected.assert_not_awaited()

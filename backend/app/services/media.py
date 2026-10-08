@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator, Generator
 from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import aiofiles
@@ -79,6 +79,20 @@ if TYPE_CHECKING:
     from app.core.media.writer import MetadataWrite
 
 type _SourceStates = dict[Path, tuple[int, ...]]
+
+
+def _reading_role(item: MediaItem) -> Literal["book", "collection", "chapter"]:
+    """Classify a reading item independently of its current chapter count.
+
+    Args:
+        item: The reading item whose source ownership has been validated.
+
+    Returns:
+        The workflow role shared by automatic and manual scraping.
+    """
+    if item.parent_id is not None:
+        return "chapter"
+    return "collection" if item.format is None else "book"
 
 
 def _source_identity(item: MediaItem) -> tuple:
@@ -1445,7 +1459,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """Get or register a discovered reading source without parsing its content.
 
         Register comic collections before their chapters. Validate current paths
-        under the library lock, then insert only the missing pending item. Existing
+        under the library lock, then insert only the missing pending item. Retain a
+        first-ingest event when workflows are bound, in the same transaction. Existing
         items keep their visibility, summaries and index state; ownership changes
         require reconciliation instead of silently overwriting another source.
 
@@ -1497,8 +1512,144 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             )
             if current is not None:
                 return current
-            await candidate.save(force_create=True)
+            async with in_transaction():
+                await candidate.save(force_create=True)
+                if await FlowTriggerService.get_triggers(GraphCategory.INGEST, lib_id):
+                    await MediaEvent.create(
+                        lib_id=lib_id,
+                        event_type="ingest",
+                        src_path=candidate.path,
+                        payload={"bootparams": [{"item_id": candidate.id}]},
+                    )
+            notify_media_events(lib_id)
             return candidate
+
+    @classmethod
+    async def consume_ingest(cls, id: int) -> bool:
+        """Dispatch a reading item's first ingest after it becomes readable.
+
+        Reuse the workflow engine's durable execution and current library bindings.
+        Ordinary source changes do not create these events. Failed events stop without
+        blocking manual scraping; interruption leaves the event available on restart.
+
+        Args:
+            id: The persisted ingest event ID selected by the library consumer.
+
+        Returns:
+            True after dispatch or removal of obsolete work; False while waiting for
+            the initial index, or when the event is absent or has already failed.
+
+        Raises:
+            ContentError: If current ownership or local metadata cannot be read safely.
+            ValueError: If the event does not contain one valid reading item ID.
+            Exception: If workflow dispatch fails; its failure is persisted first.
+        """
+        event = await MediaEvent.get_or_none(id=id, event_type="ingest").select_related(
+            "lib"
+        )
+        if event is None or event.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+            return False
+        directory = event.lib.dir
+        try:
+            async with library_lock(directory):
+                event = await MediaEvent.get_or_none(
+                    id=id, event_type="ingest"
+                ).select_related("lib")
+                if event is None:
+                    return False
+                if event.lib.dir != directory or event.lib.lib_type not in (
+                    LibType.NOVEL,
+                    LibType.COMIC,
+                ):
+                    raise ContentError("content_changed")
+                pending = (event.payload or {}).get("bootparams")
+                if (
+                    not isinstance(pending, list)
+                    or len(pending) != 1
+                    or not isinstance(pending[0], dict)
+                    or type(pending[0].get("item_id")) is not int
+                    or pending[0]["item_id"] <= 0
+                ):
+                    if (event.payload or {}).get("error_code") == "invalid_metadata":
+                        return False
+                    raise ValueError("invalid reading ingest parameters")
+                item = await MediaItem.get_or_none(
+                    id=pending[0]["item_id"], lib_id=event.lib_id
+                ).select_related("lib", "parent")
+                if (
+                    item is None
+                    or not item.visible
+                    or (item.parent is not None and not item.parent.visible)
+                    or not await FlowTriggerService.get_triggers(
+                        GraphCategory.INGEST, event.lib_id
+                    )
+                ):
+                    await event.delete()
+                    return True
+                if (event.payload or {}).get("error_code"):
+                    return False
+                # wait for first readability without binding scraping to a cache version
+                if item.index_state != IndexState.READY:
+                    return False
+                metadata, _, source_error = await to_thread(
+                    _read_metadata, item, with_cover=False
+                )
+                current = await MediaItem.get_or_none(id=item.id).select_related(
+                    "lib", "parent"
+                )
+                if current is None or _source_identity(current) != _source_identity(
+                    item
+                ):
+                    raise ContentError("content_changed")
+                error = await _save_summary(current, metadata, source_error)
+                if metadata.has_local_metadata:
+                    await event.delete()
+                    return True
+                if error:
+                    raise ContentError(error)
+                fields = metadata.data
+                params = {
+                    "item_id": item.id,
+                    "item_path": item.path,
+                    "item_name": item.name,
+                    "item_role": _reading_role(item),
+                    "lib_type": item.lib.lib_type.value,
+                    "title": fields.title or item.name,
+                    "series_title": fields.series
+                    or (item.parent.title or item.parent.name if item.parent else None),
+                    "number": fields.number,
+                    "language": fields.language or item.lib.language,
+                    "year": fields.year,
+                    "nfo_path": None,
+                    "nfo_type": None,
+                    "nfo_source": None,
+                    "season": None,
+                    "episode": None,
+                    "series_id": None,
+                    "page_num": 1,
+                    "page_size": 1,
+                }
+                event.payload = {"bootparams": [params]}
+                await event.save(update_fields=["payload"])
+            # workflow nodes acquire the same library lock when saving their result
+            await FlowTriggerService.fire(
+                GraphCategory.INGEST, event.lib_id, bootparams=params
+            )
+            await event.delete()
+            return True
+        except Exception as error:
+            if event is not None:
+                await MediaEvent.filter(id=event.id).update(
+                    payload={
+                        **(event.payload or {}),
+                        "error_code": error.code
+                        if isinstance(error, ContentError)
+                        else "invalid_metadata"
+                        if isinstance(error, ValueError)
+                        else "workflow_failed",
+                    }
+                )
+            raise
 
     @classmethod
     async def move_reading_file(
@@ -2148,6 +2299,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             item.index_state = state
             item.index_error = error
             await item.save(update_fields=["extra", "index_state", "index_error"])
+            if state == IndexState.READY:
+                notify_media_events(item.lib_id)
             return item
 
     @classmethod
@@ -2248,6 +2401,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                             "index_error",
                         ]
                     )
+                notify_media_events(current.lib_id)
                 return current
         except ContentError as error:
             async with library_lock(directory):
@@ -2406,13 +2560,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         if not reading:
             data["metadata"] = asdict(nfo) if nfo is not None else None
             return data
-        data["item_role"] = (
-            "chapter"
-            if item.parent_id is not None
-            else "collection"
-            if item.format is None
-            else "book"
-        )
+        data["item_role"] = _reading_role(item)
         path = Path(item.path)
         fields = (
             metadata.data

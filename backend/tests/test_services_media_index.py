@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -21,6 +22,7 @@ from tortoise.expressions import Q
 from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
+from app.core.flow.engine import FlowEngine, FlowTask
 from app.core.media import events as media_events
 from app.core.media import watcher as media_watcher
 from app.core.media.common import ContentError
@@ -35,7 +37,15 @@ from app.core.media.handlers import reading as reading_handler
 from app.core.media.handlers.base import get_handler
 from app.core.media.handlers.reading import ReadingMediaHandler, ReadingSource
 from app.core.media.image import load_image_index, read_image_resource
+from app.core.media.metadata import parse_comicinfo, parse_opf
 from app.core.media.text import load_text_index, read_text_chapter
+from app.models.flow import (
+    FlowGraph,
+    FlowInstance,
+    FlowTrigger,
+    GraphCategory,
+    GraphState,
+)
 from app.models.media import (
     IndexState,
     LibType,
@@ -5646,5 +5656,364 @@ def test_collection_lock(tmp_path, monkeypatch, change):
                     with pytest.raises(ContentError, match="content_changed"):
                         await task
                 assert await MediaItem.all().values() == before
+
+    asyncio.run(run())
+
+
+async def _ingest_trigger(lib: MediaLib, *, asynchronous: bool = False) -> FlowGraph:
+    """Bind a published reading workflow to an isolated library.
+
+    Args:
+        lib: The library that owns the first-ingest events.
+        asynchronous: Whether to queue execution; defaults to synchronous saving.
+
+    Returns:
+        The graph that writes a complete, fixed metadata candidate.
+    """
+    graph = await FlowGraph.create(
+        name="Reading ingest",
+        category=GraphCategory.INGEST,
+        state=GraphState.PUBLISHED,
+        definition={
+            "nodes": [
+                {"id": "start", "data": {"$schema": "ingest_start"}},
+                {
+                    "id": "end",
+                    "data": {
+                        "$schema": "reading",
+                        "response": '[{"title":"Scraped","authors":["Writer"]}]',
+                        "force_end": True,
+                    },
+                },
+            ],
+            "edges": [
+                {
+                    "source": "start",
+                    "sourceHandle": "output",
+                    "target": "end",
+                    "targetHandle": "input",
+                }
+            ],
+        },
+    )
+    await FlowTrigger.create(
+        category=GraphCategory.INGEST,
+        rel_id=lib.id,
+        graph=graph,
+        asynchronous=asynchronous,
+        priority=1,
+    )
+    return graph
+
+
+def _ingest_engine(monkeypatch: pytest.MonkeyPatch) -> FlowEngine:
+    """Use the real flow engine with isolated in-process coordination.
+
+    Args:
+        monkeypatch: The fixture restoring engine and service application state.
+
+    Returns:
+        The engine without starting application workers or schedules.
+    """
+    engine = FlowEngine.__new__(FlowEngine)
+    engine.__dict__["_events"] = Queue()
+    monkeypatch.setattr(FlowTask, "_running_tasks", [])
+    monkeypatch.setattr(FlowTask, "_running_lock", threading.Lock())
+    monkeypatch.setattr(
+        media_service.FlowTriggerService,
+        "app_ctx",
+        lambda: SimpleNamespace(flow_engine=engine),
+    )
+    return engine
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [(format, False) for format in MediaFormat]
+    + [
+        (format, True) for format in (MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP)
+    ],
+)
+def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchronous):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            await _ingest_trigger(lib, asynchronous=asynchronous)
+            engine = _ingest_engine(monkeypatch)
+            work = source.parent_path or source.directory
+            original = {
+                path: path.read_bytes() for path in work.rglob("*") if path.is_file()
+            }
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            items = await MediaItem.all()
+            versions = {item.id: item.index_version for item in items}
+            events = await MediaEvent.filter(event_type="ingest")
+            assert len(events) == len(items)
+            for event in events:
+                assert await asyncio.wait_for(media_watcher.consume_event(event), 5)
+            assert not await MediaEvent.exists()
+            if asynchronous and format != MediaFormat.EPUB:
+                assert await FlowInstance.all().count() == len(items)
+                instances = await FlowInstance.all()
+                for instance in instances:
+                    params = instance.bootparams or {}
+                    assert params["item_role"] in ("book", "collection", "chapter")
+                    assert params["lib_type"] == lib.lib_type.value
+                    assert params["nfo_type"] is None and params["page_size"] == 1
+                    assert "index_version" not in params and "$manual" not in params
+                    await engine.execute(
+                        instance.graph_id,
+                        params,
+                        repeatable=instance.repeatable,
+                        recoverable=True,
+                        recovery_id=instance.id,
+                        asynchronous=None,
+                    )
+            assert not await FlowInstance.exists()
+            for item in await MediaItem.all():
+                target = Path(item.dir) / (
+                    "metadata.opf" if lib.lib_type == LibType.NOVEL else "ComicInfo.xml"
+                )
+                assert item.index_version == versions[item.id]
+                if format == MediaFormat.EPUB:
+                    assert not target.exists() and item.title == "Embedded"
+                else:
+                    parser = (
+                        parse_opf if lib.lib_type == LibType.NOVEL else parse_comicinfo
+                    )
+                    assert parser(target.read_bytes()).data.title == "Scraped"
+                    assert item.title == "Scraped"
+                    target.unlink()
+            assert all(path.read_bytes() == body for path, body in original.items())
+            # XML deletion, forced rebuilds and repeated scans do not schedule scraping
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, work, force=True
+            )
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "state", [IndexState.PENDING, IndexState.EMPTY, IndexState.ERROR]
+)
+def test_reading_ingest_wait(tmp_path, monkeypatch, state):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await _ingest_trigger(lib)
+            _ingest_engine(monkeypatch)
+            item = await MediaItemService.create_reading(lib.id, source)
+            await MediaItem.filter(id=item.id).update(index_state=state)
+            event = await MediaEvent.get(event_type="ingest")
+            assert not await media_watcher.consume_event(event)
+            assert await MediaEvent.filter(id=event.id).exists()
+            target = source.directory / "metadata.opf"
+            assert not target.exists()
+            await MediaItemService.index_content(item.id)
+            assert await media_watcher.consume_event(event)
+            assert parse_opf(target.read_bytes()).data.title == "Scraped"
+            assert not await media_watcher.consume_event(event)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local", ["external", "embedded", "parent", "invalid"])
+def test_reading_ingest_local(tmp_path, monkeypatch, local):
+    async def run():
+        async with _database():
+            format = MediaFormat.CBZ if local == "embedded" else MediaFormat.DIR
+            lib, source = await _source(tmp_path, format, chapter=local == "parent")
+            await _ingest_trigger(lib)
+            _ingest_engine(monkeypatch)
+            if local == "embedded":
+                with zipfile.ZipFile(source.path, "a") as archive:
+                    archive.writestr(
+                        "ComicInfo.xml", "<ComicInfo><Title>Local</Title></ComicInfo>"
+                    )
+            target = (source.parent_path or source.directory) / "ComicInfo.xml"
+            if local in ("external", "parent"):
+                target.write_text(
+                    "<ComicInfo><Title>Local</Title><Writer>Parent</Writer></ComicInfo>"
+                )
+            elif local == "invalid":
+                target.write_text("invalid XML")
+            before = (
+                target.read_bytes() if target.exists() else source.path.read_bytes()
+            )
+            await MediaItemService.ingest_reading_work(
+                lib.id, source.parent_path or source.directory
+            )
+            events = await MediaEvent.filter(event_type="ingest")
+            for event in events:
+                if local == "invalid":
+                    with pytest.raises(ContentError, match="invalid_metadata"):
+                        await media_watcher.consume_event(event)
+                    assert not await media_watcher.consume_event(event)
+                else:
+                    assert await media_watcher.consume_event(event)
+            assert (
+                target.read_bytes() if target.exists() else source.path.read_bytes()
+            ) == before
+            item = await MediaItem.get(path=str(source.path))
+            if local == "parent":
+                assert item.title == "Scraped"
+                assert parse_comicinfo(
+                    (source.directory / "ComicInfo.xml").read_bytes()
+                ).data.authors == ("Writer",)
+            elif local == "invalid":
+                event = await MediaEvent.get(event_type="ingest")
+                assert (event.payload or {})["error_code"] == "invalid_metadata"
+            else:
+                assert item.title == "Local" and not await FlowInstance.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "change", ["move", "hidden", "deleted", "unbind", "foreign", "missing"]
+)
+def test_reading_ingest_current(tmp_path, monkeypatch, change):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await _ingest_trigger(lib)
+            _ingest_engine(monkeypatch)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            event = await MediaEvent.get(event_type="ingest")
+            item = await MediaItem.get(path=str(source.path))
+            if change == "move":
+                destination = source.path.with_name("Renamed.txt")
+                source.path.rename(destination)
+                await MediaItemService.move_reading_file(
+                    lib.id, source.path, destination
+                )
+                await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            elif change == "hidden":
+                await MediaItem.filter(id=item.id).update(visible=False)
+            elif change == "deleted":
+                await item.delete()
+            elif change == "unbind":
+                await FlowTrigger.all().delete()
+            elif change == "foreign":
+                other = await MediaLib.create(
+                    name="Other",
+                    dir=str(tmp_path / "Other"),
+                    lib_type=lib.lib_type,
+                    priority=2,
+                )
+                await MediaItem.filter(id=item.id).update(lib_id=other.id)
+            else:
+                source.path.unlink()
+            if change == "missing":
+                with pytest.raises(ContentError, match="media_source_unavailable"):
+                    await media_watcher.consume_event(event)
+                assert not await media_watcher.consume_event(event)
+            else:
+                assert await media_watcher.consume_event(event)
+                assert not await MediaEvent.filter(id=event.id).exists()
+            target = source.directory / "metadata.opf"
+            assert target.exists() == (change == "move")
+            if change == "move":
+                assert (await MediaItem.get(id=item.id)).path.endswith("Renamed.txt")
+                assert parse_opf(target.read_bytes()).data.title == "Scraped"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["before", "after", "failed"])
+def test_reading_ingest_interrupted(tmp_path, monkeypatch, phase):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await _ingest_trigger(lib)
+            _ingest_engine(monkeypatch)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            event = await MediaEvent.get(event_type="ingest")
+            fire = media_service.FlowTriggerService.fire
+
+            async def interrupt(*args, **kwargs):
+                """Interrupt dispatch before or after the real workflow writes.
+
+                Args:
+                    *args: The original trigger arguments.
+                    **kwargs: The original execution options.
+
+                Raises:
+                    RuntimeError: For a controlled dispatch failure.
+                    asyncio.CancelledError: To simulate process interruption.
+                """
+                if phase == "after":
+                    await fire(*args, **kwargs)
+                if phase == "failed":
+                    raise RuntimeError("dispatch failed")
+                raise asyncio.CancelledError
+
+            with monkeypatch.context() as patcher:
+                patcher.setattr(media_service.FlowTriggerService, "fire", interrupt)
+                with pytest.raises(
+                    RuntimeError if phase == "failed" else asyncio.CancelledError
+                ):
+                    await media_watcher.consume_event(event)
+            assert await MediaEvent.filter(id=event.id).exists()
+            target = source.directory / "metadata.opf"
+            before = target.read_bytes() if target.exists() else None
+            if phase == "failed":
+                assert not await media_watcher.consume_event(event)
+                assert ((await MediaEvent.get(id=event.id)).payload or {})[
+                    "error_code"
+                ] == "workflow_failed"
+                assert not target.exists()
+            else:
+                assert await media_watcher.consume_event(event)
+                assert parse_opf(target.read_bytes()).data.title == "Scraped"
+                if before:
+                    assert target.read_bytes() == before
+                assert not await MediaEvent.filter(id=event.id).exists()
+
+    asyncio.run(run())
+
+
+def test_reading_ingest_binding(tmp_path):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            assert not await MediaEvent.exists()
+            await _ingest_trigger(lib)
+            await MediaItemService.ingest_reading_work(lib.id, source.directory)
+            assert not await MediaEvent.exists()
+            next_work = Path(lib.dir) / "Next"
+            next_work.mkdir()
+            (next_work / "Book.txt").write_text("New body")
+            await MediaItemService.ingest_reading_work(lib.id, next_work)
+            event = await MediaEvent.get(event_type="ingest")
+            assert event.src_path == str(next_work / "Book.txt")
+
+    asyncio.run(run())
+
+
+def test_reading_ingest_atomic(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, MediaFormat.TXT)
+            await _ingest_trigger(lib)
+            with monkeypatch.context() as patcher:
+                patcher.setattr(
+                    MediaEvent,
+                    "create",
+                    AsyncMock(side_effect=RuntimeError("database failure")),
+                )
+                with pytest.raises(RuntimeError, match="database failure"):
+                    await MediaItemService.create_reading(lib.id, source)
+            assert not await MediaItem.exists() and not await MediaEvent.exists()
+            first, second = await asyncio.gather(
+                MediaItemService.create_reading(lib.id, source),
+                MediaItemService.create_reading(lib.id, source),
+            )
+            assert first.id == second.id
+            assert await MediaEvent.all().count() == 1
 
     asyncio.run(run())

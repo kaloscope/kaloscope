@@ -688,6 +688,8 @@ async def consume_event(event: MediaEvent) -> bool:
         current = await MediaEvent.get_or_none(id=event.id, lib_id=lib.id)
         if current is not None and current.event_type == "metadata":
             return await MediaItemService.consume_metadata(current.id)
+        if current is not None and current.event_type == "ingest":
+            return await MediaItemService.consume_ingest(current.id)
         if current is not None and current.event_type in (
             EVENT_TYPE_CREATED,
             EVENT_TYPE_MODIFIED,
