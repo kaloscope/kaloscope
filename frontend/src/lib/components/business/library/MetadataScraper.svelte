@@ -9,9 +9,10 @@
 
   type ScrapeResult = {
     title: string | null;
-    plot: string | null;
-    year: number | null;
-    rating: number | null;
+    plot?: string | null;
+    year?: number | null;
+    rating?: number | string | null;
+    authors?: string[];
   } & Record<string, unknown>;
 
   const NFO_TYPES: Partial<Record<keyof typeof LibType, string>> = {
@@ -41,11 +42,14 @@
   import { _, locales } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { fixedNumber } from '$lib/utils';
+  import { onDestroy } from 'svelte';
 
   let { item: _item, onscrape }: MetadataScraperProps = $props();
 
   // the media item
   let item: MediaItem | null = $state(null);
+  const reading = $derived.by(() => item?.media_type === 'text' || item?.media_type === 'image');
+  const comic = $derived.by(() => item?.lib?.lib_type === 'comic');
 
   // the graph options
   let graphOptions = $derived.by(() => {
@@ -59,46 +63,61 @@
   let year: number | null = $state(null);
   let season: number | null = $state(null);
   let language: string = $state('');
+  let seriesTitle = $state('');
+  let number = $state('');
 
   // the search results
   let results: ScrapeResult[] = $state([]);
   let index: number = $state(-1);
   const searching = createLoading();
   const confirming = createLoading();
-  const busy = $derived($searching !== null || $confirming !== null);
+  let initializing = $state(false);
+  const busy = $derived(initializing || $searching !== null || $confirming !== null);
+  let controller: AbortController | undefined;
 
   // the modal dialog instance
   let modal: Modal;
-  export const showModal = () => {
-    init().then(() => modal.show());
-  };
+  export async function showModal() {
+    if (busy) return;
+    initializing = true;
+    controller = new AbortController();
+    const signal = controller.signal;
+    try {
+      await init(signal);
+      if (!signal.aborted) modal.show();
+    } catch (error) {
+      if (!signal.aborted) console.error(error);
+    } finally {
+      initializing = false;
+    }
+  }
 
   /**
    * Initialize the component.
+   *
+   * @param signal - Cancels reads when this dialog is discarded.
    */
-  async function init() {
+  async function init(signal: AbortSignal) {
     results = [];
     index = -1;
 
-    // try to fetch the complete media item if only partial data is provided
-    try {
-      item = _item.lib ? _item : (await api.get(`media/${_item.id}`).json<Resp<MediaItem>>()).data;
-    } catch (error) {
-      console.error(error);
-      item = _item;
-    }
+    // read current file metadata and library bindings on every open
+    item = (await api.get(`media/${_item.id}`, { signal }).json<Resp<MediaItem>>()).data;
 
     // pre-fill the form with inferred metadata and workflow options
     graphId = item.lib?.triggers?.[0]?.graph_id ?? null;
     title = item.title ?? '';
     year = item.year ?? null;
     season = item.season ?? null;
-    language = item.lib?.language ?? '';
+    language = (reading ? item.metadata?.language : null) || item.lib?.language || '';
+    seriesTitle = item.metadata?.series ?? item.parent?.title ?? item.parent?.name ?? '';
+    number = item.metadata?.number ?? '';
 
     // if the title is still empty, try to infer it from the file path
     if (!title.trim()) {
       const resp = await api
         .get('media/title', {
+          signal,
           searchParams: { path: item.path }
         })
         .json<Resp<{ title: string }>>();
@@ -116,27 +135,43 @@
     searching.start();
     results = [];
     index = -1;
+    controller?.abort();
+    const request = new AbortController();
+    controller = request;
     api
       .post(`flow/graph/${graphId}/execute`, {
+        signal: request.signal,
         json: {
           $manual: true,
+          ...(reading
+            ? {
+                item_id: item.id,
+                lib_type: item.lib?.lib_type,
+                item_role: item.item_role,
+                series_title: comic ? seriesTitle.trim() || null : null,
+                number: comic ? number.trim() || null : null
+              }
+            : {}),
           item_path: item.path,
           item_name: item.name,
           nfo_type: getNFOType(item.lib?.lib_type),
           language: language || null,
           title: title.trim(),
           year: year || null,
-          season: season ?? 1,
+          season: reading ? null : (season ?? 1),
           page_num: 1,
           page_size: 5
         }
       })
       .json<Resp<ScrapeResult[]>>()
       .then(({ data }) => {
-        results = data;
+        if (!request.signal.aborted) results = Array.isArray(data) ? data : [];
+      })
+      .catch((error) => {
+        if (!request.signal.aborted) console.error(error);
       })
       .finally(() => {
-        searching.end();
+        if (controller === request) searching.end();
       });
   }
 
@@ -144,7 +179,7 @@
    * Confirm the selected metadata result.
    */
   function confirm() {
-    if (busy || index < 0) {
+    if (busy || !item || !graphId || index < 0) {
       return;
     }
     const result = results[index];
@@ -153,26 +188,64 @@
     }
     confirming.start();
     api
-      .post(`media/${item?.id}/gen_nfo`, {
+      .post(`media/${item.id}/${reading ? 'metadata' : 'gen_nfo'}`, {
         json: { graph_id: graphId, metadata: result }
       })
       .then(() => {
         modal.close();
         onscrape?.();
       })
+      .catch(console.error)
       .finally(() => {
         confirming.end();
       });
   }
+
+  /** Cancel discarded previews without interrupting a confirmed file save. */
+  function cancelPreview() {
+    controller?.abort();
+    controller = undefined;
+    searching.end();
+  }
+
+  onDestroy(cancelPreview);
 </script>
 
-<Modal icon={icons.imageSearch} title={$_('action.scrape', $_('entity.metadata'))} maxWidth="36rem" bind:this={modal}>
-  <div class="fieldset">
+<Modal
+  icon={icons.imageSearch}
+  title={$_('action.scrape', $_('entity.metadata'))}
+  maxWidth={reading ? '42rem' : '36rem'}
+  onclose={() => {
+    if (!modal.isOpen()) cancelPreview();
+  }}
+  bind:this={modal}
+>
+  <fieldset class="fieldset" disabled={busy}>
     <Label required>{$_('field.graph')}</Label>
-    <Select options={graphOptions} bind:value={graphId} class="w-full" />
+    <Select
+      options={graphOptions}
+      bind:value={graphId}
+      onchange={() => {
+        results = [];
+        index = -1;
+      }}
+      class="w-full"
+    />
     <Label required>{$_('field.title')}</Label>
     <input placeholder={$_('field.title')} class="input w-full" bind:value={title} />
     <div class="px-1 text-xs opacity-50">{item?.path}</div>
+    {#if comic}
+      <div class="flex flex-wrap gap-2">
+        <div class="min-w-0 flex-1 space-y-1.5">
+          <Label>{$_('metadata.fields.series')}</Label>
+          <input placeholder={$_('metadata.fields.series')} class="input w-full" bind:value={seriesTitle} />
+        </div>
+        <div class="min-w-0 flex-1 space-y-1.5">
+          <Label>{$_('metadata.fields.number')}</Label>
+          <input placeholder={$_('metadata.fields.number')} class="input w-full" bind:value={number} />
+        </div>
+      </div>
+    {/if}
     <div class="flex flex-wrap gap-2">
       <div class="flex-1 space-y-1.5">
         <Label>{$_('field.year')}</Label>
@@ -181,8 +254,8 @@
           placeholder={$_('field.year')}
           class="input w-full"
           bind:value={year}
-          min={1900}
-          max={2999}
+          min={reading ? 1 : 1900}
+          max={reading ? 9999 : 2999}
         />
       </div>
       {#if item?.lib?.lib_type === 'tv_show'}
@@ -202,6 +275,9 @@
         <Label>{$_('field.language')}</Label>
         <Select bind:value={language} class="w-full">
           <option value="">{$_('enum.none')}</option>
+          {#if language && !$locales.includes(language)}
+            <option value={language}>{$_(language, { locale: 'languages', default: language })}</option>
+          {/if}
           {#each $locales.filter((l) => l !== 'languages') as code (code)}
             <option value={code}>{$_(code, { locale: 'languages' })}</option>
           {/each}
@@ -226,6 +302,9 @@
           <tr class="text-xs font-semibold text-base-content/40 uppercase">
             <th class="w-6 sm:w-8"></th>
             <th class="w-1/4">{$_('field.title')}</th>
+            {#if reading}
+              <th class="w-1/5">{$_('metadata.fields.authors')}</th>
+            {/if}
             <th class="w-16">{$_('field.year')}</th>
             <th class="w-16">{$_('field.rating')}</th>
             <th>{$_('field.plot')}</th>
@@ -237,12 +316,19 @@
               {@const rating = fixedNumber(result.rating, 1, 0, 10)}
               <tr
                 class="cursor-pointer hover:bg-base-300 {index === i ? 'bg-primary/15' : ''}"
-                onclick={() => (index = index === i ? -1 : i)}
+                onclick={() => {
+                  if (!busy) index = index === i ? -1 : i;
+                }}
               >
                 <td><input type="radio" class="pointer-events-none radio radio-xs" checked={index === i} /></td>
                 <td class="truncate font-medium text-base-content/80" title={result.title}>
                   {result.title || EMPTY_SIGN}
                 </td>
+                {#if reading}
+                  <td class="truncate text-base-content/60" title={result.authors?.join(', ')}>
+                    {result.authors?.join(', ') || EMPTY_SIGN}
+                  </td>
+                {/if}
                 <td class="truncate text-base-content/60">{result.year ?? EMPTY_SIGN}</td>
                 <td class="truncate text-base-content/60">{rating ?? EMPTY_SIGN}</td>
                 <td class="truncate text-base-content/60" title={result.plot}>{result.plot || EMPTY_SIGN}</td>
@@ -250,7 +336,7 @@
             {/each}
           {:else if $searching === null}
             <tr>
-              <td colspan="5" class="h-32 text-center text-sm opacity-20">
+              <td colspan={reading ? 6 : 5} class="h-32 text-center text-sm opacity-20">
                 {$_('data.nodata')}
               </td>
             </tr>
@@ -258,7 +344,7 @@
         </tbody>
       </table>
     </div>
-  </div>
+  </fieldset>
   <div class="modal-action">
     <button type="button" class="btn" onclick={() => modal.close()}>
       {$_('message.cancel')}

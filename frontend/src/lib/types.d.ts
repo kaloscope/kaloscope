@@ -289,6 +289,7 @@ export type MediaItem = {
   metadata?: MediaMeta | null;
   lib_type?: keyof typeof LibType;
   media_type?: 'video' | 'text' | 'image';
+  item_role?: 'book' | 'collection' | 'chapter';
   metadata_state?: 'ready' | 'missing' | 'error';
   metadata_issues?: {
     source: 'source' | 'external' | 'embedded' | 'parent';

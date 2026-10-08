@@ -185,7 +185,7 @@
         >
           <MediaActions
             {item}
-            danmaku
+            danmaku={lib?.lib_type === 'movie' || lib?.lib_type === 'tv_show'}
             class="dropdown-left dropdown-end"
             triggerClass={btnClass}
             onscrape={() => search()}

@@ -2406,6 +2406,13 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         if not reading:
             data["metadata"] = asdict(nfo) if nfo is not None else None
             return data
+        data["item_role"] = (
+            "chapter"
+            if item.parent_id is not None
+            else "collection"
+            if item.format is None
+            else "book"
+        )
         path = Path(item.path)
         fields = (
             metadata.data

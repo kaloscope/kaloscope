@@ -349,6 +349,25 @@
     }
   }
 
+  /**
+   * Reload the work and the saved comic chapter after scraping.
+   *
+   * @param id - The media item whose metadata was saved.
+   */
+  async function refreshMetadata(id: number) {
+    if (!media) return;
+    const rootId = media.id;
+    const [root, selected] = await Promise.all([
+      getDetails(rootId),
+      id === rootId ? Promise.resolve(null) : getDetails(id)
+    ]);
+    if (media?.id !== rootId) return;
+    media = root;
+    meta = root.metadata ?? null;
+    _media = selected;
+    _meta = selected?.metadata ?? null;
+  }
+
   beforeNavigate(({ from, to }) => {
     if (from && (from.url.origin !== to?.url.origin || from.url.pathname !== to?.url.pathname)) {
       chaptersController?.abort();
@@ -430,7 +449,12 @@
 
         <div class="flex min-w-0 flex-1 flex-col gap-3">
           <!-- titles -->
-          <h1 class="text-2xl font-bold sm:text-3xl">{media?.title ?? media?.name}</h1>
+          <div class="flex items-start gap-2">
+            <h1 class="min-w-0 flex-1 text-2xl font-bold sm:text-3xl">{media?.title ?? media?.name}</h1>
+            {#if $user?.role === 'admin' && (mediaType !== 'video' || !media.parent)}
+              <MediaActions item={media} class="dropdown-end" onscrape={() => refreshMetadata(media!.id)} />
+            {/if}
+          </div>
           {#if readingMeta && (readingMeta.series || readingMeta.volume || readingMeta.number)}
             <p class="font-medium wrap-break-word opacity-70">
               {#if readingMeta.series}{readingMeta.series}{/if}
@@ -652,6 +676,7 @@
                     onclick={() => {
                       selectMedia(part);
                     }}
+                    onscrape={mediaType === 'image' ? () => refreshMetadata(part.id) : undefined}
                     ondelete={() => {
                       // refresh the parent media details to update the parts list
                       getDetails(media!.id).then((data) => {

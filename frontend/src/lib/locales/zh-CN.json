@@ -610,6 +610,8 @@
       "authors": "作者",
       "illustrators": "绘者",
       "publisher": "出版社",
+      "series": "系列",
+      "number": "话号",
       "isbn": "ISBN",
       "tags": "标签",
       "directors": "导演",

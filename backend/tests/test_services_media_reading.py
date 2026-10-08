@@ -576,6 +576,7 @@ def test_current_details(tmp_path, format):
             assert data["year"] is data["rating"] is data["backdrop"] is None
             assert data["poster"] == f"/_api/media/{item.id}/assets/cover"
             assert data["media_type"] == ("text" if novel else "image")
+            assert data["item_role"] == ("collection" if format is None else "book")
             assert data["index_state"] == "pending" and "extra" not in data
             assert (
                 "cover" not in data["metadata"] and "nfo_path" not in data["metadata"]
@@ -1269,6 +1270,7 @@ def test_video_details_http(tmp_path, lib_type, root):
                 assert response.status_code == 200, response.text
                 data = response.json()["data"]
                 assert data["title"] == "Old database title"
+                assert "item_role" not in data
                 assert data["metadata"]["title"] == "Video metadata"
                 assert data["metadata"]["plot"] == "NFO plot"
                 assert data["media_type"] == "video"
@@ -3278,6 +3280,7 @@ def test_save_chapter_metadata(tmp_path):
             assert not parse_comicinfo(xml.read_bytes()).data.authors
             assert parent_xml.read_bytes() == before
             details = await MediaItemService.get_details(chapter.id, _user())
+            assert details["item_role"] == "chapter"
             assert details["metadata"]["authors"] == ("Parent author",)
             assert (await MediaItem.get(id=parent.id)).title == "Old database title"
 

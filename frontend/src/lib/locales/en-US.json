@@ -610,6 +610,8 @@
       "authors": "Author",
       "illustrators": "Illustrator",
       "publisher": "Publisher",
+      "series": "Series",
+      "number": "Issue Number",
       "isbn": "ISBN",
       "tags": "Tags",
       "directors": "Director",
