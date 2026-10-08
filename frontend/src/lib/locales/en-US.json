@@ -416,6 +416,10 @@
       "tip": "Automatically rename and organize media files using a template; leave blank to disable."
     },
     "scan_on_startup": "Full scan on startup",
+    "movie_layout": "Store videos directly in the library folder or in a folder per movie.",
+    "tv_show_layout": "Use a folder per show under the library, with videos directly inside or in season folders.",
+    "novel_layout": "Use a folder per novel under the library, containing one TXT or EPUB file.",
+    "comic_layout": "Use a folder per comic under the library, optionally with one level of chapter folders. Each contains images or one CBZ/ZIP.",
     "loading": "Loading content",
     "loading_chapters": "Loading chapters",
     "delete_local": "Also delete the local files",

@@ -416,6 +416,10 @@
       "tip": "按模板自动重命名并整理媒体文件，留空关闭。"
     },
     "scan_on_startup": "启动时全量扫描",
+    "movie_layout": "库目录下可直接存放视频，也可按电影分文件夹。",
+    "tv_show_layout": "库目录下按剧分文件夹，视频可直接放入或按季分文件夹。",
+    "novel_layout": "库目录下每部小说一个文件夹，内含单个 TXT 或 EPUB 文件。",
+    "comic_layout": "库目录下每部漫画一个文件夹，可按话再分一层，各含图片或单个 CBZ/ZIP。",
     "loading": "正在加载正文",
     "loading_chapters": "正在加载章节",
     "delete_local": "同时删除本地文件",

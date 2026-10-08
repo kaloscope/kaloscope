@@ -86,10 +86,27 @@ def test_content_fields(media_format):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("lib_type", list(LibType))
 def test_library_inputs(tmp_path, lib_type):
-    with pytest.raises(ValidationError):
-        MediaLibUpsert(lib_type=lib_type, dir=str(tmp_path), name="Library")
+    request = MediaLibUpsert(lib_type=lib_type, dir=str(tmp_path), name="Library")
+    assert request.lib_type is lib_type
+    assert request.dir == str(tmp_path.resolve())
+
+
+def test_library_type_required(tmp_path):
+    with pytest.raises(ValidationError, match="library type is required"):
+        MediaLibUpsert(dir=str(tmp_path), name="Library")
+    assert MediaLibUpsert(id=1, name="Edited").lib_type is None
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_reading_library_alias(tmp_path, lib_type):
+    directory = tmp_path / "Library"
+    directory.mkdir()
+    alias = tmp_path / "Alias"
+    alias.symlink_to(directory, target_is_directory=True)
+    request = MediaLibUpsert(lib_type=lib_type, dir=str(alias), name="Library")
+    assert request.dir == str(directory.resolve())
 
 
 @pytest.mark.parametrize("rel_type", [HistoryType.TEXT, HistoryType.IMAGE])

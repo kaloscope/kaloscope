@@ -9,7 +9,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import httpx
@@ -3865,5 +3866,77 @@ def test_sync_after_manual_save(tmp_path, monkeypatch):
                     raise
             assert (await sync).title == "After save"
             assert (await MediaItem.get(id=item.id)).title == "After save"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("role", ["admin", "user", "guest"])
+def test_reading_library_http(tmp_path, monkeypatch, lib_type, role):
+    async def run():
+        async with _database():
+            root = tmp_path / "Library"
+            work = root / "Work"
+            work.mkdir(parents=True)
+            if lib_type == LibType.NOVEL:
+                (work / "Book.txt").write_text("Chapter 1\nBody")
+            else:
+                (work / "1.png").write_bytes(_PNG)
+
+            async def observe(lib):
+                """Run initial ingestion without a production observer.
+
+                Args:
+                    lib: The library created through the HTTP endpoint.
+                """
+                assert not await MediaItemService.ingest_reading_work(lib.id, work)
+
+            observer = AsyncMock(side_effect=observe)
+            monkeypatch.setattr(
+                media_service.MediaLibService,
+                "app_ctx",
+                lambda: SimpleNamespace(
+                    lib_watcher=SimpleNamespace(add_observer=observer)
+                ),
+            )
+            async with _client(_user() if role == "admin" else _user([])) as client:
+                response = await client.post(
+                    "/_api/media/lib/upsert",
+                    json={
+                        "name": "Reading",
+                        "lib_type": lib_type.value,
+                        "dir": str(root),
+                    },
+                    headers={"Authorization": ""} if role == "guest" else {},
+                )
+                assert (
+                    response.status_code
+                    == {"admin": 200, "user": 403, "guest": 401}[role]
+                ), response.text
+                if role != "admin":
+                    assert not await MediaLib.exists()
+                    observer.assert_not_awaited()
+                    return
+                data = response.json()["data"]
+                assert data["lib_type"] == lib_type.value and data["danmaku_ttl"] == 24
+                item = await MediaItem.get(lib_id=data["id"])
+                response = await client.get(f"/_api/media/{item.id}/content")
+                assert response.status_code == 200, response.text
+                assert response.json()["data"]["media_type"] == (
+                    "text" if lib_type == LibType.NOVEL else "image"
+                )
+                response = await client.post(
+                    "/_api/media/lib/upsert",
+                    json={
+                        "id": data["id"],
+                        "name": "Updated",
+                        "language": "en-US",
+                        "scan_on_startup": False,
+                    },
+                )
+                assert response.status_code == 200, response.text
+                assert response.json()["data"]["scan_on_startup"] is False
+                assert response.json()["data"]["danmaku_ttl"] == 24
+                observer.assert_awaited_once()
 
     asyncio.run(run())

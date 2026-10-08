@@ -1210,9 +1210,16 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                 if dir.is_relative_to(existing) or existing.is_relative_to(dir):
                     raise KaloscopeException(ErrorCode.DUPLICATE_DIRECTORY)
 
-        if obj.id:
-            lib = await MediaLib.get(id=obj.id)
+        lib = await MediaLib.get(id=obj.id) if obj.id else None
+        lib_type = lib.lib_type if lib is not None else obj.lib_type
+        if lib_type in (LibType.NOVEL, LibType.COMIC) and (
+            obj.rename_template or obj.danmaku_server
+        ):
+            raise BadRequestException()
+        if lib is not None:
             extra = {}
+            if obj.danmaku_ttl is not None:
+                extra["danmaku_ttl"] = obj.danmaku_ttl
             if "scan_on_startup" in obj.model_fields_set:
                 extra["scan_on_startup"] = obj.scan_on_startup
             if "rename_template" in obj.model_fields_set:
@@ -1223,14 +1230,13 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                 except ValueError as exc:
                     raise BadRequestException() from exc
             # update the media library
-            await MediaLib.filter(id=obj.id).update(
+            await MediaLib.filter(id=lib.id).update(
                 name=obj.name,
                 language=obj.language or None,
                 danmaku_server=obj.danmaku_server,
-                danmaku_ttl=obj.danmaku_ttl,
                 **extra,
             )
-            lib = await MediaLib.get(id=obj.id)
+            lib = await MediaLib.get(id=lib.id)
         else:
             # create the media library
             priorities: list = await MediaLib.all().values_list("priority", flat=True)
@@ -1241,18 +1247,19 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                 language=obj.language or None,
                 scan_on_startup=obj.scan_on_startup,
                 danmaku_server=obj.danmaku_server,
-                danmaku_ttl=obj.danmaku_ttl,
+                danmaku_ttl=obj.danmaku_ttl if obj.danmaku_ttl is not None else 24,
                 rename_template=obj.rename_template,
                 priority=(max(priorities) + 1 if priorities else 1),
             )
-            # add the observer
-            watcher = cls.app_ctx().lib_watcher
-            await watcher.add_observer(lib)
 
         # bind the flow triggers to the media library
         await FlowTriggerService.bind_triggers(
             GraphCategory.INGEST, lib.id, obj.triggers
         )
+        if not obj.id:
+            # initial discovery must see the library's workflow bindings
+            watcher = cls.app_ctx().lib_watcher
+            await watcher.add_observer(lib)
 
         return lib
 

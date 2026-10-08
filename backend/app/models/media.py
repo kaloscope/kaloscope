@@ -1,4 +1,5 @@
 from enum import StrEnum, auto
+from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
@@ -179,8 +180,7 @@ class ReadingMetadataSync(BaseModel):
 
 class MediaLibUpsert(BaseModel):
     id: PositiveInt | None = None
-    # enable additional library inputs when their handlers are available
-    lib_type: Literal[LibType.MOVIE, LibType.TV_SHOW] | None = None
+    lib_type: LibType | None = None
     dir: str | None = Field(min_length=1, max_length=4096, default=None)
     name: str = Field(min_length=1, max_length=64)
     language: str | None = None
@@ -192,16 +192,21 @@ class MediaLibUpsert(BaseModel):
 
     @model_validator(mode="after")
     def check_dir(self) -> Self:
-        """Validate the directory and rename template.
+        """Validate the library type, directory and rename template.
 
         Returns:
             The validated library settings.
 
         Raises:
-            ValueError: If the directory or rename template is invalid.
+            ValueError: If the library type, directory or template is invalid.
         """
-        if not self.id and (not self.dir or not is_directory(self.dir)):
-            raise ValueError(f"invalid directory: {self.dir}")
+        if not self.id:
+            if self.lib_type is None:
+                raise ValueError("library type is required")
+            if not self.dir or not is_directory(self.dir):
+                raise ValueError(f"invalid directory: {self.dir}")
+            if self.lib_type in (LibType.NOVEL, LibType.COMIC):
+                self.dir = str(Path(self.dir).resolve())
         if self.rename_template is not None:
             self.rename_template = validate_template(
                 self.rename_template, self.lib_type

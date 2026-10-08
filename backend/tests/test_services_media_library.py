@@ -17,7 +17,7 @@ from app.core.exceptions import BadRequestException, ErrorCode, KaloscopeExcepti
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.core.media.watcher import LibWatcher
-from app.models.flow import GraphCategory
+from app.models.flow import FlowGraph, GraphCategory, GraphRef, GraphState
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaLibUpsert
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
@@ -1069,6 +1069,127 @@ def test_item_delete_recovery(tmp_path, monkeypatch, local, stage):
                 assert item.visible is False
                 assert destination.read_bytes() == b"video"
                 assert removed == []
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_reading_library(tmp_path, monkeypatch, lib_type):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            graph = await FlowGraph.create(
+                name="Reading",
+                category=GraphCategory.INGEST,
+                state=GraphState.PUBLISHED,
+            )
+            work = tmp_path / "Work"
+            work.mkdir()
+            if lib_type == LibType.NOVEL:
+                (work / "Book.txt").write_text("Body")
+            else:
+                (work / "1.png").write_bytes(b"\x89PNG\r\n\x1a\nimage")
+
+            async def observe(lib):
+                """Confirm initial discovery sees the committed workflow binding.
+
+                Args:
+                    lib: The newly created library.
+                """
+                triggers = await FlowTriggerService.get_triggers(
+                    GraphCategory.INGEST, lib.id
+                )
+                assert [trigger["graph_id"] for trigger in triggers] == [graph.id]
+                assert not await MediaItemService.ingest_reading_work(lib.id, work)
+
+            observer = AsyncMock(side_effect=observe)
+            monkeypatch.setattr(
+                MediaLibService,
+                "app_ctx",
+                lambda: SimpleNamespace(
+                    lib_watcher=SimpleNamespace(add_observer=observer)
+                ),
+            )
+            library = await MediaLibService.upsert(
+                MediaLibUpsert(
+                    name="Reading",
+                    dir=str(tmp_path),
+                    lib_type=lib_type,
+                    language="zh-CN",
+                    scan_on_startup=False,
+                    triggers=[GraphRef(graph_id=graph.id, asynchronous=True)],
+                )
+            )
+            assert library.lib_type is lib_type and library.danmaku_ttl == 24
+            assert library.danmaku_server is library.rename_template is None
+            assert not library.scan_on_startup and library.language == "zh-CN"
+            assert await MediaItem.filter(lib_id=library.id).count() == 1
+            assert (
+                await MediaEvent.filter(event_type="ingest", lib_id=library.id).count()
+                == 1
+            )
+            observer.assert_awaited_once()
+            await MediaLib.filter(id=library.id).update(danmaku_ttl=72)
+            updated = await MediaLibService.upsert(
+                MediaLibUpsert(
+                    id=library.id, name="Edited", language="en-US", scan_on_startup=True
+                )
+            )
+            assert updated.lib_type is lib_type and updated.dir == library.dir
+            assert updated.danmaku_ttl == 72 and updated.scan_on_startup
+            assert not await FlowTriggerService.get_triggers(
+                GraphCategory.INGEST, library.id
+            )
+            observer.assert_awaited_once()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("editing", [False, True])
+@pytest.mark.parametrize("option", ["rename_template", "danmaku_server"])
+def test_reading_library_options(tmp_path, library_services, lib_type, editing, option):
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            library = (
+                await MediaLib.create(
+                    name="Original", dir=str(tmp_path), lib_type=lib_type, priority=1
+                )
+                if editing
+                else None
+            )
+            # editing must validate against the stored type, not a forged video type
+            request = MediaLibUpsert(
+                id=library.id if library else None,
+                lib_type=LibType.MOVIE if editing else lib_type,
+                name="Changed",
+                dir=str(tmp_path),
+                rename_template="{{title}}" if option == "rename_template" else None,
+                danmaku_server="https://danmaku.example"
+                if option == "danmaku_server"
+                else None,
+            )
+            with pytest.raises(BadRequestException):
+                await MediaLibService.upsert(request)
+            assert await MediaLib.all().count() == int(editing)
+            if library:
+                await library.refresh_from_db()
+                assert library.name == "Original"
+                assert library.danmaku_server is library.rename_template is None
+            observer, bind = library_services
+            observer.assert_not_awaited()
+            bind.assert_not_awaited()
         finally:
             await Tortoise.close_connections()
 

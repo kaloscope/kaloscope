@@ -44,6 +44,7 @@
     triggers,
     onsave
   }: MediaLibEditorProps = $props();
+  const reading = $derived(lib_type === 'novel' || lib_type === 'comic');
 
   // the modal dialog instance
   let modal: Modal;
@@ -77,8 +78,10 @@
     const json: Record<string, unknown> = Object.fromEntries(data);
     json.id = id;
     json.scan_on_startup = data.has('scan_on_startup');
-    json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
-    json.danmaku_server = urlWrapper?.full(danmaku_server);
+    if (!reading) {
+      json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
+      json.danmaku_server = urlWrapper?.full(danmaku_server);
+    }
     json.triggers = triggers;
     api
       .post('media/lib/upsert', { json })
@@ -101,7 +104,7 @@
 </script>
 
 <Modal
-  icon={icons.videoClipMultiple}
+  icon={LibType[lib_type ?? 'movie'].icon}
   title={$_(id ? 'action.edit' : 'action.add', $_('entity.media_lib'))}
   maxWidth="36rem"
   bind:this={modal}
@@ -117,7 +120,7 @@
       <Label required>{$_('field.type')}</Label>
       <Select
         translate
-        options={enumToOptions(LibType, false).filter(({ value }) => id || value === 'movie' || value === 'tv_show')}
+        options={enumToOptions(LibType, false)}
         bind:value={lib_type}
         name="lib_type"
         class="w-full"
@@ -158,6 +161,9 @@
         />
         <input type="text" class="hidden" name="dir" value={dir} />
       </button>
+      <p class="px-1 text-xs leading-relaxed opacity-60">
+        {$_(`media.${lib_type ?? 'movie'}_layout`)}
+      </p>
       <div class="flex items-center gap-3">
         <Label class="grow">{$_('media.scan_on_startup')}</Label>
         <input
@@ -168,42 +174,44 @@
           bind:checked={scan_on_startup}
         />
       </div>
-      <Label tip={$_('media.rename.tip')}>{$_('media.rename.template')}</Label>
-      <input
-        aria-label={$_('media.rename.template')}
-        placeholder={RENAME_EXAMPLES[lib_type ?? 'movie']}
-        class="input w-full font-mono text-sm"
-        bind:value={rename_template}
-        {...schema.rename_template}
-      />
-      <div class="flex flex-wrap gap-2">
-        <div class="flex-3/5 space-y-1.5">
-          <Label tip={$_('media.danmaku.server_tip')}>{$_('media.danmaku.server')}</Label>
-          <URLWrapper bind:secure bind:this={urlWrapper}>
+      {#if !reading}
+        <Label tip={$_('media.rename.tip')}>{$_('media.rename.template')}</Label>
+        <input
+          aria-label={$_('media.rename.template')}
+          placeholder={RENAME_EXAMPLES[lib_type ?? 'movie']}
+          class="input w-full font-mono text-sm"
+          bind:value={rename_template}
+          {...schema.rename_template}
+        />
+        <div class="flex flex-wrap gap-2">
+          <div class="flex-3/5 space-y-1.5">
+            <Label tip={$_('media.danmaku.server_tip')}>{$_('media.danmaku.server')}</Label>
+            <URLWrapper bind:secure bind:this={urlWrapper}>
+              <input
+                class="grow truncate"
+                list="danmaku-server-presets"
+                placeholder={DANMAKU_SERVER_PRESET}
+                bind:value={danmaku_server}
+                {...schema.danmaku_server}
+              />
+              <datalist id="danmaku-server-presets">
+                {#if danmaku_server && DANMAKU_SERVER_PRESET.startsWith(danmaku_server)}
+                  <option value={DANMAKU_SERVER_PRESET}></option>
+                {/if}
+              </datalist>
+            </URLWrapper>
+          </div>
+          <div class="grow space-y-1.5">
+            <Label>{$_('media.danmaku.ttl')}</Label>
             <input
-              class="grow truncate"
-              list="danmaku-server-presets"
-              placeholder={DANMAKU_SERVER_PRESET}
-              bind:value={danmaku_server}
-              {...schema.danmaku_server}
+              placeholder={$_('media.danmaku.ttl')}
+              class="input w-full"
+              bind:value={danmaku_ttl}
+              {...schema.danmaku_ttl}
             />
-            <datalist id="danmaku-server-presets">
-              {#if danmaku_server && DANMAKU_SERVER_PRESET.startsWith(danmaku_server)}
-                <option value={DANMAKU_SERVER_PRESET}></option>
-              {/if}
-            </datalist>
-          </URLWrapper>
+          </div>
         </div>
-        <div class="grow space-y-1.5">
-          <Label>{$_('media.danmaku.ttl')}</Label>
-          <input
-            placeholder={$_('media.danmaku.ttl')}
-            class="input w-full"
-            bind:value={danmaku_ttl}
-            {...schema.danmaku_ttl}
-          />
-        </div>
-      </div>
+      {/if}
       <FlowTriggers class="mt-4" category="ingest" {triggers} onchange={(newTriggers) => (triggers = newTriggers)} />
     </fieldset>
     <div class="modal-action">
