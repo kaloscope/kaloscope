@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt, model_validator
 from sanic.request.form import File
@@ -202,14 +202,75 @@ class FavoriteQuery(Pageable):
     )
 
 
+class TextLocator(BaseModel, extra="forbid", strict=True):
+    """Locate a paragraph or EPUB block within one published novel chapter."""
+
+    version: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chapter_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    paragraph: NonNegativeInt | None = None
+    block_id: str | None = Field(pattern=r"^[0-9a-f]{32}$", default=None)
+    offset: float = Field(ge=0, le=1, default=0)
+
+    @model_validator(mode="after")
+    def check_anchor(self) -> Self:
+        """Require exactly one paragraph or block anchor.
+
+        Returns:
+            The validated locator.
+
+        Raises:
+            ValueError: If both anchors are present or absent.
+        """
+        if (self.paragraph is None) == (self.block_id is None):
+            raise ValueError("exactly one paragraph or block anchor is required")
+        return self
+
+
+class ImageLocator(BaseModel, extra="forbid", strict=True):
+    """Locate a comic page with a relative offset inside it."""
+
+    version: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chapter_item_id: PositiveInt | None = None
+    page_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    offset: float = Field(ge=0, le=1, default=0)
+
+
 class HistoryQuery(Pageable):
-    # enable reading inputs together with retention and permission checks
-    rel_type: Literal[HistoryType.SEARCH, HistoryType.VIDEO]
+    rel_type: HistoryType
+    rel_id: NonNegativeInt | None = None
 
 
 class HistoryEntry(BaseModel):
-    rel_type: Literal[HistoryType.SEARCH, HistoryType.VIDEO]
+    rel_type: HistoryType
     rel_id: NonNegativeInt
     keyword: str | None = Field(max_length=4096, default=None)
     position: NonNegativeInt | None = None
     percentage: int | None = Field(ge=0, le=100, default=None)
+    locator: TextLocator | ImageLocator | None = None
+
+    @model_validator(mode="after")
+    def check_locator(self) -> Self:
+        """Keep reading anchors separate from search terms and video seconds.
+
+        Returns:
+            The entry with a locator matching its history type.
+
+        Raises:
+            ValueError: If reading fields are missing or used with another type.
+        """
+        if self.rel_type in (HistoryType.TEXT, HistoryType.IMAGE):
+            expected = (
+                TextLocator if self.rel_type == HistoryType.TEXT else ImageLocator
+            )
+            if (
+                not isinstance(self.locator, expected)
+                or self.rel_id == 0
+                or self.position is not None
+                or self.keyword is not None
+            ):
+                raise ValueError(
+                    "reading history requires a work ID and matching locator"
+                )
+        elif self.locator is not None:
+            raise ValueError("only reading history accepts a locator")
+        return self

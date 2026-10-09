@@ -205,10 +205,22 @@ def test_history_record(monkeypatch, rel_type, days):
                 role=UserRole.USER,
                 preferences={"search_records": days, "watch_records": days},
             )
+            session = UserInfo(
+                id=user.id,
+                login_id="test",
+                username=user.username,
+                avatar=None,
+                role=user.role,
+                preferences=user.preferences or {},
+                client_ip="127.0.0.1",
+                login_at=now,
+                expire_at=now + timedelta(hours=1),
+                last_activity=now,
+            )
             entry = HistoryEntry(
                 rel_type=rel_type, rel_id=1, keyword="Query", position=10, percentage=20
             )
-            first = await UserHistoryService.record(user.id, entry)
+            first = await UserHistoryService.record(session, entry)
             if days == 0:
                 assert first is None
                 assert await UserHistory.all().count() == 0
@@ -219,7 +231,7 @@ def test_history_record(monkeypatch, rel_type, days):
             )
             entry.position = 25
             entry.percentage = 50
-            updated = await UserHistoryService.record(user.id, entry)
+            updated = await UserHistoryService.record(session, entry)
             assert updated is not None and updated.id == first.id
             assert updated.repetitions == 1
             assert updated.updated_at == now
@@ -233,7 +245,7 @@ def test_history_record(monkeypatch, rel_type, days):
             await User.filter(id=user.id).update(
                 preferences={"search_records": 0, "watch_records": 0}
             )
-            assert await UserHistoryService.record(user.id, entry) is None
+            assert await UserHistoryService.record(session, entry) is None
             assert await UserHistory.all().count() == 1
             await UserHistoryService.clean_expired(user.id, rel_type)
             assert await UserHistory.all().count() == 0

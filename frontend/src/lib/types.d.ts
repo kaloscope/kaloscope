@@ -424,6 +424,46 @@ export type ImageContent = ContentResponse & {
 export type MediaContent = TextContent | EpubContent | ImageContent;
 
 /**
+ * A zero-based TXT paragraph or EPUB block with a relative offset inside it.
+ */
+export type TextLocator = {
+  version: string;
+  chapter_id: string;
+  offset: number;
+} & ({ paragraph: number; block_id?: null } | { block_id: string; paragraph?: null });
+
+/**
+ * A comic page position; standalone works omit the child item ID.
+ */
+export type ImageLocator = {
+  version: string;
+  chapter_item_id?: number | null;
+  page_id: string;
+  offset: number;
+};
+
+/**
+ * Reading progress submitted to the shared user history endpoint.
+ */
+export type ReadingEntry = {
+  rel_id: number;
+  percentage?: number;
+} & ({ rel_type: 'text'; locator: TextLocator } | { rel_type: 'image'; locator: ImageLocator });
+
+/**
+ * One retained work history, with a null locator when its position is unusable.
+ */
+export type ReadingHistory = {
+  id: number;
+  rel_id: number;
+  repetitions: number;
+  percentage: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+  media: MediaItem | null;
+} & ({ rel_type: 'text'; locator: TextLocator | null } | { rel_type: 'image'; locator: ImageLocator | null });
+
+/**
  * An actor credited in media metadata.
  */
 export type Actor = {

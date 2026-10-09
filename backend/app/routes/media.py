@@ -19,6 +19,7 @@ from app.core.exceptions import (
     ForbiddenException,
     KaloscopeException,
     NotFoundException,
+    content_error,
 )
 from app.core.media.common import ContentError
 from app.core.media.shelver import (
@@ -59,27 +60,6 @@ from app.utils.extractor import extract_title
 from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
 
 media = Blueprint("media", url_prefix="/media")
-
-
-def _content_error(error: ContentError, headers: dict[str, str]) -> KaloscopeException:
-    """Map a controlled reading failure to the shared HTTP content contract.
-
-    Args:
-        error: The source, cache or resource failure reported by the service.
-        headers: The private cache and MIME protection headers for the response.
-
-    Returns:
-        The application exception carrying a stable error code and HTTP status.
-    """
-    status = {
-        "bad_request": 400,
-        "not_found": 404,
-        "content_changed": 409,
-        "content_not_ready": 409,
-        "media_source_unavailable": 503,
-        "metadata_write_failed": 503,
-    }.get(error.code, 422)
-    return KaloscopeException(error.code, status_code=status, headers=headers)
 
 
 @media.get("/lib/list")
@@ -175,7 +155,7 @@ async def delete_items(_, body: MediaDel) -> HTTPResponse:
         try:
             await MediaItemService.delete(int(id), body.local)
         except ContentError as error:
-            raise _content_error(error, {}) from error
+            raise content_error(error, {}) from error
         except Exception:
             if len(body.ids) == 1:
                 raise
@@ -281,7 +261,7 @@ async def get_item_content(
             raise ContentError("media_limit_exceeded")
         return response
     except ContentError as error:
-        raise _content_error(error, headers) from error
+        raise content_error(error, headers) from error
     except KaloscopeException as error:
         error.headers = {**error.headers, **headers}
         raise
@@ -316,7 +296,7 @@ async def get_item_asset(
             id, request.ctx.user, asset_id, query.v
         )
     except ContentError as error:
-        raise _content_error(error, headers) from error
+        raise content_error(error, headers) from error
     except KaloscopeException as error:
         error.headers = {**error.headers, **headers}
         raise
@@ -353,7 +333,7 @@ async def save_metadata(_, body: MediaMetadata, id: int) -> HTTPResponse:
     try:
         await MediaItemService.save_metadata(id, body.metadata, overwrite=True)
     except ContentError as error:
-        raise _content_error(error, headers) from error
+        raise content_error(error, headers) from error
     return empty(headers=headers)
 
 

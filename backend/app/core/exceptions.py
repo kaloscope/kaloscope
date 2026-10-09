@@ -1,9 +1,13 @@
 from enum import StrEnum, auto
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sanic import NotFound, Request, SanicException, file
 from sanic.log import Colors, logger
 from sanic_ext.exceptions import ValidationError
+
+if TYPE_CHECKING:
+    from app.core.media.common import ContentError
 
 # get the root path of the project
 ROOT_PATH = Path(__file__).resolve().parents[3]
@@ -78,6 +82,29 @@ class NotFoundException(KaloscopeException):
     status_code = 404
     message = ErrorCode.NOT_FOUND
     quiet = True
+
+
+def content_error(
+    error: "ContentError", headers: dict[str, str] | None = None
+) -> KaloscopeException:
+    """Map a controlled reading failure to the shared HTTP content contract.
+
+    Args:
+        error: The source, cache or resource failure reported by the service.
+        headers: Optional response headers, omitted for ordinary JSON requests.
+
+    Returns:
+        The application exception carrying a stable error code and HTTP status.
+    """
+    status = {
+        "bad_request": 400,
+        "not_found": 404,
+        "content_changed": 409,
+        "content_not_ready": 409,
+        "media_source_unavailable": 503,
+        "metadata_write_failed": 503,
+    }.get(error.code, 422)
+    return KaloscopeException(error.code, status_code=status, headers=headers)
 
 
 async def error_handler(request: Request, exception: Exception):

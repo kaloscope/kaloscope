@@ -4,17 +4,27 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
+from pydantic import ValidationError
 from sanic import Request
 from sanic.request.form import File
 from tortoise import timezone
-from tortoise.transactions import atomic
+from tortoise.expressions import Q, Subquery
+from tortoise.transactions import atomic, in_transaction
 
 from app.core.config import KaloscopeConfig
-from app.core.exceptions import ErrorCode, ForbiddenException, KaloscopeException
+from app.core.exceptions import (
+    ErrorCode,
+    ForbiddenException,
+    KaloscopeException,
+    NotFoundException,
+)
+from app.core.media.common import ContentError
 from app.core.middleware import SessionHolder
-from app.models.flow import IndexerResource
+from app.models.flow import FlowGraph, IndexerResource
+from app.models.media import LibType, MediaItem
 from app.models.user import (
     HistoryEntry,
+    HistoryQuery,
     HistoryType,
     Permissions,
     PermType,
@@ -27,6 +37,8 @@ from app.models.user import (
     UserRole,
 )
 from app.services.base import BaseService
+from app.services.flow import FlowGraphService
+from app.services.media import MediaItemService
 from app.utils.crypto import encrypt
 from app.utils.dict import entries, remove
 
@@ -262,50 +274,150 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
         return days if type(days) is int and days >= -1 else 0
 
     @classmethod
-    async def record(cls, user_id: int, obj: HistoryEntry) -> UserHistory | None:
+    async def record(cls, user: UserInfo, obj: HistoryEntry) -> UserHistory | None:
         """Record a user history entry, incrementing repetitions on duplicate.
 
         Args:
-            user_id: The user ID.
+            user: The authenticated user with loaded library permissions.
             obj: The history entry data.
 
         Returns:
-            The user history instance, or `None` if the entry is invalid.
-        """
-        if await cls.retention_days(user_id, obj.rel_type) == 0:
-            # do not record history if the retention days is set to 0
-            return None
+            The history instance, or None if recording is disabled or the search
+            is empty.
 
-        history = None
-        created = False
-        if obj.rel_type == HistoryType.VIDEO:
-            # record video watch history
-            history, created = await UserHistory.update_or_create(
-                user_id=user_id,
-                rel_type=obj.rel_type,
-                rel_id=obj.rel_id,
-                defaults={
+        Raises:
+            ContentError: If a reading locator or its content version is invalid.
+            NotFoundException: If a reading work or chapter is missing or hidden.
+            ForbiddenException: If the user cannot access the reading library.
+        """
+        if obj.locator is not None:
+            await MediaItemService.validate_locator(obj.rel_id, user, obj.locator)
+
+        # serialize the SQLite lookup and insert so concurrent first saves share one row
+        async with in_transaction():
+            if await cls.retention_days(user.id, obj.rel_type) == 0:
+                return None
+
+            history = None
+            created = False
+            if obj.rel_type != HistoryType.SEARCH:
+                defaults: dict[str, Any] = {
                     "position": obj.position or 0,
                     "percentage": obj.percentage or 0,
-                },
-            )
-        elif obj.rel_type == HistoryType.SEARCH:
-            # record web search history
-            keyword = (obj.keyword or "").strip()
-            if keyword:
-                history, created = await UserHistory.get_or_create(
-                    user_id=user_id,
+                }
+                if obj.locator is not None:
+                    defaults.update(
+                        position=None,
+                        locator=obj.locator.model_dump(exclude_none=True),
+                    )
+                history, created = await UserHistory.update_or_create(
+                    user_id=user.id,
                     rel_type=obj.rel_type,
                     rel_id=obj.rel_id,
-                    keyword=keyword,
+                    defaults=defaults,
                 )
+            else:
+                # record web search history
+                keyword = (obj.keyword or "").strip()
+                if keyword:
+                    history, created = await UserHistory.get_or_create(
+                        user_id=user.id,
+                        rel_type=obj.rel_type,
+                        rel_id=obj.rel_id,
+                        keyword=keyword,
+                    )
 
-        # increment repetitions if not created
-        if history is not None and not created:
-            history.repetitions += 1
-            await history.save(update_fields=["repetitions", "updated_at"])
+            # increment repetitions if not created
+            if history is not None and not created:
+                history.repetitions += 1
+                await history.save(update_fields=["repetitions", "updated_at"])
 
-        return history
+            return history
+
+    @classmethod
+    async def get_page(cls, user: UserInfo, query: HistoryQuery) -> dict[str, Any]:
+        """List retained history with accessible reading works and usable locators.
+
+        Args:
+            user: The authenticated user with loaded library permissions.
+            query: The history type, optional related ID and pagination parameters.
+
+        Returns:
+            A history page with related media or graphs. Unusable reading positions
+            are returned as null without deleting the user's stored history.
+        """
+        await cls.clean_expired(user.id, query.rel_type)
+        queries = [Q(user_id=user.id, rel_type=query.rel_type)]
+        if query.rel_id is not None:
+            queries.append(Q(rel_id=query.rel_id))
+        reading = query.rel_type in (HistoryType.TEXT, HistoryType.IMAGE)
+        if reading:
+            works = MediaItem.filter(
+                parent_id=None,
+                visible=True,
+                lib__lib_type=LibType.NOVEL
+                if query.rel_type == HistoryType.TEXT
+                else LibType.COMIC,
+            )
+            if user.role != UserRole.ADMIN:
+                works = works.filter(
+                    lib_id__in=Subquery(
+                        UserPermission.filter(
+                            user_id=user.id, rel_type=PermType.MEDIA_LIB
+                        ).values("rel_id")
+                    )
+                )
+            # filter before pagination to keep totals and page boundaries accurate
+            queries.append(Q(rel_id__in=Subquery(works.values("id"))))
+        page = await UserHistory.page(*queries, **query.page_params)
+        result = await cls.dump_page(page)
+        for history in result["items"]:
+            rel_id = history["rel_id"]
+            if not rel_id:
+                continue
+            if query.rel_type == HistoryType.SEARCH:
+                graph = await FlowGraph.get_or_none(id=rel_id)
+                history["graph"] = (
+                    await FlowGraphService.dump(
+                        graph, exclude={"draft", "definition", "logs"}
+                    )
+                    if graph is not None
+                    else None
+                )
+                continue
+            media = await MediaItem.get_or_none(id=rel_id)
+            history["media"] = (
+                await MediaItemService.dump(media, exclude={"children"})
+                if media is not None
+                else None
+            )
+            if reading:
+                try:
+                    entry = HistoryEntry.model_validate(history)
+                    assert entry.locator is not None
+                    await MediaItemService.validate_locator(rel_id, user, entry.locator)
+                    history["locator"] = entry.locator.model_dump(exclude_none=True)
+                except (
+                    ValidationError,
+                    ContentError,
+                    NotFoundException,
+                    ForbiddenException,
+                ):
+                    history["locator"] = None
+                    history["percentage"] = None
+        if reading and result["items"]:
+            # recheck visibility and grants after the unlocked content reads
+            visible = set(
+                await UserHistory.filter(
+                    *queries, id__in=[history["id"] for history in result["items"]]
+                ).values_list("id", flat=True)
+            )
+            if len(visible) != len(result["items"]):
+                result["items"] = [
+                    history for history in result["items"] if history["id"] in visible
+                ]
+                result["total"] = await UserHistory.filter(*queries).count()
+        return result
 
     @classmethod
     async def clean_expired(cls, user_id: int, rel_type: HistoryType):

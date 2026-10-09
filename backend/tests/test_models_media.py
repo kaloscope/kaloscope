@@ -113,8 +113,7 @@ def test_reading_library_alias(tmp_path, lib_type):
 def test_reading_inputs(rel_type):
     with pytest.raises(ValidationError):
         HistoryEntry(rel_type=rel_type, rel_id=1)
-    with pytest.raises(ValidationError):
-        HistoryQuery(rel_type=rel_type)
+    assert HistoryQuery(rel_type=rel_type, rel_id=1).rel_id == 1
 
 
 def test_reading_locator():

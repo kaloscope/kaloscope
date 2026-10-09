@@ -3,15 +3,14 @@ from sanic_ext import validate
 from tortoise.expressions import Q
 
 from app.core.decorators import authorize
+from app.core.exceptions import content_error
+from app.core.media.common import ContentError
 from app.core.middleware import SessionHolder
 from app.models.base import IDs
-from app.models.flow import FlowGraph
-from app.models.media import MediaItem
 from app.models.user import (
     FavoriteQuery,
     HistoryEntry,
     HistoryQuery,
-    HistoryType,
     Permissions,
     User,
     UserAvatar,
@@ -25,8 +24,6 @@ from app.models.user import (
     UserQuery,
     UserRole,
 )
-from app.services.flow import FlowGraphService
-from app.services.media import MediaItemService
 from app.services.user import (
     UserFavoriteService,
     UserHistoryService,
@@ -132,42 +129,24 @@ async def list_favorites(request: Request, body: FavoriteQuery) -> HTTPResponse:
 
 
 @user.get("/history/list")
+@authorize()
 @validate(query=HistoryQuery)
 async def list_histories(request: Request, query: HistoryQuery) -> HTTPResponse:
     """List the current user's histories."""
     user: UserInfo = request.ctx.user
-    # clean expired history records
-    rel_type = query.rel_type
-    await UserHistoryService.clean_expired(user.id, rel_type)
-    # list the histories with pagination
-    page = await UserHistory.page(
-        user_id=user.id, rel_type=rel_type, **query.page_params
-    )
-    result = await UserHistoryService.dump_page(page)
-    # attach related data based on the history type
-    for his in result["items"]:
-        if rel_id := his["rel_id"]:
-            if rel_type == HistoryType.SEARCH:
-                graph = await FlowGraph.get_or_none(id=rel_id)
-                if graph is not None:
-                    graph = await FlowGraphService.dump(
-                        graph, exclude={"draft", "definition", "logs"}
-                    )
-                his["graph"] = graph
-            elif rel_type == HistoryType.VIDEO:
-                media = await MediaItem.get_or_none(id=rel_id)
-                if media is not None:
-                    media = await MediaItemService.dump(media, exclude={"children"})
-                his["media"] = media
-    return json(result)
+    return json(await UserHistoryService.get_page(user, query))
 
 
 @user.post("/history/record")
+@authorize()
 @validate(json=HistoryEntry)
 async def record_history(request: Request, body: HistoryEntry) -> HTTPResponse:
     """Record a user history entry."""
     user: UserInfo = request.ctx.user
-    await UserHistoryService.record(user.id, body)
+    try:
+        await UserHistoryService.record(user, body)
+    except ContentError as error:
+        raise content_error(error) from error
     return empty()
 
 

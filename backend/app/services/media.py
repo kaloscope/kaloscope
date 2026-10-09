@@ -58,7 +58,9 @@ from app.models.media import (
 )
 from app.models.user import (
     HistoryType,
+    ImageLocator,
     PermType,
+    TextLocator,
     UserHistory,
     UserInfo,
     UserPermission,
@@ -1085,6 +1087,37 @@ def _read_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
             else read_image_resource
         )
         return read(source.path, cache, asset_id)
+
+
+def _check_locator(item: MediaItem, locator: TextLocator | ImageLocator):
+    """Check an anchor against the guarded content index without reading metadata.
+
+    Args:
+        item: The accessible reading unit with a validated content version.
+        locator: The paragraph, block or page position submitted by the reader.
+
+    Raises:
+        ContentError: If the anchor is unknown or the source or cache is invalid.
+    """
+    from app.core.media.image import ImageIndex
+    from app.core.media.text import read_text_chapter
+
+    with _content_index(item) as (_, cache, index):
+        if isinstance(locator, ImageLocator):
+            if not isinstance(index, ImageIndex) or not any(
+                page.id == locator.page_id for page in index.pages
+            ):
+                raise ContentError("not_found")
+        else:
+            content = read_text_chapter(cache, locator.chapter_id)
+            if isinstance(content, list):
+                valid = locator.paragraph is not None and locator.paragraph < len(
+                    content
+                )
+            else:
+                valid = any(block.id == locator.block_id for block in content.blocks)
+            if not valid:
+                raise ContentError("not_found")
 
 
 def _build_index(
@@ -2830,6 +2863,49 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ):
                 raise ContentError("bad_request")
             return await to_thread(_read_text_content, item, query.chapter_id)
+
+    @classmethod
+    async def validate_locator(
+        cls, id: int, user: UserInfo, locator: TextLocator | ImageLocator
+    ):
+        """Validate a reading position and its ownership before saving or restoring it.
+
+        Args:
+            id: The top-level novel or comic work ID.
+            user: The authenticated user with loaded library permissions.
+            locator: The position in the expected published content version.
+
+        Raises:
+            NotFoundException: If the work or selected chapter is missing or hidden.
+            ForbiddenException: If library access is denied or revoked during reading.
+            ContentError: If the type, ownership, version or anchor is invalid.
+        """
+        async with cls._content_item(id, user, locator.version) as item:
+            expected = (
+                LibType.NOVEL if isinstance(locator, TextLocator) else LibType.COMIC
+            )
+            if item.parent_id is not None or item.lib.lib_type != expected:
+                raise ContentError("bad_request")
+            if isinstance(locator, ImageLocator) and item.format is None:
+                if locator.chapter_item_id is None:
+                    raise ContentError("bad_request")
+                async with cls._content_item(
+                    locator.chapter_item_id, user, locator.version
+                ) as chapter:
+                    if (
+                        chapter.parent_id != item.id
+                        or chapter.lib_id != item.lib_id
+                        or chapter.format is None
+                    ):
+                        raise ContentError("bad_request")
+                    await to_thread(_check_locator, chapter, locator)
+            else:
+                if (
+                    isinstance(locator, ImageLocator)
+                    and locator.chapter_item_id is not None
+                ):
+                    raise ContentError("bad_request")
+                await to_thread(_check_locator, item, locator)
 
     @classmethod
     async def get_asset(
