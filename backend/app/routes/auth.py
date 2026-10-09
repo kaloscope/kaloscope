@@ -6,7 +6,7 @@ from tortoise import timezone
 
 from app.core.middleware import SessionHolder
 from app.models.base import IDs
-from app.models.user import UserInfo, UserLogin
+from app.models.user import User, UserInfo, UserLogin
 from app.services.user import UserService
 from app.utils.dict import remove, values
 
@@ -39,7 +39,14 @@ async def logout(request: Request) -> HTTPResponse:
 @auth.get("/current")
 async def current(request: Request) -> HTTPResponse:
     """Get the current user's information."""
-    return json(request.ctx.user.model_dump() if hasattr(request.ctx, "user") else {})
+    result = request.ctx.user.model_dump() if hasattr(request.ctx, "user") else {}
+    if result:
+        user = await User.get_or_none(id=result["id"])
+        preferences = user.preferences if user is not None else result["preferences"]
+        result["preferences"] = UserService.DEFAULT_PREFERENCES | (
+            preferences if isinstance(preferences, dict) else {}
+        )
+    return json(result)
 
 
 @auth.get("/online")

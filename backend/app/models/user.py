@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum, auto
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt
+from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt, model_validator
 from sanic.request.form import File
 from tortoise.fields import (
     CharEnumField,
@@ -14,7 +14,7 @@ from tortoise.fields import (
     ReverseRelation,
 )
 
-from app.models.base import Pageable, RequestFilesMixin, TortoiseModel
+from app.models.base import KVPair, Pageable, RequestFilesMixin, TortoiseModel
 from app.models.flow import FlowGraph
 
 
@@ -167,6 +167,32 @@ class UserPwd(BaseModel):
 
 class UserAvatar(BaseModel, RequestFilesMixin):
     avatar: File | None = None
+
+
+class UserPreference(KVPair):
+    @model_validator(mode="before")
+    @classmethod
+    def check_retention(cls, data: Any) -> Any:
+        """Validate history retention before value coercion.
+
+        Args:
+            data: The submitted preference data.
+
+        Returns:
+            The unchanged data for normal preference validation.
+
+        Raises:
+            ValueError: If history retention is not an integer of at least -1.
+        """
+        if isinstance(data, dict) and data.get("key") in (
+            "search_records",
+            "watch_records",
+            "read_records",
+        ):
+            value = data.get("value")
+            if type(value) is not int or value < -1:
+                raise ValueError("history retention must be an integer of at least -1")
+        return data
 
 
 class FavoriteQuery(Pageable):

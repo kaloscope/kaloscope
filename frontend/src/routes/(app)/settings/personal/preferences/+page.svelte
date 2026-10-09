@@ -9,6 +9,9 @@
   // the loading state
   const loading = createLoading();
 
+  // the shared history retention options
+  const retentionDays = [1, 3, 7, 14, 30, 90, 180, 365];
+
   // the homepage options
   const homepageOptions = $derived.by(() => {
     const options = [
@@ -100,36 +103,22 @@
       </div>
     </Setting>
     <Setting title={$_('preference.privacy.title')} tip={$_('preference.privacy.tip')}>
-      <fieldset class="fieldset">
-        <Label>{$_('preference.privacy.search')}</Label>
-        <Select
-          translate
-          options={[
-            { value: 0, label: 'preference.privacy.untrack' },
-            { value: 1, label: `1 ${$_('duration.day').toLowerCase()}` },
-            { value: 3, label: `3 ${$_('duration.days').toLowerCase()}` },
-            { value: 7, label: `7 ${$_('duration.days').toLowerCase()}` }
-          ]}
-          bind:value={$user.preferences.search_records}
-          onchange={() => update('search_records')}
-          class="w-full"
-        />
-      </fieldset>
-      <fieldset class="fieldset">
-        <Label>{$_('preference.privacy.watch')}</Label>
-        <Select
-          translate
-          options={[
-            { value: 0, label: 'preference.privacy.untrack' },
-            { value: 1, label: `1 ${$_('duration.day').toLowerCase()}` },
-            { value: 3, label: `3 ${$_('duration.days').toLowerCase()}` },
-            { value: 7, label: `7 ${$_('duration.days').toLowerCase()}` }
-          ]}
-          bind:value={$user.preferences.watch_records}
-          onchange={() => update('watch_records')}
-          class="w-full"
-        />
-      </fieldset>
+      {#each [['search_records', 'search'], ['watch_records', 'watch'], ['read_records', 'read']] as [key, label] (key)}
+        {@const current = $user.preferences[key]}
+        <fieldset class="fieldset">
+          <Label>{$_(`preference.privacy.${label}`)}</Label>
+          <Select name={key} bind:value={$user.preferences[key]} onchange={() => update(key)} class="w-full">
+            <option value={0}>{$_('preference.privacy.untrack')}</option>
+            {#each retentionDays as days (days)}
+              <option value={days}>{days} {$_(days === 1 ? 'duration.day' : 'duration.days').toLowerCase()}</option>
+            {/each}
+            {#if typeof current === 'number' && current > 0 && !retentionDays.includes(current)}
+              <option value={current}>{current} {$_('duration.days').toLowerCase()}</option>
+            {/if}
+            <option value={-1}>{$_('preference.privacy.permanent')}</option>
+          </Select>
+        </fieldset>
+      {/each}
     </Setting>
   {/if}
 </Container>

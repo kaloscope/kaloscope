@@ -333,9 +333,11 @@
     },
     "privacy": {
       "title": "Privacy",
-      "tip": "Set the number of days to keep privacy records.",
+      "tip": "Choose how long to keep each type of history.",
       "search": "Search Records",
       "watch": "Watch Records",
+      "read": "Reading Records",
+      "permanent": "Keep Forever",
       "untrack": "Not Saving"
     }
   },

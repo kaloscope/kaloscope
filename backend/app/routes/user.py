@@ -4,7 +4,7 @@ from tortoise.expressions import Q
 
 from app.core.decorators import authorize
 from app.core.middleware import SessionHolder
-from app.models.base import IDs, KVPair
+from app.models.base import IDs
 from app.models.flow import FlowGraph
 from app.models.media import MediaItem
 from app.models.user import (
@@ -20,6 +20,7 @@ from app.models.user import (
     UserHistory,
     UserInfo,
     UserPermission,
+    UserPreference,
     UserPwd,
     UserQuery,
     UserRole,
@@ -108,8 +109,8 @@ async def change_avatar(request: Request, body: UserAvatar) -> HTTPResponse:
 
 
 @user.post("/update_pref")
-@validate(json=KVPair)
-async def update_pref(request: Request, body: KVPair) -> HTTPResponse:
+@validate(json=UserPreference)
+async def update_pref(request: Request, body: UserPreference) -> HTTPResponse:
     """Update current user's preference."""
     user: UserInfo = request.ctx.user
     await UserService.update_pref(user.id, body)

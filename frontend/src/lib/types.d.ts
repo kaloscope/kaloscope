@@ -129,6 +129,7 @@ export type User = {
     recent_watches: boolean;
     search_records: number;
     watch_records: number;
+    read_records: number;
     landscape_mode: 'rotate' | 'web_api';
     [key: string]: string | boolean | number;
   } | null;

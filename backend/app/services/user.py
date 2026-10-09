@@ -12,7 +12,6 @@ from tortoise.transactions import atomic
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import ErrorCode, ForbiddenException, KaloscopeException
 from app.core.middleware import SessionHolder
-from app.models.base import KVPair
 from app.models.flow import IndexerResource
 from app.models.user import (
     HistoryEntry,
@@ -24,6 +23,7 @@ from app.models.user import (
     UserHistory,
     UserInfo,
     UserPermission,
+    UserPreference,
     UserRole,
 )
 from app.services.base import BaseService
@@ -41,7 +41,8 @@ class UserService(BaseService[User], model=User):
         "recent_searches": True,
         "recent_watches": True,
         "search_records": 3,
-        "watch_records": 3,
+        "watch_records": -1,
+        "read_records": -1,
     }
 
     @classmethod
@@ -71,12 +72,9 @@ class UserService(BaseService[User], model=User):
                 ErrorCode.LOGIN_FAILED if ambiguity else ErrorCode.INCORRECT_PASSWORD
             )
         # set default preferences
-        preferences = user.preferences
-        if preferences is None:
-            preferences = cls.DEFAULT_PREFERENCES
-        elif isinstance(preferences, dict):
-            for key, value in cls.DEFAULT_PREFERENCES.items():
-                preferences.setdefault(key, value)
+        preferences = cls.DEFAULT_PREFERENCES.copy()
+        if isinstance(user.preferences, dict):
+            preferences.update(user.preferences)
         # construct the login user object
         request = Request.get_current()
         now = timezone.now()
@@ -144,7 +142,7 @@ class UserService(BaseService[User], model=User):
 
     @classmethod
     @atomic()
-    async def update_pref(cls, id: int, pref: KVPair):
+    async def update_pref(cls, id: int, pref: UserPreference):
         """Update the user's preference.
 
         Args:
@@ -248,7 +246,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
             rel_type: The history type.
 
         Returns:
-            The maximum retention days, or 0 if not set.
+            Positive retention days, -1 for permanent storage, or 0 to disable it.
         """
         days = 0
         user = await User.get_or_none(id=user_id)
@@ -259,7 +257,9 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
             days = UserService.get_pref(user.preferences, "search_records")
         elif rel_type == HistoryType.VIDEO:
             days = UserService.get_pref(user.preferences, "watch_records")
-        return days if isinstance(days, int) and days >= 0 else 0
+        elif rel_type in (HistoryType.TEXT, HistoryType.IMAGE):
+            days = UserService.get_pref(user.preferences, "read_records")
+        return days if type(days) is int and days >= -1 else 0
 
     @classmethod
     async def record(cls, user_id: int, obj: HistoryEntry) -> UserHistory | None:
@@ -311,19 +311,24 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
     async def clean_expired(cls, user_id: int, rel_type: HistoryType):
         """Delete expired history records based on user preferences.
 
-        Reads `search_records` or `watch_records` from the user's preferences to
-        determine the retention window (in days). A value of 0 means no history
-        is kept, so all records of the given type are deleted.
+        A value of -1 keeps records permanently. A value of 0 deletes all
+        records of the given type. Positive values expire records by age.
 
         Args:
             user_id: The user ID.
             rel_type: The history type to clean.
         """
         days = await cls.retention_days(user_id, rel_type)
+        if days == -1:
+            return
         if days == 0:
             await UserHistory.filter(user_id=user_id, rel_type=rel_type).delete()
         else:
-            cutoff = timezone.now() - timedelta(days=days)
+            try:
+                cutoff = timezone.now() - timedelta(days=days)
+            except OverflowError:
+                # a retention window beyond the calendar cannot expire records
+                return
             await UserHistory.filter(
                 user_id=user_id, rel_type=rel_type, updated_at__lt=cutoff
             ).delete()
