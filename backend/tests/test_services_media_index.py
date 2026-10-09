@@ -5680,7 +5680,7 @@ async def _ingest_trigger(lib: MediaLib, *, asynchronous: bool = False) -> FlowG
                 {
                     "id": "end",
                     "data": {
-                        "$schema": "reading",
+                        "$schema": lib.lib_type,
                         "response": '[{"title":"Scraped","authors":["Writer"]}]',
                         "force_end": True,
                     },

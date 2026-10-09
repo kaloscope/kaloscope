@@ -13,6 +13,8 @@ import pytest
         "app.services.media",
         "app.core.media.shelver",
         "app.core.flow.nodes.metadata",
+        "app.core.flow.nodes.metadata.novel",
+        "app.core.flow.nodes.metadata.comic",
         "app.core.media.handlers.reading",
         "app.core.media.common",
         "app.core.media.text",

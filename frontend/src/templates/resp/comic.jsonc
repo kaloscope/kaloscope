@@ -1,0 +1,23 @@
+[
+  {
+    "title": "",
+    "plot": "",
+    "rating": 9.0,
+    "year": 1999,
+    "month": 1,
+    "day": 1,
+    "authors": [""],
+    "illustrators": [""],
+    "publisher": "",
+    "language": "",
+    "isbn": "",
+    "series": "",
+    "number": "1", // issue number
+    "volume": "",
+    "genres": [""],
+    "tags": [""],
+    "page_count": null,
+    "black_and_white": null,
+    "cover": null // { "page": 0 }
+  }
+]

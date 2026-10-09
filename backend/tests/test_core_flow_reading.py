@@ -1,10 +1,11 @@
-"""Tests for reading metadata workflow previews and automatic publication."""
+"""Tests for novel and comic workflow previews and automatic publication."""
 
 import asyncio
 import base64
 import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -20,7 +21,8 @@ from app.core.exceptions import error_handler
 from app.core.flow.context import MANUAL_KEY, RETVAL_KEY, Context
 from app.core.flow.engine import FlowEngine
 from app.core.flow.nodes.base import CancellationSignal, Node, NodeGroup
-from app.core.flow.nodes.metadata.reading import ReadingNode
+from app.core.flow.nodes.metadata.comic import ComicNode
+from app.core.flow.nodes.metadata.novel import NovelNode
 from app.core.media.common import ContentError
 from app.core.media.metadata import METADATA_BYTES, parse_comicinfo, parse_opf
 from app.models.flow import FlowGraph, FlowLog, GraphCategory, GraphState
@@ -76,20 +78,63 @@ async def _database() -> AsyncGenerator[None]:
         await Tortoise.close_connections()
 
 
-def test_node_schema():
-    schema = next(schema for schema in Node.schemas if schema.node_type == "reading")
-    assert schema.name == "ReadingNode"
+@pytest.fixture(
+    params=[("novel", NovelNode), ("comic", ComicNode)], ids=["novel", "comic"]
+)
+def reading_node(request):
+    """Provide the expected library type and its metadata node.
+
+    Args:
+        request: The current parametrized fixture request.
+
+    Returns:
+        The library type and node class to exercise.
+    """
+    return request.param
+
+
+def test_node_schema(reading_node):
+    lib_type, node = reading_node
+    schema = next(schema for schema in Node.schemas if schema.node_type == lib_type)
+    assert schema.name == node.__name__
     assert schema.group == NodeGroup.END
     assert schema.categories == (GraphCategory.INGEST,)
-    assert schema.icon == "bookText"
+    assert schema.icon == ("bookText" if lib_type == "novel" else "imageMultiple")
+    assert schema.order == (4 if lib_type == "novel" else 5)
     assert [handle.id for handle in schema.handles] == ["input"]
     assert [field.id for field in schema.fields] == ["example", "response", "force_end"]
-    assert ReadingNode.example.template == "resp/reading.jsonc"
-    assert "reading" in Node.executors
+    assert node.example.template == f"resp/{lib_type}.jsonc"
+    assert lib_type in Node.executors
+    assert "reading" not in Node.executors
+    assert all(schema.node_type != "reading" for schema in Node.schemas)
 
 
-@pytest.mark.parametrize("lib_type", ["novel", "comic"])
-def test_reading_preview(monkeypatch, lib_type):
+def test_reading_example(reading_node):
+    lib_type, node = reading_node
+    template = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/templates"
+        / node.example.template
+    )
+    candidates = json.try_loads(template.read_text(), with_comments=True)
+    assert isinstance(candidates, list) and len(candidates) == 1
+    candidate = candidates[0]
+    assert isinstance(candidate, dict)
+    candidate["title"] = "Book"
+    cover: json.JSONType = {"href": "cover.jpg"} if lib_type == "novel" else {"page": 0}
+    candidate["cover"] = cover
+    if lib_type == "novel":
+        assert {"volume", "tags", "page_count", "black_and_white"}.isdisjoint(candidate)
+    context = _context({MANUAL_KEY: True, "lib_type": lib_type})
+    asyncio.run(
+        node.execute(node_data={"response": json.pretty(candidates)}, context=context)
+    )
+    assert context[RETVAL_KEY][0]["title"] == "Book"
+    assert context[RETVAL_KEY][0]["cover"] == cover
+
+
+def test_reading_preview(monkeypatch, reading_node):
+    lib_type, node = reading_node
     save = AsyncMock()
     monkeypatch.setattr(MediaItemService, "save_metadata", save)
     context = _context(
@@ -99,7 +144,7 @@ def test_reading_preview(monkeypatch, lib_type):
     context[MANUAL_KEY] = False
     context["lib_type"] = "movie"
     asyncio.run(
-        ReadingNode.execute(
+        node.execute(
             node_data={
                 "response": '[ // candidates\n {"title":" {{title}} ",'
                 '"authors":[" A ","A"],"rating":8.5}, {"title":"Second"},]'
@@ -130,26 +175,25 @@ def test_reading_preview(monkeypatch, lib_type):
         '[{"title":"Book"},{"title":""}]',
     ],
 )
-def test_reading_invalid(response):
-    context = _context({MANUAL_KEY: True, "lib_type": "novel"})
+def test_reading_invalid(response, reading_node):
+    lib_type, node = reading_node
+    context = _context({MANUAL_KEY: True, "lib_type": lib_type})
     with pytest.raises(ContentError, match="invalid_metadata"):
         asyncio.run(
-            ReadingNode.execute(
+            node.execute(
                 node_data={"response": response, "force_end": True}, context=context
             )
         )
     assert context.get(RETVAL_KEY) is None
 
 
-@pytest.mark.parametrize(
-    ("lib_type", "fields"),
-    [("novel", {"tags": ["Tag"]}), ("comic", {"volume": "Special"})],
-)
-def test_reading_unrepresentable(lib_type, fields):
+def test_reading_unrepresentable(reading_node):
+    lib_type, node = reading_node
+    fields = {"tags": ["Tag"]} if lib_type == "novel" else {"volume": "Special"}
     context = _context({MANUAL_KEY: True, "lib_type": lib_type})
     with pytest.raises(ContentError, match="invalid_metadata"):
         asyncio.run(
-            ReadingNode.execute(
+            node.execute(
                 node_data={"response": json.pretty([{"title": "Book", **fields}])},
                 context=context,
             )
@@ -157,25 +201,27 @@ def test_reading_unrepresentable(lib_type, fields):
 
 
 @pytest.mark.parametrize("limit", ["bytes", "count"])
-def test_reading_limits(limit):
+def test_reading_limits(limit, reading_node):
+    lib_type, node = reading_node
     response = (
         " " * (METADATA_BYTES + 1) if limit == "bytes" else "[{}" + ",{}" * 100 + "]"
     )
     with pytest.raises(ContentError, match="media_limit_exceeded"):
         asyncio.run(
-            ReadingNode.execute(
+            node.execute(
                 node_data={"response": response},
-                context=_context({MANUAL_KEY: True, "lib_type": "novel"}),
+                context=_context({MANUAL_KEY: True, "lib_type": lib_type}),
             )
         )
 
 
 @pytest.mark.parametrize("response", ["[]", '[{"title":"Book"}]'])
-def test_reading_force_end(response):
-    context = _context({MANUAL_KEY: True, "lib_type": "novel"})
+def test_reading_force_end(response, reading_node):
+    lib_type, node = reading_node
+    context = _context({MANUAL_KEY: True, "lib_type": lib_type})
     with pytest.raises(CancellationSignal):
         asyncio.run(
-            ReadingNode.execute(
+            node.execute(
                 node_data={"response": response, "force_end": True}, context=context
             )
         )
@@ -183,37 +229,50 @@ def test_reading_force_end(response):
 
 
 @pytest.mark.parametrize("id", [None, True, 0, -1, "1"])
-def test_reading_item_id(id):
-    context = _context({"item_id": id, "lib_type": "novel"})
+def test_reading_item_id(id, reading_node):
+    lib_type, node = reading_node
+    context = _context({"item_id": id, "lib_type": lib_type})
     # a node variable does not authorize manual mode or a different target item
     context[MANUAL_KEY] = True
     context["item_id"] = 1
     with pytest.raises(ContentError, match="invalid_metadata"):
-        asyncio.run(ReadingNode.execute(node_data={"response": "[]"}, context=context))
+        asyncio.run(node.execute(node_data={"response": "[]"}, context=context))
 
 
 @pytest.mark.parametrize(
-    "lib_type", [None, "movie", "tv_show", "opf", "image", True, [], {}]
+    "lib_type", [None, "movie", "tv_show", "opf", "image", True, [], {}, "other"]
 )
-def test_reading_lib_type(lib_type):
-    params = {MANUAL_KEY: True}
+def test_reading_lib_type(lib_type, reading_node):
+    expected_type, node = reading_node
+    if lib_type == "other":
+        lib_type = "comic" if expected_type == "novel" else "novel"
+    params: dict[str, object] = {MANUAL_KEY: True}
     if lib_type is not None:
         params["lib_type"] = lib_type
     with pytest.raises(ContentError, match="unsupported_media_format"):
         asyncio.run(
-            ReadingNode.execute(node_data={"response": "[]"}, context=_context(params))
+            node.execute(node_data={"response": "[]"}, context=_context(params))
         )
 
 
-@pytest.mark.parametrize("problem", ["missing", "video"])
-def test_reading_source(tmp_path, problem):
+@pytest.mark.parametrize("problem", ["missing", "video", "other"])
+def test_reading_source(tmp_path, monkeypatch, problem, reading_node):
+    lib_type, node = reading_node
+    source_type = LibType(lib_type)
+    if problem == "video":
+        source_type = LibType.MOVIE
+    elif problem == "other":
+        source_type = LibType.COMIC if lib_type == "novel" else LibType.NOVEL
+    save = AsyncMock()
+    monkeypatch.setattr(MediaItemService, "save_metadata", save)
+
     async def run():
         async with _database():
             lib = await MediaLib.create(
                 name="Source",
                 dir=str(tmp_path),
                 priority=1,
-                lib_type=LibType.MOVIE if problem == "video" else LibType.NOVEL,
+                lib_type=source_type,
             )
             item = await MediaItem.create(
                 lib=lib,
@@ -222,16 +281,18 @@ def test_reading_source(tmp_path, problem):
                 dir=str(tmp_path),
                 format=MediaFormat.TXT,
             )
-            params = {"item_id": item.id}
+            # automatic execution must check the database type, not the supplied one
+            params = {"item_id": item.id, "lib_type": lib_type}
             if problem == "missing":
                 await item.delete()
             error = "not_found" if problem == "missing" else "unsupported_media_format"
             with pytest.raises(ContentError, match=error):
-                await ReadingNode.execute(
+                await node.execute(
                     node_data={"response": '[{"title":"Book"}]'},
                     context=_context(params),
                 )
             assert not await MediaEvent.all().exists()
+            save.assert_not_awaited()
 
     asyncio.run(run())
 
@@ -343,7 +404,7 @@ def test_reading_graph(tmp_path, monkeypatch, format, mode):
                         {
                             "id": "end",
                             "data": {
-                                "$schema": "reading",
+                                "$schema": lib.lib_type,
                                 "response": json.pretty(response),
                                 "force_end": True,
                             },

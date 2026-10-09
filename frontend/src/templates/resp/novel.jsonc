@@ -1,0 +1,19 @@
+[
+  {
+    "title": "",
+    "plot": "",
+    "rating": 9.0,
+    "year": 1999,
+    "month": 1,
+    "day": 1,
+    "authors": [""],
+    "illustrators": [""],
+    "publisher": "",
+    "language": "",
+    "isbn": "",
+    "series": "",
+    "number": "1", // series index
+    "genres": [""],
+    "cover": null // { "href": "cover.jpg" }
+  }
+]
