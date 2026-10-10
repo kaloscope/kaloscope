@@ -11,6 +11,7 @@ declare global {
     // interface PageData {}
     interface PageState {
       createScheduledGraph?: boolean;
+      resumeReading?: boolean;
     }
     // interface Platform {}
   }

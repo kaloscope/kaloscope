@@ -254,7 +254,8 @@ def test_history_record(monkeypatch, rel_type, days):
 
 
 @pytest.mark.parametrize(
-    "preferences", [None, {"watch_records": 3}, {"watch_records": 42}]
+    "preferences",
+    [None, {"watch_records": 3}, {"watch_records": 42}, {"recent_reads": False}],
 )
 def test_preferences_http(monkeypatch, preferences):
     async def run():
@@ -290,6 +291,9 @@ def test_preferences_http(monkeypatch, preferences):
                 update={"id": other.id, "preferences": other.preferences}
             )
             expected = UserService.DEFAULT_PREFERENCES | (preferences or {})
+            assert expected["recent_reads"] == (preferences or {}).get(
+                "recent_reads", True
+            )
             client.headers["Authorization"] = "Bearer legacy"
             response = await client.get("/_api/auth/current")
             assert response.status_code == 200, response.text
@@ -321,6 +325,8 @@ def test_preferences_http(monkeypatch, preferences):
                 ("read_records", -1),
                 ("watch_records", 42),
                 ("vibration", True),
+                ("recent_reads", False),
+                ("recent_reads", True),
             ):
                 response = await client.post(
                     "/_api/user/update_pref", json={"key": key, "value": value}
@@ -372,5 +378,6 @@ def test_preferences_http(monkeypatch, preferences):
             assert response.json()["data"]["user"]["preferences"] == expected
             assert UserService.DEFAULT_PREFERENCES["watch_records"] == -1
             assert UserService.DEFAULT_PREFERENCES["search_records"] == 3
+            assert UserService.DEFAULT_PREFERENCES["recent_reads"] is True
 
     asyncio.run(run())

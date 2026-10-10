@@ -52,6 +52,7 @@ class UserService(BaseService[User], model=User):
         "vibration": False,
         "recent_searches": True,
         "recent_watches": True,
+        "recent_reads": True,
         "search_records": 3,
         "watch_records": -1,
         "read_records": -1,

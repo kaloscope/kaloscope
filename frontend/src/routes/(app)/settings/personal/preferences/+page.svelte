@@ -100,6 +100,16 @@
             onchange={() => update('recent_watches')}
           />
         </fieldset>
+        <fieldset class="fieldset grid-cols-2">
+          <Label class="my-2">{$_('preference.dashboard.read')}</Label>
+          <input
+            type="checkbox"
+            class="toggle self-center justify-self-end"
+            aria-label={$_('preference.dashboard.read')}
+            bind:checked={$user.preferences.recent_reads}
+            onchange={() => update('recent_reads')}
+          />
+        </fieldset>
       </div>
     </Setting>
     <Setting title={$_('preference.privacy.title')} tip={$_('preference.privacy.tip')}>

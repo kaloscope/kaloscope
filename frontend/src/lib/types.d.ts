@@ -127,6 +127,7 @@ export type User = {
     vibration: boolean;
     recent_searches: boolean;
     recent_watches: boolean;
+    recent_reads: boolean;
     search_records: number;
     watch_records: number;
     read_records: number;

@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { beforeNavigate } from '$app/navigation';
+  import { beforeNavigate, replaceState } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import {
@@ -342,6 +342,7 @@
         if (signal.aborted) return;
         try {
           const history = await getReadingHistory(item.id, signal);
+          if (!signal.aborted) hasReadingHistory = !!history;
           if (history?.rel_type === mediaType) {
             const saved = history.locator;
             const savedChapter = saved
@@ -635,8 +636,15 @@
         if (!active) return;
         media = data;
         meta = data.metadata ?? null;
+        // consume the dashboard reading action so refresh and forward show the details
+        const resume = page.state.resumeReading;
+        if (resume) {
+          replaceState('', { ...page.state, resumeReading: false });
+        }
         if (data.media_type === 'video') {
           void loadWatchHistory();
+        } else if (resume) {
+          read();
         } else {
           void getReadingHistory(data.id, historyController.signal)
             .then((history) => {

@@ -21,6 +21,7 @@
     FlowGraph,
     IndexerAuth,
     IndexerConfig,
+    ReadingHistory,
     Resource,
     Resp,
     ViewMode,
@@ -61,7 +62,7 @@
   /**
    * The type of the history entry.
    */
-  type HistoryType = 'video' | 'search';
+  type HistoryType = 'video' | 'search' | 'reading';
 
   /**
    * The type of the search history.
@@ -96,10 +97,14 @@
     });
   });
   let searches: SearchHistory[] = $state([]);
+  let reads: ReadingHistory[] = $state([]);
   let loadWatches = $derived($user?.preferences?.recent_watches ?? false);
   let loadSearches = $derived($user?.preferences?.recent_searches ?? false);
+  let loadReads = $derived(($user?.preferences?.recent_reads ?? false) && $user?.preferences?.read_records !== 0);
   let showWatches = $derived(loadWatches && latestWatches.length > 0);
   let showSearches = $derived(loadSearches && searches.length > 0);
+  let showReads = $derived(loadReads && reads.length > 0);
+  let historyCount = $derived([showSearches, showWatches, showReads].filter(Boolean).length);
 
   // the player instance and playing state
   let player: VideoPlayer | null = $state(null);
@@ -228,6 +233,29 @@
   }
 
   /**
+   * Load novels and comics together, retaining successful results if one type fails.
+   *
+   * @param signal - Cancellation when leaving the dashboard or changing preferences or accounts.
+   */
+  async function loadReadingHistory(signal: AbortSignal) {
+    const results = await Promise.allSettled(
+      ['text', 'image'].map((rel_type) =>
+        api
+          .get('user/history/list', {
+            searchParams: { rel_type, page_num: 0, ordering: '-updated_at' },
+            signal
+          })
+          .json<Resp<{ items: ReadingHistory[] }>>()
+      )
+    );
+    if (signal.aborted) return;
+    reads = results
+      .flatMap((result) => (result.status === 'fulfilled' ? result.value.data.items : []))
+      .filter((item) => item.media?.lib)
+      .sort((a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime() || b.id - a.id);
+  }
+
+  /**
    * Delete a history entry by ID and type.
    *
    * @param id - The ID of the history entry to delete.
@@ -239,6 +267,8 @@
         watches = watches.filter((w) => w.id !== id);
       } else if (type === 'search') {
         searches = searches.filter((s) => s.id !== id);
+      } else if (type === 'reading') {
+        reads = reads.filter((r) => r.id !== id);
       }
     });
   }
@@ -260,6 +290,9 @@
         } else if (type === 'search') {
           const ids = searches.map((s) => s.id);
           api.post('user/history/delete', { json: { ids } }).then(() => (searches = []));
+        } else if (type === 'reading') {
+          const ids = reads.map((r) => r.id);
+          api.post('user/history/delete', { json: { ids } }).then(() => (reads = []));
         }
       }
     });
@@ -311,6 +344,16 @@
     }
   });
 
+  // discard reading results from an old account or a disabled dashboard section
+  $effect(() => {
+    const owner = $user?.id;
+    const enabled = loadReads;
+    const controller = new AbortController();
+    reads = [];
+    if (owner && enabled) untrack(() => void loadReadingHistory(controller.signal));
+    return () => controller.abort();
+  });
+
   // load the board resources
   onMount(async () => {
     boards = {};
@@ -323,9 +366,9 @@
 
 <Container padding="1rem 0" maxWidth="max(150vh,72rem)">
   <!-- recent histories -->
-  {#if showSearches || showWatches}
+  {#if historyCount > 0}
     <div
-      class="mb-10 grid gap-4 {showWatches && showSearches ? 'lg:grid-cols-2' : ''}"
+      class="mb-10 grid gap-4 {historyCount > 1 ? 'lg:grid-cols-2' : ''} {historyCount === 3 ? 'xl:grid-cols-3' : ''}"
       transition:fade={{ duration: 200 }}
     >
       <!-- recent searches -->
@@ -436,6 +479,64 @@
                   class="history-delete-button"
                   aria-label={$_('action.delete')}
                   onclick={() => deleteHistory(item.id, 'video')}
+                >
+                  <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
+                </button>
+                {#if item.percentage !== null}
+                  <div class="absolute bottom-0 left-0 h-0.75 w-full bg-base-200">
+                    <div class="h-full bg-primary/50" style="width: {item.percentage}%"></div>
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
+      <!-- recent reads -->
+      {#if showReads}
+        <section class="min-w-0">
+          <div class="flex h-8 items-center justify-between px-2">
+            <span class="text-xl font-bold opacity-80">{$_('preference.dashboard.read')}</span>
+            <Button
+              icon={icons.clear}
+              text={$_('action.clear', $_('preference.dashboard.read'))}
+              iconClass="opacity-80"
+              onclick={() => deleteAllHistories('reading')}
+            />
+          </div>
+          <div class="divider mt-0 mb-1"></div>
+          <ul class="history-list">
+            {#each reads as item (item.id)}
+              {@const media = item.media!}
+              <li
+                class="group history-list-item p-2 pr-10 pb-2.5 transition-colors max-sm:w-[min(20rem,85vw)]"
+                animate:flip={{ duration: 200 }}
+              >
+                <button
+                  type="button"
+                  class="flex w-full min-w-0 cursor-pointer items-center gap-3 text-left"
+                  onclick={() => goto(`/medialibs/${media.lib!.id}/${media.id}`, { state: { resumeReading: true } })}
+                  aria-label="{$_('media.continue_read')} {mediaTitle(media)}"
+                  title={mediaTitle(media)}
+                >
+                  <Image
+                    proxy="store"
+                    src={media.poster}
+                    icon={media.lib ? LibType[media.lib.lib_type].icon : undefined}
+                    width="3rem"
+                    ratio="2/3"
+                  />
+                  <div class="flex min-w-0 flex-col gap-1">
+                    <span class="truncate text-sm font-medium group-hover:text-primary">{mediaTitle(media)}</span>
+                    <span class="truncate text-xs opacity-70">{media.lib?.name}</span>
+                    <span class="truncate text-xs opacity-40">{$dateTime(item.updated_at)}</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  class="history-delete-button"
+                  aria-label={$_('action.delete')}
+                  onclick={() => deleteHistory(item.id, 'reading')}
                 >
                   <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
                 </button>

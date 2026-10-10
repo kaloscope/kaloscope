@@ -329,7 +329,8 @@
       "title": "Dashboard",
       "tip": "Set the modules displayed on the dashboard.",
       "search": "Recent Searches",
-      "watch": "Recent Watches"
+      "watch": "Recent Watches",
+      "read": "Recent Reads"
     },
     "privacy": {
       "title": "Privacy",
