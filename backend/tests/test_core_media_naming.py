@@ -57,7 +57,7 @@ def test_show_originaltitle():
 def test_missing_show_originaltitle(value):
     context = {"show_title": "Show", "show_originaltitle": value}
 
-    with pytest.raises(ValueError, match="missing NFO field: show_originaltitle"):
+    with pytest.raises(ValueError, match="missing metadata field: show_originaltitle"):
         render_path("{{show_originaltitle}}/episode", context, "tv_show")
 
 
@@ -161,3 +161,103 @@ def test_invalid_template(template, lib_type):
 def test_invalid_metadata(context):
     with pytest.raises(ValueError):
         render_path("{{title}}", context, "movie")
+
+
+@pytest.mark.parametrize("lib_type", ["novel", "comic"])
+def test_reading_names(lib_type):
+    template = "{{work_title}} ({{year}})/{{volume}}-{{number}} {{title}} - {{authors}}"
+    work = {"work_title": "Series/A", "year": 2026}
+    chapter = {
+        "volume": "02",
+        "number": "12.5",
+        "title": "{{year}}: Special",
+        "authors": ("Alice/A", "Bob"),
+    }
+
+    assert validate_template(template) == template
+    assert render_directory(template, work, lib_type) == PurePosixPath(
+        "Series_A (2026)"
+    )
+    assert render_filename(template, chapter, lib_type) == (
+        "02-12.5 {{year}}_ Special - Alice_A, Bob"
+    )
+    assert render_filename(
+        "{{work_title}}/{{number}}", {"number": "番外"}, lib_type
+    ) == ("番外")
+
+
+@pytest.mark.parametrize("lib_type", ["novel", "comic"])
+@pytest.mark.parametrize("field", ["authors", "illustrators"])
+@pytest.mark.parametrize("names", [["Alice", "Bob"], ("Alice", "Bob")])
+def test_reading_creators(lib_type, field, names):
+    assert (
+        render_filename("{{work_title}}/{{" + field + "}}", {field: names}, lib_type)
+        == "Alice, Bob"
+    )
+
+
+@pytest.mark.parametrize("lib_type", ["novel", "comic"])
+@pytest.mark.parametrize("value", [None, "", [], ()])
+def test_reading_missing_creators(lib_type, value):
+    with pytest.raises(ValueError, match="missing metadata field: authors"):
+        render_filename("{{work_title}}/{{authors}}", {"authors": value}, lib_type)
+
+
+def test_reading_work_context():
+    template = "{{work_title}} - {{authors}}/{{title}}"
+    work = {"work_title": "Series", "authors": ["Work author"]}
+
+    assert render_directory(template, work, "comic") == PurePosixPath(
+        "Series - Work author"
+    )
+    assert render_filename(template, {"title": "Chapter"}, "comic") == "Chapter"
+
+
+@pytest.mark.parametrize("lib_type", ["novel", "comic"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{{work_title}}",
+        "{{work_title}}/{{volume}}/{{title}}",
+        "{{title}}/{{title}}",
+        "{{originaltitle}}/{{title}}",
+        "../{{title}}",
+        "{{work_title}}/CON",
+        "{{work_title}}/{{title}}.TXT",
+        "{{work_title}}/{{title}}.epub",
+        "{{work_title}}/{{title}}.CBZ",
+        "{{work_title}}/{{title}}.zip",
+    ],
+)
+def test_reading_invalid_template(lib_type, template):
+    with pytest.raises(ValueError):
+        validate_template(template, lib_type)
+
+
+@pytest.mark.parametrize("lib_type", ["novel", "comic"])
+@pytest.mark.parametrize(
+    "field",
+    ["season", "episode", "episode_code", "show_title", "unique_id", "nfo_source"],
+)
+def test_reading_video_fields(lib_type, field):
+    with pytest.raises(ValueError, match=f"unsupported rename placeholder: {field}"):
+        validate_template("{{work_title}}/{{" + field + "}}", lib_type)
+
+
+@pytest.mark.parametrize("lib_type", ["movie", "tv_show"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "authors",
+        "illustrators",
+        "publisher",
+        "series",
+        "volume",
+        "number",
+        "work_title",
+        "work_originaltitle",
+    ],
+)
+def test_video_reading_fields(lib_type, field):
+    with pytest.raises(ValueError, match=f"unsupported rename placeholder: {field}"):
+        validate_template("media/{{" + field + "}}", lib_type)

@@ -1175,7 +1175,9 @@ def test_reading_library_options(tmp_path, library_services, lib_type, editing, 
                 lib_type=LibType.MOVIE if editing else lib_type,
                 name="Changed",
                 dir=str(tmp_path),
-                rename_template="{{title}}" if option == "rename_template" else None,
+                rename_template="work/{{title}}"
+                if option == "rename_template"
+                else None,
                 danmaku_server="https://danmaku.example"
                 if option == "danmaku_server"
                 else None,

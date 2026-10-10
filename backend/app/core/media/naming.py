@@ -26,6 +26,22 @@ MOVIE_FIELDS = FIELDS - {
     "show_year",
 }
 PARENT_FIELDS = FIELDS - {"title", "originaltitle", "episode", "episode_code"}
+READING_FIELDS = frozenset(
+    {
+        "title",
+        "originaltitle",
+        "year",
+        "authors",
+        "illustrators",
+        "publisher",
+        "series",
+        "volume",
+        "number",
+        "work_title",
+        "work_originaltitle",
+    }
+)
+WORK_FIELDS = READING_FIELDS - {"title", "originaltitle"}
 _TOKEN = re.compile(r"{{\s*([a-z_]+)\s*}}")
 _UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f\x7f]')
 _RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
@@ -56,6 +72,11 @@ def validate_template(template: str, lib_type: str | None = None) -> str | None:
         raise ValueError("movie templates require one or two path components")
     if lib_type == "tv_show" and len(parts) not in (2, 3):
         raise ValueError("TV templates require two or three path components")
+    if lib_type in ("novel", "comic"):
+        if len(parts) != 2:
+            raise ValueError("reading templates require two path components")
+        if parts[-1].lower().endswith((".txt", ".epub", ".cbz", ".zip")):
+            raise ValueError("reading templates must omit the media extension")
     if len(parts) > 3:
         raise ValueError("rename templates support at most three path components")
     for index, part in enumerate(parts):
@@ -74,6 +95,10 @@ def validate_template(template: str, lib_type: str | None = None) -> str | None:
             allowed = MOVIE_FIELDS
         elif lib_type == "tv_show" and index < len(parts) - 1:
             allowed = PARENT_FIELDS
+        elif lib_type in ("novel", "comic"):
+            allowed = WORK_FIELDS if index == 0 else READING_FIELDS
+        elif lib_type is None:
+            allowed = FIELDS | READING_FIELDS
         else:
             allowed = FIELDS
         for name in _TOKEN.findall(part):
@@ -87,7 +112,7 @@ def _render_component(component: str, context: dict[str, Any]) -> str:
 
     Args:
         component: The path component containing literal text and placeholders.
-        context: The NFO field values used to replace placeholders.
+        context: The metadata field values used to replace placeholders.
 
     Returns:
         The rendered component with unsafe metadata characters replaced.
@@ -98,7 +123,7 @@ def _render_component(component: str, context: dict[str, Any]) -> str:
     """
 
     def replace(match: re.Match) -> str:
-        """Replace a placeholder with a sanitized NFO field value.
+        """Replace a placeholder with a sanitized metadata field value.
 
         Args:
             match: The placeholder match with the field name in its first group.
@@ -111,12 +136,14 @@ def _render_component(component: str, context: dict[str, Any]) -> str:
         """
         name = match[1]
         value = context.get(name)
+        if name in ("authors", "illustrators") and isinstance(value, (list, tuple)):
+            value = ", ".join(value)
         if name == "episode_code":
             season, episode = context.get("season"), context.get("episode")
             if season is not None and episode is not None:
                 value = f"S{int(season):02d}E{int(episode):02d}"
         if value is None or not str(value).strip():
-            raise ValueError(f"missing NFO field: {name}")
+            raise ValueError(f"missing metadata field: {name}")
         if name in ("season", "episode"):
             value = f"{int(value):02d}"
         # treat metadata as plain text instead of a path or template expression
@@ -135,7 +162,7 @@ def render_path(template: str, context: dict[str, Any], lib_type: str) -> PurePo
 
     Args:
         template: The relative path template to render.
-        context: The NFO field values used to replace placeholders.
+        context: The metadata field values used to replace placeholders.
         lib_type: The library type used to validate the template.
 
     Returns:
@@ -156,11 +183,12 @@ def render_path(template: str, context: dict[str, Any], lib_type: str) -> PurePo
 def render_directory(
     template: str, context: dict[str, Any], lib_type: str
 ) -> PurePosixPath:
-    """Render only shared parent components, independently of episode metadata.
+    """Render shared parent components using the parent or work metadata.
 
     Args:
         template: The relative path template whose parent components are rendered.
-        context: The NFO field values used to replace parent placeholders.
+        context: The parent metadata used to replace placeholders. Reading
+            templates require the work's own values, not chapter values.
         lib_type: The library type used to validate the template.
 
     Returns:
@@ -184,7 +212,7 @@ def render_filename(template: str, context: dict[str, Any], lib_type: str) -> st
 
     Args:
         template: The relative path template whose final component is rendered.
-        context: The NFO field values used to replace filename placeholders.
+        context: The current media metadata used to replace placeholders.
         lib_type: The library type used to validate the template.
 
     Returns:

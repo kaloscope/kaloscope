@@ -217,10 +217,11 @@ def test_empty_journal(tmp_path, monkeypatch, event_type):
 
     Args:
         tmp_path: The isolated media directory.
-        monkeypatch: The fixture replacing workflow dispatch.
+        monkeypatch: The fixture isolating locks and workflow dispatch.
         event_type: The persisted journal type with a missing payload.
     """
     fire = AsyncMock()
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
