@@ -3,13 +3,14 @@ import hashlib
 import mimetypes
 import os
 import re
+import stat
 import tempfile
 import unicodedata
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from lxml import etree
 from sanic.log import logger
@@ -17,9 +18,23 @@ from tortoise.exceptions import ValidationError
 from tortoise.transactions import in_transaction
 
 from app.core.media.coordination import write_in_thread
+from app.core.media.handlers.reading import (
+    ReadingMediaHandler,
+    ReadingSource,
+    is_ignored_name,
+)
+from app.core.media.metadata import METADATA_BYTES, _read_xml, merge_metadata
 from app.core.media.naming import render_directory, render_filename, render_path
+from app.core.media.reader import read_metadata
 from app.models.download import DownloadTask, OfflineDownloadJob
-from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
+from app.models.media import (
+    IndexState,
+    LibType,
+    MediaEvent,
+    MediaFormat,
+    MediaItem,
+    MediaLib,
+)
 from app.utils.disk import rename_exclusive
 from app.utils.xml import get_integer
 
@@ -418,6 +433,363 @@ async def _validate_updates(lib: MediaLib, updates: list[dict]):
             raise ValueError(f"destination is already indexed: {item.path}")
 
 
+async def _validate_moves(root: Path, moves: dict[str, str]):
+    """Validate file destinations, filesystem boundaries and external links.
+
+    Args:
+        root: The absolute library root.
+        moves: Source and destination file paths, including unchanged companions.
+
+    Raises:
+        OSError: If a source or destination cannot be inspected.
+        ValueError: If a move conflicts, crosses filesystems or breaks a link.
+    """
+    for source, destination in moves.items():
+        _safe_path(root, Path(source))
+        _safe_path(root, Path(destination))
+    changing = {src: dst for src, dst in moves.items() if src != dst}
+    targets = [
+        unicodedata.normalize("NFC", path).casefold() for path in changing.values()
+    ]
+    target_paths = set(targets)
+    if len(targets) != len(target_paths):
+        raise ValueError("multiple files render to the same destination")
+    if any(
+        str(ancestor) in target_paths
+        for target in target_paths
+        for ancestor in Path(target).parents
+    ):
+        raise ValueError("destination file conflicts with a planned directory")
+    for source, destination in changing.items():
+        target = Path(destination)
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"destination already exists: {target}")
+        ancestor = target.parent
+        while not ancestor.exists():
+            ancestor = ancestor.parent
+        if not ancestor.is_dir():
+            raise ValueError(f"destination ancestor is not a directory: {ancestor}")
+        if not os.access(Path(source).parent, os.W_OK | os.X_OK) or not os.access(
+            ancestor, os.W_OK | os.X_OK
+        ):
+            raise ValueError("media directory is not writable")
+        if Path(source).lstat().st_dev != ancestor.stat().st_dev:
+            raise ValueError("organization cannot cross filesystem boundaries")
+
+    await asyncio.to_thread(_validate_link_references, root, moves)
+
+
+async def _validate_downloads(lib: MediaLib, affected_paths: set[str]):
+    """Protect original downloads and defer incomplete transfers.
+
+    Args:
+        lib: The library containing the planned destinations.
+        affected_paths: Files moved or rewritten by the plan.
+
+    Raises:
+        OrganizeDeferredError: If an affected download is still transferring.
+        ValueError: If the plan would modify an original download source.
+    """
+    for task in await DownloadTask.all():
+        targets = task.transfer_targets or {}
+        if (
+            task.transfer_lib_id == lib.id
+            and affected_paths.intersection(targets.values())
+            and any(
+                not targets.get(name) or not Path(targets[name]).is_file()
+                for name in task.files or []
+            )
+            and (
+                task.transfer_pending
+                or await OfflineDownloadJob.filter(
+                    download_id=task.id, completion_due_at__not_isnull=True
+                ).exists()
+            )
+        ):
+            raise OrganizeDeferredError(
+                f"waiting for download task {task.id} to finish transferring"
+            )
+        download_dir = Path(task.dir).resolve()
+        sources = {_reference_key(download_dir / name) for name in task.files or []}
+        if any(
+            _reference_key(Path(path)) in sources
+            or (
+                not task.files
+                and (Path(path).parent.resolve() / Path(path).name).is_relative_to(
+                    download_dir
+                )
+            )
+            for path in affected_paths
+        ):
+            raise ValueError("organization would modify an original download source")
+
+
+def _reading_metadata(source: ReadingSource) -> dict:
+    """Read naming fields without using the display title's filename fallback.
+
+    Args:
+        source: The discovered source inside a validated work directory.
+
+    Returns:
+        Current fields with external priority and supported parent inheritance.
+
+    Raises:
+        ValueError: If a metadata source cannot be read reliably.
+    """
+    metadata = read_metadata(source)
+    if metadata.state == "error":
+        raise ValueError(f"reading metadata is unavailable: {source.path}")
+    external, embedded, parent = (
+        origin.parsed.data if origin and origin.parsed else None
+        for origin in (metadata.external, metadata.embedded, metadata.parent)
+    )
+    return merge_metadata(external, embedded, parent=parent).model_dump()
+
+
+def _opf_edits(paths: set[Path], moves: dict[str, str]) -> list[dict]:
+    """Relocate local OPF links while preserving unrelated metadata and elements.
+
+    Args:
+        paths: Owned external OPFs, including lower-priority companion files.
+        moves: Source and destination paths for every file in the work.
+
+    Returns:
+        Recoverable edits only for OPFs whose local links actually change.
+
+    Raises:
+        OSError: If an OPF cannot be read.
+        ValueError: If an OPF is oversized or invalid.
+    """
+    edits = []
+    for path in sorted(paths):
+        with path.open("rb") as file:
+            before = file.read(METADATA_BYTES + 1)
+        tree = _read_xml(before, {"package", "{http://www.idpf.org/2007/opf}package"})
+        destination = Path(moves[str(path)])
+        changed = False
+        for element in tree.iter():
+            value = element.get("href")
+            if not value:
+                continue
+            url = urlsplit(value)
+            if url.scheme or url.netloc or not url.path or url.path.startswith("/"):
+                continue
+            original = Path(os.path.normpath(path.parent / unquote(url.path)))
+            target = moves.get(str(original))
+            if target is None:
+                continue
+            relative = os.path.relpath(target, destination.parent)
+            if relative == os.path.normpath(unquote(url.path)):
+                continue
+            element.set("href", url._replace(path=quote(relative, safe="/")).geturl())
+            changed = True
+        if changed:
+            edits.append(
+                {
+                    "path": str(destination),
+                    "before": hashlib.sha256(before).hexdigest(),
+                    "content": etree.tostring(tree, encoding="unicode"),
+                }
+            )
+    return edits
+
+
+def _reading_files(lib: MediaLib, items: list[MediaItem]) -> dict:
+    """Plan one complete reading work in a worker thread without changing files.
+
+    Args:
+        lib: The reading library with an enabled naming template.
+        items: The work followed by all its chapters, or one standalone item.
+
+    Returns:
+        File moves, item path updates, OPF edits and the target work directory.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        ValueError: If sources, naming metadata, layout or destinations are unsafe.
+    """
+    root = Path(lib.dir).absolute()
+    work = items[0]
+    source_dir = Path(work.dir)
+    template = lib.rename_template
+    if not template or source_dir.parent != root or work.parent_id is not None:
+        raise ValueError("reading organization requires a direct work directory")
+    _safe_path(root, source_dir)
+    snapshots = {}
+    directories = {}
+    for directory, dirs, files in os.walk(source_dir, followlinks=False):
+        path = Path(directory)
+        _safe_path(root, path)
+        directories[path] = _fingerprint(path)
+        for name in dirs:
+            _safe_path(root, path / name)
+        for name in files:
+            file = path / name
+            if not stat.S_ISREG(file.lstat().st_mode):
+                raise ValueError(f"reading organization requires regular files: {file}")
+            snapshots[file] = _fingerprint(file)
+    scan = ReadingMediaHandler(lib.lib_type).scan_sources(lib.dir, work_path=source_dir)
+    sources = {str(source.path): source for source in scan.sources}
+    if scan.issues or set(sources) != {item.path for item in items}:
+        raise ValueError("reading work contains missing or unindexed sources")
+    for item in items:
+        source = sources[item.path]
+        if source.format != item.format or (
+            item.id != work.id
+            and (item.parent_id != work.id or source.parent_path != source_dir)
+        ):
+            raise ValueError("reading source ownership changed")
+    work_metadata = _reading_metadata(sources[work.path])
+    work_context = {
+        **work_metadata,
+        "work_title": work_metadata.get("title"),
+        "work_originaltitle": work_metadata.get("originaltitle"),
+    }
+    target_dir = root / render_directory(template, work_context, lib.lib_type)
+    if is_ignored_name(target_dir.name):
+        raise ValueError("reading work names must remain discoverable")
+    containers = {source_dir: target_dir}
+    bodies = {}
+    opfs = set()
+    updates = []
+    for item in items:
+        source = sources[item.path]
+        destination = target_dir
+        if source.format is not None and not (
+            source.format == MediaFormat.DIR and source.parent_path is None
+        ):
+            metadata = (
+                work_metadata if item.id == work.id else _reading_metadata(source)
+            )
+            basename = render_filename(
+                template,
+                {
+                    **metadata,
+                    "work_title": work_context["work_title"],
+                    "work_originaltitle": work_context["work_originaltitle"],
+                },
+                lib.lib_type,
+            )
+            if is_ignored_name(basename):
+                raise ValueError("reading unit names must remain discoverable")
+            if source.parent_path is not None:
+                destination /= basename
+                containers[source.directory] = destination
+            if source.format != MediaFormat.DIR:
+                destination /= basename + source.path.suffix
+                bodies[source.path] = destination
+        data = {
+            "id": item.id,
+            "path": str(destination),
+            "dir": str(destination)
+            if source.format in (None, MediaFormat.DIR)
+            else str(destination.parent),
+            "name": destination.name
+            if source.format in (None, MediaFormat.DIR)
+            else destination.stem,
+        }
+        if data["path"] != item.path:
+            data.update(index_state=IndexState.PENDING, index_error=None)
+        updates.append(data)
+        if source.format in (MediaFormat.TXT, MediaFormat.EPUB):
+            for path in snapshots:
+                if path.parent != source.directory:
+                    continue
+                if path.name.casefold() in {"content.opf", "metadata.opf"}:
+                    opfs.add(path)
+                elif path.name.casefold() == f"{source.path.stem}.opf".casefold():
+                    opfs.add(path)
+                    bodies[path] = destination.with_suffix(path.suffix)
+    targets = [
+        unicodedata.normalize("NFC", str(path)).casefold()
+        for path in containers.values()
+    ]
+    if len(set(targets)) != len(targets):
+        raise ValueError("multiple reading containers render to the same destination")
+    for source, target in containers.items():
+        _safe_path(root, target)
+        if source != target and (target.exists() or target.is_symlink()):
+            raise ValueError(f"reading destination already exists: {target}")
+    moves = {}
+    for path in snapshots:
+        container = next(
+            parent for parent in (path.parent, *path.parents) if parent in containers
+        )
+        destination = bodies.get(
+            path, containers[container] / path.relative_to(container)
+        )
+        moves[str(path)] = str(destination)
+    edits = _opf_edits(opfs, moves)
+    if any(
+        _fingerprint(path) != before
+        for path, before in (snapshots | directories).items()
+    ):
+        raise ValueError("reading source changed during organization planning")
+    return {
+        "moves": [
+            {"src": source, "dst": destination, "identity": snapshots[Path(source)]}
+            for source, destination in moves.items()
+            if source != destination
+        ],
+        "updates": updates,
+        "parent": None,
+        "delete_parent": None,
+        "mapping": {
+            **moves,
+            **{str(source): str(target) for source, target in containers.items()},
+        },
+        "edits": edits,
+        "symlinks": [],
+        "creates": [],
+        "cleanup": str(source_dir),
+        "reconcile": str(target_dir),
+    }
+
+
+async def _reading_plan(
+    lib: MediaLib, group: list[MediaItem], parent: MediaItem | None
+) -> dict:
+    """Build a reading plan with shared collision and download safeguards.
+
+    Args:
+        lib: The reading library whose lock is held by the caller.
+        group: All chapters or the standalone reading item.
+        parent: The collection item, or None for a standalone work.
+
+    Returns:
+        A journal compatible with the existing organization executor.
+
+    Raises:
+        OSError: If source files cannot be inspected.
+        ValueError: If metadata, ownership or destinations are invalid.
+        OrganizeDeferredError: If affected download transfers have not finished.
+    """
+    items = [parent, *group] if parent else group
+    payload = await asyncio.to_thread(_reading_files, lib, items)
+    moves = payload["mapping"]
+    file_moves = {move["src"]: move["dst"] for move in payload["moves"]}
+    # retain unmoved files when checking links into the source work
+    file_moves.update(
+        {source: target for source, target in moves.items() if Path(source).is_file()}
+    )
+    await _validate_moves(Path(lib.dir).absolute(), file_moves)
+    await _validate_downloads(
+        lib,
+        {path for move in payload["moves"] for path in (move["src"], move["dst"])}
+        | {edit["path"] for edit in payload["edits"]},
+    )
+    ids = {item.id for item in items}
+    scope = (Path(items[0].dir), Path(payload["reconcile"]))
+    for other in await MediaItem.filter(lib_id=lib.id).exclude(id__in=ids):
+        if any(Path(other.path).is_relative_to(path) for path in scope):
+            raise ValueError(f"reading destination is already indexed: {other.path}")
+    await _validate_updates(lib, payload["updates"])
+    payload["mapping"] = {
+        source: target for source, target in moves.items() if source != target
+    }
+    return payload
+
+
 async def _plan(
     lib: MediaLib,
     group: list[MediaItem],
@@ -433,7 +805,7 @@ async def _plan(
 
     Args:
         lib: The media library containing the naming template and root path.
-        group: The nonempty group of video items to organize together.
+        group: The nonempty group of media items to organize together.
         parent: The group's directory item, or `None` for a standalone movie.
         season: The resolved group season used for the destination directory and
             missing episode metadata, or `None` to use the parent metadata.
@@ -450,6 +822,8 @@ async def _plan(
         The journal payload describing file moves, metadata changes, reference
         edits, and source directory cleanup.
     """
+    if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+        return await _reading_plan(lib, group, parent)
     root = Path(lib.dir).absolute()
     template = lib.rename_template
     if not template:
@@ -710,35 +1084,10 @@ async def _plan(
         ):
             raise ValueError("episode and parent NFO names conflict")
     changing = {src: dst for src, dst in moves.items() if src != dst}
+    await _validate_moves(root, moves)
     targets = [
         unicodedata.normalize("NFC", path).casefold() for path in changing.values()
     ]
-    target_paths = set(targets)
-    if len(targets) != len(target_paths):
-        raise ValueError("multiple files render to the same destination")
-    if any(
-        str(ancestor) in target_paths
-        for target in target_paths
-        for ancestor in Path(target).parents
-    ):
-        raise ValueError("destination file conflicts with a planned directory")
-    for source, destination in changing.items():
-        target = Path(destination)
-        if target.exists() or target.is_symlink():
-            raise ValueError(f"destination already exists: {target}")
-        ancestor = target.parent
-        while not ancestor.exists():
-            ancestor = ancestor.parent
-        if not ancestor.is_dir():
-            raise ValueError(f"destination ancestor is not a directory: {ancestor}")
-        if not os.access(Path(source).parent, os.W_OK | os.X_OK) or not os.access(
-            ancestor, os.W_OK | os.X_OK
-        ):
-            raise ValueError("media directory is not writable")
-        if Path(source).lstat().st_dev != ancestor.stat().st_dev:
-            raise ValueError("organization cannot cross filesystem boundaries")
-
-    await asyncio.to_thread(_validate_link_references, root, moves)
 
     for item, data in zip(group, updates, strict=True):
         for name in ("nfo_path", "danmaku_path"):
@@ -895,38 +1244,7 @@ async def _plan(
     affected_paths.update(link["path"] for link in symlinks)
     affected_paths.update(edit["path"] for edit in nfo_edits)
     affected_paths.update(create["path"] for create in creates)
-    for task in await DownloadTask.all():
-        targets = task.transfer_targets or {}
-        if (
-            task.transfer_lib_id == lib.id
-            and affected_paths.intersection(targets.values())
-            and any(
-                not targets.get(name) or not Path(targets[name]).is_file()
-                for name in task.files or []
-            )
-            and (
-                task.transfer_pending
-                or await OfflineDownloadJob.filter(
-                    download_id=task.id, completion_due_at__not_isnull=True
-                ).exists()
-            )
-        ):
-            raise OrganizeDeferredError(
-                f"waiting for download task {task.id} to finish transferring"
-            )
-        download_dir = Path(task.dir).resolve()
-        sources = {_reference_key(download_dir / name) for name in task.files or []}
-        if any(
-            _reference_key(Path(path)) in sources
-            or (
-                not task.files
-                and (Path(path).parent.resolve() / Path(path).name).is_relative_to(
-                    download_dir
-                )
-            )
-            for path in affected_paths
-        ):
-            raise ValueError("organization would modify an original download source")
+    await _validate_downloads(lib, affected_paths)
     return {
         "moves": [
             {"src": src, "dst": dst, "identity": _fingerprint(Path(src))}
@@ -962,6 +1280,7 @@ def _move_files(root: Path, payload: dict):
         ValueError: If a journal path is no longer safe to access.
         OSError: If a filesystem operation fails or a destination already exists.
     """
+    edits = payload.get("edits", payload.get("nfo_edits", []))
     for move in payload["moves"]:
         source, destination = Path(move["src"]), Path(move["dst"])
         _safe_path(root, source)
@@ -977,13 +1296,9 @@ def _move_files(root: Path, payload: dict):
         elif not (destination.exists() or destination.is_symlink()):
             raise OrganizePendingError(f"source and destination are missing: {source}")
         elif _fingerprint(destination) != move["identity"]:
-            # allow rewritten NFOs to have a new inode when their contents match
+            # allow rewritten metadata to have a new inode when its contents match
             edit = next(
-                (
-                    edit
-                    for edit in payload["nfo_edits"]
-                    if edit["path"] == str(destination)
-                ),
+                (edit for edit in edits if edit["path"] == str(destination)),
                 None,
             )
             link = next(
@@ -1042,7 +1357,7 @@ def _move_files(root: Path, payload: dict):
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
-    for edit in payload["nfo_edits"]:
+    for edit in edits:
         path = Path(edit["path"])
         _safe_path(root, path)
         current = path.read_bytes()
@@ -1050,8 +1365,8 @@ def _move_files(root: Path, payload: dict):
         if current == content:
             continue
         if hashlib.sha256(current).hexdigest() != edit["before"]:
-            raise OrganizePendingError(f"NFO changed during organization: {path}")
-        # replace only the original NFO contents verified against the journal
+            raise OrganizePendingError(f"metadata changed during organization: {path}")
+        # replace only the original metadata contents verified against the journal
         descriptor, name = tempfile.mkstemp(prefix=".organizing-", dir=path.parent)
         temporary = Path(name)
         try:
@@ -1134,6 +1449,13 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
                     await DownloadTask.filter(id=task.id).update(
                         transfer_targets=updated
                     )
+            if directory := payload.get("reconcile"):
+                await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="modified",
+                    src_path=directory,
+                    is_directory=True,
+                )
             await event.delete()
         cleanup = payload.get("cleanup")
         if cleanup:
@@ -1248,7 +1570,7 @@ async def _season_groups(
 
 
 async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
-    """Organize NFO-backed groups while holding the library lock throughout.
+    """Organize metadata-backed groups while holding the library lock throughout.
 
     Recover pending plans, skip invalid groups, and continue past deferred transfers.
     Save inherited seasons before splitting so retries survive parent NFO edits.
@@ -1279,7 +1601,9 @@ async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
         parent = None
         if item.parent_id is not None:
             parent = await MediaItem.filter(id=item.parent_id).first()
-        elif Path(item.path).is_dir():
+        elif Path(item.path).is_dir() and (
+            lib.lib_type not in (LibType.NOVEL, LibType.COMIC) or item.format is None
+        ):
             parent = item
         key = parent.id if parent else item.id
         if key in processed:
@@ -1309,7 +1633,10 @@ async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
                 payload = await _plan(
                     lib, subgroup, parent, season=season, split=len(groups) > 1
                 )
-                if not any(payload[key] for key in ("moves", "creates", "nfo_edits")):
+                if not any(
+                    payload.get(key)
+                    for key in ("moves", "creates", "nfo_edits", "edits")
+                ):
                     continue
             except OrganizeDeferredError as error:
                 deferred = error
