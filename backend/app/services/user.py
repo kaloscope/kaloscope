@@ -291,7 +291,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
             ForbiddenException: If the user cannot access the reading library.
         """
         if obj.locator is not None:
-            await MediaItemService.validate_locator(obj.rel_id, user, obj.locator)
+            await MediaItemService.get_locator(obj.rel_id, user, obj.locator)
 
         # serialize the SQLite lookup and insert so concurrent first saves share one row
         async with in_transaction():
@@ -343,8 +343,9 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
             query: The history type, optional related ID and pagination parameters.
 
         Returns:
-            A history page with related media or graphs. Unusable reading positions
-            are returned as null without deleting the user's stored history.
+            A history page with related media or graphs. Stale reading positions
+            recover at their chapter start or return null if unavailable. Neither
+            case overwrites stored progress, and both clear the response percentage.
         """
         await cls.clean_expired(user.id, query.rel_type)
         queries = [Q(user_id=user.id, rel_type=query.rel_type)]
@@ -395,8 +396,14 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                 try:
                     entry = HistoryEntry.model_validate(history)
                     assert entry.locator is not None
-                    await MediaItemService.validate_locator(rel_id, user, entry.locator)
-                    history["locator"] = entry.locator.model_dump(exclude_none=True)
+                    locator = await MediaItemService.get_locator(
+                        rel_id, user, entry.locator, restore=True
+                    )
+                    history["locator"] = (
+                        locator.model_dump(exclude_none=True) if locator else None
+                    )
+                    if locator != entry.locator:
+                        history["percentage"] = None
                 except (
                     ValidationError,
                     ContentError,

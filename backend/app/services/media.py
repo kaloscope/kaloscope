@@ -1089,12 +1089,18 @@ def _read_asset(item: MediaItem, asset_id: str) -> tuple[bytes, str]:
         return read(source.path, cache, asset_id)
 
 
-def _check_locator(item: MediaItem, locator: TextLocator | ImageLocator):
-    """Check an anchor against the guarded content index without reading metadata.
+def _check_locator(
+    item: MediaItem, locator: TextLocator | ImageLocator, restore: bool = False
+) -> TextLocator | ImageLocator | None:
+    """Check an anchor or recover its chapter start from the current content index.
 
     Args:
         item: The accessible reading unit with a validated content version.
         locator: The paragraph, block or page position submitted by the reader.
+        restore: Allow recovery of a stale position; defaults to strict validation.
+
+    Returns:
+        The valid locator, a current chapter start, or None if its chapter is gone.
 
     Raises:
         ContentError: If the anchor is unknown or the source or cache is invalid.
@@ -1103,12 +1109,27 @@ def _check_locator(item: MediaItem, locator: TextLocator | ImageLocator):
     from app.core.media.text import read_text_chapter
 
     with _content_index(item) as (_, cache, index):
+        current = locator.version == index.index_version
         if isinstance(locator, ImageLocator):
-            if not isinstance(index, ImageIndex) or not any(
-                page.id == locator.page_id for page in index.pages
-            ):
+            if not isinstance(index, ImageIndex):
                 raise ContentError("not_found")
+            if current and any(page.id == locator.page_id for page in index.pages):
+                return locator
+            if restore:
+                return locator.model_copy(
+                    update={
+                        "version": index.index_version,
+                        "page_id": index.pages[0].id,
+                        "offset": 0,
+                    }
+                )
         else:
+            if isinstance(index, ImageIndex):
+                raise ContentError("not_found")
+            if not any(chapter.id == locator.chapter_id for chapter in index.chapters):
+                if restore:
+                    return None
+                raise ContentError("not_found")
             content = read_text_chapter(cache, locator.chapter_id)
             if isinstance(content, list):
                 valid = locator.paragraph is not None and locator.paragraph < len(
@@ -1116,8 +1137,18 @@ def _check_locator(item: MediaItem, locator: TextLocator | ImageLocator):
                 )
             else:
                 valid = any(block.id == locator.block_id for block in content.blocks)
-            if not valid:
-                raise ContentError("not_found")
+            if current and valid:
+                return locator
+            if restore:
+                return TextLocator(
+                    version=index.index_version,
+                    chapter_id=locator.chapter_id,
+                    paragraph=0 if isinstance(content, list) else None,
+                    block_id=None
+                    if isinstance(content, list)
+                    else content.blocks[0].id,
+                )
+        raise ContentError("not_found")
 
 
 def _build_index(
@@ -2865,22 +2896,33 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return await to_thread(_read_text_content, item, query.chapter_id)
 
     @classmethod
-    async def validate_locator(
-        cls, id: int, user: UserInfo, locator: TextLocator | ImageLocator
-    ):
-        """Validate a reading position and its ownership before saving or restoring it.
+    async def get_locator(
+        cls,
+        id: int,
+        user: UserInfo,
+        locator: TextLocator | ImageLocator,
+        *,
+        restore: bool = False,
+    ) -> TextLocator | ImageLocator | None:
+        """Resolve a reading position within its accessible work and chapter.
 
         Args:
             id: The top-level novel or comic work ID.
             user: The authenticated user with loaded library permissions.
             locator: The position in the expected published content version.
+            restore: Recover stale positions at their chapter start; defaults to
+                strict validation when recording progress.
+
+        Returns:
+            The validated or recovered locator, or None if its chapter is gone.
 
         Raises:
             NotFoundException: If the work or selected chapter is missing or hidden.
             ForbiddenException: If library access is denied or revoked during reading.
             ContentError: If the type, ownership, version or anchor is invalid.
         """
-        async with cls._content_item(id, user, locator.version) as item:
+        version = None if restore else locator.version
+        async with cls._content_item(id, user, version) as item:
             expected = (
                 LibType.NOVEL if isinstance(locator, TextLocator) else LibType.COMIC
             )
@@ -2890,7 +2932,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 if locator.chapter_item_id is None:
                     raise ContentError("bad_request")
                 async with cls._content_item(
-                    locator.chapter_item_id, user, locator.version
+                    locator.chapter_item_id, user, version
                 ) as chapter:
                     if (
                         chapter.parent_id != item.id
@@ -2898,14 +2940,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                         or chapter.format is None
                     ):
                         raise ContentError("bad_request")
-                    await to_thread(_check_locator, chapter, locator)
+                    return await to_thread(_check_locator, chapter, locator, restore)
             else:
                 if (
                     isinstance(locator, ImageLocator)
                     and locator.chapter_item_id is not None
                 ):
                     raise ContentError("bad_request")
-                await to_thread(_check_locator, item, locator)
+                return await to_thread(_check_locator, item, locator, restore)
 
     @classmethod
     async def get_asset(

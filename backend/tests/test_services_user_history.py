@@ -665,3 +665,91 @@ def test_history_legacy_http(tmp_path, monkeypatch, rel_type):
             assert not await UserHistory.filter(user_id=owner.id).exists()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.DIR])
+@pytest.mark.parametrize("change", ["version", "anchor"])
+def test_history_recover(tmp_path, monkeypatch, format, change):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            item = (
+                await _indexed_text(tmp_path)
+                if format == MediaFormat.TXT
+                else await _indexed_epub(tmp_path)
+                if format == MediaFormat.EPUB
+                else await _indexed_comic(tmp_path, format)
+            )
+            owner = await _login(client, item.lib_id)
+            entry = await _entry(item)
+            original = entry["locator"].copy()
+            if change == "version":
+                entry["locator"]["version"] = "0" * 64
+            else:
+                field = (
+                    "paragraph"
+                    if format == MediaFormat.TXT
+                    else "block_id"
+                    if format == MediaFormat.EPUB
+                    else "page_id"
+                )
+                entry["locator"][field] = 99999 if field == "paragraph" else "0" * 32
+            saved = await UserHistory.create(user_id=owner.id, **entry)
+            response = await client.get(
+                "/_api/user/history/list",
+                params={"rel_type": entry["rel_type"], "rel_id": item.id},
+            )
+            assert response.status_code == 200
+            row = response.json()["data"]["items"][0]
+            expected = {
+                key: value for key, value in original.items() if value is not None
+            }
+            expected["offset"] = 0
+            assert row["locator"] == expected
+            assert row["percentage"] is None
+            await saved.refresh_from_db()
+            assert saved.locator == entry["locator"] and saved.percentage == 25
+            # restoring does not relax the write contract
+            response = await client.post("/_api/user/history/record", json=entry)
+            assert response.status_code == (409 if change == "version" else 404)
+
+    asyncio.run(run())
+
+
+def test_history_recover_chapter(tmp_path, monkeypatch):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            item = await _indexed_text(tmp_path)
+            owner = await _login(client, item.lib_id)
+            content = await MediaItemService.get_content(
+                item.id, _user(), MediaContentQuery()
+            )
+            entry = await _entry(item)
+            entry["locator"]["chapter_id"] = content.chapters[1].id
+            saved = await UserHistory.create(user_id=owner.id, **entry)
+            body = Path(item.path)
+            body.write_text(body.read_text() + "\n\nAppended paragraph")
+            current = await MediaItemService.index_content(item.id)
+            response = await client.get(
+                "/_api/user/history/list",
+                params={"rel_type": "text", "rel_id": item.id},
+            )
+            row = response.json()["data"]["items"][0]
+            assert row["locator"] == {
+                "chapter_id": content.chapters[1].id,
+                "version": current.index_version,
+                "paragraph": 0,
+                "offset": 0,
+            }
+            assert row["percentage"] is None
+            body.write_text("Chapter 1\n\nOnly chapter")
+            await MediaItemService.index_content(item.id)
+            response = await client.get(
+                "/_api/user/history/list",
+                params={"rel_type": "text", "rel_id": item.id},
+            )
+            row = response.json()["data"]["items"][0]
+            assert row["locator"] is None and row["percentage"] is None
+            await saved.refresh_from_db()
+            assert saved.locator == entry["locator"]
+
+    asyncio.run(run())

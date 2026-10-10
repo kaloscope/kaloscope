@@ -5,6 +5,9 @@
   /** Delay in ms before auto-hiding the overlay controls. */
   const CONTROLS_HIDE_DELAY = 3000;
 
+  /** Position within the current paragraph or block, independent of screen size. */
+  export type TextPosition = { index: number; offset: number; percentage: number };
+
   /** Options passed to the text viewer mount function. */
   export type TextViewerOptions = {
     title?: string | null;
@@ -12,6 +15,8 @@
     chapterId?: string | null;
     chapterChange?: (chapter: Chapter) => void;
     back?: () => void;
+    position?: Pick<TextPosition, 'index' | 'offset'>;
+    progress?: (position: TextPosition) => void;
   } & ({ text: string | string[]; blocks?: never } | { text?: never; blocks: ContentBlock[] });
 
   /** Color theme. */
@@ -152,10 +157,10 @@
    * Normalize text payloads into the viewer's paragraph-based rendering model.
    *
    * @param text - The plain-text payload to display.
-   * @returns A single text body to render.
+   * @returns Paragraphs retaining the indices supplied by local content APIs.
    */
-  function normalizeTextContent(text: string | string[]): string {
-    return Array.isArray(text) ? text.join('\n\n') : text;
+  function normalizeTextContent(text: string | string[]): string[] {
+    return (Array.isArray(text) ? text : text.split(/\n{2,}/)).map((paragraph) => paragraph.trim());
   }
 </script>
 
@@ -163,13 +168,13 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
   // resource title
   let title = $state('');
-  // text content of the current chapter
-  let content = $state('');
+  // paragraphs of the current chapter
+  let paragraphs = $state<string[]>([]);
   // structured content of the current chapter
   let blocks = $state<ContentBlock[]>([]);
   // image failures in the current chapter
@@ -178,6 +183,15 @@
   let back = $state<(() => void) | undefined>(undefined);
   // the reading area's scroll container
   let scrollEl = $state<HTMLElement | undefined>(undefined);
+  let contentEl = $state<HTMLDivElement | undefined>(undefined);
+  // rendered anchors shared by paragraphs and structured blocks
+  let blockEls = $state<HTMLElement[]>([]);
+  let anchor: TextViewerOptions['position'];
+  let progress: TextViewerOptions['progress'];
+  let restoring = false;
+  let mountId = $state(0);
+  let progressFrame = 0;
+  let restoreFrame = 0;
   // available chapters
   let chapters = $state<Chapter[]>([]);
   // chapters grouped by volume in source order
@@ -208,29 +222,95 @@
 
   // current theme colors
   let colors = $derived(THEMES[$settings?.theme ?? 'white']);
-  // content split into paragraphs
-  let paragraphs = $derived(content.split(/\n{2,}/).map((para) => para.trim()));
 
   /**
    * Mount the text viewer with plain text or structured blocks.
    *
    * @param options - The text viewer options.
    */
-  export function mount(options: TextViewerOptions) {
+  export async function mount(options: TextViewerOptions) {
     if (!options) {
       return;
     }
+    const current = ++mountId;
+    restoring = true;
+    cancelAnimationFrame(progressFrame);
+    cancelAnimationFrame(restoreFrame);
+    progressFrame = 0;
+    progress = options.progress;
+    anchor = options.position ?? { index: 0, offset: 0 };
+    blockEls = [];
     title = options.title ?? '';
-    content = options.text === undefined ? '' : normalizeTextContent(options.text);
+    paragraphs = options.text === undefined ? [] : normalizeTextContent(options.text);
     blocks = options.blocks ?? [];
     failedImages = {};
     back = options.back;
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
-    scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
     showControls();
+    await tick();
+    if (current !== mountId) return;
+    restorePosition();
   }
+
+  /**
+   * Get the currently visible paragraph or block and relative position inside it.
+   *
+   * @returns The current position, or null while content is hidden or being restored.
+   */
+  export function getPosition(): TextPosition | null {
+    if (!scrollEl || !scrollEl.clientHeight || restoring) return null;
+    const top = scrollEl.getBoundingClientRect().top + parseFloat(getComputedStyle(scrollEl).paddingTop);
+    const index = blockEls.findIndex((el) => el && el.getBoundingClientRect().bottom > top);
+    const block = blockEls[index];
+    if (!block) return null;
+    const rect = block.getBoundingClientRect();
+    const offset = Math.max(0, Math.min(1, (top - rect.top) / Math.max(1, rect.height)));
+    const end = scrollEl.scrollHeight - scrollEl.clientHeight;
+    const percentage = end <= 0 || scrollEl.scrollTop >= end - 1 ? 100 : (scrollEl.scrollTop / end) * 100;
+    return { index, offset: Math.round(offset * 1e6) / 1e6, percentage };
+  }
+
+  /** Keep the same anchor when restoring, resizing or loading EPUB illustrations. */
+  function restorePosition() {
+    const block = anchor && blockEls[anchor.index];
+    if (!scrollEl || !block || !anchor) return;
+    restoring = true;
+    cancelAnimationFrame(progressFrame);
+    progressFrame = 0;
+    cancelAnimationFrame(restoreFrame);
+    const rect = block.getBoundingClientRect();
+    const top = scrollEl.getBoundingClientRect().top + parseFloat(getComputedStyle(scrollEl).paddingTop);
+    scrollEl.scrollTo({
+      top: scrollEl.scrollTop + rect.top - top + rect.height * anchor.offset,
+      behavior: 'instant'
+    });
+    restoreFrame = requestAnimationFrame(() => {
+      restoring = false;
+      reportProgress();
+    });
+  }
+
+  /** Report at most one position per frame; persistence belongs to the caller. */
+  function reportProgress() {
+    if (restoring || progressFrame) return;
+    progressFrame = requestAnimationFrame(() => {
+      progressFrame = 0;
+      const position = getPosition();
+      if (!position) return;
+      anchor = position;
+      progress?.(position);
+    });
+  }
+
+  $effect(() => {
+    if (!contentEl || !scrollEl) return;
+    const observer = new ResizeObserver(restorePosition);
+    observer.observe(contentEl);
+    observer.observe(scrollEl);
+    return () => observer.disconnect();
+  });
 
   /**
    * Select a chapter and notify the parent page.
@@ -283,6 +363,9 @@
     freeze.set(true);
     showControls();
     return () => {
+      mountId++;
+      cancelAnimationFrame(progressFrame);
+      cancelAnimationFrame(restoreFrame);
       freeze.set(false);
       clearTimeout(hideTimer);
     };
@@ -383,27 +466,34 @@
   {#if $settings !== null}
     <article
       bind:this={scrollEl}
-      class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-all duration-300"
+      class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-colors duration-300 [overflow-anchor:none]"
       style:padding="2.5rem {$settings.paddingX}rem"
+      onscroll={reportProgress}
     >
-      {#if content || blocks.length}
-        <div
-          class="mx-auto max-w-3xl min-w-0 wrap-break-word [word-break:normal] transition-all duration-300"
-          style:font-family={FONTS[$settings.font]}
-          style:font-size="{$settings.fontSize}px"
-          style:line-height={$settings.lineHeight}
-          style:color={colors.text}
-        >
-          {#if blocks.length}
-            {#key blocks}
-              {#each blocks as block (block.id)}
+      {#key mountId}
+        {#if paragraphs.length || blocks.length}
+          <div
+            bind:this={contentEl}
+            class="mx-auto max-w-3xl min-w-0 wrap-break-word [word-break:normal] transition-colors duration-300"
+            style:font-family={FONTS[$settings.font]}
+            style:font-size="{$settings.fontSize}px"
+            style:line-height={$settings.lineHeight}
+            style:color={colors.text}
+          >
+            {#if blocks.length}
+              {#each blocks as block, index (block.id)}
                 {#if block.type === 'paragraph'}
-                  <p class="whitespace-pre-line" style:margin-bottom="{$settings.paraSpacing}em">
+                  <p
+                    bind:this={blockEls[index]}
+                    class="whitespace-pre-line"
+                    style:margin-bottom="{$settings.paraSpacing}em"
+                  >
                     {@render textRuns(block.runs)}
                   </p>
                 {:else if block.type === 'heading'}
                   <svelte:element
                     this={`h${block.level ?? 2}`}
+                    bind:this={blockEls[index]}
                     class="font-bold whitespace-pre-line"
                     style:font-size={block.level === 1 ? '1.5em' : block.level === 2 ? '1.25em' : '1.125em'}
                     style:margin-bottom="{$settings.paraSpacing}em"
@@ -412,6 +502,7 @@
                   </svelte:element>
                 {:else if block.type === 'quote'}
                   <blockquote
+                    bind:this={blockEls[index]}
                     class="border-s-2 border-current/30 ps-4 whitespace-pre-line"
                     style:margin-bottom="{$settings.paraSpacing}em"
                   >
@@ -420,6 +511,7 @@
                 {:else if block.type === 'list'}
                   <svelte:element
                     this={block.ordered ? 'ol' : 'ul'}
+                    bind:this={blockEls[index]}
                     start={block.ordered ? (block.start ?? 1) : undefined}
                     class="space-y-1 ps-8 {block.ordered ? 'list-decimal' : 'list-disc'}"
                     style:margin-bottom="{$settings.paraSpacing}em"
@@ -429,7 +521,7 @@
                     {/each}
                   </svelte:element>
                 {:else if block.type === 'image'}
-                  <figure style:margin-bottom="{$settings.paraSpacing}em">
+                  <figure bind:this={blockEls[index]} style:margin-bottom="{$settings.paraSpacing}em">
                     {#if !block.url || failedImages[block.id]}
                       <div
                         role="status"
@@ -462,20 +554,20 @@
                   </figure>
                 {/if}
               {/each}
-            {/key}
-          {:else}
-            {#each paragraphs as para, i (i)}
-              <p class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
-                {#if para}
-                  {para}
-                {:else}
-                  &nbsp;
-                {/if}
-              </p>
-            {/each}
-          {/if}
-        </div>
-      {/if}
+            {:else}
+              {#each paragraphs as para, i (i)}
+                <p bind:this={blockEls[i]} class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
+                  {#if para}
+                    {para}
+                  {:else}
+                    &nbsp;
+                  {/if}
+                </p>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      {/key}
     </article>
   {/if}
 

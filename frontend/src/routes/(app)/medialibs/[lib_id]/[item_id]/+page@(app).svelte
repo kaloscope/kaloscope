@@ -1,8 +1,16 @@
+<script lang="ts" module>
+  // retain request order across detail page instances
+  let historyWrite = Promise.resolve();
+  const PROGRESS_SAVE_DELAY = 5000;
+</script>
+
 <script lang="ts">
   import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import {
+    alert,
+    Alerts,
     Backdrop,
     Container,
     Image,
@@ -11,7 +19,8 @@
     mediaTitle,
     Rating,
     TextViewer,
-    VideoPlayer
+    VideoPlayer,
+    type TextViewerOptions
   } from '$lib/components';
   import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
@@ -26,11 +35,16 @@
     MediaContentQuery,
     MediaItem,
     MediaMeta,
-    Resp
+    Page,
+    ReadingEntry,
+    ReadingHistory,
+    Resp,
+    TextLocator
   } from '$lib/types';
   import { buildStreamUrl } from '$lib/utils';
   import { isHTTPError } from 'ky';
   import { onDestroy, onMount, tick } from 'svelte';
+  import { get } from 'svelte/store';
 
   // the loading state
   const loading = createLoading();
@@ -55,8 +69,14 @@
   let imageViewer: ImageViewer | undefined = $state();
   let readingLoading = $state(false);
   let readingError = $state<string | null>(null);
+  let hasReadingHistory = $state(false);
   let readingChapterId: string | undefined;
   let readingController: AbortController | undefined;
+  let progressTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingProgress: ReadingEntry | undefined;
+  let progressUserId: number | undefined;
+  let lastQueuedProgress = '';
+  let captureProgress: (() => void) | undefined;
   const mediaType = $derived.by(() => media?.media_type ?? 'video');
 
   // novel sections belong to the content index, not child media records
@@ -68,15 +88,67 @@
   const hasTextChapters = $derived(textChapters.length > 1 || textChapters.some((chapter) => !!chapter.title));
 
   /**
-   * Open the local reader at the selected chapter or the first available chapter.
+   * Open the local reader, resuming saved progress only in the selected chapter.
    *
-   * @param chapterId - The content chapter ID; omitted for the first chapter.
+   * @param chapterId - The requested chapter; omitted to continue the last chapter.
    * @param version - The novel directory version; omitted for a fresh reading request.
    */
   function read(chapterId?: string, version?: string) {
     if (!media || mediaType === 'video') return;
     reading = true;
-    loadContent(chapterId, version);
+    loadContent(chapterId, version, { resume: true });
+  }
+
+  /** Save the latest position in request order, including before leaving the page. */
+  function saveProgress() {
+    captureProgress?.();
+    clearTimeout(progressTimer);
+    progressTimer = undefined;
+    const entry = pendingProgress;
+    pendingProgress = undefined;
+    if (!entry) return;
+    const owner = progressUserId;
+    const key = JSON.stringify(entry);
+    lastQueuedProgress = key;
+    historyWrite = historyWrite.then(async () => {
+      const current = get(user);
+      if (!owner || current?.id !== owner || current.preferences?.read_records === 0) return;
+      try {
+        await api.post('user/history/record', {
+          json: entry,
+          retry: 0,
+          keepalive: true,
+          context: { silentErrors: true }
+        });
+        if (media?.id === entry.rel_id) {
+          hasReadingHistory = true;
+        }
+      } catch {
+        if (lastQueuedProgress === key) lastQueuedProgress = '';
+        if (get(user)?.id !== owner) return;
+        alert({ level: 'warning', message: 'reading_progress_save_failed', unique: true });
+      }
+    });
+  }
+
+  /**
+   * Read retained progress through the shared user history endpoint.
+   *
+   * @param id - The novel's top-level media ID.
+   * @param signal - Cancellation for the directory or reading request.
+   * @returns The current account's work history, or null without a saved record.
+   */
+  async function getReadingHistory(id: number, signal: AbortSignal): Promise<ReadingHistory | null> {
+    if (!$user || $user.preferences?.read_records === 0) return null;
+    const { data } = await api
+      .get('user/history/list', {
+        searchParams: { rel_type: 'text', rel_id: id },
+        signal,
+        retry: 0,
+        context: { silentErrors: true }
+      })
+      .json<Resp<Page<ReadingHistory>>>();
+    return data.items[0] ?? null;
   }
 
   /**
@@ -117,6 +189,11 @@
     const { signal } = chaptersController;
     chaptersLoading = true;
     chaptersError = null;
+    void getReadingHistory(media.id, signal)
+      .then((history) => {
+        if (!signal.aborted) hasReadingHistory = !!history;
+      })
+      .catch(() => {});
     try {
       const data = await getContent(media.id, {}, signal);
       if (signal.aborted) return;
@@ -148,6 +225,8 @@
 
   /** Cancel pending requests before closing the reading overlay. */
   function closeReader() {
+    saveProgress();
+    captureProgress = undefined;
     readingController?.abort();
     reading = false;
   }
@@ -180,11 +259,18 @@
    *
    * @param selectedId - The requested chapter, or undefined for the first chapter.
    * @param version - The expected novel version; omitted when switching comic sources.
-   * @param refresh - Allow one automatic refresh after a content change; defaults to true.
+   * @param options - Allow one content refresh by default, and optionally resume saved progress.
    */
-  async function loadContent(selectedId?: string, version?: string, refresh = true): Promise<void> {
+  async function loadContent(
+    selectedId?: string,
+    version?: string,
+    { refresh = true, resume = false }: { refresh?: boolean; resume?: boolean } = {}
+  ): Promise<void> {
     const item = media;
+    const readerUserId = get(user)?.id;
     if (!reading || !item) return;
+    saveProgress();
+    captureProgress = undefined;
     readingController?.abort();
     readingController = new AbortController();
     const { signal } = readingController;
@@ -196,8 +282,34 @@
     await tick();
     if (signal.aborted) return;
     if (readerDialog && !readerDialog.open) readerDialog.showModal();
+    let locator: TextLocator | undefined;
+    let positionReset = false;
     try {
-      const data = await getContent(item.id, { chapter_id: selectedId, version }, signal);
+      if (resume && mediaType === 'text') {
+        // reopening immediately after exit must wait for that exit's save
+        await historyWrite;
+        if (signal.aborted) return;
+        try {
+          const history = await getReadingHistory(item.id, signal);
+          if (history?.rel_type === 'text') {
+            const saved = history.locator;
+            if (saved && (!selectedId || selectedId === saved.chapter_id)) {
+              locator = saved;
+              positionReset = history.percentage === null;
+            } else if (!saved && !selectedId) {
+              positionReset = true;
+            }
+          }
+        } catch {
+          if (!signal.aborted) alert({ level: 'warning', message: 'reading_history_load_failed', unique: true });
+        }
+      }
+      if (signal.aborted) return;
+      const data = await getContent(
+        item.id,
+        { chapter_id: locator?.chapter_id ?? selectedId, version: locator?.version ?? version },
+        signal
+      );
       if (signal.aborted) return;
       readingChapterId = data.chapter_id;
       if (data.media_type === 'text') {
@@ -237,7 +349,7 @@
             } catch (error) {
               if (!signal.aborted && contentError(error) === 'content_changed') {
                 if (refresh) {
-                  void loadContent(data.chapter_id, undefined, false);
+                  void loadContent(data.chapter_id, undefined, { refresh: false });
                 } else {
                   readingController?.abort();
                   clearContent();
@@ -248,16 +360,59 @@
             }
           }
         });
-      } else if (data.content_type === 'blocks') {
-        textViewer?.mount({ ...options, blocks: data.blocks });
       } else {
-        textViewer?.mount({ ...options, text: data.text });
+        const index = locator
+          ? data.content_type === 'blocks'
+            ? data.blocks.findIndex((block) => block.id === locator?.block_id)
+            : (locator.paragraph ?? -1)
+          : -1;
+        const progress: NonNullable<TextViewerOptions['progress']> = (position) => {
+          const current = get(user);
+          if (signal.aborted || !reading || current?.id !== readerUserId || current?.preferences?.read_records === 0)
+            return;
+          const chapterIndex = data.chapters.findIndex((chapter) => chapter.id === data.chapter_id);
+          const blockId = data.content_type === 'blocks' ? data.blocks[position.index]?.id : undefined;
+          if (data.content_type === 'blocks' && !blockId) return;
+          const base = { version: data.version, chapter_id: data.chapter_id, offset: position.offset };
+          const anchor: TextLocator =
+            data.content_type === 'blocks' ? { ...base, block_id: blockId! } : { ...base, paragraph: position.index };
+          const entry: ReadingEntry = {
+            rel_type: 'text',
+            rel_id: item.id,
+            percentage: Math.floor(((chapterIndex + position.percentage / 100) / data.chapters.length) * 100),
+            locator: anchor
+          };
+          pendingProgress = JSON.stringify(entry) === lastQueuedProgress ? undefined : entry;
+          if (pendingProgress && progressTimer === undefined) {
+            progressTimer = setTimeout(saveProgress, PROGRESS_SAVE_DELAY);
+          }
+        };
+        // restore only after the dialog's reading area is visible and measurable
+        readingLoading = false;
+        await tick();
+        if (signal.aborted) return;
+        progressUserId = readerUserId;
+        await textViewer?.mount({
+          ...options,
+          ...(data.content_type === 'blocks' ? { blocks: data.blocks } : { text: data.text }),
+          position: index >= 0 ? { index, offset: locator?.offset ?? 0 } : undefined,
+          progress
+        });
+        if (signal.aborted) return;
+        captureProgress = () => {
+          const position = textViewer?.getPosition();
+          if (position) progress(position);
+        };
+        if (positionReset) alert({ level: 'info', message: 'reading_position_reset', unique: true });
       }
     } catch (error) {
       if (signal.aborted) return;
       if (refresh && contentError(error) === 'content_changed') {
         // novel chapter ids may change with the index; comic item ids stay stable
-        await loadContent(mediaType === 'image' ? selectedId : undefined, undefined, false);
+        await loadContent(mediaType === 'image' ? selectedId : undefined, undefined, {
+          refresh: false,
+          resume: !!locator
+        });
       } else {
         readingError = contentError(error);
       }
@@ -398,6 +553,9 @@
 </script>
 
 <svelte:document
+  onvisibilitychange={() => {
+    if (document.visibilityState === 'hidden') saveProgress();
+  }}
   onclick={(event) => {
     // clear the selected child media item when clicking outside
     if (!(event.target as Element).closest('.media-part')) {
@@ -406,6 +564,8 @@
     }
   }}
 />
+
+<svelte:window onpagehide={saveProgress} />
 
 <Container class="pull-to-refresh history-back navbar-hidden" loading={$loading}>
   {#if media}
@@ -517,6 +677,17 @@
             </div>
           {/if}
           <p class="mt-1 text-sm leading-relaxed opacity-80">{_meta?.plot ?? meta?.plot}</p>
+
+          <!-- continue reading -->
+          {#if mediaType === 'text' && hasReadingHistory && (chaptersLoading || chaptersError || hasTextChapters)}
+            <button
+              class="btn mt-2 h-11 w-full gap-2 rounded-full px-5 font-medium shadow-sm btn-primary sm:w-fit"
+              onclick={() => read()}
+            >
+              <iconify-icon icon={icons.playFilled} width="1.25rem" aria-hidden="true"></iconify-icon>
+              {$_('media.continue_read')}
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -784,5 +955,6 @@
         {/if}
       </div>
     {/if}
+    <Alerts dialog />
   </dialog>
 {/if}
