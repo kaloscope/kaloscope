@@ -6,7 +6,7 @@
   const CONTROLS_HIDE_DELAY = 3000;
   /** Click-zone threshold ratio in paged mode. The complementary zone is `1 - threshold`. */
   const CLICK_ZONE_THRESHOLD = 0.3;
-  /** Distance from the bottom of the scroll container (px) to trigger loading more images. */
+  /** Distance from either end of the scroll container (px) to load more images. */
   const SCROLL_LOAD_THRESHOLD = 400;
   /** Maximum retries for a failed image request. */
   const MAX_IMAGE_RETRY = 3;
@@ -16,10 +16,15 @@
   /** A batch of images, with an optional explicit continuation offset. */
   export type ImagePage = {
     images: string[];
+    /** Absolute index of the first image; omitted for a batch starting at zero. */
+    offset?: number;
     image_count?: number | null;
-    /** Omit to use the loaded image count, or pass null at the end. */
+    /** Omit to use the end of the loaded range, or pass null at the end. */
     next_offset?: number | null;
   };
+
+  /** The current image and its relative vertical position. */
+  export type ImagePosition = { index: number; url: string; offset: number; percentage: number };
 
   /** Options passed to the image viewer mount function. */
   export type ImageViewerOptions = ImagePage & {
@@ -29,6 +34,8 @@
     chapterChange?: (chapter: Chapter) => void;
     back?: () => void;
     version?: string;
+    position?: Pick<ImagePosition, 'index' | 'offset'>;
+    progress?: (position: ImagePosition) => void;
     /** Cancels pagination when the caller leaves or replaces the resource. */
     signal?: AbortSignal;
     loadImages?: (query: {
@@ -107,7 +114,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
   // resource title
@@ -146,10 +153,18 @@
 
   // the scroll container element
   let scrollEl = $state<HTMLDivElement | undefined>(undefined);
+  let contentEl = $state<HTMLDivElement | undefined>(undefined);
+  let pagedImage = $state<HTMLImageElement | undefined>(undefined);
   // image elements used to track the scroll position
   let imageEls = $state<HTMLImageElement[]>([]);
-  // current image index, 0-based
+  // absolute image indices, including pages before the loaded range
+  let startOffset = $state(0);
   let imageIndex = $state(0);
+  let anchor: ImageViewerOptions['position'];
+  let progress: ImageViewerOptions['progress'];
+  let restoring = false;
+  let progressFrame = 0;
+  let restoreFrame = 0;
   // total number of images available from the api
   let imageCount = $state(0);
   // continuation offset supplied by the source or derived from loaded images
@@ -164,10 +179,12 @@
   let mountId = $state(0);
   // whether more images can be loaded
   let hasMore = $derived(!!loadImages && nextOffset !== null);
+  let hasPrevious = $derived(!!loadImages && startOffset > 0);
   // whether a network request is in progress
   let loading = $state(false);
   // whether pagination needs an explicit retry
   let loadFailed = $state(false);
+  let failedBefore = false;
   // whether an image is currently loading
   let imageLoading = $state(false);
 
@@ -190,38 +207,106 @@
    *
    * @param options - The image viewer options.
    */
-  export function mount(options: ImageViewerOptions) {
+  export async function mount(options: ImageViewerOptions) {
     if (!options) {
       return;
     }
     readController?.abort();
+    const current = ++mountId;
+    cancelAnimationFrame(progressFrame);
+    cancelAnimationFrame(restoreFrame);
+    progressFrame = 0;
+    restoring = true;
+    progress = options.progress;
     readController = new AbortController();
     readSignal = options.signal ? AbortSignal.any([readController.signal, options.signal]) : readController.signal;
     version = options.version;
     loadImages = options.loadImages;
     title = options.title ?? '';
+    startOffset = options.offset ?? 0;
     images = [];
     appendImages(options.images);
-    imageCount = Math.max(options.image_count ?? 0, images.length);
-    nextOffset =
-      options.next_offset === undefined ? (images.length < imageCount ? images.length : null) : options.next_offset;
+    const end = startOffset + images.length;
+    imageCount = Math.max(options.image_count ?? 0, end);
+    nextOffset = options.next_offset === undefined ? (end < imageCount ? end : null) : options.next_offset;
     if (!images.length || !loadImages || nextOffset === null) {
       nextOffset = null;
-      imageCount = images.length;
+      imageCount = end;
     }
     chapters = options.chapters ?? [];
     chapterId = options.chapterId ?? null;
     chapterChange = options.chapterChange;
     back = options.back;
-    imageIndex = 0;
+    imageIndex = Math.max(startOffset, Math.min(options.position?.index ?? startOffset, end - 1));
+    anchor = { index: imageIndex, offset: options.position?.offset ?? 0 };
     imageEls = [];
     imageLoading = images.length > 0;
     loading = false;
     loadFailed = false;
-    mountId++;
     scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     showControls();
+    await tick();
+    if (current === mountId) restorePosition();
   }
+
+  /**
+   * Get the visible image and its relative position within the current chapter.
+   *
+   * @returns The current position, or null while the viewer is unavailable.
+   */
+  export function getPosition(): ImagePosition | null {
+    if (!scrollEl?.clientHeight || restoring || readSignal?.aborted) return null;
+    const paged = $settings?.readMode === 'paged';
+    if (paged && imageLoading) return null;
+    if (!paged) updateImageIndex();
+    const image = paged ? pagedImage : imageEls[imageIndex - startOffset];
+    const url = images[imageIndex - startOffset];
+    if (!image || !url) return null;
+    const offset = Math.max(0, Math.min(1, (scrollEl.scrollTop - image.offsetTop) / Math.max(1, image.offsetHeight)));
+    const end = scrollEl.scrollHeight - scrollEl.clientHeight;
+    const finished = nextOffset === null && scrollEl.scrollTop >= end - 1;
+    const percentage = !paged && finished ? 100 : ((imageIndex + (paged ? 1 : offset)) / imageCount) * 100;
+    return { index: imageIndex, url, offset: Math.round(offset * 1e6) / 1e6, percentage };
+  }
+
+  /** Preserve the current page when images load, the viewport resizes or modes change. */
+  function restorePosition() {
+    const image = $settings?.readMode === 'paged' ? pagedImage : anchor && imageEls[anchor.index - startOffset];
+    if (!scrollEl || !image || !anchor) return;
+    restoring = true;
+    cancelAnimationFrame(progressFrame);
+    progressFrame = 0;
+    cancelAnimationFrame(restoreFrame);
+    scrollEl.scrollTo({
+      top: image.offsetTop + image.offsetHeight * anchor.offset,
+      behavior: 'instant'
+    });
+    restoreFrame = requestAnimationFrame(() => {
+      restoring = false;
+      handleImageScroll();
+    });
+  }
+
+  /** Report at most one position per frame; persistence belongs to the caller. */
+  function reportProgress() {
+    if (restoring || progressFrame) return;
+    progressFrame = requestAnimationFrame(() => {
+      progressFrame = 0;
+      const position = getPosition();
+      if (!position) return;
+      anchor = position;
+      progress?.(position);
+    });
+  }
+
+  $effect(() => {
+    if (!contentEl || !scrollEl) return;
+    const observer = new ResizeObserver(restorePosition);
+    observer.observe(contentEl);
+    observer.observe(scrollEl);
+    if (pagedImage) observer.observe(pagedImage);
+    return () => observer.disconnect();
+  });
 
   /**
    * Select a chapter and notify the parent page.
@@ -229,10 +314,10 @@
    * @param chapter - The chapter to select.
    */
   function selectChapter(chapter: Chapter) {
-    readController?.abort();
     chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
+    readController?.abort();
   }
 
   /**
@@ -247,10 +332,14 @@
   /**
    * Move to the previous loaded image.
    */
-  function prev() {
-    if (imageIndex > 0 && !readSignal?.aborted) {
+  async function prev() {
+    const signal = readSignal;
+    if (!signal || signal.aborted || loading || imageLoading) return;
+    if (imageIndex === startOffset && hasPrevious && !(await loadMore(true))) return;
+    if (imageIndex > startOffset && !signal.aborted) {
       animForward = false;
       imageIndex--;
+      anchor = { index: imageIndex, offset: 0 };
       imageLoading = true;
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
@@ -264,60 +353,70 @@
     if (!signal || signal.aborted || loading || imageLoading) {
       return;
     }
-    if (imageIndex >= images.length - 1) {
+    if (imageIndex >= startOffset + images.length - 1) {
       const currentIndex = imageIndex;
       if (!(await loadMore()) || signal.aborted || imageIndex !== currentIndex) {
         return;
       }
     }
-    if (imageIndex < images.length - 1) {
+    if (imageIndex < startOffset + images.length - 1) {
       animForward = true;
       imageIndex++;
+      anchor = { index: imageIndex, offset: 0 };
       imageLoading = true;
       scrollEl?.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
   }
 
   /**
-   * Append new image URLs to the viewer, skipping duplicates.
+   * Add image URLs to either end of the loaded range, skipping duplicates.
    *
    * @param urls - The image URLs returned by the content source.
-   * @returns The number of images appended.
+   * @param before - Prepend an earlier batch; defaults to appending.
+   * @returns The number of images added.
    */
-  function appendImages(urls: string[] | null | undefined): number {
+  function appendImages(urls: string[] | null | undefined, before = false): number {
     const nextImages = (urls ?? []).map((src) => proxyImage(src.trim(), 'auto')).filter((src): src is string => !!src);
     const previousLength = images.length;
-    images = [...new Set([...images, ...nextImages])];
+    images = [...new Set(before ? [...nextImages, ...images] : [...images, ...nextImages])];
     return images.length - previousLength;
   }
 
   /**
-   * Load the next batch through the current source, ignoring cancelled results.
+   * Extend the loaded range through the current source, ignoring cancelled results.
    *
-   * @returns Whether new images were appended to the current resource.
+   * @param before - Load the preceding batch; defaults to the next batch.
+   * @returns Whether new images were added to the current resource.
    */
-  async function loadMore() {
+  async function loadMore(before = false) {
     const loader = loadImages;
     const signal = readSignal;
-    const offset = nextOffset;
+    const offset = before ? Math.max(0, startOffset - IMAGE_BATCH_SIZE) : nextOffset;
     if (loading || !loader || !signal || signal.aborted || offset === null) {
       return false;
     }
     loading = true;
     loadFailed = false;
+    failedBefore = before;
     try {
-      const data = await loader({ offset, limit: IMAGE_BATCH_SIZE, version, signal });
+      const limit = before ? startOffset - offset : IMAGE_BATCH_SIZE;
+      if (limit <= 0) return false;
+      const data = await loader({ offset, limit, version, signal });
       if (signal.aborted) {
         return false;
       }
-      const appended = appendImages(data.images);
-      imageCount = Math.max(data.image_count ?? imageCount, images.length);
-      const next =
-        data.next_offset === undefined ? (images.length < imageCount ? images.length : null) : data.next_offset;
-      nextOffset = appended > 0 && next !== null && next > offset ? next : null;
+      anchor = getPosition() ?? anchor;
+      const appended = appendImages(data.images, before);
+      if (before) startOffset = offset;
+      const end = startOffset + images.length;
+      imageCount = Math.max(data.image_count ?? imageCount, end);
+      const next = data.next_offset === undefined ? (end < imageCount ? end : null) : data.next_offset;
+      if (!before) nextOffset = appended > 0 && next !== null && next > offset ? next : null;
       if (nextOffset === null) {
-        imageCount = images.length;
+        imageCount = end;
       }
+      await tick();
+      if (!signal.aborted) restorePosition();
       return appended > 0;
     } catch {
       if (!signal.aborted) {
@@ -339,25 +438,27 @@
     if (!el || !$settings || $settings.readMode !== 'scroll') {
       return;
     }
-    const containerTop = el.getBoundingClientRect().top;
     for (let i = 0; i < imageEls.length; i++) {
       const imgEl = imageEls[i];
       if (!imgEl) {
         continue;
       }
-      const rect = imgEl.getBoundingClientRect();
-      if (rect.bottom > containerTop) {
-        imageIndex = i;
+      if (imgEl.offsetTop + imgEl.offsetHeight > el.scrollTop) {
+        imageIndex = startOffset + i;
         return;
       }
     }
   }
 
   /**
-   * Clear image loading state after an image finishes loading.
+   * Restore the selected image after it finishes loading.
+   *
+   * @param event - The load event from the currently mounted paged image.
    */
-  function handleImageLoad() {
+  function handleImageLoad(event: Event) {
+    if (event.currentTarget !== pagedImage || readSignal?.aborted) return;
     imageLoading = false;
+    restorePosition();
   }
 
   /**
@@ -384,15 +485,19 @@
   }
 
   /**
-   * Track scroll position and request more images near the end.
+   * Track scroll position and request more images near either end.
    */
   function handleImageScroll() {
+    if (restoring) return;
     updateImageIndex();
+    reportProgress();
     const el = scrollEl;
-    if ($settings?.readMode !== 'scroll' || !el || !hasMore || loading || loadFailed) {
+    if ($settings?.readMode !== 'scroll' || !el || loading || loadFailed) {
       return;
     }
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_THRESHOLD) {
+    if (hasPrevious && el.scrollTop < SCROLL_LOAD_THRESHOLD) {
+      loadMore(true);
+    } else if (hasMore && el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_THRESHOLD) {
       loadMore();
     }
   }
@@ -468,6 +573,9 @@
     showControls();
     return () => {
       readController?.abort();
+      mountId++;
+      cancelAnimationFrame(progressFrame);
+      cancelAnimationFrame(restoreFrame);
       freeze.set(false);
       clearTimeout(hideTimer);
     };
@@ -495,8 +603,8 @@
         <button
           class="btn border-0 btn-ghost shadow-none btn-xs"
           onclick={() => {
-            readController?.abort();
             (back ?? historyBack)();
+            readController?.abort();
           }}
           aria-label="Back"
         >
@@ -570,24 +678,27 @@
   {#if $settings?.readMode === 'scroll'}
     <div
       bind:this={scrollEl}
-      class="min-w-0 flex-1 overflow-x-auto overflow-y-auto overscroll-none"
+      class="relative min-w-0 flex-1 overflow-x-auto overflow-y-auto overscroll-none [overflow-anchor:none]"
       onscroll={handleImageScroll}
     >
-      {#each images as src, i (`${mountId}:${i}`)}
-        <img
-          bind:this={imageEls[i]}
-          {src}
-          alt=""
-          class="scroll-image {zoomClass}"
-          loading={i < 3 ? 'eager' : 'lazy'}
-          draggable="false"
-          onload={(e) => {
-            e.currentTarget.setAttribute('data-loaded', 'true');
-            handleImageScroll();
-          }}
-          onerror={handleImageError}
-        />
-      {/each}
+      <div bind:this={contentEl}>
+        {#each images as src, i (`${mountId}:${startOffset + i}`)}
+          <img
+            bind:this={imageEls[i]}
+            {src}
+            alt=""
+            class="scroll-image {zoomClass}"
+            loading={Math.abs(startOffset + i - imageIndex) < 2 ? 'eager' : 'lazy'}
+            draggable="false"
+            onload={(e) => {
+              anchor = getPosition() ?? anchor;
+              e.currentTarget.setAttribute('data-loaded', 'true');
+              restorePosition();
+            }}
+            onerror={handleImageError}
+          />
+        {/each}
+      </div>
       {#if loading}
         <div class="flex-center pt-6 pb-12 text-white/40">
           <span class="loading loading-md loading-spinner"></span>
@@ -595,14 +706,19 @@
       {/if}
     </div>
   {:else}
-    <div bind:this={scrollEl} class="min-w-0 flex-1 overflow-auto overscroll-none">
-      <div class="flex-center h-full w-min min-w-full">
-        {#if images[imageIndex]}
+    <div
+      bind:this={scrollEl}
+      class="relative min-w-0 flex-1 overflow-auto overscroll-none [overflow-anchor:none]"
+      onscroll={handleImageScroll}
+    >
+      <div bind:this={contentEl} class="flex h-full w-min min-w-full justify-center">
+        {#if images[imageIndex - startOffset]}
           {#key `${mountId}:${imageIndex}`}
             <img
-              src={images[imageIndex]}
+              bind:this={pagedImage}
+              src={images[imageIndex - startOffset]}
               alt=""
-              class={zoomClass}
+              class="my-auto {zoomClass}"
               draggable="false"
               in:fly={flyParams}
               onload={handleImageLoad}
@@ -625,7 +741,7 @@
       class="absolute inset-x-0 bottom-12 z-1 mx-auto flex w-fit max-w-full items-center gap-3 rounded-field bg-black/80 px-4 py-2 text-sm text-white/80"
     >
       <span>{$_('media.image.load_failed')}</span>
-      <button class="btn border-0 btn-ghost shadow-none btn-sm" onclick={() => loadMore()}>
+      <button class="btn border-0 btn-ghost shadow-none btn-sm" onclick={() => loadMore(failedBefore)}>
         {$_('action.retry')}
       </button>
     </div>

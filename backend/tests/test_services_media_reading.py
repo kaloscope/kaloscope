@@ -1460,6 +1460,7 @@ def test_text_content_http(tmp_path):
         ({"path": "/untrusted.txt"}, 400, "bad_request"),
         ({"offset": "0"}, 400, "bad_request"),
         ({"limit": "20"}, 400, "bad_request"),
+        ({"page_id": "f" * 32}, 400, "bad_request"),
         ({"chapter_id": "item:1"}, 400, "bad_request"),
     ],
 )
@@ -2198,6 +2199,7 @@ def test_comic_content_http(tmp_path, format, chapter):
                         }
                     ],
                     "images": data["images"],
+                    "offset": 0,
                     "image_count": 3,
                     "next_offset": 2,
                 }
@@ -2217,6 +2219,41 @@ def test_comic_content_http(tmp_path, format, chapter):
                 assert last.status_code == 200, last.text
                 assert last.json()["data"]["next_offset"] is None
                 pages = data["images"] + last.json()["data"]["images"]
+                page_id = pages[-1].rsplit("/", 1)[1].split("?", 1)[0]
+                # resume through the work, including a selected child chapter
+                resume_url = f"/_api/media/{item.parent_id or item.id}/content"
+                resume_query = {
+                    "page_id": page_id,
+                    "chapter_id": data["chapter_id"],
+                    "version": data["version"],
+                    "limit": 1,
+                }
+                resumed = await client.get(resume_url, params=resume_query)
+                assert resumed.status_code == 200, resumed.text
+                selected = resumed.json()["data"]
+                assert selected["images"] == pages[-1:]
+                assert selected["offset"] == 2 and selected["image_count"] == 3
+                assert selected["next_offset"] is None
+                assert selected["source_item_id"] == item.id
+                earlier = await client.get(
+                    resume_url,
+                    params={
+                        "chapter_id": data["chapter_id"],
+                        "version": data["version"],
+                        "offset": 1,
+                        "limit": 1,
+                    },
+                )
+                assert earlier.json()["data"]["images"] == pages[1:2]
+                assert earlier.json()["data"]["offset"] == 1
+                unknown = await client.get(
+                    resume_url, params={**resume_query, "page_id": "0" * 32}
+                )
+                assert unknown.status_code == 404
+                stale = await client.get(
+                    resume_url, params={**resume_query, "version": "0" * 64}
+                )
+                assert stale.status_code == 409
                 for page_url, number in zip(pages, (1, 2, 10), strict=True):
                     image = await client.get(page_url)
                     assert (
@@ -2269,6 +2306,9 @@ def test_comic_content_http(tmp_path, format, chapter):
                 await UserPermission.all().delete()
                 assert (await client.get(url)).status_code == 403
                 assert (
+                    await client.get(resume_url, params=resume_query)
+                ).status_code == 403
+                assert (
                     await client.get(pages[-1], headers={"If-None-Match": etag})
                 ).status_code == 403
                 client.headers.clear()
@@ -2288,6 +2328,8 @@ def test_comic_content_http(tmp_path, format, chapter):
         ({"limit": 0}, 400),
         ({"limit": 101}, 400),
         ({"limit": "1.5"}, 400),
+        ({"page_id": "../1.png"}, 400),
+        ({"page_id": "f" * 32, "offset": 0}, 400),
         ({"chapter_id": "item:999"}, 400),
         ({"chapter_id": "f" * 32}, 400),
         ({"chapter_id": "item:0"}, 400),

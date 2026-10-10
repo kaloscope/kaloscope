@@ -460,7 +460,7 @@
     "image": {
       "chapters": "Chapters",
       "settings": "Settings",
-      "load_failed": "Failed to load more images",
+      "load_failed": "Failed to load image pages",
       "read_mode": "Read Mode",
       "read_mode_options": {
         "scroll": "Scroll",

@@ -229,6 +229,7 @@ class MediaContentQuery(BaseModel):
         default=None, pattern=r"^(?:[0-9a-f]{32}|item:[1-9][0-9]*)$"
     )
     version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    page_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=20, ge=1, le=100)
 
@@ -342,6 +343,7 @@ class ImageContent(ContentResponse):
     format: Literal["dir", "cbz", "zip"]
     content_type: Literal["images"] = "images"
     images: list[str]
+    offset: int
     image_count: int
     next_offset: int | None
 

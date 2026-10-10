@@ -1021,20 +1021,23 @@ def _read_text_content(
         return EpubContent.model_validate({**values, **data})
 
 
-def _read_image_content(item: MediaItem, offset: int, limit: int) -> ImageContent:
+def _read_image_content(
+    item: MediaItem, offset: int, limit: int, page_id: str | None = None
+) -> ImageContent:
     """Read one comic's indexed page range with a live local title.
 
     Args:
         item: The accessible comic source with a validated ready index version.
         offset: The zero-based first page; the page count selects the empty last page.
         limit: The validated batch size from 1 to 100.
+        page_id: An indexed page to start from; None uses the numeric offset.
 
     Returns:
         One source's chapter label, version and bounded image URLs in reading order.
 
     Raises:
         ContentError: If the source or cache changed, is unavailable or invalid,
-            or the requested offset exceeds the page count.
+            or the requested offset or page ID is outside the current index.
     """
     from app.core.media.image import ImageIndex
     from app.core.media.reader import read_metadata
@@ -1042,6 +1045,12 @@ def _read_image_content(item: MediaItem, offset: int, limit: int) -> ImageConten
     with _content_index(item) as (source, _, index):
         assert isinstance(index, ImageIndex)
         count = len(index.pages)
+        if page_id is not None:
+            offset = next(
+                (i for i, page in enumerate(index.pages) if page.id == page_id), -1
+            )
+            if offset < 0:
+                raise ContentError("not_found")
         if offset > count:
             raise ContentError("bad_request")
         title = read_metadata(source).data.title or source.directory.name
@@ -1059,6 +1068,7 @@ def _read_image_content(item: MediaItem, offset: int, limit: int) -> ImageConten
                 f"/_api/media/{item.id}/assets/{page.id}?v={index.index_version}"
                 for page in index.pages[offset:end]
             ],
+            offset=offset,
             image_count=count,
             next_offset=end if end < count else None,
         )
@@ -2841,7 +2851,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             if source.parent_id != item.id or source.lib_id != item.lib_id:
                 raise ContentError("content_changed")
             content = await to_thread(
-                _read_image_content, source, query.offset, query.limit
+                _read_image_content, source, query.offset, query.limit, query.page_id
             )
         if await children.values(*fields) != chapters:
             raise ContentError("content_changed")
@@ -2882,14 +2892,16 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         async with cls._content_item(id, user, query.version) as item:
             if item.lib.lib_type == LibType.COMIC:
+                if query.page_id is not None and "offset" in query.model_fields_set:
+                    raise ContentError("bad_request")
                 if item.format is None:
                     return await cls._get_collection_content(item, user, query)
                 if query.chapter_id not in (None, f"item:{item.id}"):
                     raise ContentError("bad_request")
                 return await to_thread(
-                    _read_image_content, item, query.offset, query.limit
+                    _read_image_content, item, query.offset, query.limit, query.page_id
                 )
-            if query.model_fields_set & {"offset", "limit"} or (
+            if query.model_fields_set & {"offset", "limit", "page_id"} or (
                 query.chapter_id is not None and query.chapter_id.startswith("item:")
             ):
                 raise ContentError("bad_request")

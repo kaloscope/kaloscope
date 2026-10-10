@@ -305,6 +305,7 @@ export type MediaItem = {
 export type MediaContentQuery = {
   chapter_id?: string;
   version?: string;
+  page_id?: string;
   offset?: number;
   limit?: number;
 };
@@ -417,6 +418,7 @@ export type ImageContent = ContentResponse & {
   format: 'dir' | 'cbz' | 'zip';
   content_type: 'images';
   images: string[];
+  offset: number;
   image_count: number;
   next_offset: number | null;
 };

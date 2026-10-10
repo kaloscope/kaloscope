@@ -20,6 +20,7 @@
     Rating,
     TextViewer,
     VideoPlayer,
+    type ImageViewerOptions,
     type TextViewerOptions
   } from '$lib/components';
   import { LibType } from '$lib/enums';
@@ -31,6 +32,7 @@
     BaseResp,
     Chapter,
     ContentChapter,
+    ImageLocator,
     MediaContent,
     MediaContentQuery,
     MediaItem,
@@ -71,6 +73,7 @@
   let readingError = $state<string | null>(null);
   let hasReadingHistory = $state(false);
   let readingChapterId: string | undefined;
+  let readingResume = false;
   let readingController: AbortController | undefined;
   let progressTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingProgress: ReadingEntry | undefined;
@@ -134,15 +137,15 @@
   /**
    * Read retained progress through the shared user history endpoint.
    *
-   * @param id - The novel's top-level media ID.
+   * @param id - The novel or comic's top-level media ID.
    * @param signal - Cancellation for the directory or reading request.
    * @returns The current account's work history, or null without a saved record.
    */
   async function getReadingHistory(id: number, signal: AbortSignal): Promise<ReadingHistory | null> {
-    if (!$user || $user.preferences?.read_records === 0) return null;
+    if (!$user || $user.preferences?.read_records === 0 || mediaType === 'video') return null;
     const { data } = await api
       .get('user/history/list', {
-        searchParams: { rel_type: 'text', rel_id: id },
+        searchParams: { rel_type: mediaType, rel_id: id },
         signal,
         retry: 0,
         context: { silentErrors: true }
@@ -189,11 +192,6 @@
     const { signal } = chaptersController;
     chaptersLoading = true;
     chaptersError = null;
-    void getReadingHistory(media.id, signal)
-      .then((history) => {
-        if (!signal.aborted) hasReadingHistory = !!history;
-      })
-      .catch(() => {});
     try {
       const data = await getContent(media.id, {}, signal);
       if (signal.aborted) return;
@@ -275,6 +273,7 @@
     readingController = new AbortController();
     const { signal } = readingController;
     readingChapterId = selectedId;
+    readingResume = resume;
     readingLoading = true;
     readingError = null;
     clearContent();
@@ -282,18 +281,23 @@
     await tick();
     if (signal.aborted) return;
     if (readerDialog && !readerDialog.open) readerDialog.showModal();
-    let locator: TextLocator | undefined;
+    let locator: TextLocator | ImageLocator | undefined;
     let positionReset = false;
     try {
-      if (resume && mediaType === 'text') {
+      if (resume) {
         // reopening immediately after exit must wait for that exit's save
         await historyWrite;
         if (signal.aborted) return;
         try {
           const history = await getReadingHistory(item.id, signal);
-          if (history?.rel_type === 'text') {
+          if (history?.rel_type === mediaType) {
             const saved = history.locator;
-            if (saved && (!selectedId || selectedId === saved.chapter_id)) {
+            const savedChapter = saved
+              ? 'chapter_id' in saved
+                ? saved.chapter_id
+                : `item:${saved.chapter_item_id ?? item.id}`
+              : undefined;
+            if (saved && (!selectedId || selectedId === savedChapter)) {
               locator = saved;
               positionReset = history.percentage === null;
             } else if (!saved && !selectedId) {
@@ -305,9 +309,16 @@
         }
       }
       if (signal.aborted) return;
+      const textLocator = locator && 'chapter_id' in locator ? locator : undefined;
+      const imageLocator = locator && 'page_id' in locator ? locator : undefined;
       const data = await getContent(
         item.id,
-        { chapter_id: locator?.chapter_id ?? selectedId, version: locator?.version ?? version },
+        {
+          chapter_id:
+            textLocator?.chapter_id ?? (imageLocator ? `item:${imageLocator.chapter_item_id ?? item.id}` : selectedId),
+          version: locator?.version ?? version,
+          page_id: imageLocator?.page_id
+        },
         signal
       );
       if (signal.aborted) return;
@@ -333,13 +344,45 @@
           loadContent(chapter.id ?? undefined, data.media_type === 'text' ? data.version : undefined),
         back: closeReader
       };
+      const queueProgress = (entry: ReadingEntry) => {
+        const current = get(user);
+        if (signal.aborted || !reading || current?.id !== readerUserId || current?.preferences?.read_records === 0)
+          return;
+        pendingProgress = JSON.stringify(entry) === lastQueuedProgress ? undefined : entry;
+        if (pendingProgress && progressTimer === undefined) {
+          progressTimer = setTimeout(saveProgress, PROGRESS_SAVE_DELAY);
+        }
+      };
+      // restore only after the dialog's reading area is visible and measurable
+      readingLoading = false;
+      await tick();
+      if (signal.aborted) return;
+      progressUserId = readerUserId;
       if (data.content_type === 'images') {
-        imageViewer?.mount({
+        const progress: NonNullable<ImageViewerOptions['progress']> = (position) => {
+          // local content URLs carry the indexed page ID in the final path segment
+          const pageId = new URL(position.url, window.location.origin).pathname.split('/').at(-1)!;
+          queueProgress({
+            rel_type: 'image',
+            rel_id: item.id,
+            percentage: Math.floor(position.percentage),
+            locator: {
+              version: data.version,
+              chapter_item_id: data.source_item_id === item.id ? undefined : data.source_item_id,
+              page_id: pageId,
+              offset: position.offset
+            }
+          });
+        };
+        await imageViewer?.mount({
           ...options,
           images: data.images,
+          offset: data.offset,
           image_count: data.image_count,
           next_offset: data.next_offset,
           version: data.version,
+          position: { index: data.offset, offset: imageLocator?.offset ?? 0 },
+          progress,
           signal,
           loadImages: async ({ offset, limit, version, signal }) => {
             try {
@@ -349,7 +392,7 @@
             } catch (error) {
               if (!signal.aborted && contentError(error) === 'content_changed') {
                 if (refresh) {
-                  void loadContent(data.chapter_id, undefined, { refresh: false });
+                  void loadContent(data.chapter_id, undefined, { refresh: false, resume: true });
                 } else {
                   readingController?.abort();
                   clearContent();
@@ -360,42 +403,35 @@
             }
           }
         });
+        if (signal.aborted) return;
+        captureProgress = () => {
+          const position = imageViewer?.getPosition();
+          if (position) progress(position);
+        };
       } else {
-        const index = locator
+        const index = textLocator
           ? data.content_type === 'blocks'
-            ? data.blocks.findIndex((block) => block.id === locator?.block_id)
-            : (locator.paragraph ?? -1)
+            ? data.blocks.findIndex((block) => block.id === textLocator.block_id)
+            : (textLocator.paragraph ?? -1)
           : -1;
         const progress: NonNullable<TextViewerOptions['progress']> = (position) => {
-          const current = get(user);
-          if (signal.aborted || !reading || current?.id !== readerUserId || current?.preferences?.read_records === 0)
-            return;
           const chapterIndex = data.chapters.findIndex((chapter) => chapter.id === data.chapter_id);
           const blockId = data.content_type === 'blocks' ? data.blocks[position.index]?.id : undefined;
           if (data.content_type === 'blocks' && !blockId) return;
           const base = { version: data.version, chapter_id: data.chapter_id, offset: position.offset };
           const anchor: TextLocator =
             data.content_type === 'blocks' ? { ...base, block_id: blockId! } : { ...base, paragraph: position.index };
-          const entry: ReadingEntry = {
+          queueProgress({
             rel_type: 'text',
             rel_id: item.id,
             percentage: Math.floor(((chapterIndex + position.percentage / 100) / data.chapters.length) * 100),
             locator: anchor
-          };
-          pendingProgress = JSON.stringify(entry) === lastQueuedProgress ? undefined : entry;
-          if (pendingProgress && progressTimer === undefined) {
-            progressTimer = setTimeout(saveProgress, PROGRESS_SAVE_DELAY);
-          }
+          });
         };
-        // restore only after the dialog's reading area is visible and measurable
-        readingLoading = false;
-        await tick();
-        if (signal.aborted) return;
-        progressUserId = readerUserId;
         await textViewer?.mount({
           ...options,
           ...(data.content_type === 'blocks' ? { blocks: data.blocks } : { text: data.text }),
-          position: index >= 0 ? { index, offset: locator?.offset ?? 0 } : undefined,
+          position: index >= 0 ? { index, offset: textLocator?.offset ?? 0 } : undefined,
           progress
         });
         if (signal.aborted) return;
@@ -403,8 +439,8 @@
           const position = textViewer?.getPosition();
           if (position) progress(position);
         };
-        if (positionReset) alert({ level: 'info', message: 'reading_position_reset', unique: true });
       }
+      if (positionReset) alert({ level: 'info', message: 'reading_position_reset', unique: true });
     } catch (error) {
       if (signal.aborted) return;
       if (refresh && contentError(error) === 'content_changed') {
@@ -534,12 +570,20 @@
   // load the parent media item details on mount
   onMount(() => {
     let active = true;
+    const historyController = new AbortController();
     loading.start();
     getDetails(Number(page.params.item_id))
       .then((data) => {
         if (!active) return;
         media = data;
         meta = data.metadata ?? null;
+        if (data.media_type !== 'video') {
+          void getReadingHistory(data.id, historyController.signal)
+            .then((history) => {
+              if (active) hasReadingHistory = !!history;
+            })
+            .catch(() => {});
+        }
         if (data.media_type === 'text') void loadTextChapters();
       })
       .finally(() => {
@@ -547,6 +591,7 @@
       });
     return () => {
       active = false;
+      historyController.abort();
       chaptersController?.abort();
     };
   });
@@ -679,7 +724,7 @@
           <p class="mt-1 text-sm leading-relaxed opacity-80">{_meta?.plot ?? meta?.plot}</p>
 
           <!-- continue reading -->
-          {#if mediaType === 'text' && hasReadingHistory && (chaptersLoading || chaptersError || hasTextChapters)}
+          {#if mediaType !== 'video' && hasReadingHistory}
             <button
               class="btn mt-2 h-11 w-full gap-2 rounded-full px-5 font-medium shadow-sm btn-primary sm:w-fit"
               onclick={() => read()}
@@ -951,7 +996,12 @@
           <span class="loading loading-lg loading-bars" role="status" aria-label={$_('media.loading')}></span>
         {:else if readingError}
           <p role="alert">{$_(`alert.${readingError}`, { default: $_('alert.resource_load_failed') })}</p>
-          <button class="btn btn-primary" onclick={() => loadContent(readingChapterId)}>{$_('action.retry')}</button>
+          <button
+            class="btn btn-primary"
+            onclick={() => loadContent(readingChapterId, undefined, { resume: readingResume })}
+          >
+            {$_('action.retry')}
+          </button>
         {/if}
       </div>
     {/if}

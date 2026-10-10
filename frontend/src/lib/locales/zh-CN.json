@@ -460,7 +460,7 @@
     "image": {
       "chapters": "章节",
       "settings": "阅读设置",
-      "load_failed": "后续图片加载失败",
+      "load_failed": "图片分页加载失败",
       "read_mode": "阅读模式",
       "read_mode_options": {
         "scroll": "滚动",
