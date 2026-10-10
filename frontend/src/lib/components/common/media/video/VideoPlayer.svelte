@@ -17,6 +17,8 @@
     width?: string;
     /** The height of the container. */
     height?: string;
+    /** Notify the caller after the final watch-history request settles. */
+    onhistory?: () => void;
   };
 
   /**
@@ -103,9 +105,11 @@
    * Records the user's watch history when the player is destroyed.
    *
    * @param player - The player instance.
+   * @param owner - The account that opened this player; undefined skips recording.
    */
-  function recordHistory(player: Player | null) {
-    if (!player) {
+  async function recordHistory(player: Player | null, owner: number | undefined) {
+    const current = get(user);
+    if (!player || !owner || current?.id !== owner || current.preferences?.watch_records === 0) {
       return;
     }
     const url = player.config.url;
@@ -122,35 +126,38 @@
         position = duration;
       }
       const percentage = Math.floor((position / duration) * 100);
-      api
+      const { data } = await api
         .get('media/list', { searchParams: { page_num: 0, path } })
-        .json<Resp<Page<MediaItem>>>()
-        .then(({ data }) => {
-          for (const item of data.items) {
-            api.post('user/history/record', {
-              json: {
-                rel_type: 'video',
-                rel_id: item.id,
-                position: position,
-                percentage: percentage
-              }
-            });
-          }
-        });
+        .json<Resp<Page<MediaItem>>>();
+      if (get(user)?.id !== owner || get(user)?.preferences?.watch_records === 0) return;
+      await Promise.all(
+        data.items.map((item) =>
+          api.post('user/history/record', {
+            json: {
+              rel_type: 'video',
+              rel_id: item.id,
+              position: position,
+              percentage: percentage
+            }
+          })
+        )
+      );
     }
   }
 </script>
 
 <script lang="ts">
-  import { freeze } from '$lib/stores';
+  import { freeze, user } from '$lib/stores';
   import { sniffer } from '$lib/utils';
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { v4 as uuidv4 } from 'uuid';
   import Player, { Events, SimplePlayer } from 'xgplayer';
   import DefaultPreset from './plugins/preset';
   import VideoSettings, { formatDanmakus } from './VideoSettings.svelte';
 
-  const { width = '100%', height = '100%' }: VideoPlayerOptions = $props();
+  const { width = '100%', height = '100%', onhistory }: VideoPlayerOptions = $props();
+  const historyUserId = get(user)?.id;
   // player ID
   const id: string = `player-${uuidv4()}`;
   // video container
@@ -597,7 +604,9 @@
     return () => {
       freeze.set(false);
       // destroy the player instance
-      recordHistory(player);
+      void recordHistory(player, historyUserId)
+        .catch(console.error)
+        .finally(() => onhistory?.());
       player?.destroy();
       // remove the event listener
       if (isMobile) {

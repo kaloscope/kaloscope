@@ -1,4 +1,4 @@
-"""Tests for reading positions in the shared user history API."""
+"""Tests for playback and reading positions in the shared user history API."""
 
 import asyncio
 from pathlib import Path
@@ -633,6 +633,8 @@ def test_history_legacy_http(tmp_path, monkeypatch, rel_type):
     async def run():
         async with _database(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
+            if rel_type == "video":
+                await MediaLib.filter(id=item.lib_id).update(lib_type=LibType.MOVIE)
             owner = await _login(client, item.lib_id)
             entry = {
                 "rel_type": rel_type,
@@ -663,6 +665,168 @@ def test_history_legacy_http(tmp_path, monkeypatch, rel_type):
             )
             assert response.status_code == 204
             assert not await UserHistory.filter(user_id=owner.id).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
+def test_video_history_parent(tmp_path, monkeypatch, lib_type):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            lib = await MediaLib.create(
+                lib_type=lib_type, dir=str(tmp_path), name="Video", priority=1
+            )
+            work = await MediaItem.create(
+                lib=lib, dir=str(tmp_path), path=str(tmp_path / "Work"), name="Work"
+            )
+            episodes = [
+                await MediaItem.create(
+                    lib=lib,
+                    parent=work,
+                    dir=work.path,
+                    path=str(Path(work.path) / f"{number}.mp4"),
+                    name=str(number),
+                )
+                for number in range(1, 4)
+            ]
+            owner = await _login(client, lib.id)
+            for episode in episodes:
+                response = await client.post(
+                    "/_api/user/history/record",
+                    json={
+                        "rel_type": "video",
+                        "rel_id": episode.id,
+                        "position": episode.id * 10,
+                        "percentage": 35,
+                    },
+                )
+                assert response.status_code == 204
+            # a newer hidden episode must not occupy the only page slot
+            await MediaItem.filter(id=episodes[-1].id).update(visible=False)
+            other = await User.create(
+                username="Other", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=other,
+                rel_type=HistoryType.VIDEO,
+                rel_id=episodes[0].id,
+                position=99,
+            )
+            standalone = await MediaItem.create(
+                lib=lib,
+                dir=lib.dir,
+                path=str(tmp_path / "Standalone.mp4"),
+                name="Standalone",
+            )
+            await UserHistory.create(
+                user=owner,
+                rel_type=HistoryType.VIDEO,
+                rel_id=standalone.id,
+                position=15,
+            )
+            query = {
+                "rel_type": "video",
+                "parent_id": work.id,
+                "page_size": 1,
+                "ordering": "-updated_at",
+            }
+            response = await client.get("/_api/user/history/list", params=query)
+            assert response.status_code == 200, response.text
+            page = response.json()["data"]
+            assert page["total"] == 2 and len(page["items"]) == 1
+            latest = page["items"][0]
+            assert latest["rel_id"] == episodes[1].id
+            assert latest["position"] == episodes[1].id * 10
+            assert latest["media"]["parent"]["id"] == work.id
+            exact = await client.get(
+                "/_api/user/history/list",
+                params={"rel_type": "video", "rel_id": episodes[0].id},
+            )
+            assert exact.json()["data"]["total"] == 1
+            assert exact.json()["data"]["items"][0]["position"] == episodes[0].id * 10
+            direct = await client.get(
+                "/_api/user/history/list",
+                params={"rel_type": "video", "rel_id": standalone.id},
+            )
+            assert direct.json()["data"]["items"][0]["position"] == 15
+            mismatch = await client.get(
+                "/_api/user/history/list",
+                params={**query, "rel_id": work.id},
+            )
+            assert mismatch.json()["data"]["total"] == 0
+            # hidden parents and revoked grants suppress histories without deleting them
+            await MediaItem.filter(id=work.id).update(visible=False)
+            hidden = await client.get("/_api/user/history/list", params=query)
+            assert hidden.json()["data"]["total"] == 0
+            await MediaItem.filter(id=work.id).update(visible=True)
+            await UserPermission.filter(user_id=owner.id).delete()
+            denied = await client.get("/_api/user/history/list", params=query)
+            assert denied.json()["data"]["total"] == 0
+            assert await UserHistory.filter(user_id=owner.id).count() == 4
+
+    asyncio.run(run())
+
+
+def test_video_history_visibility(tmp_path, monkeypatch):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            lib = await MediaLib.create(
+                lib_type=LibType.MOVIE, dir=str(tmp_path), name="Video", priority=1
+            )
+            owner = await _login(client, lib.id)
+            other_lib = await MediaLib.create(
+                lib_type=LibType.MOVIE,
+                dir=str(tmp_path / "Private"),
+                name="Private",
+                priority=2,
+            )
+            private = await MediaItem.create(
+                lib=other_lib, dir=other_lib.dir, path=other_lib.dir, name="Private"
+            )
+            video = await MediaItem.create(
+                lib=lib, dir=lib.dir, path=str(tmp_path / "Movie.mp4"), name="Movie"
+            )
+            wrong_parent = await MediaItem.create(
+                lib=lib,
+                parent=private,
+                dir=lib.dir,
+                path=str(tmp_path / "Episode.mp4"),
+                name="Episode",
+            )
+            for item_id in (video.id, private.id, wrong_parent.id, 999):
+                await UserHistory.create(
+                    user=owner, rel_type=HistoryType.VIDEO, rel_id=item_id, position=30
+                )
+            query = {"rel_type": "video", "page_size": 1, "ordering": "-updated_at"}
+            response = await client.get("/_api/user/history/list", params=query)
+            assert response.status_code == 200, response.text
+            page = response.json()["data"]
+            assert page["total"] == 1 and page["items"][0]["media"]["id"] == video.id
+            await MediaItem.filter(id=video.id).delete()
+            response = await client.get("/_api/user/history/list", params=query)
+            assert response.json()["data"]["items"] == []
+            assert response.json()["data"]["total"] == 0
+            assert await UserHistory.filter(user_id=owner.id).count() == 4
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"rel_type": "video", "parent_id": 0},
+        {"rel_type": "video", "parent_id": -1},
+        {"rel_type": "text", "parent_id": 1},
+        {"rel_type": "image", "parent_id": 1},
+        {"rel_type": "search", "parent_id": 1},
+    ],
+)
+def test_history_parent_invalid(monkeypatch, query):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            await _login(client, 1)
+            response = await client.get("/_api/user/history/list", params=query)
+            assert response.status_code == 400
 
     asyncio.run(run())
 

@@ -16,12 +16,41 @@ from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaMetadata
 from app.routes import media as media_routes
+from tests.test_services_media_reading import _client, _database, _user
 
 
 @pytest.fixture(autouse=True)
 def workspace(monkeypatch, tmp_path_factory):
     directory = tmp_path_factory.mktemp("workspace-temp")
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
+@pytest.mark.parametrize(
+    ("range_header", "start", "end"),
+    [("bytes=0-999", 0, 9), ("bytes=4-999", 4, 9), ("bytes=4-6", 4, 6)],
+)
+def test_video_stream_range(tmp_path, range_header, start, end):
+    async def run():
+        async with _database(), _client(_user()) as client:
+            path = tmp_path / "video.mp4"
+            data = b"0123456789"
+            path.write_bytes(data)
+            lib = await MediaLib.create(
+                name="Video", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            await MediaItem.create(
+                lib=lib, path=str(path), dir=str(tmp_path), name=path.stem
+            )
+            response = await client.get(
+                "/_api/media/stream",
+                params={"path": str(path)},
+                headers={"Range": range_header},
+            )
+            assert response.status_code == 206
+            assert response.content == data[start : end + 1]
+            assert response.headers["Content-Range"] == f"bytes {start}-{end}/10"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])

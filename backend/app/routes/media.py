@@ -447,10 +447,10 @@ async def get_item_stream(
 
         start, end = match.groups()
         start = int(start) if start else 0
-        end = int(end) if end else total - 1
+        end = min(int(end), total - 1) if end else total - 1
 
         # validate range
-        if start >= total or end >= total or start > end:
+        if start >= total or start > end:
             raise RangeNotSatisfiable
 
         # stream the requested range

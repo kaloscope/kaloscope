@@ -21,11 +21,11 @@
     FlowGraph,
     IndexerAuth,
     IndexerConfig,
-    MediaItem,
     Resource,
     Resp,
     ViewMode,
-    ViewModes
+    ViewModes,
+    WatchHistory
   } from '$lib/types';
   import { aspectRatio, buildStreamUrl } from '$lib/utils';
   import { onMount, tick, untrack } from 'svelte';
@@ -62,18 +62,6 @@
    * The type of the history entry.
    */
   type HistoryType = 'video' | 'search';
-
-  /**
-   * The type of the watch history.
-   */
-  type WatchHistory = {
-    id: number;
-    rel_id: number;
-    updated_at: string;
-    position: number;
-    percentage: number;
-    media: MediaItem | null;
-  };
 
   /**
    * The type of the search history.
@@ -293,7 +281,7 @@
         url: buildStreamUrl(media.path),
         back: () => (playing = false),
         title: mediaTitle(media),
-        startTime: w.position,
+        startTime: w.position ?? 0,
         danmakuServer: media.lib?.danmaku_server
       });
     });

@@ -41,7 +41,8 @@
     ReadingEntry,
     ReadingHistory,
     Resp,
-    TextLocator
+    TextLocator,
+    WatchHistory
   } from '$lib/types';
   import { buildStreamUrl } from '$lib/utils';
   import { isHTTPError } from 'ky';
@@ -63,6 +64,10 @@
   // the player instance and playing state
   let player: VideoPlayer | null = $state(null);
   let playing = $state(false);
+  let watchHistory = $state<WatchHistory | null>(null);
+  let watchLoading = $state(false);
+  let watchController: AbortController | undefined;
+  let active = false;
 
   // local reading uses the parent entry to retain the comic chapter directory
   let reading = $state(false);
@@ -152,6 +157,53 @@
       })
       .json<Resp<Page<ReadingHistory>>>();
     return data.items[0] ?? null;
+  }
+
+  /**
+   * Refresh the latest retained video or episode through the shared history API.
+   *
+   * @returns The latest accessible entry, or null when unavailable.
+   */
+  async function loadWatchHistory(): Promise<WatchHistory | null> {
+    watchController?.abort();
+    const item = media;
+    const owner = get(user)?.id;
+    if (!active || !item || mediaType !== 'video' || !owner || get(user)?.preferences?.watch_records === 0) {
+      watchHistory = null;
+      watchLoading = false;
+      return null;
+    }
+    const controller = new AbortController();
+    watchController = controller;
+    watchLoading = true;
+    try {
+      const { data } = await api
+        .get('user/history/list', {
+          searchParams: {
+            rel_type: 'video',
+            ...(parts.length ? { parent_id: item.id } : { rel_id: item.id }),
+            page_size: 1,
+            ordering: '-updated_at'
+          },
+          signal: controller.signal,
+          retry: 0
+        })
+        .json<Resp<Page<WatchHistory>>>();
+      if (controller.signal.aborted || !active || get(user)?.id !== owner) return null;
+      watchHistory = data.items[0] ?? null;
+      return watchHistory;
+    } catch (error) {
+      if (!controller.signal.aborted) console.error(error);
+      return null;
+    } finally {
+      if (watchController === controller) watchLoading = false;
+    }
+  }
+
+  /** Resume the latest accessible video after refreshing its saved position. */
+  async function continuePlay() {
+    const history = await loadWatchHistory();
+    if (history?.media) play(history.media, history.position ?? 0);
   }
 
   /**
@@ -484,9 +536,11 @@
 
   /**
    * Start playing the selected media item.
+   *
+   * @param target - The video to open; defaults to the selected item or the work.
+   * @param startTime - The saved position in seconds; omitted to play from the start.
    */
-  function play() {
-    const target = _media ?? media;
+  function play(target = _media ?? media, startTime?: number) {
     if (!target) {
       return;
     }
@@ -503,8 +557,12 @@
       }
       player?.mount({
         url: buildStreamUrl(target.path),
-        back: () => (playing = false),
+        back: () => {
+          watchLoading = true;
+          playing = false;
+        },
         title: mediaTitle(target),
+        startTime,
         chapters: chapters,
         danmakuServer: target.lib?.danmaku_server
       });
@@ -569,7 +627,7 @@
 
   // load the parent media item details on mount
   onMount(() => {
-    let active = true;
+    active = true;
     const historyController = new AbortController();
     loading.start();
     getDetails(Number(page.params.item_id))
@@ -577,7 +635,9 @@
         if (!active) return;
         media = data;
         meta = data.metadata ?? null;
-        if (data.media_type !== 'video') {
+        if (data.media_type === 'video') {
+          void loadWatchHistory();
+        } else {
           void getReadingHistory(data.id, historyController.signal)
             .then((history) => {
               if (active) hasReadingHistory = !!history;
@@ -591,6 +651,7 @@
       });
     return () => {
       active = false;
+      watchController?.abort();
       historyController.abort();
       chaptersController?.abort();
     };
@@ -723,14 +784,15 @@
           {/if}
           <p class="mt-1 text-sm leading-relaxed opacity-80">{_meta?.plot ?? meta?.plot}</p>
 
-          <!-- continue reading -->
-          {#if mediaType !== 'video' && hasReadingHistory}
+          <!-- continue playback or reading -->
+          {#if mediaType === 'video' ? watchHistory?.media : hasReadingHistory}
             <button
-              class="btn mt-2 h-11 w-full gap-2 rounded-full px-5 font-medium shadow-sm btn-primary sm:w-fit"
-              onclick={() => read()}
+              class="btn mt-2 h-9 w-full gap-1.5 rounded-full px-4 font-medium shadow-sm btn-primary sm:w-fit"
+              disabled={watchLoading}
+              onclick={() => (mediaType === 'video' ? continuePlay() : read())}
             >
-              <iconify-icon icon={icons.playFilled} width="1.25rem" aria-hidden="true"></iconify-icon>
-              {$_('media.continue_read')}
+              <iconify-icon icon={icons.playFilled} width="1rem" aria-hidden="true"></iconify-icon>
+              {$_(mediaType === 'video' ? 'media.continue_play' : 'media.continue_read')}
             </button>
           {/if}
         </div>
@@ -872,7 +934,7 @@
                   class:btn-subtle={!active}
                   onclick={(event) => {
                     event.stopPropagation();
-                    if (mediaType === 'video') selectMedia(part).then(play);
+                    if (mediaType === 'video') selectMedia(part).then(() => play());
                     else read(`item:${part.id}`);
                   }}
                   onkeydown={(event) => {
@@ -961,7 +1023,7 @@
 <!-- player overlay -->
 {#if playing}
   <div class="fixed inset-0 layer-1 max-sm:bottom-(--ks-dock-h)">
-    <VideoPlayer bind:this={player} />
+    <VideoPlayer bind:this={player} onhistory={() => void loadWatchHistory()} />
   </div>
 {/if}
 

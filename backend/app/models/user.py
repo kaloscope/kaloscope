@@ -238,6 +238,21 @@ class ImageLocator(BaseModel, extra="forbid", strict=True):
 class HistoryQuery(Pageable):
     rel_type: HistoryType
     rel_id: NonNegativeInt | None = None
+    parent_id: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def check_parent(self) -> Self:
+        """Limit child-history queries to video works.
+
+        Returns:
+            The validated history query.
+
+        Raises:
+            ValueError: If another history type uses a parent filter.
+        """
+        if self.parent_id is not None and self.rel_type != HistoryType.VIDEO:
+            raise ValueError("only video history accepts a parent filter")
+        return self
 
 
 class HistoryEntry(BaseModel):

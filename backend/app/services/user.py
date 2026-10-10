@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from sanic import Request
 from sanic.request.form import File
 from tortoise import timezone
-from tortoise.expressions import Q, Subquery
+from tortoise.expressions import F, Q, Subquery
 from tortoise.transactions import atomic, in_transaction
 
 from app.core.config import KaloscopeConfig
@@ -336,11 +336,11 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
 
     @classmethod
     async def get_page(cls, user: UserInfo, query: HistoryQuery) -> dict[str, Any]:
-        """List retained history with accessible reading works and usable locators.
+        """List retained history with accessible media and usable reading locators.
 
         Args:
             user: The authenticated user with loaded library permissions.
-            query: The history type, optional related ID and pagination parameters.
+            query: The history type, optional related or parent ID and pagination.
 
         Returns:
             A history page with related media or graphs. Stale reading positions
@@ -352,16 +352,26 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
         if query.rel_id is not None:
             queries.append(Q(rel_id=query.rel_id))
         reading = query.rel_type in (HistoryType.TEXT, HistoryType.IMAGE)
-        if reading:
-            works = MediaItem.filter(
-                parent_id=None,
-                visible=True,
-                lib__lib_type=LibType.NOVEL
-                if query.rel_type == HistoryType.TEXT
-                else LibType.COMIC,
-            )
+        media_history = query.rel_type != HistoryType.SEARCH
+        if media_history:
+            items = MediaItem.filter(visible=True)
+            if reading:
+                items = items.filter(
+                    parent_id=None,
+                    lib__lib_type=LibType.NOVEL
+                    if query.rel_type == HistoryType.TEXT
+                    else LibType.COMIC,
+                )
+            else:
+                items = items.filter(
+                    Q(parent_id=None)
+                    | Q(parent__visible=True, parent__lib_id=F("lib__id")),
+                    lib__lib_type__in=[LibType.MOVIE, LibType.TV_SHOW],
+                )
+                if query.parent_id is not None:
+                    items = items.filter(parent_id=query.parent_id)
             if user.role != UserRole.ADMIN:
-                works = works.filter(
+                items = items.filter(
                     lib_id__in=Subquery(
                         UserPermission.filter(
                             user_id=user.id, rel_type=PermType.MEDIA_LIB
@@ -369,7 +379,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                     )
                 )
             # filter before pagination to keep totals and page boundaries accurate
-            queries.append(Q(rel_id__in=Subquery(works.values("id"))))
+            queries.append(Q(rel_id__in=Subquery(items.values("id"))))
         page = await UserHistory.page(*queries, **query.page_params)
         result = await cls.dump_page(page)
         for history in result["items"]:
@@ -412,7 +422,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                 ):
                     history["locator"] = None
                     history["percentage"] = None
-        if reading and result["items"]:
+        if media_history and result["items"]:
             # recheck visibility and grants after the unlocked content reads
             visible = set(
                 await UserHistory.filter(

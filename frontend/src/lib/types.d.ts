@@ -466,6 +466,18 @@ export type ReadingHistory = {
 } & ({ rel_type: 'text'; locator: TextLocator | null } | { rel_type: 'image'; locator: ImageLocator | null });
 
 /**
+ * Retained playback progress for one video or episode.
+ */
+export type WatchHistory = {
+  id: number;
+  rel_id: number;
+  updated_at: string;
+  position: number | null;
+  percentage: number | null;
+  media: MediaItem | null;
+};
+
+/**
  * An actor credited in media metadata.
  */
 export type Actor = {
