@@ -1,5 +1,6 @@
 import asyncio
 import queue
+from contextvars import copy_context
 from datetime import UTC, datetime
 from enum import Enum, auto
 from functools import cached_property
@@ -80,6 +81,16 @@ class EventHandler(FileSystemEventHandler):
         self._lib = lib
         self._loop = loop
         self._events = events
+        # retain ORM context across notifications from watchdog threads
+        self._context = copy_context()
+
+    def dispatch(self, event: FileSystemEvent):
+        """Schedule watchdog notifications on the application's event loop.
+
+        Args:
+            event: The filesystem notification received on the observer thread.
+        """
+        self._loop.call_soon_threadsafe(super().dispatch, event, context=self._context)
 
     async def _persist(self, event: FileSystemEvent):
         """Persist the event to the database.

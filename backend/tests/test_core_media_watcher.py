@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import mimetypes
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
@@ -15,7 +16,12 @@ from filelock import Timeout
 from lxml import etree
 from sanic import Sanic
 from tortoise import Tortoise
-from watchdog.events import FileCreatedEvent, FileMovedEvent
+from watchdog.events import (
+    FileCreatedEvent,
+    FileDeletedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+)
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
@@ -36,6 +42,47 @@ from app.services.flow import FlowTriggerService
 def workspace(monkeypatch, tmp_path_factory):
     directory = tmp_path_factory.mktemp("workspace-temp")
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        FileCreatedEvent("/Library/Book.txt"),
+        FileModifiedEvent("/Library/Book.txt"),
+        FileDeletedEvent("/Library/Book.txt"),
+        FileMovedEvent("/Library/Book.txt", "/Library/Renamed.txt"),
+    ],
+)
+def test_event_thread(monkeypatch, event):
+    """Dispatch observer-thread events safely onto the application's event loop.
+
+    Args:
+        monkeypatch: The fixture replacing persistence with a completion signal.
+        event: A filesystem notification delivered by a background thread.
+    """
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        completed = loop.create_future()
+        context = ContextVar("watcher_context", default="missing")
+        context.set("application")
+        handler = watcher.EventHandler(MediaLib(), loop, Queue())
+
+        async def persist(incoming):
+            """Confirm delivery on the application's loop.
+
+            Args:
+                incoming: The original filesystem notification.
+            """
+            assert asyncio.get_running_loop() is loop
+            completed.set_result((incoming, context.get()))
+
+        monkeypatch.setattr(handler, "_persist", persist)
+        # watchdog threads do not inherit the application's context variables
+        await loop.run_in_executor(None, handler.dispatch, event)
+        assert await asyncio.wait_for(completed, timeout=2) == (event, "application")
+
+    asyncio.run(run(), debug=True)
 
 
 def test_idle_wakeup(tmp_path, monkeypatch):
