@@ -38,6 +38,12 @@ from app.core.media.coordination import (
 )
 from app.core.media.metadata import ReadingMetadata, render_metadata
 from app.core.media.naming import validate_template
+from app.core.media.organizer import (
+    OrganizeDeferredError,
+    OrganizePendingError,
+    organize_items,
+    recover_organizing,
+)
 from app.models.flow import FlowTrigger, GraphCategory
 from app.models.media import (
     ContentChapter,
@@ -1286,9 +1292,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
 
         lib = await MediaLib.get(id=obj.id) if obj.id else None
         lib_type = lib.lib_type if lib is not None else obj.lib_type
-        if lib_type in (LibType.NOVEL, LibType.COMIC) and (
-            obj.rename_template or obj.danmaku_server
-        ):
+        if lib_type in (LibType.NOVEL, LibType.COMIC) and obj.danmaku_server:
             raise BadRequestException()
         if lib is not None:
             extra = {}
@@ -1563,6 +1567,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 raise ContentError("content_changed")
             if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
                 raise ContentError("unsupported_media_format")
+            await recover_organizing(lib)
             parent = None
             if source.parent_path is not None:
                 parent = await MediaItem.get_or_none(
@@ -1607,11 +1612,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def consume_ingest(cls, id: int) -> bool:
-        """Dispatch a reading item's first ingest after it becomes readable.
+        """Dispatch first reading ingestion or organize a successfully saved result.
 
         Reuse the workflow engine's durable execution and current library bindings.
-        Ordinary source changes do not create these events. Failed events stop without
-        blocking manual scraping; interruption leaves the event available on restart.
+        Ordinary source changes do not create these events. Workflow failures stop
+        without blocking manual scraping; organization waits for unfinished transfers
+        and interrupted plans. Both tasks remain available after a process restart.
 
         Args:
             id: The persisted ingest event ID selected by the library consumer.
@@ -1623,6 +1629,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Raises:
             ContentError: If current ownership or local metadata cannot be read safely.
             ValueError: If the event does not contain one valid reading item ID.
+            OrganizePendingError: If a saved organization plan cannot finish safely.
+            OrganizeDeferredError: If affected downloads are still transferring.
             Exception: If workflow dispatch fails; its failure is persisted first.
         """
         event = await MediaEvent.get_or_none(id=id, event_type="ingest").select_related(
@@ -1643,6 +1651,22 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     LibType.COMIC,
                 ):
                     raise ContentError("content_changed")
+                await recover_organizing(event.lib)
+                payload = event.payload or {}
+                if "organize_ids" in payload:
+                    ids = payload["organize_ids"]
+                    if (
+                        payload.get("bootparams") != []
+                        or not isinstance(ids, list)
+                        or not ids
+                        or any(type(value) is not int or value <= 0 for value in ids)
+                    ):
+                        if payload.get("error_code") == "invalid_metadata":
+                            return False
+                        raise ValueError("invalid reading organization parameters")
+                    await organize_items(event.lib, ids)
+                    await event.delete()
+                    return True
                 pending = (event.payload or {}).get("bootparams")
                 if (
                     not isinstance(pending, list)
@@ -1718,6 +1742,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             )
             await event.delete()
             return True
+        except (OrganizePendingError, OrganizeDeferredError):
+            # keep resumable organization separate from failed workflow dispatch
+            raise
         except Exception as error:
             if event is not None:
                 await MediaEvent.filter(id=event.id).update(
@@ -1798,6 +1825,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 raise ContentError("content_changed")
             if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
                 raise ContentError("unsupported_media_format")
+            await recover_organizing(lib)
             item = await MediaItem.get_or_none(
                 lib_id=lib_id, path=str(src_path)
             ).select_related("lib", "parent")
@@ -1923,6 +1951,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 raise ContentError("content_changed")
             if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
                 raise ContentError("unsupported_media_format")
+            await recover_organizing(lib)
             candidates = await MediaItem.filter(
                 Q(path=str(src_path))
                 | Q(path__startswith=f"{src_path}/")
@@ -2047,6 +2076,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         if source_path is not None and Path(original.path) != source_path:
             raise ContentError("content_changed")
         async with library_lock(original.lib.dir):
+            await recover_organizing(original.lib)
             items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related(
                 "lib", "parent"
             )
@@ -2132,6 +2162,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
             raise ContentError("unsupported_media_format")
         async with library_lock(item.lib.dir):
+            await recover_organizing(item.lib)
             metadata, _, source_error = await to_thread(
                 _read_metadata, item, with_cover=False
             )
@@ -2181,6 +2212,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             identifier=task.identifier,
         )
         async with library_lock(item.lib.dir):
+            await recover_organizing(item.lib)
             current = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
             if current is None or _source_identity(item) != _source_identity(current):
                 raise ContentError("content_changed")
@@ -2206,7 +2238,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def _write_metadata(
-        cls, event: MediaEvent, item: MediaItem, task: MetadataWrite
+        cls,
+        event: MediaEvent,
+        item: MediaItem,
+        task: MetadataWrite,
+        *,
+        resume: bool = False,
     ) -> bool:
         """Publish a candidate and complete its summary under the library lock.
 
@@ -2214,6 +2251,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             event: The current save task, loaded again by the caller holding the lock.
             item: The current item in the task's library, with its parent loaded.
             task: The validated candidate and publication state stored in the event.
+            resume: Recognize an already published candidate after interruption;
+                False for the initial save, which still yields to existing metadata.
 
         Returns:
             Whether this task published metadata instead of using valid local data.
@@ -2226,6 +2265,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 raise ContentError("content_changed")
             _resolve_source(item)
             written = task.published
+            signature = None
             if not task.published:
                 data = await to_thread(
                     render_metadata,
@@ -2233,6 +2273,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     "opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo",
                     identifier=task.identifier,
                 )
+                if resume:
+                    signature = hashlib.sha256(data).hexdigest()
                 written = await write_in_thread(
                     _publish_metadata, item, data, overwrite=task.overwrite
                 )
@@ -2244,6 +2286,16 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             metadata, _, source_error = await to_thread(
                 _read_metadata, item, with_cover=False
             )
+            # a crash may publish XML before its database flag is committed
+            if (
+                not written
+                and signature is not None
+                and metadata.external is not None
+                and metadata.external.path.name.casefold()
+                in {"metadata.opf", "comicinfo.xml"}
+                and metadata.external.signature == signature
+            ):
+                written = True
             async with in_transaction():
                 current = await MediaItem.get_or_none(id=item.id).select_related(
                     "lib", "parent"
@@ -2255,6 +2307,13 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 error = await _save_summary(current, metadata, source_error)
                 if error:
                     raise ContentError(error)
+                if written and current.lib.rename_template:
+                    await MediaEvent.create(
+                        lib_id=current.lib_id,
+                        event_type="ingest",
+                        src_path=current.path,
+                        payload={"bootparams": [], "organize_ids": [current.id]},
+                    )
                 await event.delete()
             return written
         except ContentError as error:
@@ -2285,6 +2344,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return False
         directory = event.lib.dir
         async with library_lock(directory):
+            await recover_organizing(event.lib)
             event = await MediaEvent.get_or_none(
                 id=id, event_type="metadata"
             ).select_related("lib")
@@ -2311,7 +2371,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 return True
             if task.error_code:
                 return False
-            await cls._write_metadata(event, item, task)
+            await cls._write_metadata(event, item, task, resume=True)
+            notify_media_events(item.lib_id)
             return True
 
     @classmethod
@@ -2335,6 +2396,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         original = await MediaItem.get(id=id).select_related("lib")
         async with library_lock(original.lib.dir):
+            await recover_organizing(original.lib)
             item = await MediaItem.get(id=id).select_related("lib")
             if item.lib_id != original.lib_id or item.lib.dir != original.lib.dir:
                 raise ContentError("content_changed")
@@ -2416,6 +2478,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         original = await MediaItem.get(id=id).select_related("lib")
         directory = original.lib.dir
         async with library_lock(directory):
+            await recover_organizing(original.lib)
             item = await MediaItem.get(id=id, lib_id=original.lib_id).select_related(
                 "lib", "parent"
             )
@@ -2441,6 +2504,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         try:
             index, states = await write_in_thread(_build_index, item, staging)
             async with library_lock(directory):
+                await recover_organizing(item.lib)
                 current = await MediaItem.get_or_none(id=id).select_related(
                     "lib", "parent"
                 )
@@ -2993,7 +3057,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     async def delete(cls, id: int, local: bool = False):
         """Delete or hide a media item under its library lock.
 
-        Recover video organization before resolving current paths. Local deletion
+        Recover organization before resolving current paths. Local deletion
         removes owned files individually. Retain the original child scope across
         parent changes and summarize surviving comic collections.
 
@@ -3006,8 +3070,6 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             OrganizePendingError: If pending organization cannot finish safely.
             ContentError: If ownership or file cleanup cannot be confirmed.
         """
-        from app.core.media.organizer import recover_organizing
-
         items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related("lib")
         item = next((row for row in items if row.id == id), None)
         if item is None:
@@ -3020,8 +3082,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             lib = await MediaLib.get(id=item.lib_id)
             if (lib.dir, lib.lib_type) != (item.lib.dir, item.lib.lib_type):
                 raise ContentError("content_changed")
-            if not reading:
-                await recover_organizing(lib)
+            await recover_organizing(lib)
             items = await MediaItem.filter(
                 id__in=[id, *child_ids], lib_id=item.lib_id
             ).select_related("lib", "parent")

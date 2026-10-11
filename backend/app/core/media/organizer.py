@@ -10,6 +10,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote, urlsplit
 
 from lxml import etree
@@ -17,15 +18,9 @@ from sanic.log import logger
 from tortoise.exceptions import ValidationError
 from tortoise.transactions import in_transaction
 
-from app.core.media.coordination import write_in_thread
-from app.core.media.handlers.reading import (
-    ReadingMediaHandler,
-    ReadingSource,
-    is_ignored_name,
-)
+from app.core.media.coordination import notify_media_events, write_in_thread
 from app.core.media.metadata import METADATA_BYTES, _read_xml, merge_metadata
 from app.core.media.naming import render_directory, render_filename, render_path
-from app.core.media.reader import read_metadata
 from app.models.download import DownloadTask, OfflineDownloadJob
 from app.models.media import (
     IndexState,
@@ -37,6 +32,9 @@ from app.models.media import (
 )
 from app.utils.disk import rename_exclusive
 from app.utils.xml import get_integer
+
+if TYPE_CHECKING:
+    from app.core.media.handlers.reading import ReadingSource
 
 _SUBTITLES = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".lrc"}
 
@@ -524,7 +522,7 @@ async def _validate_downloads(lib: MediaLib, affected_paths: set[str]):
             raise ValueError("organization would modify an original download source")
 
 
-def _reading_metadata(source: ReadingSource) -> dict:
+def _reading_metadata(source: "ReadingSource") -> dict:
     """Read naming fields without using the display title's filename fallback.
 
     Args:
@@ -536,6 +534,8 @@ def _reading_metadata(source: ReadingSource) -> dict:
     Raises:
         ValueError: If a metadata source cannot be read reliably.
     """
+    from app.core.media.reader import read_metadata
+
     metadata = read_metadata(source)
     if metadata.state == "error":
         raise ValueError(f"reading metadata is unavailable: {source.path}")
@@ -608,6 +608,8 @@ def _reading_files(lib: MediaLib, items: list[MediaItem]) -> dict:
         OSError: If files cannot be inspected or read.
         ValueError: If sources, naming metadata, layout or destinations are unsafe.
     """
+    from app.core.media.handlers.reading import ReadingMediaHandler, is_ignored_name
+
     root = Path(lib.dir).absolute()
     work = items[0]
     source_dir = Path(work.dir)
@@ -639,13 +641,13 @@ def _reading_files(lib: MediaLib, items: list[MediaItem]) -> dict:
             and (item.parent_id != work.id or source.parent_path != source_dir)
         ):
             raise ValueError("reading source ownership changed")
-    work_metadata = _reading_metadata(sources[work.path])
-    work_context = {
-        **work_metadata,
-        "work_title": work_metadata.get("title"),
-        "work_originaltitle": work_metadata.get("originaltitle"),
+    collection_metadata = _reading_metadata(sources[work.path])
+    collection_context = {
+        **collection_metadata,
+        "collection_title": collection_metadata.get("title"),
+        "collection_originaltitle": collection_metadata.get("originaltitle"),
     }
-    target_dir = root / render_directory(template, work_context, lib.lib_type)
+    target_dir = root / render_directory(template, collection_context, lib.lib_type)
     if is_ignored_name(target_dir.name):
         raise ValueError("reading work names must remain discoverable")
     containers = {source_dir: target_dir}
@@ -659,14 +661,16 @@ def _reading_files(lib: MediaLib, items: list[MediaItem]) -> dict:
             source.format == MediaFormat.DIR and source.parent_path is None
         ):
             metadata = (
-                work_metadata if item.id == work.id else _reading_metadata(source)
+                collection_metadata if item.id == work.id else _reading_metadata(source)
             )
             basename = render_filename(
                 template,
                 {
                     **metadata,
-                    "work_title": work_context["work_title"],
-                    "work_originaltitle": work_context["work_originaltitle"],
+                    "collection_title": collection_context["collection_title"],
+                    "collection_originaltitle": collection_context[
+                        "collection_originaltitle"
+                    ],
                 },
                 lib.lib_type,
             )
@@ -1457,6 +1461,8 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
                     is_directory=True,
                 )
             await event.delete()
+        if payload.get("reconcile"):
+            notify_media_events(lib.id)
         cleanup = payload.get("cleanup")
         if cleanup:
             await write_in_thread(_remove_empty_directories, Path(cleanup))

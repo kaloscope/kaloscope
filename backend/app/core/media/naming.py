@@ -37,11 +37,11 @@ READING_FIELDS = frozenset(
         "series",
         "volume",
         "number",
-        "work_title",
-        "work_originaltitle",
+        "collection_title",
+        "collection_originaltitle",
     }
 )
-WORK_FIELDS = READING_FIELDS - {"title", "originaltitle"}
+COLLECTION_FIELDS = READING_FIELDS - {"title", "originaltitle"}
 _TOKEN = re.compile(r"{{\s*([a-z_]+)\s*}}")
 _UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f\x7f]')
 _RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
@@ -96,7 +96,7 @@ def validate_template(template: str, lib_type: str | None = None) -> str | None:
         elif lib_type == "tv_show" and index < len(parts) - 1:
             allowed = PARENT_FIELDS
         elif lib_type in ("novel", "comic"):
-            allowed = WORK_FIELDS if index == 0 else READING_FIELDS
+            allowed = COLLECTION_FIELDS if index == 0 else READING_FIELDS
         elif lib_type is None:
             allowed = FIELDS | READING_FIELDS
         else:
@@ -183,12 +183,12 @@ def render_path(template: str, context: dict[str, Any], lib_type: str) -> PurePo
 def render_directory(
     template: str, context: dict[str, Any], lib_type: str
 ) -> PurePosixPath:
-    """Render shared parent components using the parent or work metadata.
+    """Render shared parent components using the top-level item's metadata.
 
     Args:
         template: The relative path template whose parent components are rendered.
         context: The parent metadata used to replace placeholders. Reading
-            templates require the work's own values, not chapter values.
+            templates use the collection or standalone book, not a chapter.
         lib_type: The library type used to validate the template.
 
     Returns:

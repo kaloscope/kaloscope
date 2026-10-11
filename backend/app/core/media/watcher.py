@@ -281,10 +281,10 @@ class LibWatcher:
             self._watcher_lock.release()
 
     async def _create_events(self, lib: MediaLib) -> Queue:
-        """Queue pending events and recover video organization when applicable.
+        """Recover organization and queue pending events for every library type.
 
         Reading events resume through the same coalescing path as live events.
-        Log video recovery conflicts so other libraries can start.
+        Log recovery conflicts so other libraries can start.
 
         Args:
             lib: The media library instance.
@@ -293,16 +293,15 @@ class LibWatcher:
             A queue of pending events excluding organization journals.
         """
         events = Queue()
-        if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
-            try:
-                async with library_lock(lib.dir):
-                    await recover_organizing(lib)
-            except OrganizePendingError:
-                logger.error(
-                    "Media library %s has an organization awaiting recovery",
-                    lib.id,
-                    exc_info=True,
-                )
+        try:
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+        except OrganizePendingError:
+            logger.error(
+                "Media library %s has an organization awaiting recovery",
+                lib.id,
+                exc_info=True,
+            )
         for event in await MediaEvent.filter(lib_id=lib.id).exclude(
             event_type="organize"
         ):
@@ -445,7 +444,7 @@ class LibWatcher:
     ):
         """Scan video files or enqueue reading work directories for reconciliation.
 
-        Recover pending video organization before comparing indexed paths.
+        Recover pending organization before comparing indexed paths.
 
         Args:
             target: The media library instance or the directory path to scan.
@@ -479,6 +478,8 @@ class LibWatcher:
             if lib is None:
                 lib = await MediaLib.filter(dir=path).get()
             if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+                async with library_lock(lib.dir):
+                    await recover_organizing(lib)
                 await self._enqueue_reading_events(lib)
             else:
                 async with library_lock(lib.dir):
@@ -685,6 +686,8 @@ async def consume_event(event: MediaEvent) -> bool:
     if lib is None:
         return False
     if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+        async with library_lock(lib.dir):
+            await recover_organizing(lib)
         current = await MediaEvent.get_or_none(id=event.id, lib_id=lib.id)
         if current is not None and current.event_type == "metadata":
             return await MediaItemService.consume_metadata(current.id)

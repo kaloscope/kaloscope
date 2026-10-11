@@ -418,7 +418,7 @@
     "episodes": "Episodes",
     "rename": {
       "template": "Automatic rename template",
-      "tip": "Automatically rename and organize media files using a template; leave blank to disable."
+      "tip": "Rename and organize media with a template. Leave blank to disable."
     },
     "scan_on_startup": "Full scan on startup",
     "movie_layout": "Store videos directly in the library folder or in a folder per movie.",

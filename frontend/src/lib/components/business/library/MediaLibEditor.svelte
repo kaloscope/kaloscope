@@ -19,7 +19,9 @@
   const DANMAKU_SERVER_PRESET = 'danmaku.kaloscope.org';
   const RENAME_EXAMPLES: Partial<Record<keyof typeof LibType, string>> = {
     movie: '{{title}} ({{year}})/{{title}} ({{year}})',
-    tv_show: '{{show_title}}/S{{season}}/{{episode_code}}'
+    tv_show: '{{show_title}}/S{{season}}/{{episode_code}}',
+    novel: '{{collection_title}}/{{title}}',
+    comic: '{{collection_title}}/{{title}}'
   };
 </script>
 
@@ -78,8 +80,8 @@
     const json: Record<string, unknown> = Object.fromEntries(data);
     json.id = id;
     json.scan_on_startup = data.has('scan_on_startup');
+    json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
     if (!reading) {
-      json.rename_template = String(data.get('rename_template') ?? '').trim() || null;
       json.danmaku_server = urlWrapper?.full(danmaku_server);
     }
     json.triggers = triggers;
@@ -174,15 +176,15 @@
           bind:checked={scan_on_startup}
         />
       </div>
+      <Label tip={$_('media.rename.tip')}>{$_('media.rename.template')}</Label>
+      <input
+        aria-label={$_('media.rename.template')}
+        placeholder={RENAME_EXAMPLES[lib_type ?? 'movie']}
+        class="input w-full font-mono text-sm"
+        bind:value={rename_template}
+        {...schema.rename_template}
+      />
       {#if !reading}
-        <Label tip={$_('media.rename.tip')}>{$_('media.rename.template')}</Label>
-        <input
-          aria-label={$_('media.rename.template')}
-          placeholder={RENAME_EXAMPLES[lib_type ?? 'movie']}
-          class="input w-full font-mono text-sm"
-          bind:value={rename_template}
-          {...schema.rename_template}
-        />
         <div class="flex flex-wrap gap-2">
           <div class="flex-3/5 space-y-1.5">
             <Label tip={$_('media.danmaku.server_tip')}>{$_('media.danmaku.server')}</Label>

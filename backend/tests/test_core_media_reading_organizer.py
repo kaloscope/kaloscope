@@ -4,15 +4,17 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 from zipfile import ZipFile
 
 import pytest
 from lxml import etree
+from sanic import Sanic
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
-from app.core.media import organizer
+from app.core.media import events, organizer, watcher
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.reading import ReadingMediaHandler
 from app.core.media.metadata import ReadingMetadata, render_metadata
@@ -26,6 +28,8 @@ from app.models.media import (
     MediaLib,
 )
 from app.models.user import HistoryEntry, User, UserHistory, UserRole
+from app.services import media as media_service
+from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService
 from tests.test_services_media_reading import _user
 from tests.test_services_user_history import _entry
@@ -145,7 +149,7 @@ async def _work(tmp_path: Path, format: MediaFormat) -> tuple[MediaLib, MediaIte
         if format in (MediaFormat.TXT, MediaFormat.EPUB)
         else LibType.COMIC,
         priority=1,
-        rename_template="{{work_title}}/{{title}} - {{authors}}",
+        rename_template="{{collection_title}}/{{title}} - {{authors}}",
     )
     assert await MediaItemService.ingest_reading_work(lib.id, directory) == {}
     return lib, await MediaItem.get(lib_id=lib.id)
@@ -224,7 +228,7 @@ def test_collection(tmp_path):
                 dir=str(root),
                 lib_type=LibType.COMIC,
                 priority=1,
-                rename_template="{{work_title}}/{{title}}",
+                rename_template="{{collection_title}}/{{title}}",
             )
             assert await MediaItemService.ingest_reading_work(lib.id, source_dir) == {}
             work = await MediaItem.get(lib_id=lib.id, parent_id=None)
@@ -363,7 +367,7 @@ def test_unused_unit_name(tmp_path):
     async def run():
         async with _database():
             lib, item = await _work(tmp_path, MediaFormat.DIR)
-            lib.rename_template = "{{work_title}}/{{number}}"
+            lib.rename_template = "{{collection_title}}/{{number}}"
             async with library_lock(lib.dir):
                 assert await organizer.organize_items(lib, [item.id])
             scan = ReadingMediaHandler(lib.lib_type).scan_sources(lib.dir)
@@ -410,6 +414,26 @@ def test_download_source(tmp_path, state):
             assert Path(item.path).read_bytes() == original
             assert task.transfer_targets == {source.name: item.path}
             assert not await MediaEvent.filter(event_type="organize").exists()
+            if state == "pending":
+                event = await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="ingest",
+                    src_path=item.path,
+                    payload={"bootparams": [], "organize_ids": [item.id]},
+                )
+                with pytest.raises(organizer.OrganizeDeferredError):
+                    await watcher.consume_event(event)
+                await event.refresh_from_db()
+                assert event.payload is not None and "error_code" not in event.payload
+                await DownloadTask.filter(id=task.id).update(
+                    files=[source.name], transfer_pending=False
+                )
+                assert await watcher.consume_event(event)
+                await item.refresh_from_db()
+                await task.refresh_from_db()
+                assert item.path != str(source)
+                assert task.transfer_targets == {source.name: item.path}
+                assert not await MediaEvent.filter(event_type="ingest").exists()
 
     asyncio.run(run())
 
@@ -437,5 +461,199 @@ def test_source_change(tmp_path, monkeypatch):
             assert not await MediaEvent.filter(event_type="organize").exists()
             await item.refresh_from_db()
             assert item.path == str(source)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", list(MediaFormat))
+def test_saved_work(tmp_path, monkeypatch, format):
+    fire = AsyncMock()
+    monkeypatch.setattr(FlowTriggerService, "fire", fire)
+
+    async def run():
+        async with _database():
+            lib, item = await _work(tmp_path, format)
+            original_path = item.path
+            assert await MediaItemService.save_metadata(
+                item.id, {"title": "Saved", "authors": ["Writer"]}, overwrite=True
+            )
+            event = await MediaEvent.get(event_type="ingest")
+            assert event.payload == {"bootparams": [], "organize_ids": [item.id]}
+            assert (await MediaItem.get(id=item.id)).path == original_path
+            assert await watcher.consume_event(event)
+            await item.refresh_from_db()
+            assert item.path != original_path and item.title == "Saved"
+            assert not await watcher.consume_event(event)
+            tasks = await events.coalesce_reading_events(lib.id)
+            assert len(tasks) == 1
+            task = tasks[0]
+            assert not await events.prepare_reading_event(task.id)
+            await task.refresh_from_db()
+            assert task.payload is not None
+            now = task.payload["not_before"] + 1
+            monkeypatch.setattr(events, "time", lambda: now)
+            monkeypatch.setattr(watcher, "time", lambda: now)
+            assert await events.prepare_reading_event(task.id)
+            task = await MediaEvent.get(id=task.id).select_related("lib")
+            assert await watcher.consume_event(task)
+            await item.refresh_from_db()
+            assert item.index_state == IndexState.READY
+            assert not await MediaEvent.all().exists()
+            details = await MediaItemService.get_details(item.id, _user())
+            assert details["metadata"]["title"] == "Saved"
+            fire.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["existing", "external", "disabled"])
+def test_save_without_organization(tmp_path, change):
+    async def run():
+        async with _database():
+            lib, item = await _work(tmp_path, MediaFormat.TXT)
+            original_path = item.path
+            assert not await MediaEvent.filter(event_type="ingest").exists()
+            if change == "external":
+                _source(Path(item.dir), MediaFormat.TXT, "External")
+                await MediaItemService.sync_metadata(item.id)
+            else:
+                if change == "disabled":
+                    await MediaLib.filter(id=lib.id).update(rename_template=None)
+                assert await MediaItemService.save_metadata(
+                    item.id, {"title": "Candidate"}, overwrite=change == "disabled"
+                ) == (change == "disabled")
+            assert (
+                await MediaItemService.ingest_reading_work(lib.id, Path(item.dir)) == {}
+            )
+            assert not await MediaEvent.all().exists()
+            assert (await MediaItem.get(id=item.id)).path == original_path
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
+@pytest.mark.parametrize("stage", ["none", "published", "summary", "handoff"])
+def test_metadata_handoff(tmp_path, monkeypatch, format, stage):
+    async def run():
+        async with _database():
+            lib, item = await _work(tmp_path, format)
+            name = "metadata.opf" if format == MediaFormat.TXT else "ComicInfo.xml"
+            (Path(item.dir) / name).unlink()
+            save = MediaEvent.save
+            create = MediaEvent.create
+
+            async def fail_summary(*args, **kwargs):
+                raise RuntimeError("interrupted summary")
+
+            async def fail_flag(event, *args, **kwargs):
+                if event.event_type == "metadata" and (event.payload or {}).get(
+                    "published"
+                ):
+                    raise RuntimeError("interrupted publication flag")
+                return await save(event, *args, **kwargs)
+
+            async def fail_handoff(cls, *args, **kwargs):
+                if kwargs.get("event_type") == "ingest":
+                    raise RuntimeError("interrupted handoff")
+                return await create(*args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                if stage == "summary":
+                    patch.setattr(media_service, "_save_summary", fail_summary)
+                elif stage == "published":
+                    patch.setattr(MediaEvent, "save", fail_flag)
+                elif stage == "handoff":
+                    patch.setattr(MediaEvent, "create", classmethod(fail_handoff))
+                if stage == "none":
+                    assert await MediaItemService.save_metadata(
+                        item.id, {"title": "Automatic", "authors": ["Writer"]}
+                    )
+                else:
+                    with pytest.raises(RuntimeError, match="interrupted"):
+                        await MediaItemService.save_metadata(
+                            item.id, {"title": "Automatic", "authors": ["Writer"]}
+                        )
+            if stage != "none":
+                pending = await MediaEvent.get(event_type="metadata")
+                assert not await MediaEvent.filter(event_type="ingest").exists()
+                assert await watcher.consume_event(pending)
+                assert not await watcher.consume_event(pending)
+            event = await MediaEvent.get(event_type="ingest")
+            assert await watcher.consume_event(event)
+            await item.refresh_from_db()
+            assert item.dir == str(Path(lib.dir) / "Automatic")
+            assert not await MediaEvent.filter(
+                event_type__in=["ingest", "organize", "metadata"]
+            ).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["files", "database"])
+def test_organization_restart(tmp_path, monkeypatch, stage):
+    async def run():
+        async with _database():
+            lib, item = await _work(tmp_path, MediaFormat.TXT)
+            assert await MediaItemService.save_metadata(
+                item.id, {"title": "Saved", "authors": ["Writer"]}, overwrite=True
+            )
+            event = await MediaEvent.get(event_type="ingest")
+            move = organizer._move_files
+            delete = MediaEvent.delete
+
+            def interrupted(root, payload):
+                move(root, {**payload, "moves": payload["moves"][:1], "edits": []})
+                raise OSError("interrupted move")
+
+            async def fail_commit(current, *args, **kwargs):
+                if current.event_type == "organize":
+                    raise RuntimeError("interrupted commit")
+                return await delete(current, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                if stage == "files":
+                    patch.setattr(organizer, "_move_files", interrupted)
+                else:
+                    patch.setattr(MediaEvent, "delete", fail_commit)
+                with pytest.raises(organizer.OrganizePendingError):
+                    await watcher.consume_event(event)
+            await event.refresh_from_db()
+            assert event.payload is not None and "error_code" not in event.payload
+            await MediaLib.filter(id=lib.id).update(rename_template=None)
+            await lib.refresh_from_db()
+            monitor = watcher.LibWatcher(Mock(spec=Sanic))
+            queue = await monitor._create_events(lib)
+            assert not queue.empty()
+            assert not await MediaEvent.filter(event_type="organize").exists()
+            assert await watcher.consume_event(event)
+            await item.refresh_from_db()
+            assert item.dir == str(Path(lib.dir) / "Saved")
+            assert not await MediaEvent.filter(event_type="ingest").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"organize_ids": [True], "bootparams": []},
+        {"organize_ids": [], "bootparams": []},
+        {"organize_ids": [1], "bootparams": [{"item_id": 1}]},
+    ],
+)
+def test_organization_payload(tmp_path, payload):
+    async def run():
+        async with _database():
+            lib, item = await _work(tmp_path, MediaFormat.TXT)
+            event = await MediaEvent.create(
+                lib_id=lib.id, event_type="ingest", src_path=item.path, payload=payload
+            )
+            with pytest.raises(ValueError, match="organization parameters"):
+                await watcher.consume_event(event)
+            await event.refresh_from_db()
+            assert event.payload is not None
+            assert event.payload["error_code"] == "invalid_metadata"
+            assert not await watcher.consume_event(event)
+            assert Path(item.path).is_file()
 
     asyncio.run(run())

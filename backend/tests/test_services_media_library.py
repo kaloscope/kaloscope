@@ -160,6 +160,16 @@ def test_template_invalid(tmp_path, template):
             "{{show_title}}/{{episode_code}}",
             "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}",
         ),
+        (
+            LibType.NOVEL,
+            "{{collection_title}}/{{title}}",
+            "{{collection_title}}/{{title}} - {{authors}}",
+        ),
+        (
+            LibType.COMIC,
+            "{{collection_title}}/{{title}}",
+            "{{collection_title}}/{{number}} - {{title}}",
+        ),
     ],
 )
 @pytest.mark.parametrize("cleared_template", [None, "", "   "])
@@ -227,6 +237,8 @@ def test_rename_template(
             assert await MediaLib.all().count() == 1
             observer.assert_awaited_once()
             assert bind.await_count == 4
+            assert not await MediaEvent.filter(event_type="organize").exists()
+            assert not await MediaEvent.filter(event_type="ingest").exists()
         finally:
             await Tortoise.close_connections()
 
@@ -261,6 +273,15 @@ def test_rename_template(
             "{{title}}",
             LibType.MOVIE,
         ),
+        (LibType.NOVEL, "{{collection_title}}/{{title}}", "{{title}}", LibType.MOVIE),
+        (
+            LibType.COMIC,
+            "{{collection_title}}/{{title}}",
+            "{{show_title}}/{{episode_code}}",
+            LibType.TV_SHOW,
+        ),
+        (LibType.NOVEL, "{{collection_title}}/{{title}}", "{{title}}/{{title}}", None),
+        (LibType.COMIC, "{{collection_title}}/{{title}}", "work/{{title}}.zip", None),
     ],
 )
 def test_template_lib_type(
@@ -1154,8 +1175,7 @@ def test_reading_library(tmp_path, monkeypatch, lib_type):
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
 @pytest.mark.parametrize("editing", [False, True])
-@pytest.mark.parametrize("option", ["rename_template", "danmaku_server"])
-def test_reading_library_options(tmp_path, library_services, lib_type, editing, option):
+def test_reading_library_options(tmp_path, library_services, lib_type, editing):
     async def run():
         await Tortoise.init(
             db_url="sqlite://:memory:", modules={"models": ["app.models"]}
@@ -1175,12 +1195,7 @@ def test_reading_library_options(tmp_path, library_services, lib_type, editing, 
                 lib_type=LibType.MOVIE if editing else lib_type,
                 name="Changed",
                 dir=str(tmp_path),
-                rename_template="work/{{title}}"
-                if option == "rename_template"
-                else None,
-                danmaku_server="https://danmaku.example"
-                if option == "danmaku_server"
-                else None,
+                danmaku_server="https://danmaku.example",
             )
             with pytest.raises(BadRequestException):
                 await MediaLibService.upsert(request)

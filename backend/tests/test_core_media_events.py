@@ -164,7 +164,6 @@ def test_reading_scan(tmp_path, monkeypatch, lib_type, initial):
             monitor = _monitor(monkeypatch, lib)
             video = AsyncMock(side_effect=AssertionError("unexpected video scan"))
             monkeypatch.setattr(monitor, "_enqueue_events", video)
-            monkeypatch.setattr(media_watcher, "recover_organizing", video)
             enumerate_sources = media_watcher.list_source_entries
             main_thread = threading.get_ident()
 
@@ -483,7 +482,6 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type, entry):
                 media_events, "notify_media_events", notifications.append
             )
             video = AsyncMock(side_effect=AssertionError("unexpected video processing"))
-            monkeypatch.setattr(media_watcher, "recover_organizing", video)
             monkeypatch.setattr(media_watcher, "_consume_event", video)
             if entry == "direct":
                 tasks = await coalesce_reading_events(lib.id)
@@ -663,7 +661,6 @@ def test_consume_reading_pending(tmp_path, monkeypatch, kind):
             )
             before = await MediaEvent.all().values()
             unexpected = AsyncMock(side_effect=AssertionError("unexpected processing"))
-            monkeypatch.setattr(media_watcher, "recover_organizing", unexpected)
             monkeypatch.setattr(media_watcher, "coalesce_reading_events", unexpected)
             monkeypatch.setattr(media_watcher, "_consume_event", unexpected)
             if kind == "ingest":
@@ -672,7 +669,11 @@ def test_consume_reading_pending(tmp_path, monkeypatch, kind):
                 current = await MediaEvent.get(id=task.id)
                 assert (current.payload or {})["error_code"] == "invalid_metadata"
                 before = await MediaEvent.all().values()
-            assert not await consume_event(task)
+            if kind == "organize":
+                with pytest.raises(media_watcher.OrganizePendingError):
+                    await consume_event(task)
+            else:
+                assert not await consume_event(task)
             assert await MediaEvent.all().values() == before
             unexpected.assert_not_awaited()
 
@@ -1209,7 +1210,6 @@ def test_consume_reading_ready(tmp_path, monkeypatch, moment, lib_type):
         async with _database():
             lib, body, task = await _pending(tmp_path, lib_type)
             video = AsyncMock(side_effect=AssertionError("unexpected video processing"))
-            monkeypatch.setattr(media_watcher, "recover_organizing", video)
             monkeypatch.setattr(media_watcher, "_consume_event", video)
             monkeypatch.setattr(media_watcher.FlowTriggerService, "fire", video)
             assert not await consume_event(task)
