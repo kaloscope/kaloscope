@@ -15,7 +15,7 @@
   let selected: MediaLib | null = $state(null);
   const loading = createLoading();
 
-  let retryCount = 0;
+  let disposed = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -24,31 +24,20 @@
    * @param retry - Whether this search is a retry attempt.
    */
   function getAll(retry: boolean = false) {
-    if (!retry) {
-      if (retryTimer) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
-      retryCount = 0;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
     }
-    loading.start();
+    if (!retry) loading.start();
     api
       .get('media/lib/list')
       .json<Resp<MediaLib[]>>()
       .then(({ data }) => {
+        if (disposed) return;
         libs = data;
-        // if any library is scanning, retry search after some time
-        if (libs.some((lib) => lib.scanning) && retryCount < 5) {
-          retryTimer = setTimeout(
-            () => {
-              retryTimer = null;
-              getAll(true);
-            },
-            1000 * Math.pow(2, retryCount)
-          );
-          retryCount++;
-        } else {
-          retryCount = 0;
+        // keep polling until queued scans finish, including their retries
+        if (libs.some((lib) => lib.scanning)) {
+          retryTimer = setTimeout(() => getAll(true), 2000);
         }
       })
       .finally(() => loading.end());
@@ -90,6 +79,10 @@
 
   onMount(() => {
     getAll();
+    return () => {
+      disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   });
 </script>
 
@@ -126,6 +119,7 @@
         <Button
           loading={lib.scanning}
           icon={icons.folderSearch}
+          text={$_('action.scan')}
           onclick={() => {
             scan(lib.id);
           }}

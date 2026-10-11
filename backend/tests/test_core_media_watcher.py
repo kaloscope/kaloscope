@@ -373,9 +373,6 @@ def test_pending_actions(tmp_path, monkeypatch, action):
     assert [call.args[0] for call in scan_action.await_args_list] == (
         [healthy] if action == watcher.LibAction.REMOVE else [pending, healthy, pending]
     )
-    if action == watcher.LibAction.REBUILD:
-        assert scan_action.await_args_list[0].kwargs == {"force_content": True}
-        assert scan_action.await_args_list[-1].kwargs == {"force_content": True}
     assert [call.args[0] for call in remove_action.await_args_list] == (
         [pending, removed, pending] if action == watcher.LibAction.REMOVE else [removed]
     )

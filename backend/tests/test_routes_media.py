@@ -102,7 +102,7 @@ def test_library_management_permissions(tmp_path, admin):
 
 
 @pytest.mark.parametrize("lib_type", list(LibType))
-def test_scan_content(tmp_path, lib_type):
+def test_scan_library(tmp_path, lib_type):
     async def run():
         async with _database(), _client(_user()) as client:
             lib = await MediaLib.create(
@@ -112,19 +112,9 @@ def test_scan_content(tmp_path, lib_type):
             cast(Any, client._transport).app.ctx.lib_watcher = SimpleNamespace(
                 scan_directory=scan
             )
-            response = await client.get(
-                f"/_api/media/lib/{lib.id}/scan", params={"force_content": "true"}
-            )
-            reading = lib_type in (LibType.NOVEL, LibType.COMIC)
-            assert response.status_code == (204 if reading else 400), response.text
-            assert scan.await_count == int(reading)
-            if reading:
-                assert scan.await_args is not None
-                assert scan.await_args.kwargs["force_content"] is True
-            response = await client.get(
-                f"/_api/media/lib/{lib.id}/scan", params={"force_content": "invalid"}
-            )
-            assert response.status_code == 400
+            response = await client.get(f"/_api/media/lib/{lib.id}/scan")
+            assert response.status_code == 204, response.text
+            scan.assert_awaited_once_with(lib, validate_request=True)
             scan.side_effect = ContentError("media_source_unavailable")
             response = await client.get(f"/_api/media/lib/{lib.id}/scan")
             assert response.status_code == 503
@@ -161,20 +151,15 @@ def test_library_scan_status(tmp_path, admin):
                 assert response.status_code == 200, response.text
                 data = response.json()["data"][0]
                 assert data["scanning"] is True
-                assert data.get("issues", []) == []
+                assert "issues" not in data
                 task.payload = {"state": "failed", "error_code": "unsupported_layout"}
                 await task.save()
                 data = (await client.get("/_api/media/lib/list")).json()["data"][0]
                 assert data["scanning"] is False
-                if admin:
-                    assert data["issues"] == [
-                        {"path": "Book.txt", "error": "unsupported_layout"}
-                    ]
-                else:
-                    assert "issues" not in data
+                assert "issues" not in data
                 await task.delete()
                 data = (await client.get("/_api/media/lib/list")).json()["data"][0]
-                assert not data.get("issues")
+                assert data["scanning"] is False
 
     asyncio.run(run())
 

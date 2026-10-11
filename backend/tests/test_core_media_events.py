@@ -1207,7 +1207,7 @@ async def _ready(task: MediaEvent, moment: list[float]) -> MediaEvent:
     return await MediaEvent.get(id=task.id).select_related("lib")
 
 
-def test_forced_scan(tmp_path, monkeypatch, moment):
+def test_scan_body_update(tmp_path, monkeypatch, moment):
     async def run():
         async with _database():
             lib, body, task = await _pending(tmp_path)
@@ -1218,16 +1218,20 @@ def test_forced_scan(tmp_path, monkeypatch, moment):
             body.write_text("Next")
             os.utime(body, ns=(state.st_atime_ns, state.st_mtime_ns))
             monitor = _monitor(monkeypatch, lib)
-            for force in (False, True):
-                await monitor.scan_directory(lib, force_content=force)
+            for changed in (False, True):
+                if changed:
+                    await MediaEvent.create(
+                        lib=lib, src_path=str(body), event_type="modified"
+                    )
+                await monitor.scan_directory(lib)
                 task = await MediaEvent.get(event_type="reconcile")
                 assert (
                     bool(ReadingReconcile.model_validate(task.payload).force_targets)
-                    == force
+                    == changed
                 )
                 assert await consume_event(await _ready(task, moment))
                 await item.refresh_from_db()
-                assert (item.index_version != original) == force
+                assert (item.index_version != original) == changed
             content = await MediaItemService.get_content(
                 item.id, _user(), MediaContentQuery()
             )
@@ -1237,15 +1241,15 @@ def test_forced_scan(tmp_path, monkeypatch, moment):
     asyncio.run(run())
 
 
-def test_forced_scan_handoff(tmp_path, monkeypatch):
+def test_scan_handoff(tmp_path, monkeypatch):
     async def run():
         async with _database():
             lib = await _library(tmp_path, LibType.NOVEL)
             monitor = _monitor(monkeypatch, lib)
             monkeypatch.setattr(monitor, "_observers", {})
             monkeypatch.setitem(monitor.__dict__, "_watcher_actions", {})
-            await monitor.scan_directory(lib, validate_request=True, force_content=True)
-            assert monitor._watcher_actions[lib.dir] == media_watcher.LibAction.REBUILD
+            await monitor.scan_directory(lib, validate_request=True)
+            assert monitor._watcher_actions[lib.dir] == media_watcher.LibAction.SCAN
 
     asyncio.run(run())
 

@@ -148,7 +148,6 @@ class LibAction(Enum):
 
     SCAN = auto()
     REMOVE = auto()
-    REBUILD = auto()
 
 
 class LibWatcher:
@@ -216,8 +215,6 @@ class LibWatcher:
                             action = self._watcher_actions.get(path)
                             if action == LibAction.SCAN:
                                 await self.scan_directory(path)
-                            elif action == LibAction.REBUILD:
-                                await self.scan_directory(path, force_content=True)
                             elif action == LibAction.REMOVE:
                                 await self.remove_observer(path)
 
@@ -455,7 +452,6 @@ class LibWatcher:
         *,
         backfill_nfo_events: bool = True,
         validate_request: bool = False,
-        force_content: bool = False,
     ):
         """Scan video files or enqueue reading work directories for reconciliation.
 
@@ -465,7 +461,6 @@ class LibWatcher:
             target: The media library instance or the directory path to scan.
             backfill_nfo_events: Whether to create events for missing NFO files.
             validate_request: Whether to validate the scanning request.
-            force_content: Rebuild all reading indexes. Defaults to incremental reuse.
 
         Raises:
             KaloscopeException: If the requested scan is already in progress.
@@ -487,9 +482,7 @@ class LibWatcher:
 
             # check if the path is observed by the current worker
             if path not in self._observers:
-                self._watcher_actions[path] = (
-                    LibAction.REBUILD if force_content else LibAction.SCAN
-                )
+                self._watcher_actions[path] = LibAction.SCAN
                 return
 
         try:
@@ -498,7 +491,7 @@ class LibWatcher:
             if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
                 async with library_lock(lib.dir):
                     await recover_organizing(lib)
-                await self._enqueue_reading_events(lib, force=force_content)
+                await self._enqueue_reading_events(lib)
             else:
                 async with library_lock(lib.dir):
                     await recover_organizing(lib)
@@ -509,17 +502,16 @@ class LibWatcher:
             if path in self._scanning_paths:
                 self._scanning_paths.remove(path)
 
-    async def _enqueue_reading_events(self, lib: MediaLib, *, force: bool = False):
+    async def _enqueue_reading_events(self, lib: MediaLib):
         """Queue incremental work scans without inferring source deletion.
 
-        Enumerate only the library's direct directories in a worker thread. Each
-        task uses existing source discovery during ingestion; registered empty or
-        missing works still need reconciliation. Coalescing retains pending moves
-        and body-change facts under the library lock.
+        Enumerate direct directories and misplaced bodies in a worker thread.
+        Each task uses existing source discovery during ingestion; registered
+        empty or missing works still need reconciliation. Coalescing retains
+        pending moves and body-change facts under the library lock.
 
         Args:
             lib: The observed reading library with a pending-event queue.
-            force: Rebuild every selected body; False permits unchanged index reuse.
 
         Raises:
             ContentError: If the root is invalid, inaccessible or the library changes.
@@ -542,7 +534,7 @@ class LibWatcher:
             if lib.lib_type == LibType.NOVEL
             else {".cbz", ".zip"} | IMAGE_EXTENSIONS
         )
-        # retain invalid root bodies as diagnostic scopes, never as media items
+        # report misplaced root bodies through the normal task error handling
         works.update(path for path in files if path.suffix.casefold() in extensions)
         previous = await MediaItem.filter(lib_id=lib.id).values_list("dir")
         previous += await MediaEvent.filter(
@@ -555,7 +547,7 @@ class LibWatcher:
             parts = path.relative_to(root).parts
             if parts and ".." not in parts and not any(map(is_ignored_name, parts)):
                 works.add(root / parts[0])
-        tasks = await coalesce_reading_events(lib.id, scan_works=works, force=force)
+        tasks = await coalesce_reading_events(lib.id, scan_works=works)
         _, events = self._observers[lib.dir]
         for event in tasks:
             event.lib = lib

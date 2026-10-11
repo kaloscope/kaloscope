@@ -92,7 +92,6 @@ async def coalesce_reading_events(
     *,
     scan_works: set[Path] | None = None,
     missing_only: bool = False,
-    force: bool = False,
 ) -> list[MediaEvent]:
     """Merge filesystem events and scan scopes into one task per affected work.
 
@@ -108,7 +107,6 @@ async def coalesce_reading_events(
             pending moves and forced rebuilds without forcing unchanged bodies.
         missing_only: Only enqueue scan scopes without a pending task. Defaults to
             False so explicit scans reset failed work. Reader retries use True.
-        force: Force scanned bodies to rebuild. False reuses unchanged indexes.
 
     Returns:
         Tasks ordered by scan path, then by their first selected filesystem event.
@@ -150,9 +148,7 @@ async def coalesce_reading_events(
             return []
 
         grouped = {
-            str(work): ReadingReconcile(
-                targets=[str(work)], force_targets=[str(work)] if force else []
-            )
+            str(work): ReadingReconcile(targets=[str(work)], force_targets=[])
             for work in sorted(scan_works or ())
         }
         for event in events:
