@@ -797,7 +797,7 @@ async def _save_summary(
         relative_path=external.path.relative_to(item.dir).as_posix()
         if external and external.error != "ambiguous_metadata"
         else None,
-        file_signature=external.signature if external and not error else None,
+        signature=external.signature if external and not error else None,
         error=error,
     )
     fields = ["extra"]
@@ -1020,7 +1020,8 @@ def _read_text_content(
             if block["type"] == "image":
                 asset_id = block["asset_id"]
                 block["url"] = (
-                    f"/_api/media/{item.id}/assets/{asset_id}?v={index.index_version}"
+                    f"/_api/media/{item.id}/assets/{asset_id}"
+                    f"?version={index.index_version}"
                     if asset_id is not None
                     else None
                 )
@@ -1071,7 +1072,7 @@ def _read_image_content(
             chapter_id=chapter_id,
             chapters=[ContentChapter(id=chapter_id, title=title, part=1)],
             images=[
-                f"/_api/media/{item.id}/assets/{page.id}?v={index.index_version}"
+                f"/_api/media/{item.id}/assets/{page.id}?version={index.index_version}"
                 for page in index.pages[offset:end]
             ],
             offset=offset,

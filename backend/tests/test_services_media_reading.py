@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from filelock import Timeout
+from pydantic import ValidationError
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
 from tortoise import Tortoise
@@ -39,6 +40,7 @@ from app.models.media import (
     MediaFormat,
     MediaItem,
     MediaLib,
+    ReadingMetadataSync,
     TextContent,
 )
 from app.models.user import (
@@ -237,7 +239,7 @@ def test_sync_metadata(tmp_path, format):
                     "state": "ready",
                     "format": "opf" if novel else "comicinfo",
                     "relative_path": xml.name,
-                    "file_signature": hashlib.sha256(xml.read_bytes()).hexdigest(),
+                    "signature": hashlib.sha256(xml.read_bytes()).hexdigest(),
                     "error": None,
                 },
             }
@@ -292,13 +294,37 @@ def test_sync_updates(tmp_path, format):
                 "state": "none",
                 "format": None,
                 "relative_path": None,
-                "file_signature": None,
+                "signature": None,
                 "error": None,
             }
             assert current.index_state == item.index_state
             assert current.index_version is None and not xml.exists()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("signature", [None, "a" * 64])
+def test_sync_legacy_signature(signature):
+    """Accept existing sync records while serializing only the canonical field.
+
+    Args:
+        signature: The previous external XML digest, or None when unavailable.
+    """
+    data = {
+        "state": "none" if signature is None else "ready",
+        "format": "opf",
+        "relative_path": "metadata.opf",
+        "file_signature": signature,
+        "error": None,
+    }
+    sync = ReadingMetadataSync.model_validate(data)
+    assert sync.signature == signature
+    expected = {**data, "signature": data["file_signature"]}
+    del expected["file_signature"]
+    assert sync.model_dump() == expected
+    data["file_signature"] = "invalid"
+    with pytest.raises(ValidationError):
+        ReadingMetadataSync.model_validate(data)
 
 
 @pytest.mark.parametrize(
@@ -352,7 +378,7 @@ def test_sync_failure(tmp_path, monkeypatch, problem, code):
             assert current.extra is not None
             sync = current.extra["metadata_sync"]
             assert sync["state"] == "error" and sync["error"] == code
-            assert sync["file_signature"] is None
+            assert sync["signature"] is None
             if problem == "ambiguous":
                 assert sync["relative_path"] is None
             if problem in ("invalid", "ambiguous"):
@@ -1922,7 +1948,7 @@ def test_epub_content_http(tmp_path):
                 asset_url = images[0]["url"]
                 assert (
                     asset_url == f"/_api/media/{item.id}/assets/{_epub_asset_id()}"
-                    f"?v={item.index_version}"
+                    f"?version={item.index_version}"
                 )
                 image = await client.get(asset_url)
                 assert image.status_code == 200 and image.content == _PNG
@@ -1933,12 +1959,17 @@ def test_epub_content_http(tmp_path):
                     == "private, max-age=0, must-revalidate"
                 )
                 etag = image.headers["etag"]
+                legacy_url = asset_url.replace("?version=", "?v=")
+                legacy = await client.get(legacy_url)
+                assert legacy.status_code == 200 and legacy.content == image.content
+                assert legacy.headers["etag"] == etag
                 for condition in (etag, f'"unrelated", W/{etag}', "*"):
-                    cached = await client.get(
-                        asset_url, headers={"If-None-Match": condition}
-                    )
-                    assert cached.status_code == 304 and cached.content == b""
-                    assert cached.headers["etag"] == etag
+                    for resource_url in (asset_url, legacy_url):
+                        cached = await client.get(
+                            resource_url, headers={"If-None-Match": condition}
+                        )
+                        assert cached.status_code == 304 and cached.content == b""
+                        assert cached.headers["etag"] == etag
                 assert (
                     await client.get(
                         asset_url, headers={"If-None-Match": '"unrelated"'}
@@ -1977,12 +2008,14 @@ def test_epub_content_http(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("version_key", ["version", "v"])
 @pytest.mark.parametrize(
     "case,status,code",
     [
         ("missing_version", 400, "bad_request"),
         ("invalid_version", 400, "bad_request"),
         ("stale_version", 409, "content_changed"),
+        ("ambiguous_version", 400, "bad_request"),
         ("path_query", 400, "bad_request"),
         ("unknown", 404, "not_found"),
         ("unindexed", 404, "not_found"),
@@ -1996,11 +2029,12 @@ def test_epub_content_http(tmp_path):
         ("pending", 409, "content_not_ready"),
     ],
 )
-def test_epub_asset_errors(tmp_path, case, status, code):
+def test_epub_asset_errors(tmp_path, version_key, case, status, code):
     """Never let conditional requests bypass access, membership or source checks.
 
     Args:
         tmp_path: The isolated source and cache root.
+        version_key: The canonical version parameter or its legacy alias.
         case: The invalid query, access or source condition.
         status: The expected HTTP status.
         code: The stable error exposed to the client.
@@ -2012,13 +2046,15 @@ def test_epub_asset_errors(tmp_path, case, status, code):
                 _indexed_text(tmp_path) if case == "txt" else _indexed_epub(tmp_path)
             )
             asset_id = _epub_asset_id()
-            params = {"v": str(item.index_version)}
+            params = {version_key: str(item.index_version)}
             if case == "missing_version":
                 params.clear()
             elif case == "invalid_version":
-                params["v"] = "../invalid"
+                params[version_key] = "../invalid"
             elif case == "stale_version":
-                params["v"] = "f" * 64
+                params[version_key] = "f" * 64
+            elif case == "ambiguous_version":
+                params["v" if version_key == "version" else "version"] = "f" * 64
             elif case == "path_query":
                 params["path"] = "/untrusted.png"
             elif case == "unknown":
@@ -2255,6 +2291,7 @@ def test_comic_content_http(tmp_path, format, chapter):
                 )
                 assert stale.status_code == 409
                 for page_url, number in zip(pages, (1, 2, 10), strict=True):
+                    assert page_url.endswith(f"?version={item.index_version}")
                     image = await client.get(page_url)
                     assert (
                         image.status_code == 200
@@ -2299,7 +2336,7 @@ def test_comic_content_http(tmp_path, format, chapter):
                 for asset_id in ("f" * 32, "1.png"):
                     missing = await client.get(
                         f"/_api/media/{item.id}/assets/{asset_id}",
-                        params={"v": data["version"]},
+                        params={"version": data["version"]},
                         headers={"If-None-Match": "*"},
                     )
                     assert missing.status_code == 404 and "etag" not in missing.headers

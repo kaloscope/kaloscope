@@ -315,7 +315,7 @@ export type MediaContentQuery = {
  * The published version required by an indexed image request.
  */
 export type MediaAssetQuery = {
-  v: string;
+  version: string;
 };
 
 /**

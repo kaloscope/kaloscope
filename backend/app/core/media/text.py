@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated, BinaryIO, Literal, Self, TextIO
 
 from charset_normalizer import from_bytes
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -69,7 +70,9 @@ class TextIndex(BaseModel):
     index_version: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_snapshot: FileSnapshot
     encoding: str = Field(min_length=1, max_length=64)
-    text_size: int = Field(gt=0)
+    content_size: int = Field(
+        gt=0, validation_alias=AliasChoices("content_size", "text_size")
+    )
     chapters: tuple[TextChapter, ...] = Field(min_length=1, max_length=_MAX_CHAPTERS)
 
     @model_validator(mode="after")
@@ -92,7 +95,7 @@ class TextIndex(BaseModel):
                 raise ValueError("invalid text chapter range")
             offset = chapter.end
             identities.add(chapter.id)
-        if offset != self.text_size:
+        if offset != self.content_size:
             raise ValueError("text cache size does not match chapter ranges")
         return self
 
@@ -302,7 +305,7 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex | Ep
                     chapters = _write_text(text, output)
                 except UnicodeDecodeError as error:
                     raise ContentError("text_decode_failed") from error
-                text_size = output.tell()
+                content_size = output.tell()
         try:
             current = source.path.stat(follow_symlinks=False)
         except FileNotFoundError as error:
@@ -315,7 +318,7 @@ def build_text_index(source: "ReadingSource", cache_dir: Path) -> TextIndex | Ep
                 size=before.st_size, mtime_ns=before.st_mtime_ns
             ),
             encoding=encoding,
-            text_size=text_size,
+            content_size=content_size,
             chapters=chapters,
         )
         data = index.model_dump_json().encode("utf-8")
@@ -346,12 +349,8 @@ def load_text_index(cache_dir: Path) -> TextIndex | EpubIndex:
         if len(data) > INDEX_BYTES:
             raise ContentError("content_not_ready")
         index = _INDEX.validate_json(data)
-        filename, size = (
-            ("content.txt", index.text_size)
-            if isinstance(index, TextIndex)
-            else ("content.jsonl", index.content_size)
-        )
-        if (cache_dir / filename).stat().st_size != size:
+        filename = "content.txt" if isinstance(index, TextIndex) else "content.jsonl"
+        if (cache_dir / filename).stat().st_size != index.content_size:
             raise ContentError("content_not_ready")
         return index
     except (OSError, ValidationError) as error:

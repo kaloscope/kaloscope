@@ -293,14 +293,14 @@ async def get_item_asset(
     }
     try:
         data, mime = await MediaItemService.get_asset(
-            id, request.ctx.user, asset_id, query.v
+            id, request.ctx.user, asset_id, query.version
         )
     except ContentError as error:
         raise content_error(error, headers) from error
     except KaloscopeException as error:
         error.headers = {**error.headers, **headers}
         raise
-    etag = f'"{query.v}-{asset_id}"'
+    etag = f'"{query.version}-{asset_id}"'
     headers.update(
         {"Cache-Control": "private, max-age=0, must-revalidate", "ETag": etag}
     )

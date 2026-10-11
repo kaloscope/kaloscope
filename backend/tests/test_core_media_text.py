@@ -113,6 +113,31 @@ def test_text_encodings(tmp_path, encoding, bom):
     assert str(tmp_path) not in (cache / "index.json").read_text()
 
 
+def test_legacy_content_size(tmp_path):
+    """Read existing TXT caches without changing their version or chapter IDs.
+
+    Args:
+        tmp_path: The isolated source and cache root.
+    """
+    body = "Chapter 1\nFirst\nChapter 2\nSecond"
+    cache = tmp_path / "cache"
+    index = build_text_index(_source(tmp_path, body.encode()), cache)
+    path = cache / "index.json"
+    data = json.loads(path.read_text())
+    assert data["content_size"] == len(body.encode())
+    assert "text_size" not in data
+    data["text_size"] = data.pop("content_size")
+    path.write_text(json.dumps(data))
+
+    loaded = load_text_index(cache)
+    assert loaded == index and loaded.model_dump_json() == index.model_dump_json()
+    assert _cached_text(cache) == body
+    data["text_size"] += 1
+    path.write_text(json.dumps(data))
+    with pytest.raises(ContentError, match="content_not_ready"):
+        load_text_index(cache)
+
+
 @pytest.mark.parametrize(
     ("encoding", "body"), [("gb18030", _SIMPLIFIED), ("big5", _TRADITIONAL)]
 )
@@ -413,7 +438,7 @@ def test_cache_damage(tmp_path, damage):
     elif damage == "oversize":
         index_path.write_bytes(b" " * (text.INDEX_BYTES + 1))
     elif damage == "utf8":
-        body_path.write_bytes(b"\xff" * index.text_size)
+        body_path.write_bytes(b"\xff" * index.content_size)
     else:
         data = json.loads(index_path.read_text())
         if damage == "schema":

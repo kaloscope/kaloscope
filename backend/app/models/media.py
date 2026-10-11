@@ -2,7 +2,14 @@ from enum import StrEnum, auto
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    model_validator,
+)
 from tortoise.fields import (
     BigIntField,
     BooleanField,
@@ -174,7 +181,11 @@ class ReadingMetadataSync(BaseModel):
     state: Literal["none", "pending", "ready", "error"]
     format: Literal["opf", "comicinfo"] | None = None
     relative_path: str | None = Field(default=None, min_length=1, max_length=4096)
-    file_signature: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    signature: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        validation_alias=AliasChoices("signature", "file_signature"),
+    )
     error: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -239,7 +250,9 @@ class MediaAssetQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    v: str = Field(pattern=r"^[0-9a-f]{64}$")
+    version: str = Field(
+        pattern=r"^[0-9a-f]{64}$", validation_alias=AliasChoices("version", "v")
+    )
 
 
 class ContentChapter(BaseModel):
