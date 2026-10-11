@@ -7,7 +7,7 @@
 <script lang="ts">
   import { beforeNavigate, replaceState } from '$app/navigation';
   import { page } from '$app/state';
-  import { api } from '$lib/api';
+  import { api, getCurrentRole } from '$lib/api';
   import {
     alert,
     Alerts,
@@ -656,13 +656,13 @@
   });
   onDestroy(closeReader);
 
-  // load the parent media item details on mount
+  // load user and media details before retrieving saved history
   onMount(() => {
     active = true;
     const historyController = new AbortController();
     loading.start();
-    getDetails(Number(page.params.item_id))
-      .then((data) => {
+    Promise.all([getDetails(Number(page.params.item_id)), getCurrentRole()])
+      .then(([data]) => {
         if (!active) return;
         media = data;
         meta = data.metadata ?? null;
