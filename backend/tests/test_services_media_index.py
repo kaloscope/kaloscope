@@ -49,6 +49,7 @@ from app.models.flow import (
 from app.models.media import (
     IndexState,
     LibType,
+    MediaContentQuery,
     MediaEvent,
     MediaFormat,
     MediaItem,
@@ -57,6 +58,7 @@ from app.models.media import (
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services import media as media_service
 from app.services.media import MediaItemService
+from tests.test_services_media_reading import _user
 
 _PNG = b"\x89PNG\r\n\x1a\nimage"
 
@@ -5147,7 +5149,7 @@ def test_prune_active_build(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_prune_active_read(tmp_path):
+def test_prune_active_read(tmp_path, monkeypatch):
     async def run():
         async with _database():
             item = await MediaItemService.index_content(
@@ -5157,13 +5159,26 @@ def test_prune_active_read(tmp_path):
             old = _cache(item).parent / ("a" * 64)
             old.mkdir()
 
-            def read():
-                """Hold the normal cache guard until concurrent cleanup returns."""
-                with media_service._content_index(item):
-                    started.set()
-                    assert released.wait(5)
+            read = media_service._read_text_content
 
-            task = asyncio.create_task(asyncio.to_thread(read))
+            def delayed(item, chapter_id):
+                """Hold a content read while cleanup tries to acquire its lock.
+
+                Args:
+                    item: The ready novel guarded by the service.
+                    chapter_id: The selected chapter, or None for the first one.
+
+                Returns:
+                    The content read after concurrent cleanup finishes.
+                """
+                started.set()
+                assert released.wait(5)
+                return read(item, chapter_id)
+
+            monkeypatch.setattr(media_service, "_read_text_content", delayed)
+            task = asyncio.create_task(
+                MediaItemService.get_content(item.id, _user(), MediaContentQuery())
+            )
             try:
                 assert await asyncio.to_thread(started.wait, 2)
                 await MediaItemService.prune_indexes()

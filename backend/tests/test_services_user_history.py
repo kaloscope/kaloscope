@@ -545,7 +545,7 @@ def test_history_save_race(tmp_path, monkeypatch, change):
             item = await _indexed_text(tmp_path)
             owner = await _login(client, item.lib_id)
             entry = await _entry(item)
-            original = media_service.to_thread
+            original = media_service.write_in_thread
 
             async def changed(func, *args, **kwargs):
                 result = await original(func, *args, **kwargs)
@@ -560,7 +560,7 @@ def test_history_save_race(tmp_path, monkeypatch, change):
                         await MediaItem.filter(id=item.id).update(visible=False)
                 return result
 
-            monkeypatch.setattr(media_service, "to_thread", changed)
+            monkeypatch.setattr(media_service, "write_in_thread", changed)
             response = await client.post("/_api/user/history/record", json=entry)
             assert (
                 response.status_code
@@ -605,7 +605,7 @@ def test_history_list_race(tmp_path, monkeypatch, change):
                 "/_api/user/history/record", json=await _entry(item)
             )
             assert response.status_code == 204
-            original = media_service.to_thread
+            original = media_service.write_in_thread
 
             async def changed(func, *args, **kwargs):
                 result = await original(func, *args, **kwargs)
@@ -616,7 +616,7 @@ def test_history_list_race(tmp_path, monkeypatch, change):
                         await MediaItem.filter(id=item.id).update(visible=False)
                 return result
 
-            monkeypatch.setattr(media_service, "to_thread", changed)
+            monkeypatch.setattr(media_service, "write_in_thread", changed)
             response = await client.get(
                 "/_api/user/history/list", params={"rel_type": "text"}
             )

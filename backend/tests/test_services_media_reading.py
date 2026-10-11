@@ -6,6 +6,7 @@ import os
 import threading
 import zipfile
 from collections.abc import AsyncGenerator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -16,7 +17,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from filelock import Timeout
+from filelock import FileLock, Timeout
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
@@ -27,7 +28,7 @@ from app.core.config import KaloscopeConfig
 from app.core.exceptions import ForbiddenException, NotFoundException, error_handler
 from app.core.media import reader, shelver, watcher, writer
 from app.core.media.common import ContentError
-from app.core.media.coordination import library_lock
+from app.core.media.coordination import index_lock_path, library_lock
 from app.core.media.handlers.reading import ReadingSource
 from app.core.media.metadata import (
     ReadingMetadata,
@@ -1646,6 +1647,83 @@ def test_text_content_access(tmp_path, monkeypatch, change, code):
     asyncio.run(run())
 
 
+def test_content_lock_wait(tmp_path):
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            asyncio.get_running_loop().set_default_executor(
+                ThreadPoolExecutor(max_workers=2)
+            )
+            # native locking lets the test release readers even if they block the pool
+            readers = []
+            try:
+                with FileLock(index_lock_path(item.id)):
+                    readers = [
+                        asyncio.create_task(
+                            MediaItemService.get_content(
+                                item.id, _user(), MediaContentQuery()
+                            )
+                        )
+                        for _ in range(8)
+                    ]
+                    await asyncio.sleep(0.1)
+                    assert await asyncio.wait_for(asyncio.to_thread(lambda: True), 2)
+                    assert not any(task.done() for task in readers)
+            finally:
+                results = await asyncio.wait_for(asyncio.gather(*readers), 5)
+            assert all(result.version == item.index_version for result in results)
+            assert (
+                await MediaItemService.index_content(item.id)
+            ).index_state == IndexState.READY
+
+    asyncio.run(run())
+
+
+def test_content_cancel(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            item = await _indexed_text(tmp_path)
+            started, released = threading.Event(), threading.Event()
+            read = media_service._read_text_content
+
+            def delayed(item, chapter_id):
+                """Hold the reader until cancellation has been checked.
+
+                Args:
+                    item: The ready novel guarded by the service.
+                    chapter_id: The selected chapter, or None for the first one.
+
+                Returns:
+                    The original chapter content after the test releases the worker.
+                """
+                started.set()
+                assert released.wait(5)
+                return read(item, chapter_id)
+
+            monkeypatch.setattr(media_service, "_read_text_content", delayed)
+            reading = asyncio.create_task(
+                MediaItemService.get_content(item.id, _user(), MediaContentQuery())
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 5)
+                reading.cancel()
+                await asyncio.sleep(0)
+                assert not reading.done()
+                with (
+                    pytest.raises(Timeout),
+                    FileLock(index_lock_path(item.id), timeout=0),
+                ):
+                    pass
+            finally:
+                released.set()
+            with pytest.raises(asyncio.CancelledError):
+                await reading
+            with FileLock(index_lock_path(item.id), timeout=0):
+                pass
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "change", ["hidden", "deleted", "moved", "version", "pending", "permission"]
 )
@@ -1703,7 +1781,7 @@ def test_content_race(tmp_path, monkeypatch, change, mode):
                     await MediaItem.filter(id=item.id).update(**fields[change])
                 return result
 
-            monkeypatch.setattr(media_service, "to_thread", changed)
+            monkeypatch.setattr(media_service, "write_in_thread", changed)
             expected = (
                 NotFoundException
                 if change in {"hidden", "deleted"}
@@ -3066,7 +3144,7 @@ def test_collection_read_race(tmp_path, monkeypatch, change, status):
                     await MediaItem.filter(id=id).update(**fields)
                 return result
 
-            monkeypatch.setattr(media_service, "to_thread", changed)
+            monkeypatch.setattr(media_service, "write_in_thread", changed)
             async with _client(user) as client, library_lock(parent.lib.dir):
                 response = await asyncio.wait_for(
                     client.get(f"/_api/media/{parent.id}/content"), timeout=3

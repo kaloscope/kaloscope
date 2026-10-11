@@ -50,7 +50,7 @@ from app.models.media import (
     MediaLib,
 )
 from app.services.media import MediaItemService
-from tests.test_services_media_reading import _user
+from tests.test_services_media_reading import _indexed_epub, _user
 
 
 @pytest.fixture(autouse=True)
@@ -803,6 +803,51 @@ def test_coalesce_content(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("state", ["deferred", "failed"])
+def test_coalesce_repair(tmp_path, state):
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path, LibType.COMIC)
+            work = Path(lib.dir) / "Work"
+            first, second = work / "A", work / "B"
+            payload = ReadingReconcile(
+                targets=[str(first)],
+                force_targets=[str(first)],
+                state=state,
+                attempts=3,
+                observed_snapshot="a" * 64,
+                not_before=100.0,
+                error_code="media_source_unavailable",
+            )
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(work),
+                event_type="reconcile",
+                is_directory=True,
+                payload=payload.model_dump(mode="json", exclude_none=True),
+            )
+            for _ in range(2):
+                assert not await coalesce_reading_events(
+                    lib.id,
+                    scan_works={work},
+                    force_targets={second},
+                    missing_only=True,
+                )
+                await event.refresh_from_db()
+                current = ReadingReconcile.model_validate(event.payload)
+                assert (
+                    current.targets
+                    == current.force_targets
+                    == [str(first), str(second)]
+                )
+                assert current.model_dump(
+                    exclude={"targets", "force_targets"}
+                ) == payload.model_dump(exclude={"targets", "force_targets"})
+                assert await MediaEvent.all().count() == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_coalesce_legacy(tmp_path, legacy):
     """Preserve metadata-only intent, rebuilding unknown legacy scopes conservatively.
@@ -1275,6 +1320,9 @@ def test_missing_cache_recovery(tmp_path, moment, lib_type):
                         owner.id, _user(), MediaContentQuery()
                     )
                 event = await MediaEvent.get(event_type="reconcile")
+                assert ReadingReconcile.model_validate(event.payload).force_targets == [
+                    unit.dir
+                ]
                 if _ == 0:
                     assert not await prepare_reading_event(event.id)
                     before = await MediaEvent.all().values()
@@ -1291,6 +1339,61 @@ def test_missing_cache_recovery(tmp_path, moment, lib_type):
             assert content.version != unit.index_version
             assert not await MediaEvent.exists()
             assert await MediaItem.filter(id=unit.id).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_corrupt_cache_recovery(tmp_path, moment, queued):
+    async def run():
+        async with _database():
+            item = await _indexed_epub(tmp_path)
+            cache = (
+                Path(KaloscopeConfig.get_workspace("temp"))
+                / "media_index"
+                / str(item.id)
+                / str(item.index_version)
+                / "content.jsonl"
+            )
+            cache.write_bytes(cache.read_bytes().replace(b"Before", b"Broken"))
+            if queued:
+                event = (
+                    await coalesce_reading_events(
+                        item.lib_id, scan_works={Path(item.dir)}
+                    )
+                )[0]
+                assert not await prepare_reading_event(event.id)
+                await event.refresh_from_db()
+                before = ReadingReconcile.model_validate(event.payload)
+            for attempt in range(2):
+                with pytest.raises(ContentError, match="content_not_ready"):
+                    await MediaItemService.get_content(
+                        item.id, _user(), MediaContentQuery()
+                    )
+                event = await MediaEvent.get(event_type="reconcile")
+                payload = ReadingReconcile.model_validate(event.payload)
+                assert payload.force_targets == [item.dir]
+                if queued:
+                    assert payload.observed_snapshot == before.observed_snapshot
+                    assert payload.not_before == before.not_before
+                    assert payload.attempts == before.attempts
+                if attempt == 0:
+                    assert not await prepare_reading_event(event.id)
+                    saved = await MediaEvent.all().values()
+                else:
+                    assert await MediaEvent.all().values() == saved
+            moment[0] += 2
+            assert await prepare_reading_event(event.id)
+            assert await consume_event(
+                await MediaEvent.get(id=event.id).select_related("lib")
+            )
+            content = await MediaItemService.get_content(
+                item.id, _user(), MediaContentQuery()
+            )
+            assert content.version != item.index_version
+            assert "Before" in content.model_dump_json()
+            assert "Broken" not in content.model_dump_json()
+            assert not await MediaEvent.exists()
 
     asyncio.run(run())
 

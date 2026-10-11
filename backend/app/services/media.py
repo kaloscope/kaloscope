@@ -8,7 +8,13 @@ import shutil
 import stat
 from asyncio import create_task, to_thread
 from collections.abc import AsyncGenerator, Generator
-from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
+from contextlib import (
+    AsyncExitStack,
+    ExitStack,
+    asynccontextmanager,
+    contextmanager,
+    suppress,
+)
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -982,7 +988,7 @@ def _content_index(
     """Guard a reading source and its published cache throughout a content read.
 
     Args:
-        item: The accessible reading unit with a validated ready index version.
+        item: The accessible reading unit whose index lock is held by the caller.
 
     Yields:
         The validated source, cache directory and current text, EPUB or image index.
@@ -993,10 +999,7 @@ def _content_index(
     from app.core.media.image import load_image_index
     from app.core.media.text import load_text_index
 
-    with (
-        ExitStack() as stack,
-        _reading_source(item) as (source, source_states, missing),
-    ):
+    with _reading_source(item) as (source, source_states, missing):
         if missing:
             raise ContentError("media_source_unavailable")
         root = Path(KaloscopeConfig.get_workspace("temp"))
@@ -1008,7 +1011,6 @@ def _content_index(
                 / ("content.txt" if item.format == MediaFormat.TXT else "content.jsonl")
             )
         try:
-            stack.enter_context(FileLock(index_lock_path(item.id)))
             directories = (root, cache.parent.parent, cache.parent, cache)
             states = {}
             for path in (*directories, *files):
@@ -3094,7 +3096,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     async def _content_item(
         cls, id: int, user: UserInfo, version: str | None
     ) -> AsyncGenerator[MediaItem]:
-        """Check access and published version before and after unlocked reading.
+        """Check access and published version while guarding the cache for reading.
 
         Missing caches enqueue existing reconciliation once, without resetting the
         quiet interval or retry budget on repeated content requests.
@@ -3138,26 +3140,32 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             if version is not None and version != item.index_version:
                 raise ContentError("content_changed")
         failure = None
-        try:
-            yield item
-        except ContentError as error:
-            failure = error
-        current = await cls.get_accessible(id, user)
-        if (
-            user.role != UserRole.ADMIN
-            and not await UserPermission.filter(
-                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=current.lib_id
-            ).exists()
-        ):
-            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
-        if _source_identity(current) != _source_identity(item) or (
-            item.format is not None
-            and (
-                current.index_state != IndexState.READY
-                or current.index_version != item.index_version
-            )
-        ):
-            raise ContentError("content_changed")
+        async with AsyncExitStack() as stack:
+            if item.format is not None:
+                # wait outside the thread pool used by both readers and index writers
+                await stack.enter_async_context(
+                    AsyncFileLock(index_lock_path(id), fallback_to_soft=False)
+                )
+            try:
+                yield item
+            except ContentError as error:
+                failure = error
+            current = await cls.get_accessible(id, user)
+            if (
+                user.role != UserRole.ADMIN
+                and not await UserPermission.filter(
+                    user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=current.lib_id
+                ).exists()
+            ):
+                raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+            if _source_identity(current) != _source_identity(item) or (
+                item.format is not None
+                and (
+                    current.index_state != IndexState.READY
+                    or current.index_version != item.index_version
+                )
+            ):
+                raise ContentError("content_changed")
         if failure is not None:
             if failure.code == "content_not_ready" and current.format is not None:
                 from app.core.media.events import coalesce_reading_events
@@ -3165,7 +3173,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 root = Path(current.lib.dir)
                 work = root / Path(current.dir).relative_to(root).parts[0]
                 await coalesce_reading_events(
-                    current.lib_id, scan_works={work}, missing_only=True
+                    current.lib_id,
+                    scan_works={work},
+                    force_targets={Path(current.dir)},
+                    missing_only=True,
                 )
             raise failure
 
@@ -3241,7 +3252,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         async with cls._content_item(selected["id"], user, query.version) as source:
             if source.parent_id != item.id or source.lib_id != item.lib_id:
                 raise ContentError("content_changed")
-            content = await to_thread(
+            content = await write_in_thread(
                 _read_image_content, source, query.offset, query.limit, query.page_id
             )
         if await children.values(*fields) != chapters:
@@ -3289,14 +3300,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     return await cls._get_collection_content(item, user, query)
                 if query.chapter_id not in (None, f"item:{item.id}"):
                     raise ContentError("bad_request")
-                return await to_thread(
+                return await write_in_thread(
                     _read_image_content, item, query.offset, query.limit, query.page_id
                 )
             if query.model_fields_set & {"offset", "limit", "page_id"} or (
                 query.chapter_id is not None and query.chapter_id.startswith("item:")
             ):
                 raise ContentError("bad_request")
-            return await to_thread(_read_text_content, item, query.chapter_id)
+            return await write_in_thread(_read_text_content, item, query.chapter_id)
 
     @classmethod
     async def get_locator(
@@ -3343,14 +3354,16 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                         or chapter.format is None
                     ):
                         raise ContentError("bad_request")
-                    return await to_thread(_check_locator, chapter, locator, restore)
+                    return await write_in_thread(
+                        _check_locator, chapter, locator, restore
+                    )
             else:
                 if (
                     isinstance(locator, ImageLocator)
                     and locator.chapter_item_id is not None
                 ):
                     raise ContentError("bad_request")
-                return await to_thread(_check_locator, item, locator, restore)
+                return await write_in_thread(_check_locator, item, locator, restore)
 
     @classmethod
     async def get_asset(
@@ -3378,7 +3391,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 MediaFormat.TXT,
             ):
                 raise ContentError("not_found")
-            return await to_thread(_read_asset, item, asset_id)
+            return await write_in_thread(_read_asset, item, asset_id)
 
     @classmethod
     async def delete(cls, id: int, local: bool = False):

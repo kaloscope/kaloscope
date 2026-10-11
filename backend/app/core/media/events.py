@@ -91,6 +91,7 @@ async def coalesce_reading_events(
     lib_id: int,
     *,
     scan_works: set[Path] | None = None,
+    force_targets: set[Path] | None = None,
     missing_only: bool = False,
 ) -> list[MediaEvent]:
     """Merge filesystem events and scan scopes into one task per affected work.
@@ -105,6 +106,8 @@ async def coalesce_reading_events(
         scan_works: Work directories to check incrementally, including missing
             registered works. None merges only filesystem events. Scans preserve
             pending moves and forced rebuilds without forcing unchanged bodies.
+        force_targets: Containers within scan_works whose damaged caches must be
+            rebuilt. None keeps scans incremental.
         missing_only: Only enqueue scan scopes without a pending task. Defaults to
             False so explicit scans reset failed work. Reader retries use True.
 
@@ -135,20 +138,53 @@ async def coalesce_reading_events(
             )
         ):
             raise ValueError("scan works must be visible direct library directories")
+        if any(
+            not any(
+                target == work
+                or (lib.lib_type == LibType.COMIC and target.parent == work)
+                for work in scan_works or ()
+            )
+            or is_ignored_name(target.name)
+            for target in force_targets or ()
+        ):
+            raise ValueError("forced containers must be within the scan works")
         handler = get_handler(lib.lib_type)
         events = await MediaEvent.filter(
             lib_id=lib_id, event_type__in=_SOURCE_EVENTS
         ).order_by("id")
         if missing_only and scan_works:
-            queued = await MediaEvent.filter(
-                lib_id=lib_id, event_type="reconcile"
-            ).values_list("src_path")
-            scan_works = scan_works - {Path(path) for (path,) in queued}
+            queued = await MediaEvent.filter(lib_id=lib_id, event_type="reconcile")
+            for event in queued:
+                forced = {
+                    str(target)
+                    for target in force_targets or ()
+                    if target.is_relative_to(event.src_path)
+                }
+                if not forced:
+                    continue
+                payload = ReadingReconcile.model_validate(event.payload)
+                if event.src_path in payload.force_targets:
+                    continue
+                if forced - set(payload.force_targets):
+                    payload.force_targets = sorted(set(payload.force_targets) | forced)
+                    if event.src_path not in payload.targets:
+                        payload.targets = sorted(set(payload.targets) | forced)
+                    event.payload = payload.model_dump(mode="json", exclude_none=True)
+                    await event.save(update_fields=["payload"])
+                    notify_media_events(lib_id)
+            scan_works = scan_works - {Path(event.src_path) for event in queued}
         if not events and not scan_works:
             return []
 
         grouped = {
-            str(work): ReadingReconcile(targets=[str(work)], force_targets=[])
+            str(work): ReadingReconcile(
+                targets=[str(work)],
+                force_targets=sorted(
+                    str(target)
+                    for target in force_targets or ()
+                    if target.is_relative_to(work)
+                ),
+            )
             for work in sorted(scan_works or ())
         }
         for event in events:
