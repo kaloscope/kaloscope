@@ -84,6 +84,7 @@ async def list_libraries(request: Request) -> HTTPResponse:
 
 
 @media.post("/lib/sort")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def sort_libraries(_, body: IDs) -> HTTPResponse:
     """Sort the media libraries."""
@@ -116,6 +117,7 @@ async def delete_libraries(_, body: IDs) -> HTTPResponse:
 
 
 @media.get("/lib/<id:int>/scan")
+@authorize(role=UserRole.ADMIN)
 async def scan_library(request: Request, id: int) -> HTTPResponse:
     """Scan the media library."""
     lib = await MediaLib.get(id=id)
@@ -125,13 +127,19 @@ async def scan_library(request: Request, id: int) -> HTTPResponse:
 
 
 @media.get("/list")
+@authorize()
 @validate(query=MediaQuery)
-async def list_items(_, query: MediaQuery) -> HTTPResponse:
+async def list_items(request: Request, query: MediaQuery) -> HTTPResponse:
     """List the media items."""
     queries = [
+        Q(visible=True),
+        Q(parent_id__isnull=True) | Q(parent__visible=True),
         # only list the top-level items if no path is specified
-        Q(path=query.path) if query.path else Q(visible=True, parent_id__isnull=True)
+        Q(path=query.path) if query.path else Q(parent_id__isnull=True),
     ]
+    user: UserInfo = request.ctx.user
+    if user.perms is not None:
+        queries.append(Q(lib_id__in=user.perms.media_lib_ids))
     if query.lib_id:
         queries.append(Q(lib_id=query.lib_id))
     if query.keyword:
@@ -139,7 +147,9 @@ async def list_items(_, query: MediaQuery) -> HTTPResponse:
     page = await MediaItem.page(
         *queries,
         **query.page_params,
-        annotations={"keyword": RawSQL("IFNULL(title, name)")},
+        annotations={
+            "keyword": RawSQL('IFNULL("media_item"."title", "media_item"."name")')
+        },
     )
     return json(
         await MediaItemService.dump_page(page, exclude={"lib", "parent", "children"})

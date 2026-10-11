@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from lxml import etree
+from sanic import Sanic
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -15,6 +16,7 @@ from app.core.exceptions import BadRequestException
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaMetadata
+from app.models.user import PermType, User, UserPermission
 from app.routes import media as media_routes
 from tests.test_services_media_reading import _client, _database, _user
 
@@ -23,6 +25,79 @@ from tests.test_services_media_reading import _client, _database, _user
 def workspace(monkeypatch, tmp_path_factory):
     directory = tmp_path_factory.mktemp("workspace-temp")
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
+
+
+@pytest.mark.parametrize("lib_type", list(LibType))
+@pytest.mark.parametrize("access", ["admin", "granted", "denied"])
+def test_list_permissions(tmp_path, lib_type, access):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            parent = await MediaItem.create(
+                lib=lib, path=str(tmp_path / "Work"), dir=str(tmp_path), name="Work"
+            )
+            child = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(tmp_path / "Work" / "Chapter"),
+                dir=parent.path,
+                name="Chapter",
+            )
+            user = _user() if access == "admin" else _user([])
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            if access == "granted":
+                await UserPermission.create(
+                    user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=lib.id
+                )
+            async with _client(user) as client:
+                for params, item in (
+                    ({}, parent),
+                    ({"lib_id": lib.id}, parent),
+                    ({"keyword": "Work"}, parent),
+                    ({"path": parent.path}, parent),
+                    ({"path": child.path}, child),
+                ):
+                    response = await client.get("/_api/media/list", params=params)
+                    assert response.status_code == 200, response.text
+                    ids = [item["id"] for item in response.json()["data"]["items"]]
+                    assert ids == ([] if access == "denied" else [item.id])
+                await MediaItem.filter(id=parent.id).update(visible=False)
+                for params in ({}, {"path": parent.path}, {"path": child.path}):
+                    response = await client.get("/_api/media/list", params=params)
+                    assert response.status_code == 200, response.text
+                    assert response.json()["data"]["items"] == []
+                client.cookies.clear()
+                response = await client.get(
+                    "/_api/media/list", headers={"Authorization": ""}
+                )
+                assert response.status_code == 401
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_library_management_permissions(tmp_path, admin):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=LibType.NOVEL, priority=1
+            )
+            scan = AsyncMock()
+            async with _client(_user() if admin else _user([])) as client:
+                Sanic.get_app().ctx.lib_watcher = SimpleNamespace(scan_directory=scan)
+                response = await client.get(f"/_api/media/lib/{lib.id}/scan")
+                assert response.status_code == (204 if admin else 403), response.text
+                assert scan.await_count == int(admin)
+                response = await client.post(
+                    "/_api/media/lib/sort", json={"ids": [lib.id]}
+                )
+                assert response.status_code == (204 if admin else 403), response.text
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
