@@ -42,12 +42,14 @@ from app.core.media.watcher import EventHandler, LibWatcher, consume_event
 from app.models.media import (
     IndexState,
     LibType,
+    MediaContentQuery,
     MediaEvent,
     MediaFormat,
     MediaItem,
     MediaLib,
 )
 from app.services.media import MediaItemService
+from tests.test_services_media_reading import _user
 
 
 @pytest.fixture(autouse=True)
@@ -1193,6 +1195,47 @@ async def _ready(task: MediaEvent, moment: list[float]) -> MediaEvent:
     moment[0] += 2
     assert await prepare_reading_event(task.id)
     return await MediaEvent.get(id=task.id).select_related("lib")
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_missing_cache_recovery(tmp_path, moment, lib_type):
+    async def run():
+        async with _database():
+            lib, _, task = await _pending(tmp_path, lib_type)
+            assert await consume_event(await _ready(task, moment))
+            unit = await MediaItem.get(lib=lib, format__isnull=False)
+            owner = await MediaItem.get(lib=lib, parent_id=None)
+            cache = (
+                Path(KaloscopeConfig.get_workspace("temp"))
+                / "media_index"
+                / str(unit.id)
+                / str(unit.index_version)
+            )
+            (cache / "index.json").unlink()
+            for _ in range(2):
+                with pytest.raises(ContentError, match="content_not_ready"):
+                    await MediaItemService.get_content(
+                        owner.id, _user(), MediaContentQuery()
+                    )
+                event = await MediaEvent.get(event_type="reconcile")
+                if _ == 0:
+                    assert not await prepare_reading_event(event.id)
+                    before = await MediaEvent.all().values()
+                else:
+                    assert await MediaEvent.all().values() == before
+            moment[0] += 2
+            assert await prepare_reading_event(event.id)
+            assert await consume_event(
+                await MediaEvent.get(id=event.id).select_related("lib")
+            )
+            content = await MediaItemService.get_content(
+                owner.id, _user(), MediaContentQuery()
+            )
+            assert content.version != unit.index_version
+            assert not await MediaEvent.exists()
+            assert await MediaItem.filter(id=unit.id).exists()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])

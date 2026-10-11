@@ -3096,6 +3096,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     ) -> AsyncGenerator[MediaItem]:
         """Check access and published version before and after unlocked reading.
 
+        Missing caches enqueue existing reconciliation once, without resetting the
+        quiet interval or retry budget on repeated content requests.
+
         Args:
             id: The requested reading item ID.
             user: The authenticated user with loaded library permissions.
@@ -3156,6 +3159,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         ):
             raise ContentError("content_changed")
         if failure is not None:
+            if failure.code == "content_not_ready" and current.format is not None:
+                from app.core.media.events import coalesce_reading_events
+
+                root = Path(current.lib.dir)
+                work = root / Path(current.dir).relative_to(root).parts[0]
+                await coalesce_reading_events(
+                    current.lib_id, scan_works={work}, missing_only=True
+                )
             raise failure
 
     @classmethod

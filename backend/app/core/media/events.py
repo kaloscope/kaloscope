@@ -88,7 +88,7 @@ def _defer_reading_task(payload: ReadingReconcile, error: ContentError):
 
 
 async def coalesce_reading_events(
-    lib_id: int, *, scan_works: set[Path] | None = None
+    lib_id: int, *, scan_works: set[Path] | None = None, missing_only: bool = False
 ) -> list[MediaEvent]:
     """Merge filesystem events and scan scopes into one task per affected work.
 
@@ -102,6 +102,8 @@ async def coalesce_reading_events(
         scan_works: Work directories to check incrementally, including missing
             registered works. None merges only filesystem events. Scans preserve
             pending moves and forced rebuilds without forcing unchanged bodies.
+        missing_only: Only enqueue scan scopes without a pending task. Defaults to
+            False so explicit scans reset failed work. Reader retries use True.
 
     Returns:
         Tasks ordered by scan path, then by their first selected filesystem event.
@@ -134,6 +136,11 @@ async def coalesce_reading_events(
         events = await MediaEvent.filter(
             lib_id=lib_id, event_type__in=_SOURCE_EVENTS
         ).order_by("id")
+        if missing_only and scan_works:
+            queued = await MediaEvent.filter(
+                lib_id=lib_id, event_type="reconcile"
+            ).values_list("src_path")
+            scan_works = scan_works - {Path(path) for (path,) in queued}
         if not events and not scan_works:
             return []
 
