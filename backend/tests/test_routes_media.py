@@ -100,6 +100,34 @@ def test_library_management_permissions(tmp_path, admin):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("lib_type", list(LibType))
+def test_scan_content(tmp_path, lib_type):
+    async def run():
+        async with _database(), _client(_user()) as client:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            scan = AsyncMock()
+            cast(Any, client._transport).app.ctx.lib_watcher = SimpleNamespace(
+                scan_directory=scan
+            )
+            response = await client.get(
+                f"/_api/media/lib/{lib.id}/scan", params={"force_content": "true"}
+            )
+            reading = lib_type in (LibType.NOVEL, LibType.COMIC)
+            assert response.status_code == (204 if reading else 400), response.text
+            assert scan.await_count == int(reading)
+            if reading:
+                assert scan.await_args is not None
+                assert scan.await_args.kwargs["force_content"] is True
+            response = await client.get(
+                f"/_api/media/lib/{lib.id}/scan", params={"force_content": "invalid"}
+            )
+            assert response.status_code == 400
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("range_header", "start", "end"),
     [("bytes=0-999", 0, 9), ("bytes=4-999", 4, 9), ("bytes=4-6", 4, 6)],

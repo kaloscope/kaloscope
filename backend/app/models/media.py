@@ -231,6 +231,14 @@ class MediaQuery(Pageable):
     path: str | None = None
 
 
+class MediaScan(BaseModel):
+    """Select incremental scanning or forced reading content reconstruction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    force_content: bool = False
+
+
 class MediaContentQuery(BaseModel):
     """Select a reading section or comic page range from the published version."""
 

@@ -330,7 +330,7 @@ def test_delayed_scan(tmp_path, monkeypatch, enabled):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("action", [watcher.LibAction.SCAN, watcher.LibAction.REMOVE])
+@pytest.mark.parametrize("action", list(watcher.LibAction))
 def test_pending_actions(tmp_path, monkeypatch, action):
     pending, healthy, removed = (
         str(tmp_path / name) for name in ("Pending", "Healthy", "Removed")
@@ -352,7 +352,7 @@ def test_pending_actions(tmp_path, monkeypatch, action):
     )
     rounds = []
 
-    async def handle(path):
+    async def handle(path, **kwargs):
         if path == pending and not rounds:
             raise RuntimeError("library action failed")
 
@@ -371,8 +371,11 @@ def test_pending_actions(tmp_path, monkeypatch, action):
 
     assert rounds == [(5, {pending: action}), (10, {})]
     assert [call.args[0] for call in scan_action.await_args_list] == (
-        [pending, healthy, pending] if action == watcher.LibAction.SCAN else [healthy]
+        [healthy] if action == watcher.LibAction.REMOVE else [pending, healthy, pending]
     )
+    if action == watcher.LibAction.REBUILD:
+        assert scan_action.await_args_list[0].kwargs == {"force_content": True}
+        assert scan_action.await_args_list[-1].kwargs == {"force_content": True}
     assert [call.args[0] for call in remove_action.await_args_list] == (
         [pending, removed, pending] if action == watcher.LibAction.REMOVE else [removed]
     )

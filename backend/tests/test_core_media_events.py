@@ -1,6 +1,7 @@
 """Tests for durable reading events, stability, completion and bounded retries."""
 
 import asyncio
+import os
 import shutil
 import threading
 from collections.abc import AsyncGenerator
@@ -1195,6 +1196,49 @@ async def _ready(task: MediaEvent, moment: list[float]) -> MediaEvent:
     moment[0] += 2
     assert await prepare_reading_event(task.id)
     return await MediaEvent.get(id=task.id).select_related("lib")
+
+
+def test_forced_scan(tmp_path, monkeypatch, moment):
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            item = await MediaItem.get(path=str(body))
+            original = item.index_version
+            state = body.stat()
+            body.write_text("Next")
+            os.utime(body, ns=(state.st_atime_ns, state.st_mtime_ns))
+            monitor = _monitor(monkeypatch, lib)
+            for force in (False, True):
+                await monitor.scan_directory(lib, force_content=force)
+                task = await MediaEvent.get(event_type="reconcile")
+                assert (
+                    bool(ReadingReconcile.model_validate(task.payload).force_targets)
+                    == force
+                )
+                assert await consume_event(await _ready(task, moment))
+                await item.refresh_from_db()
+                assert (item.index_version != original) == force
+            content = await MediaItemService.get_content(
+                item.id, _user(), MediaContentQuery()
+            )
+            assert content.format == "txt" and content.text == ["Next"]
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+def test_forced_scan_handoff(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path, LibType.NOVEL)
+            monitor = _monitor(monkeypatch, lib)
+            monkeypatch.setattr(monitor, "_observers", {})
+            monkeypatch.setitem(monitor.__dict__, "_watcher_actions", {})
+            await monitor.scan_directory(lib, validate_request=True, force_content=True)
+            assert monitor._watcher_actions[lib.dir] == media_watcher.LibAction.REBUILD
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])

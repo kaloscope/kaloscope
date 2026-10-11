@@ -50,6 +50,7 @@ from app.models.media import (
     MediaMetadata,
     MediaQuery,
     MediaResource,
+    MediaScan,
     TranscodeQuery,
     TranscodeTaskQuery,
 )
@@ -118,11 +119,16 @@ async def delete_libraries(_, body: IDs) -> HTTPResponse:
 
 @media.get("/lib/<id:int>/scan")
 @authorize(role=UserRole.ADMIN)
-async def scan_library(request: Request, id: int) -> HTTPResponse:
+@validate(query=MediaScan)
+async def scan_library(request: Request, id: int, query: MediaScan) -> HTTPResponse:
     """Scan the media library."""
     lib = await MediaLib.get(id=id)
+    if query.force_content and lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
+        raise BadRequestException()
     watcher: LibWatcher = request.app.ctx.lib_watcher
-    await watcher.scan_directory(lib, validate_request=True)
+    await watcher.scan_directory(
+        lib, validate_request=True, force_content=query.force_content
+    )
     return empty()
 
 
