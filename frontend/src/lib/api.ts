@@ -128,7 +128,7 @@ export function proxyImage(url: string | null, policy: boolean | 'auto' | 'store
 }
 
 /**
- * Get the current user's role, either from the store or by making an API call.
+ * Get the current user's role, retaining fetched details in the shared store.
  *
  * @returns The current user's role.
  */
@@ -139,6 +139,7 @@ export async function getCurrentRole(): Promise<keyof typeof UserRole | null> {
   }
   try {
     const resp = await api.get('auth/current').json<Resp<User>>();
+    user.set(resp.data);
     return resp.data.role ?? null;
   } catch {
     return null;
