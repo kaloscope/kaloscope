@@ -513,7 +513,7 @@
    * @param e - The keyboard event.
    */
   function handleKeyDown(e: KeyboardEvent) {
-    if (settingsOpen || chaptersOpen || $settings === null) {
+    if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') {
       return;
     }
     if (e.key === 'ArrowUp' || e.key === 'PageUp') {
