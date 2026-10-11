@@ -389,13 +389,49 @@
         title: chapterTitle(chapter, index),
         volume: chapter.volume
       }));
+      /**
+       * Recover changed content once, then use the reader's existing retry UI.
+       *
+       * @param code - The content or resource error reported during reading.
+       */
+      const handleContentError = (code: string) => {
+        if (signal.aborted) return;
+        if (code === 'content_changed' && refresh) {
+          void loadContent(data.media_type === 'image' ? data.chapter_id : undefined, undefined, {
+            refresh: false,
+            resume: true
+          });
+        } else {
+          saveProgress();
+          captureProgress = undefined;
+          readingController?.abort();
+          clearContent();
+          readingLoading = false;
+          readingError = code;
+        }
+      };
+      let checkingImage = false;
       const options = {
         title: data.title,
         chapters,
         chapterId: data.chapter_id,
         chapterChange: (chapter: Chapter) =>
           loadContent(chapter.id ?? undefined, data.media_type === 'text' ? data.version : undefined),
-        back: closeReader
+        back: closeReader,
+        imageError: async () => {
+          if (signal.aborted || checkingImage) return;
+          checkingImage = true;
+          try {
+            // image elements do not expose HTTP errors; validate their content version
+            await getContent(item.id, { chapter_id: data.chapter_id, version: data.version }, signal);
+            // EPUB keeps its per-image retry; comics use the reader's error and retry UI
+            if (data.content_type === 'images') handleContentError('resource_load_failed');
+          } catch (error) {
+            handleContentError(contentError(error));
+          } finally {
+            checkingImage = false;
+          }
+        }
       };
       const queueProgress = (entry: ReadingEntry) => {
         const current = get(user);
@@ -444,13 +480,7 @@
               return next;
             } catch (error) {
               if (!signal.aborted && contentError(error) === 'content_changed') {
-                if (refresh) {
-                  void loadContent(data.chapter_id, undefined, { refresh: false, resume: true });
-                } else {
-                  readingController?.abort();
-                  clearContent();
-                  readingError = 'content_changed';
-                }
+                handleContentError('content_changed');
               }
               throw error;
             }

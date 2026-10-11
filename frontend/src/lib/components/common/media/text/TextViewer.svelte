@@ -17,6 +17,8 @@
     back?: () => void;
     position?: Pick<TextPosition, 'index' | 'offset'>;
     progress?: (position: TextPosition) => void;
+    /** Let local readers check whether a failed image belongs to stale content. */
+    imageError?: () => void;
   } & ({ text: string | string[]; blocks?: never } | { text?: never; blocks: ContentBlock[] });
 
   /** Color theme. */
@@ -188,6 +190,7 @@
   let blockEls = $state<HTMLElement[]>([]);
   let anchor: TextViewerOptions['position'];
   let progress: TextViewerOptions['progress'];
+  let imageError: TextViewerOptions['imageError'];
   let restoring = false;
   let mountId = $state(0);
   let progressFrame = 0;
@@ -238,6 +241,7 @@
     cancelAnimationFrame(restoreFrame);
     progressFrame = 0;
     progress = options.progress;
+    imageError = options.imageError;
     anchor = options.position ?? { index: 0, offset: 0 };
     blockEls = [];
     title = options.title ?? '';
@@ -548,7 +552,11 @@
                         class="mx-auto h-auto max-w-full"
                         loading="lazy"
                         decoding="async"
-                        onerror={() => (failedImages[block.id] = true)}
+                        onerror={(event) => {
+                          if (!event.currentTarget.isConnected) return;
+                          failedImages[block.id] = true;
+                          imageError?.();
+                        }}
                       />
                     {/if}
                   </figure>
@@ -556,7 +564,11 @@
               {/each}
             {:else}
               {#each paragraphs as para, i (i)}
-                <p bind:this={blockEls[i]} class="indent-2" style:margin-bottom="{$settings.paraSpacing}em">
+                <p
+                  bind:this={blockEls[i]}
+                  class="indent-2 whitespace-pre-line"
+                  style:margin-bottom="{$settings.paraSpacing}em"
+                >
                   {#if para}
                     {para}
                   {:else}

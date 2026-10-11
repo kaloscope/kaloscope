@@ -36,6 +36,8 @@
     version?: string;
     position?: Pick<ImagePosition, 'index' | 'offset'>;
     progress?: (position: ImagePosition) => void;
+    /** Let local readers recover after image retries are exhausted. */
+    imageError?: () => void;
     /** Cancels pagination when the caller leaves or replaces the resource. */
     signal?: AbortSignal;
     loadImages?: (query: {
@@ -162,6 +164,7 @@
   let imageIndex = $state(0);
   let anchor: ImageViewerOptions['position'];
   let progress: ImageViewerOptions['progress'];
+  let imageError: ImageViewerOptions['imageError'];
   let restoring = false;
   let progressFrame = 0;
   let restoreFrame = 0;
@@ -218,6 +221,7 @@
     progressFrame = 0;
     restoring = true;
     progress = options.progress;
+    imageError = options.imageError;
     readController = new AbortController();
     readSignal = options.signal ? AbortSignal.any([readController.signal, options.signal]) : readController.signal;
     version = options.version;
@@ -481,6 +485,7 @@
       img.src = url.toString();
     } else {
       imageLoading = false;
+      imageError?.();
     }
   }
 
