@@ -554,7 +554,11 @@ def merge_metadata(
 
 
 def render_metadata(
-    metadata: ReadingMetadata, format: Literal["opf", "comicinfo"], *, identifier: UUID
+    metadata: ReadingMetadata,
+    format: Literal["opf", "comicinfo"],
+    *,
+    identifier: UUID,
+    legacy: bool = False,
 ) -> bytes:
     """Rebuild an external metadata document using only the selected candidate.
 
@@ -566,6 +570,8 @@ def render_metadata(
         format: The external OPF or ComicInfo format selected by the library.
         identifier: A stable local UUID for OPF without ISBN, retained by the caller
             across publication retries and ignored for ComicInfo.
+        legacy: Reproduce earlier bytes only to recognize interrupted publications;
+            False by default for all new writes.
 
     Returns:
         Bounded UTF-8 XML bytes that can be read back without losing candidate fields.
@@ -587,7 +593,11 @@ def render_metadata(
             )
             group = etree.SubElement(root, f"{_OPF}metadata")
             value = f"urn:isbn:{metadata.isbn}" if metadata.isbn else identifier.urn
-            etree.SubElement(group, f"{_DC}identifier", id="bookid").text = value
+            bookid = etree.SubElement(group, f"{_DC}identifier", id="bookid")
+            bookid.text = value
+            if metadata.isbn and not legacy:
+                bookid.set(f"{_OPF}scheme", "ISBN")
+                bookid.text = metadata.isbn
             for name, tag in (
                 ("title", "title"),
                 ("plot", "description"),
@@ -676,6 +686,12 @@ def render_metadata(
                 etree.SubElement(
                     pages, "Page", Image=str(metadata.cover.page), Type="FrontCover"
                 )
+            if not legacy:
+                # keep optional trailing elements in ComicInfo schema order
+                for tag in ("Pages", "CommunityRating", "GTIN"):
+                    element = root.find(tag)
+                    if element is not None:
+                        root.append(element)
             parser = parse_comicinfo
         else:
             raise ContentError("unsupported_media_format")

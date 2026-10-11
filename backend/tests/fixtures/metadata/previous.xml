@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<ComicInfo>
+  <Title>Candidate</Title>
+  <PageCount>1</PageCount>
+  <GTIN>9780306406157</GTIN>
+  <BlackAndWhite>No</BlackAndWhite>
+  <CommunityRating>4.255</CommunityRating>
+  <Pages>
+    <Page Image="0" Type="FrontCover"/>
+  </Pages>
+</ComicInfo>

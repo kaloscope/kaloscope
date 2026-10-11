@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<opf:package xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0" unique-identifier="bookid">
+  <opf:metadata>
+    <dc:identifier id="bookid">urn:isbn:9780306406157</dc:identifier>
+    <dc:title>Candidate</dc:title>
+    <dc:language>und</dc:language>
+    <opf:meta name="calibre:rating" content="8.51"/>
+  </opf:metadata>
+  <opf:manifest/>
+  <opf:spine/>
+</opf:package>

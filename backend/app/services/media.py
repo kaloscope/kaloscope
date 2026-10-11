@@ -2266,7 +2266,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 raise ContentError("content_changed")
             _resolve_source(item)
             written = task.published
-            signature = None
+            signatures: set[str] = set()
             if not task.published:
                 data = await to_thread(
                     render_metadata,
@@ -2275,7 +2275,15 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     identifier=task.identifier,
                 )
                 if resume:
-                    signature = hashlib.sha256(data).hexdigest()
+                    signatures.add(hashlib.sha256(data).hexdigest())
+                    previous = await to_thread(
+                        render_metadata,
+                        task.metadata,
+                        "opf" if item.lib.lib_type == LibType.NOVEL else "comicinfo",
+                        identifier=task.identifier,
+                        legacy=True,
+                    )
+                    signatures.add(hashlib.sha256(previous).hexdigest())
                 written = await write_in_thread(
                     _publish_metadata, item, data, overwrite=task.overwrite
                 )
@@ -2290,11 +2298,11 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             # a crash may publish XML before its database flag is committed
             if (
                 not written
-                and signature is not None
+                and signatures
                 and metadata.external is not None
                 and metadata.external.path.name.casefold()
                 in {"metadata.opf", "comicinfo.xml"}
-                and metadata.external.signature == signature
+                and metadata.external.signature in signatures
             ):
                 written = True
             async with in_transaction():

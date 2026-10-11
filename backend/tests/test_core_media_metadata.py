@@ -1,6 +1,7 @@
 """Unit tests for reading metadata parsing and field-level source precedence."""
 
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -604,6 +605,54 @@ def test_render_metadata(format):
     assert parsed.data == candidate and not parsed.invalid_fields
     assert data == render_metadata(candidate, format, identifier=identifier)
     assert b"&amp;" in data and b"&lt;b&gt;" in data
+
+
+def test_opf_isbn_scheme():
+    candidate = ReadingMetadata(title="Book", isbn="9780306406157")
+    root = etree.fromstring(render_metadata(candidate, "opf", identifier=UUID(int=1)))
+
+    identifiers = root.xpath(
+        "//dc:identifier[@opf:scheme='ISBN']/text()",
+        namespaces={
+            "dc": "http://purl.org/dc/elements/1.1/",
+            "opf": "http://www.idpf.org/2007/opf",
+        },
+    )
+    assert identifiers == [candidate.isbn]
+    assert root.get("unique-identifier") == "bookid"
+    assert parse_opf(etree.tostring(root)).data.isbn == candidate.isbn
+
+
+@pytest.mark.parametrize("version", ["2.0", "2.1"])
+@pytest.mark.parametrize("full", [False, True])
+def test_comic_schema(version, full):
+    candidate = ReadingMetadata(
+        title="Comic & <Title>",
+        series="Series",
+        number="番外",
+        volume="0",
+        plot="Summary",
+        year=2024,
+        month=2,
+        day=29,
+        authors=("A", "B"),
+        illustrators=("C",),
+        publisher="Publisher",
+        genres=("Fantasy",),
+        language="zh-CN",
+        pages=0,
+        monochrome=False,
+        rating=Decimal("8.6") if full else None,
+        cover=CoverReference(page=0) if full else None,
+        isbn="9780306406157" if full and version == "2.1" else None,
+        tags=("Tag",) if full and version == "2.1" else (),
+    )
+    schema_path = Path(__file__).parent / "fixtures" / "comicinfo" / f"v{version}.xsd"
+    schema = etree.XMLSchema(etree.parse(str(schema_path)))
+    xml = render_metadata(candidate, "comicinfo", identifier=UUID(int=1))
+
+    schema.assertValid(etree.fromstring(xml))
+    assert parse_comicinfo(xml).data == candidate
 
 
 @pytest.mark.parametrize("format", ["opf", "comicinfo"])

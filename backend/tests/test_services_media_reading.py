@@ -8,10 +8,11 @@ import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -28,7 +29,12 @@ from app.core.media import reader, shelver, watcher, writer
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.handlers.reading import ReadingSource
-from app.core.media.metadata import parse_comicinfo, parse_opf
+from app.core.media.metadata import (
+    ReadingMetadata,
+    parse_comicinfo,
+    parse_opf,
+    render_metadata,
+)
 from app.core.middleware import on_request, on_response
 from app.models.media import (
     EpubContent,
@@ -3649,6 +3655,69 @@ def test_auto_metadata_recovery(tmp_path, monkeypatch):
             assert not (Path(item.dir) / "metadata.opf").exists()
             assert (await MediaItem.get(id=item.id)).title == "Arrived during shutdown"
             assert not await MediaEvent.all().exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
+@pytest.mark.parametrize("origin", ["previous", "current", "external"])
+def test_metadata_publication_recovery(tmp_path, format, origin):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, format)
+            await MediaLib.filter(id=item.lib_id).update(rename_template="{title}")
+            novel = format == MediaFormat.TXT
+            values: dict[str, object] = {
+                "title": "Candidate",
+                "isbn": "9780306406157",
+                "rating": Decimal("8.51"),
+            }
+            if not novel:
+                values.update(pages=1, monochrome=False, cover={"page": 0})
+            task = writer.MetadataWrite(
+                item_id=item.id,
+                metadata=ReadingMetadata.model_validate(values),
+                overwrite=False,
+                identifier=UUID(int=1),
+            )
+            event = await MediaEvent.create(
+                lib_id=item.lib_id,
+                event_type="metadata",
+                src_path=item.path,
+                payload=task.model_dump(mode="json"),
+            )
+            fixture = Path(__file__).parent / "fixtures" / "metadata"
+            data = (
+                fixture / ("previous.opf" if novel else "previous.xml")
+            ).read_bytes()
+            if origin == "current":
+                data = render_metadata(
+                    task.metadata,
+                    "opf" if novel else "comicinfo",
+                    identifier=task.identifier,
+                )
+            elif origin == "external":
+                # identical fields do not make a foreign file this task's publication
+                data = data.replace(b"Candidate", b"Candidate<!-- user edit -->")
+            xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
+            xml.write_bytes(data)
+            before = xml.stat()
+
+            assert await MediaItemService.consume_metadata(event.id)
+            assert xml.read_bytes() == data
+            assert xml.stat().st_ino == before.st_ino
+            assert xml.stat().st_mtime_ns == before.st_mtime_ns
+            assert (await MediaItem.get(id=item.id)).title == "Candidate"
+            assert not await MediaEvent.filter(event_type="metadata").exists()
+            pending = await MediaEvent.filter(event_type="ingest")
+            if origin == "external":
+                assert pending == []
+            else:
+                assert len(pending) == 1
+                assert pending[0].payload == {
+                    "bootparams": [],
+                    "organize_ids": [item.id],
+                }
 
     asyncio.run(run())
 
