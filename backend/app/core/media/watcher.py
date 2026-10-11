@@ -737,6 +737,7 @@ async def consume_event(event: MediaEvent) -> bool:
         try:
             if not await _handle_reading_moves(event, payload):
                 return False
+            payload = ReadingReconcile.model_validate(event.payload)
             work = Path(event.src_path)
             targets = {Path(path) for path in payload.targets}
             items = await MediaItem.filter(
@@ -765,6 +766,12 @@ async def consume_event(event: MediaEvent) -> bool:
                     item.id,
                     directory=directory,
                     source_path=Path(item.path),
+                    moved=any(
+                        Path(item.path).is_relative_to(move.src_path)
+                        if move.is_directory
+                        else item.path == move.src_path
+                        for move in payload.moves
+                    ),
                 )
             absent = False
             if not await MediaItem.filter(
@@ -883,6 +890,13 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
             break
         moves.update(linked)
     chain = sorted(moves.values(), key=lambda move: move.event_id)
+    root = Path(event.lib.dir)
+    if any(
+        not Path(path).is_relative_to(root)
+        for move in chain
+        for path in (move.src_path, move.dest_path)
+    ):
+        return await MediaItemService.move_reading_items(event, chain)
     directory = chain[0].is_directory
     paths = [Path(chain[0].src_path)]
     for move in chain:
@@ -894,7 +908,6 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
         or (not directory and len({path.suffix.casefold() for path in paths}) != 1)
     ):
         return await MediaItemService.move_reading_items(event, chain)
-    root = Path(event.lib.dir)
     if any(
         path == root or not path.is_relative_to(root) or ".." in path.parts
         for path in paths

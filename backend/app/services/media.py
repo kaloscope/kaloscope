@@ -333,7 +333,11 @@ def _validate_previous_path(
 
 
 def _missing_reading_sources(
-    items: list[MediaItem], work_paths: set[Path], *, directories_only: bool = False
+    items: list[MediaItem],
+    work_paths: set[Path],
+    *,
+    directories_only: bool = False,
+    moved: bool = False,
 ) -> _SourceStates | None:
     """Confirm absent sources while retaining the identities of surviving ancestors.
 
@@ -342,6 +346,8 @@ def _missing_reading_sources(
         work_paths: Registered top-level work directories in the same library.
         directories_only: Require absent containers as well as bodies. The default
             False also allows missing files in surviving containers.
+        moved: A persisted move confirms departure even if the library is now empty.
+            False retains protection against an empty mount point.
 
     Returns:
         Ancestor snapshots when all required paths are absent, or None if a source
@@ -388,7 +394,7 @@ def _missing_reading_sources(
         root = Path(items[0].lib.dir)
         _, directories = list_source_entries(root)
         # an accessible but empty mount point is not evidence of library deletion
-        if not work_paths.intersection(directories):
+        if not moved and not work_paths.intersection(directories):
             raise ContentError("media_source_unavailable")
         if file_state(root.stat(follow_symlinks=False)) != states[root]:
             raise ContentError("content_changed")
@@ -2073,6 +2079,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         commit all identities with the removal of their move facts. A retry cannot
         replay a completed cycle or transfer a replacement's identity a second time.
         This operation never moves or deletes files or changes reading histories.
+        Chains crossing the library boundary reconcile as departures and arrivals,
+        retaining their shared facts until all affected tasks finish.
 
         Args:
             event: The prepared reconcile task, refreshed in place after commit.
@@ -2090,16 +2098,15 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         root = Path(event.lib.dir)
         works = set()
+        boundary = False
         for move in moves:
             for path in (Path(move.src_path), Path(move.dest_path)):
-                if (
-                    not path.is_absolute()
-                    or path == root
-                    or not path.is_relative_to(root)
-                    or ".." in path.parts
-                ):
+                if not path.is_absolute() or path == root or ".." in path.parts:
                     raise ContentError("unsupported_layout")
-                works.add(str(root / path.relative_to(root).parts[0]))
+                if path.is_relative_to(root):
+                    works.add(str(root / path.relative_to(root).parts[0]))
+                else:
+                    boundary = True
         async with library_lock(str(root)):
             lib = await MediaLib.get(id=event.lib_id)
             if (lib.dir, lib.lib_type) != (event.lib.dir, event.lib.lib_type):
@@ -2128,9 +2135,13 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 }
                 if any(facts.get(move.event_id) != move for move in moves):
                     raise ContentError("content_changed")
-                items = await MediaItem.filter(
-                    Q(dir__in=works) | Q(parent__path__in=works), lib_id=lib.id
-                ).select_related("lib", "parent")
+                items = (
+                    []
+                    if boundary
+                    else await MediaItem.filter(
+                        Q(dir__in=works) | Q(parent__path__in=works), lib_id=lib.id
+                    ).select_related("lib", "parent")
+                )
                 for item in items:
                     _resolve_source(item)
                 paths = {item.id: [Path(item.path)] for item in items}
@@ -2231,6 +2242,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     remaining = [m for m in payload.moves if m.event_id not in applied]
                     if remaining == payload.moves:
                         continue
+                    if boundary:
+                        remaining = sorted(
+                            [*remaining, *moves], key=lambda move: move.event_id
+                        )
+                        if remaining == payload.moves:
+                            continue
                     payload.moves = remaining
                     task.payload = payload.model_dump(mode="json", exclude_none=True)
                     await task.save(update_fields=["payload", "updated_at"])
@@ -2242,7 +2259,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def remove_missing_reading_item(
-        cls, id: int, *, directory: Path | None = None, source_path: Path | None = None
+        cls,
+        id: int,
+        *,
+        directory: Path | None = None,
+        source_path: Path | None = None,
+        moved: bool = False,
     ) -> list[int]:
         """Remove an absent reading source, its owned children, caches and histories.
 
@@ -2261,6 +2283,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 be absent. None also allows missing bodies in surviving containers.
             source_path: The captured body path that must still belong to this item;
                 None uses the item's current path for internal callers.
+            moved: Whether a validated persisted move confirms this source departed.
+                False retains protection when all known work directories disappear.
 
         Returns:
             Removed item IDs, or an empty list if the item is gone or a source exists.
@@ -2302,6 +2326,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 items,
                 work_paths,
                 directories_only=directory is not None,
+                moved=moved,
             )
             if states is None:
                 return []
@@ -2332,6 +2357,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                         items,
                         work_paths,
                         directories_only=directory is not None,
+                        moved=moved,
                     )
                     != states
                 ):

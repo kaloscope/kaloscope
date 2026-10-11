@@ -1363,7 +1363,7 @@ def test_consume_empty_and_invalid(tmp_path, moment):
 
 @pytest.mark.parametrize("change", ["move", "raw", "merged", "library", "removed"])
 def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
-    """Reject superseded scopes and defer unsupported moves before ingestion.
+    """Reject superseded scopes and acknowledge departures before ingestion.
 
     Args:
         tmp_path: The isolated filesystem root.
@@ -1402,14 +1402,13 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
             assert await consume_event(task) == (change == "move")
             ingest.assert_not_awaited()
             assert not await MediaItem.exists()
-            if change != "removed":
+            if change in ("removed", "move"):
+                assert not await MediaEvent.filter(id=task.id).exists()
+            else:
                 saved = await MediaEvent.get(id=task.id)
                 payload = ReadingReconcile.model_validate(saved.payload)
                 if change in ("raw", "merged"):
                     assert payload.observed_snapshot is None
-                elif change == "move":
-                    assert payload.state == "deferred"
-                    assert payload.error_code == "unsupported_layout"
                 else:
                     assert saved.payload == task.payload
 
@@ -1923,7 +1922,7 @@ def test_consume_move_swap(tmp_path, monkeypatch, moment, directory, interrupt):
 @pytest.mark.parametrize("directory", [False, True])
 @pytest.mark.parametrize("shape", ["branch", "cycle", "outside", "depth"])
 def test_consume_chain_boundary(tmp_path, moment, directory, shape):
-    """Apply branches and cycles while deferring unsupported intermediate paths.
+    """Reconcile boundary crossings and defer unsupported intermediate depths.
 
     Args:
         tmp_path: The isolated filesystem root.
@@ -1978,7 +1977,7 @@ def test_consume_chain_boundary(tmp_path, moment, directory, shape):
             task = await MediaEvent.get(src_path=str(body.parent))
             task = await _ready(task, moment)
             assert await consume_event(task)
-            if shape in ("outside", "depth"):
+            if shape == "depth":
                 payload = ReadingReconcile.model_validate(
                     (await MediaEvent.get(id=task.id)).payload
                 )
@@ -1988,13 +1987,84 @@ def test_consume_chain_boundary(tmp_path, moment, directory, shape):
             else:
                 for pending in await MediaEvent.filter(event_type="reconcile"):
                     assert await consume_event(await _ready(pending, moment))
-                current = await MediaItem.get(id=original.id)
+                current = (
+                    await MediaItem.get()
+                    if shape == "outside"
+                    else await MediaItem.get(id=original.id)
+                )
+                assert (current.id == original.id) == (shape != "outside")
                 final = middle if shape == "branch" else destination
                 assert current.path == str(final / body.name if directory else final)
                 assert current.index_state == IndexState.READY
                 assert await MediaItem.all().count() == (2 if shape == "branch" else 1)
                 assert not await MediaEvent.exists()
             assert (destination / body.name if directory else destination).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("linked", [False, True])
+def test_consume_cross_library(tmp_path, moment, lib_type, reverse, linked):
+    async def run():
+        async with _database():
+            origin, body, task = await _pending(tmp_path, lib_type)
+            assert await consume_event(await _ready(task, moment))
+            original_ids = await MediaItem.all().values_list("id", flat=True)
+            root = tmp_path / "Destination"
+            root.mkdir()
+            target = await MediaLib.create(
+                name="Target", dir=str(root), lib_type=lib_type, priority=2
+            )
+            source = Path(origin.dir) / "Work"
+            relative = body.relative_to(source)
+            if linked:
+                middle = source.with_name("Middle")
+                source.rename(middle)
+                await MediaEvent.create(
+                    lib=origin,
+                    src_path=str(source),
+                    dest_path=str(middle),
+                    event_type="moved",
+                    is_directory=True,
+                )
+                source = middle
+            destination = root / "Work"
+            source.rename(destination)
+            for lib in (origin, target):
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(source),
+                    dest_path=str(destination),
+                    event_type="moved",
+                    is_directory=True,
+                )
+            if linked:
+                final = root / "Last"
+                destination.rename(final)
+                await MediaEvent.create(
+                    lib=target,
+                    src_path=str(destination),
+                    dest_path=str(final),
+                    event_type="moved",
+                    is_directory=True,
+                )
+                destination = final
+            for lib in (target, origin) if reverse else (origin, target):
+                await coalesce_reading_events(lib.id)
+                for _ in range(2):
+                    for pending in await MediaEvent.filter(
+                        lib=lib, event_type="reconcile"
+                    ).order_by("-src_path" if reverse else "src_path"):
+                        assert await consume_event(await _ready(pending, moment))
+            assert not await MediaItem.filter(lib=origin).exists()
+            items = await MediaItem.filter(lib=target)
+            assert len(items) == (1 if lib_type == LibType.NOVEL else 2)
+            assert all(item.id not in original_ids for item in items)
+            assert all(item.index_state == IndexState.READY for item in items)
+            assert not await MediaEvent.exists()
+            assert (destination / relative).is_file()
 
     asyncio.run(run())
 

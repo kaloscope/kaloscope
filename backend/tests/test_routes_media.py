@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from lxml import etree
-from sanic import Sanic
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
@@ -88,7 +87,8 @@ def test_library_management_permissions(tmp_path, admin):
             )
             scan = AsyncMock()
             async with _client(_user() if admin else _user([])) as client:
-                Sanic.get_app().ctx.lib_watcher = SimpleNamespace(scan_directory=scan)
+                app = cast(Any, client._transport).app
+                app.ctx.lib_watcher = SimpleNamespace(scan_directory=scan)
                 response = await client.get(f"/_api/media/lib/{lib.id}/scan")
                 assert response.status_code == (204 if admin else 403), response.text
                 assert scan.await_count == int(admin)
