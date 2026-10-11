@@ -770,7 +770,7 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
     nodes = {"movie": MovieNode, "tvshow": TVShowNode, "episode": EpisodeNode}
 
     async def fire(*_args, bootparams):
-        item = await MediaItem.get(path=bootparams["item_path"])
+        item = await MediaItem.get(path=bootparams["path"])
         assert bootparams["item_id"] == item.id
         fired.append(item.id)
         if bootparams["nfo_type"] is None:
@@ -891,8 +891,8 @@ def test_event_recovery(tmp_path, monkeypatch, stage, event_type):
             )
             params = {
                 "item_id": item.id,
-                "item_path": str(source),
-                "item_name": source.stem,
+                "path": str(source),
+                "name": source.stem,
                 "nfo_path": str(nfo),
                 "title": "Old",
             }
@@ -943,8 +943,8 @@ def test_event_recovery(tmp_path, monkeypatch, stage, event_type):
                 fire.assert_awaited_once()
                 assert fire.call_args.kwargs["bootparams"] == {
                     **params,
-                    "item_path": str(destination),
-                    "item_name": destination.stem,
+                    "path": str(destination),
+                    "name": destination.stem,
                     "nfo_path": str(target_nfo),
                     "title": "New",
                 }
@@ -1509,7 +1509,8 @@ def test_ingest_persistence(tmp_path, monkeypatch, error):
         (LibType.TV_SHOW, "recorded"),
     ],
 )
-def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo, legacy):
     old = tmp_path / "Old.mkv"
     old.write_bytes(b"unrelated replacement")
     video = tmp_path / "Current" / "Current S02E03.mkv"
@@ -1556,8 +1557,8 @@ def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo):
             )
             params = {
                 "item_id": item.id,
-                "item_path": str(old),
-                "item_name": old.stem,
+                "path": str(old),
+                "name": old.stem,
                 "nfo_path": str(old.with_suffix(".nfo"))
                 if nfo != "unrequested"
                 else None,
@@ -1570,15 +1571,23 @@ def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo):
                 "season": 1 if is_show else None,
                 "episode": 1 if is_show else None,
                 "series_id": "old-series" if is_show else None,
-                "nfo_source": "old-source" if is_show else None,
+                "site": "old-source" if is_show else None,
                 "page_num": 1,
                 "page_size": 1,
             }
+            persisted = dict(params)
+            if legacy:
+                for name, legacy_name in (
+                    ("path", "item_path"),
+                    ("name", "item_name"),
+                    ("site", "nfo_source"),
+                ):
+                    persisted[legacy_name] = persisted.pop(name)
             event = await MediaEvent.create(
                 lib=lib,
                 src_path=str(old),
                 event_type="ingest",
-                payload={"bootparams": [params]},
+                payload={"bootparams": [persisted]},
             )
 
             async def fire(*_args, bootparams):
@@ -1602,15 +1611,15 @@ def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo):
             )
             assert result == {
                 **params,
-                "item_path": str(video),
-                "item_name": video.stem,
+                "path": str(video),
+                "name": video.stem,
                 "nfo_path": str(expected_nfo) if nfo != "unrequested" else None,
                 "title": "Current series" if is_show else "Current title",
                 "year": 2024 if is_show else 2026,
                 "season": 2 if is_show else None,
                 "episode": 3 if is_show else None,
                 "series_id": "42" if is_show else None,
-                "nfo_source": "tmdb" if is_show else None,
+                "site": "tmdb" if is_show else None,
             }
             assert not await MediaEvent.filter(id=event.id).exists()
             assert old.read_bytes() == b"unrelated replacement"
@@ -1650,8 +1659,8 @@ def test_ingest_scope(tmp_path, monkeypatch, state):
                 await item.delete()
             params = {
                 "item_id": None if state == "unbound" else item.id,
-                "item_path": item.path,
-                "item_name": item.name,
+                "path": item.path,
+                "name": item.name,
                 "nfo_path": None,
             }
             event = await MediaEvent.create(
@@ -1781,8 +1790,8 @@ def test_ingest_paths(tmp_path, monkeypatch):
             assert configs == ["{{title}}"]
             params = fire.call_args.kwargs["bootparams"]
             assert params["item_id"] == item.id
-            assert params["item_path"] == str(destination)
-            assert params["item_name"] == "New"
+            assert params["path"] == str(destination)
+            assert params["name"] == "New"
             assert params["title"] == "New"
             assert params["nfo_path"] == str(destination.with_suffix(".nfo"))
             for kind, source, target in [
@@ -1899,7 +1908,7 @@ def test_organization_arrival(tmp_path, monkeypatch, arrival, recovery):
             fire.assert_awaited_once()
             params = fire.call_args.kwargs["bootparams"]
             assert params["item_id"] == incoming.id
-            assert params["item_path"] == str(source)
+            assert params["path"] == str(source)
         finally:
             await Tortoise.close_connections()
 
@@ -2273,7 +2282,7 @@ def test_ingest_shared_nfo(tmp_path, monkeypatch):
 
             params = fire.call_args.kwargs["bootparams"]
             folder = tmp_path / "Film (2026)"
-            assert params["item_path"] == str(folder / "Film.mkv")
+            assert params["path"] == str(folder / "Film.mkv")
             assert params["nfo_path"] == str(folder / "Film (2026).nfo")
             assert Path(params["nfo_path"]).is_file()
         finally:
@@ -2290,13 +2299,13 @@ def test_ingest_shared_nfo(tmp_path, monkeypatch):
         (
             LibType.TV_SHOW,
             "Old/S01E02.mkv",
-            "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}",
+            "{{parent.title}}/Season {{season}}/{{code}} - {{title}}",
             "Series/Season 01/S01E02 - Pilot.mkv",
         ),
         (
             LibType.TV_SHOW,
             "Old/Season 01/S01E02.mkv",
-            "{{show_title}}/{{episode_code}} - {{title}}",
+            "{{parent.title}}/{{code}} - {{title}}",
             "Series/S01E02 - Pilot.mkv",
         ),
     ],
@@ -2425,7 +2434,7 @@ def test_unindexed_season(tmp_path, monkeypatch, season_nfo):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+                rename_template="{{parent.title}}/Season {{season}}/{{code}}",
             )
             monitor = watcher.LibWatcher(Mock(spec=Sanic))
             events = Queue()
@@ -2630,7 +2639,7 @@ def test_ingest_recovery(tmp_path, monkeypatch, restart, interruption):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/{{episode_code}} - {{title}}",
+                rename_template="{{parent.title}}/{{code}} - {{title}}",
             )
             event = await MediaEvent.create(
                 lib=lib, src_path=str(source), event_type="created"
@@ -2657,7 +2666,7 @@ def test_ingest_recovery(tmp_path, monkeypatch, restart, interruption):
             episode = next(
                 params for params in fired if params["nfo_type"] == "episode"
             )
-            assert episode["item_path"] == str(destination)
+            assert episode["path"] == str(destination)
             assert episode["nfo_path"] == str(destination.with_suffix(".nfo"))
             assert episode["title"] == "Series"
             for kind, origin, target in [

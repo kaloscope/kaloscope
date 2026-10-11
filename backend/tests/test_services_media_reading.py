@@ -603,7 +603,7 @@ def test_current_details(tmp_path, format):
             assert data["year"] is data["rating"] is data["backdrop"] is None
             assert data["poster"] == f"/_api/media/{item.id}/assets/cover"
             assert data["media_type"] == ("text" if novel else "image")
-            assert data["item_role"] == ("collection" if format is None else "book")
+            assert data["role"] == ("collection" if format is None else "book")
             assert data["index_state"] == "pending" and "extra" not in data
             assert (
                 "cover" not in data["metadata"] and "nfo_path" not in data["metadata"]
@@ -1288,7 +1288,9 @@ def test_video_details_http(tmp_path, lib_type, root):
             await MediaLib.filter(id=item.lib_id).update(lib_type=lib_type)
             path = Path(item.dir) / "video.nfo"
             path.write_text(
-                f"<{root}><title>Video metadata</title><plot>NFO plot</plot></{root}>"
+                f"<{root}><title>Video metadata</title><plot>NFO plot</plot>"
+                '<uniqueid type="tmdb" default="true">42</uniqueid>'
+                f"<originaltitle>Original title</originaltitle></{root}>"
             )
             await MediaItem.filter(id=item.id).update(format=None, nfo_path=str(path))
             async with _client(_user()) as client:
@@ -1297,9 +1299,14 @@ def test_video_details_http(tmp_path, lib_type, root):
                 assert response.status_code == 200, response.text
                 data = response.json()["data"]
                 assert data["title"] == "Old database title"
-                assert "item_role" not in data
+                assert "role" not in data
                 assert data["metadata"]["title"] == "Video metadata"
                 assert data["metadata"]["plot"] == "NFO plot"
+                assert data["metadata"]["originaltitle"] == "Original title"
+                assert data["metadata"]["id"] == "42"
+                assert data["metadata"]["site"] == "tmdb"
+                assert {"unique_id", "nfo_source"}.isdisjoint(data["metadata"])
+                assert data["id"] == item.id
                 assert data["media_type"] == "video"
                 assert response.headers["cache-control"] == "private, no-store"
                 assert (await client.get(url + "/assets/cover")).status_code == 404
@@ -3360,7 +3367,7 @@ def test_save_chapter_metadata(tmp_path):
             assert not parse_comicinfo(xml.read_bytes()).data.authors
             assert parent_xml.read_bytes() == before
             details = await MediaItemService.get_details(chapter.id, _user())
-            assert details["item_role"] == "chapter"
+            assert details["role"] == "chapter"
             assert details["metadata"]["authors"] == ("Parent author",)
             assert (await MediaItem.get(id=parent.id)).title == "Old database title"
 
@@ -3552,11 +3559,18 @@ def test_save_metadata_retry(tmp_path, monkeypatch, stage):
 
 
 @pytest.mark.parametrize("published", [False, True])
-def test_save_metadata_recovery(tmp_path, monkeypatch, published):
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("format", [None, *MediaFormat])
+def test_save_metadata_recovery(tmp_path, monkeypatch, published, legacy, format):
     async def run():
         async with _database():
-            item = await _item(tmp_path, MediaFormat.TXT)
-            xml = Path(item.dir) / "metadata.opf"
+            item = await _item(tmp_path, format)
+            novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
+            xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
+            parser = parse_opf if novel else parse_comicinfo
+            candidate: dict[str, object] = {"title": "Candidate"}
+            if not novel:
+                candidate.update(pages=0, monochrome=False)
             if published:
 
                 async def fail(*args, **kwargs):
@@ -3566,11 +3580,10 @@ def test_save_metadata_recovery(tmp_path, monkeypatch, published):
                     patch.setattr(media_service, "_save_summary", fail)
                     with pytest.raises(RuntimeError, match="interrupted"):
                         await MediaItemService.save_metadata(
-                            item.id, {"title": "Candidate"}, overwrite=True
+                            item.id, candidate, overwrite=True
                         )
                 event = await MediaEvent.get()
                 assert event.payload is not None and event.payload["published"] is True
-                xml.write_bytes(_opf("External after publication"))
                 expected = "External after publication"
             else:
 
@@ -3581,14 +3594,33 @@ def test_save_metadata_recovery(tmp_path, monkeypatch, published):
                     patch.setattr(media_service, "write_in_thread", interrupted)
                     with pytest.raises(asyncio.CancelledError):
                         await MediaItemService.save_metadata(
-                            item.id, {"title": "Candidate"}, overwrite=True
+                            item.id, candidate, overwrite=True
                         )
                 event = await MediaEvent.get()
                 assert event.payload is not None and event.payload["published"] is False
-                xml.write_bytes(_opf("External before publication"))
                 expected = "Candidate"
+            external = (
+                _opf("External after publication")
+                if novel
+                else b"<ComicInfo><Title>External after publication</Title>"
+                b"<PageCount>12</PageCount><BlackAndWhite>Yes</BlackAndWhite>"
+                b"</ComicInfo>"
+            )
+            xml.write_bytes(external)
+            if legacy:
+                # restore the candidate keys stored before the field simplification
+                fields = event.payload["metadata"]
+                fields["page_count"] = fields.pop("pages")
+                fields["black_and_white"] = fields.pop("monochrome")
+                await event.save(update_fields=["payload"])
             assert await watcher.consume_event(event)
-            assert parse_opf(xml.read_bytes()).data.title == expected
+            result = parser(xml.read_bytes()).data
+            assert result.title == expected
+            if not novel:
+                assert result.pages == (12 if published else 0)
+                assert result.monochrome is published
+            if published:
+                assert xml.read_bytes() == external
             assert (await MediaItem.get(id=item.id)).title == expected
             assert not await MediaEvent.all().exists()
 
@@ -3644,7 +3676,8 @@ def test_metadata_without_index(tmp_path, state):
 
 
 @pytest.mark.parametrize("format", [None, *MediaFormat])
-def test_save_metadata_http(tmp_path, format):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_save_metadata_http(tmp_path, format, legacy):
     async def run():
         async with _database():
             item = await _item(tmp_path, format)
@@ -3652,20 +3685,35 @@ def test_save_metadata_http(tmp_path, format):
             await User.create(
                 id=user.id, username=user.username, password="unused", role=user.role
             )
+            candidate = {"title": "Confirmed", "authors": ["Writer"]}
+            comic = format not in (MediaFormat.TXT, MediaFormat.EPUB)
+            if comic:
+                candidate.update(
+                    {"page_count": 12, "black_and_white": False}
+                    if legacy
+                    else {"pages": 12, "monochrome": False}
+                )
             async with _client(user) as client:
                 response = await client.post(
                     f"/_api/media/{item.id}/metadata",
                     json={
                         "graph_id": 1,
-                        "metadata": {"title": "Confirmed", "authors": ["Writer"]},
+                        "metadata": candidate,
                     },
                 )
                 assert response.status_code == 204, response.text
                 assert response.headers["Cache-Control"] == "private, no-store"
                 details = await client.get(f"/_api/media/{item.id}")
                 assert details.status_code == 200, details.text
-                assert details.json()["data"]["title"] == "Confirmed"
-                assert details.json()["data"]["metadata"]["authors"] == ["Writer"]
+                data = details.json()["data"]
+                assert data["title"] == "Confirmed"
+                assert data["metadata"]["authors"] == ["Writer"]
+                assert data["role"] == ("collection" if format is None else "book")
+                assert "item_role" not in data
+                assert {"page_count", "black_and_white"}.isdisjoint(data["metadata"])
+                if comic:
+                    assert data["metadata"]["pages"] == 12
+                    assert data["metadata"]["monochrome"] is False
                 assert not await MediaEvent.all().exists()
 
     asyncio.run(run())

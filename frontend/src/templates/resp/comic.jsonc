@@ -16,8 +16,8 @@
     "volume": "",
     "genres": [""],
     "tags": [""],
-    "page_count": null,
-    "black_and_white": null,
+    "pages": null,
+    "monochrome": null,
     "cover": null // { "page": 0 }
   }
 ]

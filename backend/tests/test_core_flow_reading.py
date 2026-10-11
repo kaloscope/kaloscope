@@ -124,7 +124,7 @@ def test_reading_example(reading_node):
     cover: json.JSONType = {"href": "cover.jpg"} if lib_type == "novel" else {"page": 0}
     candidate["cover"] = cover
     if lib_type == "novel":
-        assert {"volume", "tags", "page_count", "black_and_white"}.isdisjoint(candidate)
+        assert {"volume", "tags", "pages", "monochrome"}.isdisjoint(candidate)
     context = _context({MANUAL_KEY: True, "lib_type": lib_type})
     asyncio.run(
         node.execute(node_data={"response": json.pretty(candidates)}, context=context)
@@ -170,7 +170,7 @@ def test_reading_preview(monkeypatch, reading_node):
         '[{"title":"Book","output_path":"/tmp/metadata.opf"}]',
         '[{"title":"Book","overwrite":true}]',
         '[{"title":"Book","rating":true}]',
-        '[{"title":"Book","page_count":-1}]',
+        '[{"title":"Book","pages":-1}]',
         '[{"title":"Book","year":2026,"month":2,"day":30}]',
         '[{"title":"Book"},{"title":""}]',
     ],
@@ -426,7 +426,7 @@ def test_reading_graph(tmp_path, monkeypatch, format, mode):
                 MANUAL_KEY: mode == "manual",
                 "item_id": item.id,
                 "lib_type": lib.lib_type if mode == "manual" else "movie",
-                "item_path": str(tmp_path / "unowned.txt"),
+                "path": str(tmp_path / "unowned.txt"),
                 "metadata_path": str(tmp_path / "unowned.xml"),
             }
             engine = FlowEngine.__new__(FlowEngine)

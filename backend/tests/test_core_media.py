@@ -42,7 +42,10 @@ def test_tvshow_title(monkeypatch, tmp_path: Path, title: str | None, expected: 
 @pytest.mark.parametrize("registered", [False, True])
 def test_metadata_targets(tmp_path, registered):
     path = tmp_path / "movie.nfo"
-    path.write_text("<movie><title>Updated</title><year>2026</year></movie>")
+    path.write_text(
+        "<movie><title>Updated</title><year>2026</year>"
+        '<uniqueid type="tmdb" default="true">42</uniqueid></movie>'
+    )
 
     async def run():
         await Tortoise.init(
@@ -95,6 +98,7 @@ def test_metadata_targets(tmp_path, registered):
                 assert item.year == 2026
                 assert item.nfo_path == str(path)
                 assert item.nfo_mtime is not None
+                assert item.unique_id == "42" and item.nfo_source == "tmdb"
             assert sorted(affected) == sorted(item.id for item in items)
             await unrelated.refresh_from_db()
             assert unrelated.title == "Unrelated"

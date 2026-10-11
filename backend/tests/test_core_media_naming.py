@@ -15,8 +15,13 @@ from app.core.media.naming import (
 def test_placeholders():
     assert validate_template("  ", "movie") is None
     assert render_path(
-        "{{show_title}}/{{episode_code}} - {{title}}",
-        {"show_title": "Show/A", "title": "Pilot: Part 1", "season": 1, "episode": 2},
+        "{{parent.title}}/{{code}} - {{title}}",
+        {
+            "parent": {"title": "Show/A"},
+            "title": "Pilot: Part 1",
+            "season": 1,
+            "episode": 2,
+        },
         "tv_show",
     ) == PurePosixPath("Show_A/S01E02 - Pilot_ Part 1")
     assert render_path(
@@ -25,10 +30,10 @@ def test_placeholders():
 
 
 def test_partial_context():
-    template = "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}"
+    template = "{{parent.title}}/Season {{season}}/{{code}} - {{title}}"
 
     directory = render_directory(
-        template, {"show_title": "Show", "season": 0}, "tv_show"
+        template, {"parent": {"title": "Show"}, "season": 0}, "tv_show"
     )
     filename = render_filename(
         template, {"title": "Special", "season": 0, "episode": 123}, "tv_show"
@@ -38,12 +43,13 @@ def test_partial_context():
     assert filename == "S00E123 - Special"
 
 
-def test_show_originaltitle():
+def test_parent_originaltitle():
     template = (
-        "{{show_originaltitle}}/S{{season}}/{{show_originaltitle}} - {{originaltitle}}"
+        "{{parent.originaltitle}}/S{{season}}/"
+        "{{parent.originaltitle}} - {{originaltitle}}"
     )
     context = {
-        "show_originaltitle": "Show/A",
+        "parent": {"originaltitle": "Show/A"},
         "originaltitle": "Pilot: Part 1",
         "season": 1,
     }
@@ -54,11 +60,13 @@ def test_show_originaltitle():
 
 
 @pytest.mark.parametrize("value", [None, "", " "])
-def test_missing_show_originaltitle(value):
-    context = {"show_title": "Show", "show_originaltitle": value}
+def test_missing_parent_originaltitle(value):
+    context = {"parent": {"title": "Show", "originaltitle": value}}
 
-    with pytest.raises(ValueError, match="missing metadata field: show_originaltitle"):
-        render_path("{{show_originaltitle}}/episode", context, "tv_show")
+    with pytest.raises(
+        ValueError, match="missing metadata field: parent.originaltitle"
+    ):
+        render_path("{{parent.originaltitle}}/episode", context, "tv_show")
 
 
 def test_flat_directory():
@@ -81,14 +89,7 @@ def test_filename_length():
 
 @pytest.mark.parametrize(
     "field",
-    [
-        "show_title",
-        "show_originaltitle",
-        "show_year",
-        "season",
-        "episode",
-        "episode_code",
-    ],
+    ["season", "episode", "code"],
 )
 @pytest.mark.parametrize("directory", [False, True])
 def test_movie_show_fields(field, directory):
@@ -103,25 +104,23 @@ def test_movie_show_fields(field, directory):
 @pytest.mark.parametrize(
     "field",
     [
-        "show_title",
-        "show_originaltitle",
-        "show_year",
+        "parent.title",
+        "parent.originaltitle",
+        "parent.year",
         "season",
         "episode",
-        "episode_code",
+        "code",
     ],
 )
 def test_show_fields(field):
     placeholder = "{{" + field + "}}"
-    template = "{{show_title}}/" + placeholder
+    template = "{{parent.title}}/" + placeholder
 
     assert validate_template(placeholder) == placeholder
     assert validate_template(template, "tv_show") == template
 
 
-@pytest.mark.parametrize(
-    "field", ["title", "originaltitle", "year", "unique_id", "nfo_source"]
-)
+@pytest.mark.parametrize("field", ["title", "originaltitle", "year", "id", "site"])
 def test_movie_fields(field):
     placeholder = "{{" + field + "}}"
     template = f"{placeholder}/{placeholder}"
@@ -141,7 +140,7 @@ def test_movie_fields(field):
         ("{{unknown}}", "movie"),
         ("{% if title %}x{% endif %}", "movie"),
         ("{{title}}/{{episode}}", "tv_show"),
-        ("{{show_title}}/{{episode_code}}/x", "tv_show"),
+        ("{{parent.title}}/{{code}}/x", "tv_show"),
         ("{{title}}/a/b", "movie"),
         ("{{title}}", "tv_show"),
         ("C:\\{{title}}", "movie"),
@@ -166,9 +165,9 @@ def test_invalid_metadata(context):
 @pytest.mark.parametrize("lib_type", ["novel", "comic"])
 def test_reading_names(lib_type):
     template = (
-        "{{collection_title}} ({{year}})/{{volume}}-{{number}} {{title}} - {{authors}}"
+        "{{parent.title}} ({{year}})/{{volume}}-{{number}} {{title}} - {{authors}}"
     )
-    collection = {"collection_title": "Series/A", "year": 2026}
+    collection = {"parent": {"title": "Series/A"}, "year": 2026}
     chapter = {
         "volume": "02",
         "number": "12.5",
@@ -184,7 +183,7 @@ def test_reading_names(lib_type):
         "02-12.5 {{year}}_ Special - Alice_A, Bob"
     )
     assert render_filename(
-        "{{collection_title}}/{{number}}", {"number": "番外"}, lib_type
+        "{{parent.title}}/{{number}}", {"number": "番外"}, lib_type
     ) == ("番外")
 
 
@@ -193,9 +192,7 @@ def test_reading_names(lib_type):
 @pytest.mark.parametrize("names", [["Alice", "Bob"], ("Alice", "Bob")])
 def test_reading_creators(lib_type, field, names):
     assert (
-        render_filename(
-            "{{collection_title}}/{{" + field + "}}", {field: names}, lib_type
-        )
+        render_filename("{{parent.title}}/{{" + field + "}}", {field: names}, lib_type)
         == "Alice, Bob"
     )
 
@@ -204,15 +201,13 @@ def test_reading_creators(lib_type, field, names):
 @pytest.mark.parametrize("value", [None, "", [], ()])
 def test_reading_missing_creators(lib_type, value):
     with pytest.raises(ValueError, match="missing metadata field: authors"):
-        render_filename(
-            "{{collection_title}}/{{authors}}", {"authors": value}, lib_type
-        )
+        render_filename("{{parent.title}}/{{authors}}", {"authors": value}, lib_type)
 
 
 @pytest.mark.parametrize("field", ["title", "originaltitle"])
 def test_reading_collection_context(field):
-    template = "{{collection_" + field + "}} - {{authors}}/{{title}}"
-    collection = {f"collection_{field}": "Series", "authors": ["Collection author"]}
+    template = "{{parent." + field + "}} - {{authors}}/{{title}}"
+    collection = {"parent": {field: "Series"}, "authors": ["Collection author"]}
 
     assert render_directory(template, collection, "comic") == PurePosixPath(
         "Series - Collection author"
@@ -224,18 +219,18 @@ def test_reading_collection_context(field):
 @pytest.mark.parametrize(
     "template",
     [
-        "{{collection_title}}",
-        "{{collection_title}}/{{volume}}/{{title}}",
+        "{{parent.title}}",
+        "{{parent.title}}/{{volume}}/{{title}}",
         "{{title}}/{{title}}",
         "{{originaltitle}}/{{title}}",
         "../{{title}}",
-        "{{collection_title}}/CON",
-        "{{collection_title}}/{{title}}.TXT",
-        "{{collection_title}}/{{title}}.epub",
-        "{{collection_title}}/{{title}}.CBZ",
-        "{{collection_title}}/{{title}}.zip",
+        "{{parent.title}}/CON",
+        "{{parent.title}}/{{title}}.TXT",
+        "{{parent.title}}/{{title}}.epub",
+        "{{parent.title}}/{{title}}.CBZ",
+        "{{parent.title}}/{{title}}.zip",
         "{{work_title}}/{{title}}",
-        "{{collection_title}}/{{work_originaltitle}}",
+        "{{parent.title}}/{{work_originaltitle}}",
     ],
 )
 def test_reading_invalid_template(lib_type, template):
@@ -246,11 +241,11 @@ def test_reading_invalid_template(lib_type, template):
 @pytest.mark.parametrize("lib_type", ["novel", "comic"])
 @pytest.mark.parametrize(
     "field",
-    ["season", "episode", "episode_code", "show_title", "unique_id", "nfo_source"],
+    ["season", "episode", "code", "id", "site"],
 )
 def test_reading_video_fields(lib_type, field):
     with pytest.raises(ValueError, match=f"unsupported rename placeholder: {field}"):
-        validate_template("{{collection_title}}/{{" + field + "}}", lib_type)
+        validate_template("{{parent.title}}/{{" + field + "}}", lib_type)
 
 
 @pytest.mark.parametrize("lib_type", ["movie", "tv_show"])
@@ -263,10 +258,101 @@ def test_reading_video_fields(lib_type, field):
         "series",
         "volume",
         "number",
-        "collection_title",
-        "collection_originaltitle",
     ],
 )
 def test_video_reading_fields(lib_type, field):
     with pytest.raises(ValueError, match=f"unsupported rename placeholder: {field}"):
         validate_template("media/{{" + field + "}}", lib_type)
+
+
+@pytest.mark.parametrize("lib_type", ["movie", "tv_show", "novel", "comic"])
+def test_parent_fields(lib_type):
+    template = "{{parent.title}} ({{parent.year}})/{{parent.originaltitle}} - {{title}}"
+    context = {
+        "parent": {"title": "Series/A", "originaltitle": "Original", "year": 2020},
+        "title": "Chapter",
+        "year": 2026,
+    }
+    assert render_path(template, context, lib_type) == PurePosixPath(
+        "Series_A (2020)/Original - Chapter"
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy", "canonical", "lib_type"),
+    [
+        (
+            "{{show_title}} ({{show_year}})/{{show_originaltitle}} {{episode_code}}",
+            "{{parent.title}} ({{parent.year}})/{{parent.originaltitle}} {{code}}",
+            "tv_show",
+        ),
+        (
+            "{{collection_title}}/{{collection_originaltitle}} - {{title}}",
+            "{{parent.title}}/{{parent.originaltitle}} - {{title}}",
+            "novel",
+        ),
+        (
+            "{{ collection_title }}/{{collection_originaltitle}} - {{title}}",
+            "{{parent.title}}/{{parent.originaltitle}} - {{title}}",
+            "comic",
+        ),
+        (
+            "{{title}} ({{nfo_source}}-{{unique_id}})",
+            "{{title}} ({{site}}-{{id}})",
+            "movie",
+        ),
+    ],
+)
+def test_legacy_tokens(legacy, canonical, lib_type):
+    context = {
+        "parent": {"title": "Series", "originaltitle": "Original", "year": 2026},
+        "title": "Title",
+        "season": 1,
+        "episode": 2,
+        "site": "tmdb",
+        "id": "42",
+    }
+    assert validate_template(legacy, lib_type) == canonical
+    assert render_path(legacy, context, lib_type) == render_path(
+        canonical, context, lib_type
+    )
+
+
+def test_legacy_length():
+    template = "{{show_title}}" * 71 + "/{{episode_code}}"
+    context = {"parent": {"title": "A"}, "season": 1, "episode": 2}
+
+    assert len(template) <= 1024
+    assert validate_template(template, "tv_show") == template
+    assert render_path(template, context, "tv_show") == PurePosixPath(
+        "A" * 71, "S01E02"
+    )
+
+
+def test_alias_length_limit():
+    template = "{{unique_id}}" * 79
+
+    assert len(template) > 1024
+    with pytest.raises(ValueError, match="exceeds 1024 characters"):
+        validate_template(template, "movie")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "parent",
+        "parent.name",
+        "parent.title.upper()",
+        "parent.__class__",
+        "parent.parent.title",
+    ],
+)
+def test_parent_access(field):
+    with pytest.raises(ValueError):
+        validate_template("{{" + field + "}}/{{title}}", "comic")
+
+
+@pytest.mark.parametrize("parent", [None, "Title", {}, {"title": ""}])
+def test_missing_parent(parent):
+    with pytest.raises(ValueError, match="missing metadata field: parent.title"):
+        render_directory("{{parent.title}}/{{title}}", {"parent": parent}, "comic")

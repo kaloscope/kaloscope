@@ -173,7 +173,9 @@ def test_episode_scope(tmp_path, monkeypatch, change):
                 return True
 
             monkeypatch.setattr(media_routes, "gen_nfo", publish)
-            body = MediaMetadata(graph_id=1, metadata={"title": "Updated"})
+            body = MediaMetadata(
+                graph_id=1, metadata={"title": "Updated", "site": "tmdb", "id": "42"}
+            )
             route = inspect.unwrap(cast(Any, media_routes.generate_nfo))
 
             response = await route(None, body, parent.id)
@@ -184,9 +186,13 @@ def test_episode_scope(tmp_path, monkeypatch, change):
                 assert original is not None
                 expected = [original.path]
             assert [
-                call.kwargs["bootparams"]["item_path"]
-                for call in execute.await_args_list
+                call.kwargs["bootparams"]["path"] for call in execute.await_args_list
             ] == expected
+            for call in execute.await_args_list:
+                params = call.kwargs["bootparams"]
+                assert params["site"] == "tmdb" and params["series_id"] == "42"
+                assert params["name"] == "Original"
+                assert {"item_path", "item_name", "nfo_source"}.isdisjoint(params)
         finally:
             await Tortoise.close_connections()
 

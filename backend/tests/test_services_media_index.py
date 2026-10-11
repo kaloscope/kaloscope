@@ -5758,10 +5758,21 @@ def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchr
                 instances = await FlowInstance.all()
                 for instance in instances:
                     params = instance.bootparams or {}
-                    assert params["item_role"] in ("book", "collection", "chapter")
+                    assert params["role"] in ("book", "collection", "chapter")
                     assert params["lib_type"] == lib.lib_type.value
                     assert params["nfo_type"] is None and params["page_size"] == 1
                     assert "index_version" not in params and "$manual" not in params
+                    current = await MediaItem.get(id=params["item_id"])
+                    assert params["path"] == current.path
+                    assert params["name"] == current.name
+                    assert "series" in params and params["site"] is None
+                    assert {
+                        "item_path",
+                        "item_name",
+                        "item_role",
+                        "series_title",
+                        "nfo_source",
+                    }.isdisjoint(params)
                     await engine.execute(
                         instance.graph_id,
                         params,

@@ -152,23 +152,43 @@ def test_template_invalid(tmp_path, template):
 
 
 @pytest.mark.parametrize(
+    ("lib_type", "legacy", "canonical"),
+    [
+        (LibType.MOVIE, "{{unique_id}}-{{nfo_source}}", "{{id}}-{{site}}"),
+        (
+            LibType.TV_SHOW,
+            "{{show_title}}/{{episode_code}}",
+            "{{parent.title}}/{{code}}",
+        ),
+        (LibType.NOVEL, "{{collection_title}}/{{title}}", "{{parent.title}}/{{title}}"),
+        (LibType.COMIC, "{{collection_title}}/{{title}}", "{{parent.title}}/{{title}}"),
+    ],
+)
+def test_template_aliases(tmp_path, lib_type, legacy, canonical):
+    request = MediaLibUpsert(
+        dir=str(tmp_path), name="Library", lib_type=lib_type, rename_template=legacy
+    )
+    assert request.rename_template == canonical
+
+
+@pytest.mark.parametrize(
     ("lib_type", "initial_template", "edited_template"),
     [
         (LibType.MOVIE, "{{title}}", "{{title}} ({{year}})/{{title}}"),
         (
             LibType.TV_SHOW,
-            "{{show_title}}/{{episode_code}}",
-            "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}",
+            "{{parent.title}}/{{code}}",
+            "{{parent.title}}/Season {{season}}/{{code}} - {{title}}",
         ),
         (
             LibType.NOVEL,
-            "{{collection_title}}/{{title}}",
-            "{{collection_title}}/{{title}} - {{authors}}",
+            "{{parent.title}}/{{title}}",
+            "{{parent.title}}/{{title}} - {{authors}}",
         ),
         (
             LibType.COMIC,
-            "{{collection_title}}/{{title}}",
-            "{{collection_title}}/{{number}} - {{title}}",
+            "{{parent.title}}/{{title}}",
+            "{{parent.title}}/{{number}} - {{title}}",
         ),
     ],
 )
@@ -251,37 +271,37 @@ def test_rename_template(
         (
             LibType.MOVIE,
             "{{title}}",
-            "{{show_title}}/{{season}}/{{episode_code}}",
+            "{{parent.title}}/{{season}}/{{code}}",
             None,
         ),
-        (LibType.TV_SHOW, "{{show_title}}/{{episode_code}}", "{{title}}", None),
+        (LibType.TV_SHOW, "{{parent.title}}/{{code}}", "{{title}}", None),
         (
             LibType.TV_SHOW,
-            "{{show_title}}/{{episode_code}}",
-            "{{title}}/{{episode_code}}",
+            "{{parent.title}}/{{code}}",
+            "{{title}}/{{code}}",
             None,
         ),
         (
             LibType.MOVIE,
             "{{title}}",
-            "{{show_title}}/{{season}}/{{episode_code}}",
+            "{{parent.title}}/{{season}}/{{code}}",
             LibType.TV_SHOW,
         ),
         (
             LibType.TV_SHOW,
-            "{{show_title}}/{{episode_code}}",
+            "{{parent.title}}/{{code}}",
             "{{title}}",
             LibType.MOVIE,
         ),
-        (LibType.NOVEL, "{{collection_title}}/{{title}}", "{{title}}", LibType.MOVIE),
+        (LibType.NOVEL, "{{parent.title}}/{{title}}", "{{title}}", LibType.MOVIE),
         (
             LibType.COMIC,
-            "{{collection_title}}/{{title}}",
-            "{{show_title}}/{{episode_code}}",
+            "{{parent.title}}/{{title}}",
+            "{{parent.title}}/{{code}}",
             LibType.TV_SHOW,
         ),
-        (LibType.NOVEL, "{{collection_title}}/{{title}}", "{{title}}/{{title}}", None),
-        (LibType.COMIC, "{{collection_title}}/{{title}}", "work/{{title}}.zip", None),
+        (LibType.NOVEL, "{{parent.title}}/{{title}}", "{{title}}/{{title}}", None),
+        (LibType.COMIC, "{{parent.title}}/{{title}}", "work/{{title}}.zip", None),
     ],
 )
 def test_template_lib_type(
@@ -618,7 +638,7 @@ def test_delete_split(tmp_path, monkeypatch, local, merge):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+                rename_template="{{parent.title}}/Season {{season}}/{{code}}",
             )
 
             async def create_parent(directory, season):

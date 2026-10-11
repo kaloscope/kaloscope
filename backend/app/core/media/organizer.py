@@ -39,18 +39,19 @@ if TYPE_CHECKING:
 _SUBTITLES = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".lrc"}
 
 
-_METADATA = (
-    "title",
-    "year",
-    "season",
-    "episode",
-    "aired",
-    "unique_id",
-    "nfo_source",
-    "poster",
-    "backdrop",
-    "rating",
-)
+# map normalized metadata to the existing database columns
+_METADATA = {
+    "title": "title",
+    "year": "year",
+    "season": "season",
+    "episode": "episode",
+    "aired": "aired",
+    "unique_id": "id",
+    "nfo_source": "site",
+    "poster": "poster",
+    "backdrop": "backdrop",
+    "rating": "rating",
+}
 
 
 class OrganizePendingError(RuntimeError):
@@ -127,10 +128,10 @@ def _identity(metadata: dict) -> tuple | None:
         metadata: The parsed media metadata.
 
     Returns:
-        The NFO source and unique ID, or `None` if no unique ID is available.
+        The metadata site and external ID, or `None` if no ID is available.
     """
-    value = metadata.get("unique_id")
-    return (metadata.get("nfo_source"), value) if value else None
+    value = metadata.get("id")
+    return (metadata.get("site"), value) if value else None
 
 
 def _fingerprint(path: Path) -> list[int]:
@@ -390,15 +391,13 @@ def _context(metadata: dict, parent: dict | None) -> dict:
         parent: The parent show's metadata, or `None` for a standalone item.
 
     Returns:
-        A metadata copy with show fields and missing values inherited from the
-        parent where supported.
+        A metadata copy with a parent namespace and supported missing values
+        inherited from the show. Standalone items use their own parent metadata.
     """
     result = dict(metadata)
+    result["parent"] = dict(parent if parent is not None else metadata)
     if parent:
-        result["show_title"] = parent.get("title")
-        result["show_originaltitle"] = parent.get("originaltitle")
-        result["show_year"] = parent.get("year")
-        for name in ("year", "season", "nfo_source"):
+        for name in ("year", "season", "site"):
             if result.get(name) is None:
                 result[name] = parent.get(name)
     return result
@@ -644,8 +643,7 @@ def _reading_files(lib: MediaLib, items: list[MediaItem]) -> dict:
     collection_metadata = _reading_metadata(sources[work.path])
     collection_context = {
         **collection_metadata,
-        "collection_title": collection_metadata.get("title"),
-        "collection_originaltitle": collection_metadata.get("originaltitle"),
+        "parent": collection_metadata,
     }
     target_dir = root / render_directory(template, collection_context, lib.lib_type)
     if is_ignored_name(target_dir.name):
@@ -667,10 +665,7 @@ def _reading_files(lib: MediaLib, items: list[MediaItem]) -> dict:
                 template,
                 {
                     **metadata,
-                    "collection_title": collection_context["collection_title"],
-                    "collection_originaltitle": collection_context[
-                        "collection_originaltitle"
-                    ],
+                    "parent": collection_metadata,
                 },
                 lib.lib_type,
             )
@@ -856,7 +851,7 @@ async def _plan(
         for name in ("season", "year"):
             if parent_context.get(name) is None:
                 parent_context[name] = getattr(parent, name)
-        parent_context["show_year"] = parent_context.get("year")
+        parent_context["parent"]["year"] = parent_context.get("year")
     target_dir = root / render_directory(template, parent_context, lib.lib_type)
     _safe_path(root, target_dir)
 
@@ -1007,8 +1002,8 @@ async def _plan(
         if parent and target_dir == root:
             data["visible"] = item.visible and parent.visible
         if not is_tv and target_dir == root:
-            for name in _METADATA:
-                value = parent_meta.get(name)
+            for name, field in _METADATA.items():
+                value = parent_meta.get(field)
                 if value is not None:
                     data[name] = str(value) if name == "rating" else value
             data["nfo_path"] = str(destination.with_suffix(".nfo"))
@@ -1016,8 +1011,8 @@ async def _plan(
             data["nfo_path"] = None
         if is_tv and parent is not None:
             if metadata:
-                for name in _METADATA:
-                    value = metadata.get(name)
+                for name, field in _METADATA.items():
+                    value = metadata.get(field)
                     if value is not None or name not in ("year", "season", "episode"):
                         data[name] = (
                             str(value)
@@ -1138,8 +1133,8 @@ async def _plan(
                 else (parent.visible if parent else group[0].visible)
             ),
         }
-        for name in _METADATA:
-            value = stored_meta.get(name)
+        for name, field in _METADATA.items():
+            value = stored_meta.get(field)
             if value is not None or reuse_nfo:
                 parent_data[name] = (
                     str(value) if name == "rating" and value is not None else value

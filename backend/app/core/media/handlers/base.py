@@ -31,7 +31,7 @@ class MediaPathInfo:
     item_id: int | None = None
     nfo_path: Path | None = None
     nfo_type: NFOType | None = None
-    nfo_source: str | None = None
+    site: str | None = None
     language: Language | None = None
     title: str = field(init=False)
     year: int | None = None
@@ -66,8 +66,8 @@ class MediaMeta:
     """The metadata of a media item parsed from an NFO file."""
 
     nfo_path: str = field(init=False)
-    nfo_source: str | None = None
-    unique_id: str | None = None
+    site: str | None = None
+    id: str | None = None
     title: str | None = None
     originaltitle: str | None = None
     tagline: str | None = None

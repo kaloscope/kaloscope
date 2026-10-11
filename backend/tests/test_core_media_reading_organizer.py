@@ -149,17 +149,21 @@ async def _work(tmp_path: Path, format: MediaFormat) -> tuple[MediaLib, MediaIte
         if format in (MediaFormat.TXT, MediaFormat.EPUB)
         else LibType.COMIC,
         priority=1,
-        rename_template="{{collection_title}}/{{title}} - {{authors}}",
+        rename_template="{{parent.title}}/{{title}} - {{authors}}",
     )
     assert await MediaItemService.ingest_reading_work(lib.id, directory) == {}
     return lib, await MediaItem.get(lib_id=lib.id)
 
 
 @pytest.mark.parametrize("format", list(MediaFormat))
-def test_standalone(tmp_path, format):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_standalone(tmp_path, format, legacy):
     async def run():
         async with _database():
             lib, item = await _work(tmp_path, format)
+            if legacy:
+                lib.rename_template = "{{collection_title}}/{{title}} - {{authors}}"
+                await lib.save(update_fields=["rename_template"])
             source = Path(item.path)
             original = {
                 path.name: path.read_bytes() for path in Path(item.dir).iterdir()
@@ -228,7 +232,7 @@ def test_collection(tmp_path):
                 dir=str(root),
                 lib_type=LibType.COMIC,
                 priority=1,
-                rename_template="{{collection_title}}/{{title}}",
+                rename_template="{{parent.title}}/{{title}}",
             )
             assert await MediaItemService.ingest_reading_work(lib.id, source_dir) == {}
             work = await MediaItem.get(lib_id=lib.id, parent_id=None)
@@ -367,7 +371,7 @@ def test_unused_unit_name(tmp_path):
     async def run():
         async with _database():
             lib, item = await _work(tmp_path, MediaFormat.DIR)
-            lib.rename_template = "{{collection_title}}/{{number}}"
+            lib.rename_template = "{{parent.title}}/{{number}}"
             async with library_lock(lib.dir):
                 assert await organizer.organize_items(lib, [item.id])
             scan = ReadingMediaHandler(lib.lib_type).scan_sources(lib.dir)

@@ -98,8 +98,8 @@ def test_metadata(tmp_path, lib_type, tag):
     assert metadata["title"] == "示例 & New"
     assert metadata["originaltitle"] == "Original"
     assert metadata["year"] == 2026
-    assert metadata["unique_id"] == "10"
-    assert metadata["nfo_source"] == "tmdb"
+    assert metadata["id"] == "10"
+    assert metadata["site"] == "tmdb"
     assert metadata["nfo_path"] == str(path)
     assert metadata["actors"] == [{"name": "Alice", "role": "Lead", "thumb": None}]
     assert (metadata["season"], metadata["episode"]) == (
@@ -533,7 +533,7 @@ async def _episode(root: Path):
         dir=str(root),
         lib_type=LibType.TV_SHOW,
         priority=1,
-        rename_template="{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}",
+        rename_template="{{parent.title}}/Season {{season}}/{{code}} - {{title}}",
     )
     source = root / "Original"
     source.mkdir()
@@ -800,7 +800,7 @@ def test_companion_rename(tmp_path, monkeypatch, companion, relocated, collision
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template=f"{target_name}/{{{{episode_code}}}} - {{{{title}}}}",
+                rename_template=f"{target_name}/{{{{code}}}} - {{{{title}}}}",
             )
             source = tmp_path / "Show"
             source.mkdir()
@@ -1155,8 +1155,8 @@ def test_show_originaltitle(tmp_path, originaltitle, directory):
             source = Path(parent.path)
             old_path = item.path
             lib.rename_template = (
-                "{{show_originaltitle}}" if directory else "{{show_title}}"
-            ) + "/S{{season}}/{{show_originaltitle}} - {{originaltitle}}"
+                "{{parent.originaltitle}}" if directory else "{{parent.title}}"
+            ) + "/S{{season}}/{{parent.originaltitle}} - {{originaltitle}}"
             extra = (
                 f"<originaltitle>{originaltitle}</originaltitle>"
                 if originaltitle is not None
@@ -1207,7 +1207,7 @@ def test_tvshow_missing_nfo(tmp_path):
                 lib_type=LibType.TV_SHOW,
                 priority=1,
                 rename_template=(
-                    "{{show_title}}/Season {{season}}/{{episode_code}} - {{title}}"
+                    "{{parent.title}}/Season {{season}}/{{code}} - {{title}}"
                 ),
             )
             source = tmp_path / "Original"
@@ -1270,7 +1270,7 @@ def test_pending_episode_nfo(tmp_path, show_title, basename, indexed):
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
-            lib.rename_template = "{{show_title}}/{{episode_code}} - {{title}}"
+            lib.rename_template = "{{parent.title}}/{{code}} - {{title}}"
             source = Path(parent.path)
             parent_nfo = _path(parent.nfo_path)
             _nfo(parent_nfo, show_title, "tvshow", "<season>1</season>")
@@ -1435,7 +1435,7 @@ def test_season_fallback(
 ):
     async def run():
         async with _database():
-            template = "{{show_title}}/"
+            template = "{{parent.title}}/"
             if season_directory:
                 template += "Season {{season}}/"
             lib = await MediaLib.create(
@@ -1443,7 +1443,7 @@ def test_season_fallback(
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template=template + "{{episode_code}}",
+                rename_template=template + "{{code}}",
             )
             source = tmp_path / "Original"
             source.mkdir()
@@ -1626,7 +1626,7 @@ def test_external_directory_symlink(tmp_path, monkeypatch, absolute, relocated):
         async with _database():
             lib, parent, item = await _episode(tmp_path)
             directory = "Renamed" if relocated else "Original"
-            lib.rename_template = directory + "/{{episode_code}} - {{title}}"
+            lib.rename_template = directory + "/{{code}} - {{title}}"
             await lib.save(update_fields=["rename_template"])
             source = Path(parent.path)
             alias = tmp_path / "Alias"
@@ -1751,7 +1751,7 @@ def test_retained_symlink(tmp_path, monkeypatch, absolute, interruption, target_
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
-            lib.rename_template = "Original/{{episode_code}} - {{title}}"
+            lib.rename_template = "Original/{{code}} - {{title}}"
             await lib.save(update_fields=["rename_template"])
             source = Path(item.path)
             target = source.with_name(target_name)
@@ -1836,7 +1836,7 @@ def test_symlink_target_alias(tmp_path, reference, relocated):
             root.mkdir()
             lib, parent, item = await _episode(root)
             directory = "Renamed" if relocated else "Original"
-            lib.rename_template = directory + "/{{episode_code}} - {{title}}"
+            lib.rename_template = directory + "/{{code}} - {{title}}"
             source = Path(item.path)
             if reference == "unicode":
                 source = source.rename(source.with_name("Café.mkv"))
@@ -1881,7 +1881,7 @@ def test_retained_download_symlink(tmp_path, pending):
     async def run():
         async with _database():
             lib, parent, item = await _episode(tmp_path)
-            lib.rename_template = "Original/{{episode_code}} - {{title}}"
+            lib.rename_template = "Original/{{code}} - {{title}}"
             source = Path(item.path)
             alias = source.with_name("alias.mkv")
             alias.symlink_to(source.name)
@@ -2140,7 +2140,7 @@ def test_season_nfo_symlink(tmp_path, season, organized):
                 dir=str(root),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+                rename_template="{{parent.title}}/Season {{season}}/{{code}}",
             )
             external_nfo = tmp_path / "show.nfo"
             _nfo(
@@ -2204,7 +2204,7 @@ def test_download_nfo(tmp_path, listed):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/{{episode_code}}",
+                rename_template="{{parent.title}}/{{code}}",
             )
             folder = tmp_path / "Show"
             folder.mkdir()
@@ -2343,7 +2343,7 @@ def test_season_merge(tmp_path):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/{{episode_code}} - {{title}}",
+                rename_template="{{parent.title}}/{{code}} - {{title}}",
             )
             items, parents = [], []
             for season in (1, 2):
@@ -2407,7 +2407,7 @@ def test_season_split(tmp_path, seasons, existing_directory, source_first):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+                rename_template="{{parent.title}}/Season {{season}}/{{code}}",
             )
             show_directory = tmp_path / "Show"
             directory = (
@@ -2567,7 +2567,7 @@ def test_split_season_fallback(
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/Season {{season}}/{{episode_code}}",
+                rename_template="{{parent.title}}/Season {{season}}/{{code}}",
             )
             directory = tmp_path / "Show" / "Season 02"
             directory.mkdir(parents=True)
@@ -2755,7 +2755,7 @@ def test_episode_case_collision(tmp_path):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="{{show_title}}/{{title}}",
+                rename_template="{{parent.title}}/{{title}}",
             )
             directory = tmp_path / "Original"
             directory.mkdir()
@@ -2854,7 +2854,7 @@ def test_parent_merge(tmp_path, visible, different_visibility):
                 dir=str(tmp_path),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="Merged/{{episode_code}} - {{title}}",
+                rename_template="Merged/{{code}} - {{title}}",
             )
             items, parents = [], []
             for season, title in enumerate(("First Title", "Second Title"), 1):
@@ -3147,7 +3147,7 @@ def test_danmaku_scope(tmp_path, monkeypatch, operation):
                 dir=str(root),
                 lib_type=LibType.TV_SHOW,
                 priority=1,
-                rename_template="Merged/{{episode_code}}",
+                rename_template="Merged/{{code}}",
                 danmaku_server="https://danmaku.example",
             )
             parents, items, caches = [], [], []
@@ -3364,7 +3364,7 @@ def test_companions(tmp_path, linked):
 
 @pytest.mark.parametrize("identity", [None, "", "10"])
 def test_identity(identity):
-    metadata = {"unique_id": identity, "nfo_source": "tmdb"}
+    metadata = {"id": identity, "site": "tmdb"}
 
     result = organizer._identity(metadata)
 
@@ -3378,7 +3378,7 @@ def test_template_context():
         "originaltitle": "Original",
         "year": 2026,
         "season": 1,
-        "nfo_source": "tmdb",
+        "site": "tmdb",
     }
 
     result = organizer._context(metadata, parent)
@@ -3387,13 +3387,11 @@ def test_template_context():
         "title": "Episode",
         "year": 2026,
         "season": 0,
-        "show_title": "Show",
-        "show_originaltitle": "Original",
-        "show_year": 2026,
-        "nfo_source": "tmdb",
+        "parent": parent,
+        "site": "tmdb",
     }
     assert metadata == {"title": "Episode", "year": None, "season": 0}
-    assert organizer._context(metadata, None) == metadata
+    assert organizer._context(metadata, None) == {**metadata, "parent": metadata}
 
 
 @pytest.mark.parametrize("season", [None, 2])

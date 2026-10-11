@@ -50,6 +50,49 @@ def _comic(fields: str) -> bytes:
     return f"<ComicInfo>{fields}</ComicInfo>".encode()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_comic_field_names(legacy):
+    candidate = (
+        '{"title":"Comic","page_count":0,"black_and_white":false}'
+        if legacy
+        else '{"title":"Comic","pages":0,"monochrome":false}'
+    )
+    fields = ReadingMetadata.model_validate_json(candidate)
+    assert fields.model_dump(mode="json", exclude_defaults=True) == {
+        "title": "Comic",
+        "pages": 0,
+        "monochrome": False,
+    }
+    xml = render_metadata(fields, "comicinfo", identifier=UUID(int=0))
+    assert b"<PageCount>0</PageCount>" in xml
+    assert b"<BlackAndWhite>No</BlackAndWhite>" in xml
+    assert parse_comicinfo(xml).data == fields
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        '{"pages":-1,"page_count":0}',
+        '{"monochrome":"false","black_and_white":true}',
+        '{"page_count":-1}',
+        '{"black_and_white":"false"}',
+    ],
+)
+def test_comic_alias_validation(candidate):
+    with pytest.raises(ValidationError):
+        ReadingMetadata.model_validate_json(candidate)
+
+
+def test_comic_alias_priority():
+    fields = ReadingMetadata.model_validate_json(
+        '{"pages":0,"page_count":1,"monochrome":false,"black_and_white":true}'
+    )
+    assert fields.model_dump(mode="json", exclude_defaults=True) == {
+        "pages": 0,
+        "monochrome": False,
+    }
+
+
 def test_opf_fields():
     result = parse_opf(
         _opf(
@@ -221,8 +264,8 @@ def test_comic_fields():
         genres=("Adventure", "Fantasy"),
         tags=("tag1", "tag2"),
         rating=Decimal("8.50"),
-        page_count=0,
-        black_and_white=False,
+        pages=0,
+        monochrome=False,
         isbn="9780306406157",
         cover=CoverReference(page=0),
     )
@@ -256,8 +299,8 @@ def test_unknown_values():
         ("rating", "<CommunityRating>1e2</CommunityRating>"),
         ("rating", "<CommunityRating>6</CommunityRating>"),
         ("rating", "<CommunityRating>-0.5</CommunityRating>"),
-        ("page_count", "<PageCount>-2</PageCount>"),
-        ("black_and_white", "<BlackAndWhite>false</BlackAndWhite>"),
+        ("pages", "<PageCount>-2</PageCount>"),
+        ("monochrome", "<BlackAndWhite>false</BlackAndWhite>"),
         ("isbn", "<GTIN>9780306406158</GTIN>"),
         ("cover", '<Pages><Page Image="-1" Type="FrontCover"/></Pages>'),
         (
@@ -326,8 +369,8 @@ def test_metadata_merge():
         publisher="Embedded publisher",
         number="0",
         rating=Decimal(10),
-        black_and_white=True,
-        page_count=100,
+        monochrome=True,
+        pages=100,
         cover=CoverReference(page=5),
         tags=("embedded",),
     )
@@ -345,7 +388,7 @@ def test_metadata_merge():
         year=2020,
         tags=("parent",),
         rating=Decimal(8),
-        page_count=200,
+        pages=200,
         cover=CoverReference(page=7),
     )
     before = (external.model_dump(), embedded.model_dump(), parent.model_dump())
@@ -355,7 +398,7 @@ def test_metadata_merge():
     assert (
         merged.illustrators == ("Artist",) and merged.publisher == "Embedded publisher"
     )
-    assert (merged.rating, merged.page_count, merged.black_and_white) == (
+    assert (merged.rating, merged.pages, merged.monochrome) == (
         Decimal(0),
         0,
         False,
@@ -549,8 +592,8 @@ def test_render_metadata(format):
         rating=Decimal("8.51"),
         volume="0" if format == "comicinfo" else None,
         tags=("Tag",) if format == "comicinfo" else (),
-        page_count=0 if format == "comicinfo" else None,
-        black_and_white=False if format == "comicinfo" else None,
+        pages=0 if format == "comicinfo" else None,
+        monochrome=False if format == "comicinfo" else None,
         cover=CoverReference(href="cover.jpg")
         if format == "opf"
         else CoverReference(page=0),

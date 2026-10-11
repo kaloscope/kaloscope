@@ -11,6 +11,7 @@ from uuid import UUID
 
 from lxml import etree
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -100,8 +101,15 @@ class ReadingMetadata(BaseModel):
     genres: _Names = ()
     tags: _Names = ()
     rating: Decimal | None = Field(default=None, ge=0, le=10, decimal_places=2)
-    page_count: int | None = Field(default=None, ge=0, le=0x7FFFFFFF)
-    black_and_white: bool | None = None
+    pages: int | None = Field(
+        default=None,
+        ge=0,
+        le=0x7FFFFFFF,
+        validation_alias=AliasChoices("pages", "page_count"),
+    )
+    monochrome: bool | None = Field(
+        default=None, validation_alias=AliasChoices("monochrome", "black_and_white")
+    )
     cover: CoverReference | None = None
 
     @field_validator("*", mode="before")
@@ -467,7 +475,7 @@ def parse_comicinfo(data: bytes) -> ParsedMetadata:
         ("year", "Year"),
         ("month", "Month"),
         ("day", "Day"),
-        ("page_count", "PageCount"),
+        ("pages", "PageCount"),
     ):
         values[name] = _integer(get_text(root, tag))
     volume = _integer(get_text(root, "Volume"))
@@ -479,9 +487,9 @@ def parse_comicinfo(data: bytes) -> ParsedMetadata:
     values["rating"] = rating * 2 if isinstance(rating, Decimal) else rating
     monochrome = get_text(root, "BlackAndWhite")
     if monochrome in ("Yes", "No"):
-        values["black_and_white"] = monochrome == "Yes"
+        values["monochrome"] = monochrome == "Yes"
     elif monochrome not in (None, "", "Unknown"):
-        invalid.append("black_and_white")
+        invalid.append("monochrome")
     if get_text(root, "Manga") in ("Yes", "YesAndRightToLeft"):
         values["originaltitle"] = get_text(root, "AlternateSeries")
     gtin = get_text(root, "GTIN")
@@ -646,7 +654,7 @@ def render_metadata(
                 ("publisher", "Publisher"),
                 ("genres", "Genre"),
                 ("tags", "Tags"),
-                ("page_count", "PageCount"),
+                ("pages", "PageCount"),
                 ("language", "LanguageISO"),
                 ("isbn", "GTIN"),
             ):
@@ -655,9 +663,9 @@ def render_metadata(
                     etree.SubElement(root, tag).text = (
                         ", ".join(value) if isinstance(value, tuple) else str(value)
                     )
-            if metadata.black_and_white is not None:
+            if metadata.monochrome is not None:
                 etree.SubElement(root, "BlackAndWhite").text = (
-                    "Yes" if metadata.black_and_white else "No"
+                    "Yes" if metadata.monochrome else "No"
                 )
             if metadata.rating is not None:
                 etree.SubElement(root, "CommunityRating").text = str(

@@ -67,8 +67,8 @@ class TVShowMediaHandler(MediaHandler):
         root = data.getroot()
         uniqueid = get_element(root, "uniqueid", {"default": "true"})
         if uniqueid is not None:
-            meta.nfo_source = uniqueid.get("type")
-            meta.unique_id = uniqueid.text
+            meta.site = uniqueid.get("type")
+            meta.id = uniqueid.text
         meta.title = get_text(root, "title")
         meta.originaltitle = get_text(root, "originaltitle")
         meta.tagline = get_text(root, "tagline")
@@ -143,7 +143,7 @@ class TVShowMediaHandler(MediaHandler):
             info.season = parent.season
             info.episode = extract_episode(info.item_name)
             info.series_id = parent.unique_id
-            info.nfo_source = parent.nfo_source
+            info.site = parent.nfo_source
             return info
 
         dir = Path(lib.dir)

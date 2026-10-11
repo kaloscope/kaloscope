@@ -352,8 +352,8 @@ async def update_metadata(
         data = {
             "nfo_path": meta.nfo_path,
             "nfo_mtime": datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
-            "nfo_source": meta.nfo_source,
-            "unique_id": meta.unique_id,
+            "nfo_source": meta.site,
+            "unique_id": meta.id,
             "aired": meta.aired,
             "rating": meta.rating,
             "poster": meta.poster,

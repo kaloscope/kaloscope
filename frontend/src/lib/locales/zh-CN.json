@@ -632,8 +632,8 @@
     "volume": "第 {0} 卷",
     "series_index": "系列序号 {0}",
     "issue": "第 {0} 话",
-    "page_count": "{0} 页",
-    "black_and_white": "黑白",
+    "pages": "{0} 页",
+    "monochrome": "黑白",
     "full_color": "彩色"
   },
   "ffmpeg": {

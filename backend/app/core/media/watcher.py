@@ -642,8 +642,8 @@ def _ingest_params(info: MediaPathInfo) -> dict:
     """
     return {
         "item_id": info.item_id,
-        "item_path": info.item_path,
-        "item_name": info.item_name,
+        "path": info.item_path,
+        "name": info.item_name,
         "nfo_path": str(info.nfo_path) if info.nfo_path else None,
         "nfo_type": info.nfo_type,
         "language": info.language,
@@ -652,7 +652,7 @@ def _ingest_params(info: MediaPathInfo) -> dict:
         "season": info.season,
         "episode": info.episode,
         "series_id": info.series_id,
-        "nfo_source": info.nfo_source,
+        "site": info.site,
         "page_num": 1,
         "page_size": 1,
     }
@@ -1035,6 +1035,14 @@ async def _resume_ingest(event: MediaEvent) -> list[dict]:
 
     pending = []
     for params in payload["bootparams"]:
+        # normalize events persisted before the ingest field names changed
+        for old, name in (
+            ("item_path", "path"),
+            ("item_name", "name"),
+            ("nfo_source", "site"),
+        ):
+            if old in params:
+                params.setdefault(name, params.pop(old))
         # skip media removed after the event was persisted
         if params["item_id"] is not None:
             current = await MediaItem.get_or_none(
@@ -1050,8 +1058,8 @@ async def _resume_ingest(event: MediaEvent) -> list[dict]:
                 else None
             )
             info = MediaPathInfo(Path(current.path))
-            params["item_path"] = info.item_path
-            params["item_name"] = info.item_name
+            params["path"] = info.item_path
+            params["name"] = info.item_name
             if current.nfo_path or params["nfo_path"]:
                 nfo_path = current.nfo_path
                 if not nfo_path and parent and event.lib.lib_type == LibType.MOVIE:
@@ -1063,7 +1071,7 @@ async def _resume_ingest(event: MediaEvent) -> list[dict]:
             if parent is not None and event.lib.lib_type == LibType.TV_SHOW:
                 params["title"] = parent.title or params["title"]
                 params["series_id"] = parent.unique_id
-                params["nfo_source"] = parent.nfo_source
+                params["site"] = parent.nfo_source
                 if parent.year is not None:
                     params["year"] = parent.year
             elif current.title:

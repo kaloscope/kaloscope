@@ -19,9 +19,9 @@
   const DANMAKU_SERVER_PRESET = 'danmaku.kaloscope.org';
   const RENAME_EXAMPLES: Partial<Record<keyof typeof LibType, string>> = {
     movie: '{{title}} ({{year}})/{{title}} ({{year}})',
-    tv_show: '{{show_title}}/S{{season}}/{{episode_code}}',
-    novel: '{{collection_title}}/{{title}}',
-    comic: '{{collection_title}}/{{title}}'
+    tv_show: '{{parent.title}}/S{{season}}/{{code}}',
+    novel: '{{parent.title}}/{{title}}',
+    comic: '{{parent.title}}/{{title}}'
   };
 </script>
 

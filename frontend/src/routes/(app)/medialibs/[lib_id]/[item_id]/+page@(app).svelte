@@ -815,11 +815,9 @@
         {@const facts = [
           published ? $_('metadata.published', published) : null,
           readingMeta.language,
-          mediaType === 'image' && readingMeta.page_count != null
-            ? $_('metadata.page_count', readingMeta.page_count)
-            : null,
-          mediaType === 'image' && readingMeta.black_and_white != null
-            ? $_(readingMeta.black_and_white ? 'metadata.black_and_white' : 'metadata.full_color')
+          mediaType === 'image' && readingMeta.pages != null ? $_('metadata.pages', readingMeta.pages) : null,
+          mediaType === 'image' && readingMeta.monochrome != null
+            ? $_(readingMeta.monochrome ? 'metadata.monochrome' : 'metadata.full_color')
             : null
         ]
           .filter(Boolean)

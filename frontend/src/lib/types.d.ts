@@ -291,7 +291,7 @@ export type MediaItem = {
   metadata?: MediaMeta | null;
   lib_type?: keyof typeof LibType;
   media_type?: 'video' | 'text' | 'image';
-  item_role?: 'book' | 'collection' | 'chapter';
+  role?: 'book' | 'collection' | 'chapter';
   metadata_state?: 'ready' | 'missing' | 'error';
   metadata_issues?: {
     source: 'source' | 'external' | 'embedded' | 'parent';
@@ -492,8 +492,8 @@ export type Actor = {
  */
 export type MediaMeta = {
   nfo_path?: string;
-  nfo_source?: string | null;
-  unique_id?: string | null;
+  site?: string | null;
+  id?: string | null;
   title: string | null;
   originaltitle: string | null;
   tagline?: string | null;
@@ -525,8 +525,8 @@ export type MediaMeta = {
   number?: string | null;
   month?: number | null;
   day?: number | null;
-  page_count?: number | null;
-  black_and_white?: boolean | null;
+  pages?: number | null;
+  monochrome?: boolean | null;
 };
 
 /**

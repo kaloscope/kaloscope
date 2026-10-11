@@ -9,23 +9,20 @@ FIELDS = frozenset(
         "year",
         "season",
         "episode",
-        "episode_code",
-        "show_title",
-        "show_originaltitle",
-        "show_year",
-        "unique_id",
-        "nfo_source",
+        "code",
+        "parent.title",
+        "parent.originaltitle",
+        "parent.year",
+        "id",
+        "site",
     }
 )
 MOVIE_FIELDS = FIELDS - {
     "season",
     "episode",
-    "episode_code",
-    "show_title",
-    "show_originaltitle",
-    "show_year",
+    "code",
 }
-PARENT_FIELDS = FIELDS - {"title", "originaltitle", "episode", "episode_code"}
+PARENT_FIELDS = FIELDS - {"title", "originaltitle", "episode", "code"}
 READING_FIELDS = frozenset(
     {
         "title",
@@ -37,12 +34,23 @@ READING_FIELDS = frozenset(
         "series",
         "volume",
         "number",
-        "collection_title",
-        "collection_originaltitle",
+        "parent.title",
+        "parent.originaltitle",
+        "parent.year",
     }
 )
 COLLECTION_FIELDS = READING_FIELDS - {"title", "originaltitle"}
-_TOKEN = re.compile(r"{{\s*([a-z_]+)\s*}}")
+_ALIASES = {
+    "episode_code": "code",
+    "show_title": "parent.title",
+    "show_originaltitle": "parent.originaltitle",
+    "show_year": "parent.year",
+    "collection_title": "parent.title",
+    "collection_originaltitle": "parent.originaltitle",
+    "unique_id": "id",
+    "nfo_source": "site",
+}
+_TOKEN = re.compile(r"{{\s*([a-z_]+(?:\.[a-z_]+)?)\s*}}")
 _UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f\x7f]')
 _RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
 
@@ -56,7 +64,8 @@ def validate_template(template: str, lib_type: str | None = None) -> str | None:
             placeholders, or `None` to apply only the shared template rules.
 
     Returns:
-        The stripped template, or `None` if it is empty.
+        The stripped template, normalizing legacy tokens when the result fits
+        the length limit, or `None` if empty.
 
     Raises:
         ValueError: If the template exceeds the length or path depth limits,
@@ -67,6 +76,13 @@ def validate_template(template: str, lib_type: str | None = None) -> str | None:
         return None
     if len(template) > 1024:
         raise ValueError("rename template exceeds 1024 characters")
+    original = template
+    template = _TOKEN.sub(
+        lambda match: (
+            "{{" + _ALIASES[match[1]] + "}}" if match[1] in _ALIASES else match[0]
+        ),
+        template,
+    )
     parts = template.split("/")
     if lib_type == "movie" and len(parts) not in (1, 2):
         raise ValueError("movie templates require one or two path components")
@@ -104,7 +120,8 @@ def validate_template(template: str, lib_type: str | None = None) -> str | None:
         for name in _TOKEN.findall(part):
             if name not in allowed:
                 raise ValueError(f"unsupported rename placeholder: {name}")
-    return template
+    # retain valid legacy templates when longer field names exceed the storage limit
+    return template if len(template) <= 1024 else original
 
 
 def _render_component(component: str, context: dict[str, Any]) -> str:
@@ -122,7 +139,7 @@ def _render_component(component: str, context: dict[str, Any]) -> str:
             or the rendered component is empty, reserved, or too long.
     """
 
-    def replace(match: re.Match) -> str:
+    def replace(match: re.Match[str]) -> str:
         """Replace a placeholder with a sanitized metadata field value.
 
         Args:
@@ -134,11 +151,19 @@ def _render_component(component: str, context: dict[str, Any]) -> str:
         Raises:
             ValueError: If the field is missing or a numeric field is invalid.
         """
-        name = match[1]
-        value = context.get(name)
+        name = _ALIASES.get(match[1], match[1])
+        if name.startswith("parent."):
+            parent = context.get("parent")
+            value = (
+                parent.get(name.removeprefix("parent."))
+                if isinstance(parent, dict)
+                else None
+            )
+        else:
+            value = context.get(name)
         if name in ("authors", "illustrators") and isinstance(value, (list, tuple)):
             value = ", ".join(value)
-        if name == "episode_code":
+        if name == "code":
             season, episode = context.get("season"), context.get("episode")
             if season is not None and episode is not None:
                 value = f"S{int(season):02d}E{int(episode):02d}"

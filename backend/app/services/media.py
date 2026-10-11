@@ -1716,19 +1716,19 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 fields = metadata.data
                 params = {
                     "item_id": item.id,
-                    "item_path": item.path,
-                    "item_name": item.name,
-                    "item_role": _reading_role(item),
+                    "path": item.path,
+                    "name": item.name,
+                    "role": _reading_role(item),
                     "lib_type": item.lib.lib_type.value,
                     "title": fields.title or item.name,
-                    "series_title": fields.series
+                    "series": fields.series
                     or (item.parent.title or item.parent.name if item.parent else None),
                     "number": fields.number,
                     "language": fields.language or item.lib.language,
                     "year": fields.year,
                     "nfo_path": None,
                     "nfo_type": None,
-                    "nfo_source": None,
+                    "site": None,
                     "season": None,
                     "episode": None,
                     "series_id": None,
@@ -2706,7 +2706,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         if not reading:
             data["metadata"] = asdict(nfo) if nfo is not None else None
             return data
-        data["item_role"] = _reading_role(item)
+        data["role"] = _reading_role(item)
         path = Path(item.path)
         fields = (
             metadata.data
@@ -3314,7 +3314,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         metadata = meta.metadata
         series_id = metadata.get("id")
-        nfo_source = metadata.get("site")
+        site = metadata.get("site")
         season = metadata.get("season", item.season)
         title = metadata.get("title", item.title)
         year = metadata.get("year", item.year)
@@ -3346,9 +3346,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 bootparams={
                     "$manual": True,
                     "series_id": series_id,
-                    "nfo_source": nfo_source,
-                    "item_path": e.path,
-                    "item_name": e.name,
+                    "site": site,
+                    "path": e.path,
+                    "name": e.name,
                     "nfo_type": NFOType.EPISODE,
                     "language": item.lib.language,
                     "title": title,

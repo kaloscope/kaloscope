@@ -63,7 +63,7 @@
   let year: number | null = $state(null);
   let season: number | null = $state(null);
   let language: string = $state('');
-  let seriesTitle = $state('');
+  let series = $state('');
   let number = $state('');
 
   // the search results
@@ -110,7 +110,7 @@
     year = item.year ?? null;
     season = item.season ?? null;
     language = (reading ? item.metadata?.language : null) || item.lib?.language || '';
-    seriesTitle = item.metadata?.series ?? item.parent?.title ?? item.parent?.name ?? '';
+    series = item.metadata?.series ?? item.parent?.title ?? item.parent?.name ?? '';
     number = item.metadata?.number ?? '';
 
     // if the title is still empty, try to infer it from the file path
@@ -147,13 +147,13 @@
             ? {
                 item_id: item.id,
                 lib_type: item.lib?.lib_type,
-                item_role: item.item_role,
-                series_title: comic ? seriesTitle.trim() || null : null,
+                role: item.role,
+                series: comic ? series.trim() || null : null,
                 number: comic ? number.trim() || null : null
               }
             : {}),
-          item_path: item.path,
-          item_name: item.name,
+          path: item.path,
+          name: item.name,
           nfo_type: getNFOType(item.lib?.lib_type),
           language: language || null,
           title: title.trim(),
@@ -238,7 +238,7 @@
       <div class="flex flex-wrap gap-2">
         <div class="min-w-0 flex-1 space-y-1.5">
           <Label>{$_('metadata.fields.series')}</Label>
-          <input placeholder={$_('metadata.fields.series')} class="input w-full" bind:value={seriesTitle} />
+          <input placeholder={$_('metadata.fields.series')} class="input w-full" bind:value={series} />
         </div>
         <div class="min-w-0 flex-1 space-y-1.5">
           <Label>{$_('metadata.fields.number')}</Label>
