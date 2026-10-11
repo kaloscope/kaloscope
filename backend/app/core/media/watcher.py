@@ -191,6 +191,7 @@ class LibWatcher:
 
     async def start(self):
         """Start the watcher."""
+        await MediaItemService.prune_indexes()
         libs = await MediaLib.all()
         for lib in libs:
             await self.add_observer(lib, startup=True)

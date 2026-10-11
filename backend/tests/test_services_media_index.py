@@ -2841,7 +2841,8 @@ def test_rename_reading_chapter(tmp_path, monkeypatch, format):
             await current.refresh_from_db()
             assert current.index_state == IndexState.READY
             assert (
-                current.index_version != first.index_version and _cache(first).is_dir()
+                current.index_version != first.index_version
+                and not _cache(first).exists()
             )
             assert current.parent_id == first.parent_id and not current.visible
             assert await MediaItem.filter(path=str(sibling)).values() == sibling_row
@@ -3028,7 +3029,8 @@ def test_move_chapter_work(tmp_path, monkeypatch, format, directory_move, visibl
             await current.refresh_from_db()
             assert current.index_state == IndexState.READY
             assert current.index_version != first.index_version
-            assert current.parent_id == target.id and _cache(first).is_dir()
+            assert current.parent_id == target.id and not _cache(first).exists()
+            assert _cache(current).is_dir()
             old = await MediaItem.get(id=first.parent_id)
             assert old.index_state == IndexState.EMPTY and old.extra is not None
             assert old.extra["content"]["chapter_count"] == 0
@@ -5072,11 +5074,105 @@ def test_rebuild_content(tmp_path):
             assert reused.index_version == first.index_version
             current = await MediaItemService.index_content(item.id)
             assert current.index_version != first.index_version
-            for row, expected in ((first, "Body"), (current, "Next")):
-                cache = _cache(row)
-                index = load_text_index(cache)
-                assert read_text_chapter(cache, index.chapters[0].id) == [expected]
-            assert len(list(_cache(current).parent.iterdir())) == 2
+            cache = _cache(current)
+            index = load_text_index(cache)
+            assert read_text_chapter(cache, index.chapters[0].id) == ["Next"]
+            assert not _cache(first).exists()
+            assert list(cache.parent.iterdir()) == [cache]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.CBZ])
+def test_prune_indexes(tmp_path, format):
+    async def run():
+        async with _database():
+            item = await MediaItemService.index_content(
+                (await _item(tmp_path, format)).id
+            )
+            cache = _cache(item)
+            for name in ("a" * 64, "building_" + "b" * 32 + ".tmp"):
+                (cache.parent / name).mkdir()
+                (cache.parent / name / "partial").write_text("obsolete")
+            orphan = cache.parent.parent / "999999"
+            orphan.mkdir()
+            (orphan / "partial").write_text("orphan")
+            untouched = tmp_path / "Untouched"
+            untouched.mkdir()
+            (cache.parent / ("c" * 64)).symlink_to(untouched, target_is_directory=True)
+            await MediaItemService.prune_indexes()
+            assert cache.is_dir() and untouched.is_dir() and not orphan.exists()
+            assert {p.name for p in cache.parent.iterdir()} == {cache.name, "c" * 64}
+            assert (
+                await MediaItemService.index_content(item.id, force=False)
+            ).index_version == item.index_version
+
+    asyncio.run(run())
+
+
+def test_prune_active_build(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            item = await _item(tmp_path, MediaFormat.TXT)
+            started, released = threading.Event(), threading.Event()
+            build = media_service._build_index
+
+            def blocked(source, staging):
+                """Hold a real build so startup cleanup observes its active lock.
+
+                Args:
+                    source: The selected reading unit.
+                    staging: The private build directory.
+
+                Returns:
+                    The completed index and source snapshots.
+                """
+                result = build(source, staging)
+                started.set()
+                assert released.wait(5)
+                return result
+
+            monkeypatch.setattr(media_service, "_build_index", blocked)
+            task = asyncio.create_task(MediaItemService.index_content(item.id))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                await MediaItemService.prune_indexes()
+                root = tmp_path / "cache" / "media_index" / str(item.id)
+                assert list(root.glob("building_*.tmp"))
+            finally:
+                released.set()
+                result = await task
+            assert _cache(result).is_dir()
+
+    asyncio.run(run())
+
+
+def test_prune_active_read(tmp_path):
+    async def run():
+        async with _database():
+            item = await MediaItemService.index_content(
+                (await _item(tmp_path, MediaFormat.TXT)).id
+            )
+            started, released = threading.Event(), threading.Event()
+            old = _cache(item).parent / ("a" * 64)
+            old.mkdir()
+
+            def read():
+                """Hold the normal cache guard until concurrent cleanup returns."""
+                with media_service._content_index(item):
+                    started.set()
+                    assert released.wait(5)
+
+            task = asyncio.create_task(asyncio.to_thread(read))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                await MediaItemService.prune_indexes()
+                assert old.is_dir()
+            finally:
+                released.set()
+                await task
+            await MediaItemService.prune_indexes()
+            assert not old.exists() and _cache(item).is_dir()
 
     asyncio.run(run())
 
@@ -5155,7 +5251,7 @@ def test_reuse_changed_source(tmp_path, format, change):
             assert (
                 current.index_state == IndexState.READY and current.index_error is None
             )
-            assert len(list(_cache(first).parent.iterdir())) == 2
+            assert list(_cache(first).parent.iterdir()) == [_cache(current)]
             assert current.extra is not None
             if change == "size" and format in (MediaFormat.CBZ, MediaFormat.ZIP):
                 assert current.extra["content"]["page_count"] == 2

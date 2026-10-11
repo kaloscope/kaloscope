@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import aiofiles
+from filelock import AsyncFileLock, FileLock, Timeout
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
@@ -32,6 +33,7 @@ from app.core.exceptions import (
 )
 from app.core.media.common import ContentError, file_state
 from app.core.media.coordination import (
+    index_lock_path,
     library_lock,
     notify_media_events,
     write_in_thread,
@@ -422,10 +424,40 @@ def _remove_reading_caches(ids: list[int]):
             if not stat.S_ISDIR(info.st_mode):
                 raise ContentError("content_not_ready")
         for id in ids:
-            with suppress(FileNotFoundError):
+            with FileLock(index_lock_path(id), timeout=0), suppress(FileNotFoundError):
                 shutil.rmtree(directory / str(id))
-    except OSError as error:
+    except (OSError, Timeout) as error:
         raise ContentError("content_not_ready") from error
+
+
+def _prune_index(item: MediaItem | None, directory: Path):
+    """Remove obsolete caches while the caller holds the item's index lock.
+
+    Args:
+        item: The current database owner, or None for an orphaned directory.
+        directory: The item's internal cache directory below media_index.
+    """
+    try:
+        for parent in (directory.parent.parent, directory.parent, directory):
+            if not parent.is_dir() or parent.is_symlink():
+                return
+        if item is None:
+            shutil.rmtree(directory)
+            return
+        removed = 0
+        for path in directory.iterdir():
+            if (
+                path.name != item.index_version
+                and re.fullmatch(r"[0-9a-f]{64}|building_[0-9a-f]{32}\.tmp", path.name)
+                and path.is_dir()
+                and not path.is_symlink()
+            ):
+                shutil.rmtree(path)
+                removed += 1
+                if removed == 20:
+                    break
+    except OSError:
+        logger.warning("Failed to clean media cache %s", directory, exc_info=True)
 
 
 async def _remove_media_records(items: list[MediaItem]):
@@ -961,7 +993,10 @@ def _content_index(
     from app.core.media.image import load_image_index
     from app.core.media.text import load_text_index
 
-    with _reading_source(item) as (source, source_states, missing):
+    with (
+        ExitStack() as stack,
+        _reading_source(item) as (source, source_states, missing),
+    ):
         if missing:
             raise ContentError("media_source_unavailable")
         root = Path(KaloscopeConfig.get_workspace("temp"))
@@ -973,6 +1008,7 @@ def _content_index(
                 / ("content.txt" if item.format == MediaFormat.TXT else "content.jsonl")
             )
         try:
+            stack.enter_context(FileLock(index_lock_path(item.id)))
             directories = (root, cache.parent.parent, cache.parent, cache)
             states = {}
             for path in (*directories, *files):
@@ -2688,6 +2724,37 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return item
 
     @classmethod
+    async def prune_indexes(cls):
+        """Collect obsolete caches at startup, skipping active readers and builders."""
+        root = Path(KaloscopeConfig.get_workspace("temp")) / "media_index"
+        try:
+            directories = await to_thread(
+                lambda: (
+                    [p for p in root.iterdir() if p.name.isdecimal()]
+                    if root.is_dir() and not root.is_symlink()
+                    else []
+                )
+            )
+        except OSError:
+            logger.warning("Failed to list media caches", exc_info=True)
+            return
+        for directory in directories:
+            try:
+                async with AsyncFileLock(
+                    index_lock_path(int(directory.name)),
+                    timeout=0,
+                    fallback_to_soft=False,
+                ):
+                    item = await MediaItem.get_or_none(id=int(directory.name))
+                    await write_in_thread(_prune_index, item, directory)
+            except Timeout:
+                continue
+            except OSError:
+                logger.warning(
+                    "Failed to clean media cache %s", directory, exc_info=True
+                )
+
+    @classmethod
     async def index_content(cls, id: int, *, force: bool = True) -> MediaItem:
         """Rebuild and publish content for one persisted reading unit.
 
@@ -2697,8 +2764,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         and modification times match. All paths must enqueue work for the consumer.
         Collections derive their state from children and cannot be indexed as a
         body. Cache directories publish before the database pointer;
-        old and orphaned versions are retained for separate cleanup. Cancellation
-        leaves pending work safe to retry.
+        obsolete versions and abandoned builds are collected under the same index
+        lock used by readers. Cancellation leaves pending work safe to retry.
 
         Args:
             id: The internal reading item ID selected by the library consumer.
@@ -2716,104 +2783,112 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         from app.core.media.image import ImageIndex
 
-        original = await MediaItem.get(id=id).select_related("lib")
-        directory = original.lib.dir
-        async with library_lock(directory):
-            await recover_organizing(original.lib)
-            item = await MediaItem.get(id=id, lib_id=original.lib_id).select_related(
-                "lib", "parent"
-            )
-            if item.lib.dir != directory:
-                raise ContentError("content_changed")
-            if (
-                item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC)
-                or item.format is None
-            ):
-                raise ContentError("unsupported_media_format")
-            if not force and await to_thread(_index_is_current, item):
-                return item
-            item.index_state = IndexState.PENDING
-            item.index_error = None
-            await item.save(update_fields=["index_state", "index_error"])
-
-        staging = (
-            Path(KaloscopeConfig.get_workspace("temp"))
-            / "media_index"
-            / str(id)
-            / f"building_{secrets.token_hex(16)}.tmp"
-        )
-        try:
-            index, states = await write_in_thread(_build_index, item, staging)
+        async with AsyncFileLock(index_lock_path(id), fallback_to_soft=False):
+            original = await MediaItem.get(id=id).select_related("lib")
+            directory = original.lib.dir
             async with library_lock(directory):
-                await recover_organizing(item.lib)
-                current = await MediaItem.get_or_none(id=id).select_related(
-                    "lib", "parent"
-                )
-                if current is None or _source_identity(item) != _source_identity(
-                    current
-                ):
+                await recover_organizing(original.lib)
+                item = await MediaItem.get(
+                    id=id, lib_id=original.lib_id
+                ).select_related("lib", "parent")
+                if item.lib.dir != directory:
                     raise ContentError("content_changed")
-                await write_in_thread(
-                    _publish_index, current, staging, index.index_version, states
-                )
-                extra = dict(current.extra or {})
-                extra["schema_version"] = 1
-                extra["content"] = {
-                    "chapter_count": None
-                    if isinstance(index, ImageIndex)
-                    else len(index.chapters),
-                    "page_count": len(index.pages)
-                    if isinstance(index, ImageIndex)
-                    else None,
-                }
-                current.extra = extra
-                current.size = (
-                    index.source_snapshot.size
-                    if index.source_snapshot is not None
-                    else sum(page.size for page in index.pages)
-                    if isinstance(index, ImageIndex)
-                    else None
-                )
-                current.index_version = index.index_version
-                current.index_state = IndexState.READY
-                current.index_error = None
-                async with in_transaction():
-                    await current.save(
-                        update_fields=[
-                            "extra",
-                            "size",
-                            "index_version",
-                            "index_state",
-                            "index_error",
-                        ]
-                    )
-                notify_media_events(current.lib_id)
-                return current
-        except ContentError as error:
-            async with library_lock(directory):
-                current = await MediaItem.get_or_none(id=id).select_related(
-                    "lib", "parent"
-                )
-                if current is not None and _source_identity(item) == _source_identity(
-                    current
+                if (
+                    item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC)
+                    or item.format is None
                 ):
-                    current.index_state = (
-                        IndexState.EMPTY
-                        if error.code == "empty_content"
-                        else IndexState.PENDING
-                        if error.code
-                        in {
-                            "content_changed",
-                            "media_source_unavailable",
-                            "content_not_ready",
-                        }
-                        else IndexState.ERROR
+                    raise ContentError("unsupported_media_format")
+                cache = (
+                    Path(KaloscopeConfig.get_workspace("temp"))
+                    / "media_index"
+                    / str(id)
+                )
+                await write_in_thread(_prune_index, item, cache)
+                if not force and await to_thread(_index_is_current, item):
+                    return item
+                item.index_state = IndexState.PENDING
+                item.index_error = None
+                await item.save(update_fields=["index_state", "index_error"])
+
+            staging = (
+                Path(KaloscopeConfig.get_workspace("temp"))
+                / "media_index"
+                / str(id)
+                / f"building_{secrets.token_hex(16)}.tmp"
+            )
+            try:
+                index, states = await write_in_thread(_build_index, item, staging)
+                async with library_lock(directory):
+                    await recover_organizing(item.lib)
+                    current = await MediaItem.get_or_none(id=id).select_related(
+                        "lib", "parent"
                     )
-                    current.index_error = error.code
-                    await current.save(update_fields=["index_state", "index_error"])
-            raise
-        finally:
-            await write_in_thread(shutil.rmtree, staging, ignore_errors=True)
+                    if current is None or _source_identity(item) != _source_identity(
+                        current
+                    ):
+                        raise ContentError("content_changed")
+                    await write_in_thread(
+                        _publish_index, current, staging, index.index_version, states
+                    )
+                    extra = dict(current.extra or {})
+                    extra["schema_version"] = 1
+                    extra["content"] = {
+                        "chapter_count": None
+                        if isinstance(index, ImageIndex)
+                        else len(index.chapters),
+                        "page_count": len(index.pages)
+                        if isinstance(index, ImageIndex)
+                        else None,
+                    }
+                    current.extra = extra
+                    current.size = (
+                        index.source_snapshot.size
+                        if index.source_snapshot is not None
+                        else sum(page.size for page in index.pages)
+                        if isinstance(index, ImageIndex)
+                        else None
+                    )
+                    current.index_version = index.index_version
+                    current.index_state = IndexState.READY
+                    current.index_error = None
+                    async with in_transaction():
+                        await current.save(
+                            update_fields=[
+                                "extra",
+                                "size",
+                                "index_version",
+                                "index_state",
+                                "index_error",
+                            ]
+                        )
+                    await write_in_thread(_prune_index, current, cache)
+                    notify_media_events(current.lib_id)
+                    return current
+            except ContentError as error:
+                async with library_lock(directory):
+                    current = await MediaItem.get_or_none(id=id).select_related(
+                        "lib", "parent"
+                    )
+                    if current is not None and _source_identity(
+                        item
+                    ) == _source_identity(current):
+                        current.index_state = (
+                            IndexState.EMPTY
+                            if error.code == "empty_content"
+                            else IndexState.PENDING
+                            if error.code
+                            in {
+                                "content_changed",
+                                "media_source_unavailable",
+                                "content_not_ready",
+                            }
+                            else IndexState.ERROR
+                        )
+                        current.index_error = error.code
+                        await current.save(update_fields=["index_state", "index_error"])
+                raise
+            finally:
+                await write_in_thread(shutil.rmtree, staging, ignore_errors=True)
 
     @classmethod
     async def get_accessible(cls, id: int, user: UserInfo) -> MediaItem:

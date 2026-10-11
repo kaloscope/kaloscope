@@ -73,3 +73,15 @@ def library_lock(directory: str) -> AsyncFileLock:
         Path(KaloscopeConfig.get_workspace("temp")) / f"library_{key}.lock",
         fallback_to_soft=False,
     )
+
+
+def index_lock_path(id: int) -> Path:
+    """Locate the native lock shared by index readers, builders and cleanup.
+
+    Args:
+        id: The internal media item ID.
+
+    Returns:
+        A stable lock path outside the replaceable cache directory.
+    """
+    return Path(KaloscopeConfig.get_workspace("temp")) / f"media_index_{id}.lock"
