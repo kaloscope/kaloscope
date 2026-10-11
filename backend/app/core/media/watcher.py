@@ -46,6 +46,7 @@ from app.core.media.events import (
 )
 from app.core.media.handlers.base import MediaPathInfo, get_handler
 from app.core.media.handlers.reading import (
+    IMAGE_EXTENSIONS,
     ReadingSource,
     is_ignored_name,
     list_source_entries,
@@ -529,14 +530,25 @@ class LibWatcher:
         if not root.is_absolute() or ".." in root.parts:
             raise ContentError("media_source_unavailable")
         try:
-            _, directories = await asyncio.to_thread(list_source_entries, root)
+            files, directories = await asyncio.to_thread(list_source_entries, root)
         except OSError as error:
             raise ContentError("media_source_unavailable") from error
         current = await MediaLib.get(id=lib.id)
         if (current.dir, current.lib_type) != (lib.dir, lib.lib_type):
             raise ContentError("content_changed")
         works = set(directories)
-        for (directory,) in await MediaItem.filter(lib_id=lib.id).values_list("dir"):
+        extensions = (
+            {".txt", ".epub"}
+            if lib.lib_type == LibType.NOVEL
+            else {".cbz", ".zip"} | IMAGE_EXTENSIONS
+        )
+        # retain invalid root bodies as diagnostic scopes, never as media items
+        works.update(path for path in files if path.suffix.casefold() in extensions)
+        previous = await MediaItem.filter(lib_id=lib.id).values_list("dir")
+        previous += await MediaEvent.filter(
+            lib_id=lib.id, event_type="reconcile"
+        ).values_list("src_path")
+        for (directory,) in previous:
             path = Path(directory)
             if not path.is_relative_to(root):
                 continue

@@ -13,6 +13,7 @@ from tortoise import Tortoise
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import BadRequestException
 from app.core.media import organizer
+from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaMetadata
 from app.models.user import PermType, User, UserPermission
@@ -124,6 +125,56 @@ def test_scan_content(tmp_path, lib_type):
                 f"/_api/media/lib/{lib.id}/scan", params={"force_content": "invalid"}
             )
             assert response.status_code == 400
+            scan.side_effect = ContentError("media_source_unavailable")
+            response = await client.get(f"/_api/media/lib/{lib.id}/scan")
+            assert response.status_code == 503
+            assert response.json()["message"] == "media_source_unavailable"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_library_scan_status(tmp_path, admin):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=LibType.NOVEL, priority=1
+            )
+            user = _user() if admin else _user([])
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=lib.id
+            )
+            task = await MediaEvent.create(
+                lib=lib,
+                src_path=str(tmp_path / "Book.txt"),
+                event_type="reconcile",
+                payload={"state": "deferred", "error_code": "unsupported_layout"},
+            )
+            async with _client(user) as client:
+                cast(Any, client._transport).app.ctx.lib_watcher = SimpleNamespace(
+                    is_scanning=lambda _: False
+                )
+                response = await client.get("/_api/media/lib/list")
+                assert response.status_code == 200, response.text
+                data = response.json()["data"][0]
+                assert data["scanning"] is True
+                assert data.get("issues", []) == []
+                task.payload = {"state": "failed", "error_code": "unsupported_layout"}
+                await task.save()
+                data = (await client.get("/_api/media/lib/list")).json()["data"][0]
+                assert data["scanning"] is False
+                if admin:
+                    assert data["issues"] == [
+                        {"path": "Book.txt", "error": "unsupported_layout"}
+                    ]
+                else:
+                    assert "issues" not in data
+                await task.delete()
+                data = (await client.get("/_api/media/lib/list")).json()["data"][0]
+                assert not data.get("issues")
 
     asyncio.run(run())
 

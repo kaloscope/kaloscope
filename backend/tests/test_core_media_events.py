@@ -191,7 +191,12 @@ def test_reading_scan(tmp_path, monkeypatch, lib_type, initial):
                 await monitor.scan_directory(lib.dir)
             tasks = await MediaEvent.all().order_by("id")
             assert [task.src_path for task in tasks] == [
-                str(root / name) for name in ("Empty", "Missing", "New")
+                str(root / name)
+                for name in (
+                    ["Empty", "Missing", "New", "loose.txt"]
+                    if lib_type == LibType.NOVEL
+                    else ["Empty", "Missing", "New"]
+                )
             ]
             for task in tasks:
                 assert task.event_type == "reconcile" and task.is_directory
@@ -252,7 +257,6 @@ def test_scan_pending(tmp_path, monkeypatch):
                     error_code="bad_body",
                 ).model_dump(mode="json", exclude_none=True),
             )
-            untouched = await MediaEvent.get(id=other.id).values()
             await MediaEvent.create(
                 lib=lib, event_type="modified", src_path=str(work / "B/1.png")
             )
@@ -270,8 +274,13 @@ def test_scan_pending(tmp_path, monkeypatch):
             assert payload.error_code is None and payload.observed_snapshot is None
             assert payload.not_before is None
             assert await MediaEvent.all().count() == 2
-            assert await MediaEvent.get(id=other.id).values() == untouched
-            assert monitor._observers[lib.dir][1].get_nowait().id == task.id
+            refreshed = ReadingReconcile.model_validate(
+                (await MediaEvent.get(id=other.id)).payload
+            )
+            assert refreshed.targets == [other_path]
+            assert refreshed.state == "pending" and refreshed.error_code is None
+            queue = monitor._observers[lib.dir][1]
+            assert {queue.get_nowait().id, queue.get_nowait().id} == {task.id, other.id}
 
     asyncio.run(run())
 
@@ -1278,6 +1287,41 @@ def test_missing_cache_recovery(tmp_path, moment, lib_type):
             assert content.version != unit.index_version
             assert not await MediaEvent.exists()
             assert await MediaItem.filter(id=unit.id).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
+def test_scan_layout_issue(tmp_path, monkeypatch, moment, lib_type):
+    async def run():
+        async with _database():
+            lib = await _library(tmp_path, lib_type)
+            root = Path(lib.dir)
+            root.mkdir()
+            body = root / ("Book.txt" if lib_type == LibType.NOVEL else "1.png")
+            body.write_bytes(
+                b"Body" if lib_type == LibType.NOVEL else b"\x89PNG\r\n\x1a\nimage"
+            )
+            monitor = _monitor(monkeypatch, lib)
+            await monitor.scan_directory(lib)
+            task = await MediaEvent.get(event_type="reconcile")
+            for _ in range(5):
+                with pytest.raises(ContentError, match="unsupported_layout"):
+                    await prepare_reading_event(task.id)
+                await task.refresh_from_db()
+                payload = ReadingReconcile.model_validate(task.payload)
+                if payload.not_before is not None:
+                    moment[0] = payload.not_before
+            assert payload.state == "failed"
+            assert not await MediaItem.exists()
+            directory = root / "Work"
+            directory.mkdir()
+            body.rename(directory / body.name)
+            await monitor.scan_directory(lib)
+            for pending in await MediaEvent.filter(event_type="reconcile"):
+                assert await consume_event(await _ready(pending, moment))
+            assert not await MediaEvent.exists()
+            assert (await MediaItem.get()).index_state == IndexState.READY
 
     asyncio.run(run())
 

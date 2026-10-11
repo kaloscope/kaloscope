@@ -368,6 +368,8 @@ class ReadingMediaHandler(MediaHandler):
                 entries.append((str(directory), None))
                 return []
             if not stat.S_ISDIR(info.st_mode):
+                if directory == work_path and stat.S_ISREG(info.st_mode):
+                    raise ContentError("unsupported_layout")
                 raise ContentError("media_source_unavailable")
             # directory write times include ignored files and unrelated chapter writes
             entries.append((str(directory), *file_state(info)[:2]))

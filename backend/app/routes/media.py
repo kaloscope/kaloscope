@@ -44,6 +44,7 @@ from app.models.media import (
     MediaAssetQuery,
     MediaContentQuery,
     MediaDel,
+    MediaEvent,
     MediaItem,
     MediaLib,
     MediaLibUpsert,
@@ -74,13 +75,34 @@ async def list_libraries(request: Request) -> HTTPResponse:
         queries.append(Q(id__in=user.perms.media_lib_ids))
     # list the libraries without pagination
     media_libs = await MediaLibService.dump_list(MediaLib.filter(*queries))
+    tasks: dict[int, list[MediaEvent]] = {}
+    for event in await MediaEvent.filter(
+        lib_id__in=[lib["id"] for lib in media_libs], event_type="reconcile"
+    ):
+        tasks.setdefault(event.lib_id, []).append(event)
     # attach the triggers and scanning status for each library
     watcher: LibWatcher = request.app.ctx.lib_watcher
     for lib in media_libs:
         lib["triggers"] = await FlowTriggerService.get_triggers(
             GraphCategory.INGEST, lib["id"]
         )
-        lib["scanning"] = watcher.is_scanning(lib["dir"])
+        pending = tasks.get(lib["id"], [])
+        lib["scanning"] = watcher.is_scanning(lib["dir"]) or any(
+            (event.payload or {}).get("state") != "failed" for event in pending
+        )
+        if user.role == UserRole.ADMIN:
+            root = Path(lib["dir"])
+            lib["issues"] = [
+                {
+                    "path": str(Path(event.src_path).relative_to(root))
+                    if Path(event.src_path).is_relative_to(root)
+                    else event.src_path,
+                    "error": (event.payload or {}).get("error_code"),
+                }
+                for event in pending
+                if (event.payload or {}).get("state") == "failed"
+                and (event.payload or {}).get("error_code")
+            ][:20]
     return json(media_libs)
 
 
@@ -126,9 +148,12 @@ async def scan_library(request: Request, id: int, query: MediaScan) -> HTTPRespo
     if query.force_content and lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
         raise BadRequestException()
     watcher: LibWatcher = request.app.ctx.lib_watcher
-    await watcher.scan_directory(
-        lib, validate_request=True, force_content=query.force_content
-    )
+    try:
+        await watcher.scan_directory(
+            lib, validate_request=True, force_content=query.force_content
+        )
+    except ContentError as error:
+        raise content_error(error, {}) from error
     return empty()
 
 
