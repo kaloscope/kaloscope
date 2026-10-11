@@ -79,6 +79,7 @@ from app.utils.disk import delete_path, rename_exclusive
 if TYPE_CHECKING:
     from app.core.media.cover import CoverImage
     from app.core.media.epub.cache import EpubIndex
+    from app.core.media.events import ReadingMove
     from app.core.media.handlers.base import MediaPathInfo
     from app.core.media.handlers.reading import ReadingSource
     from app.core.media.image import ImageIndex
@@ -673,6 +674,30 @@ def _validate_reading_directory_move(
             _validate_previous_path(
                 Path(items[0].lib.dir), previous_path, dest_path, states
             )
+
+
+def _validate_reading_moves(items: list[MediaItem], paths: dict[int, list[Path]]):
+    """Validate final sources and former paths after replaying linked moves.
+
+    Args:
+        items: Affected items with final paths and parent relations loaded.
+        paths: The body paths visited by each affected item, in event order.
+
+    Raises:
+        ContentError: If a source is invalid, unstable or a former path is reused.
+    """
+    destinations = {Path(item.path) for item in items}
+    with ExitStack() as stack:
+        for item in items:
+            source, states, _ = stack.enter_context(
+                _reading_source(
+                    item, require_candidate=item.format not in (None, MediaFormat.DIR)
+                )
+            )
+            for previous in set(paths[item.id]) - destinations:
+                _validate_previous_path(
+                    Path(item.lib.dir), previous, source.path, states
+                )
 
 
 async def _get_target_parent(
@@ -2037,6 +2062,183 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     ],
                 )
             return items
+
+    @classmethod
+    async def move_reading_items(
+        cls, event: MediaEvent, moves: list[ReadingMove]
+    ) -> bool:
+        """Replay mixed or cyclic moves and retire their facts atomically.
+
+        Update registered paths in arrival order, validate the final filesystem and
+        commit all identities with the removal of their move facts. A retry cannot
+        replay a completed cycle or transfer a replacement's identity a second time.
+        This operation never moves or deletes files or changes reading histories.
+
+        Args:
+            event: The prepared reconcile task, refreshed in place after commit.
+            moves: Linked filesystem moves ordered by their persisted event IDs.
+
+        Returns:
+            True after applying the moves, or False if the prepared task changed.
+
+        Raises:
+            ContentError: If paths, ownership, final layout or stability are invalid.
+            DoesNotExist: If the library no longer exists.
+        """
+        from app.core.media.events import ReadingReconcile, _reading_event_identity
+        from app.core.media.handlers.reading import is_ignored_name
+
+        root = Path(event.lib.dir)
+        works = set()
+        for move in moves:
+            for path in (Path(move.src_path), Path(move.dest_path)):
+                if (
+                    not path.is_absolute()
+                    or path == root
+                    or not path.is_relative_to(root)
+                    or ".." in path.parts
+                ):
+                    raise ContentError("unsupported_layout")
+                works.add(str(root / path.relative_to(root).parts[0]))
+        async with library_lock(str(root)):
+            lib = await MediaLib.get(id=event.lib_id)
+            if (lib.dir, lib.lib_type) != (event.lib.dir, event.lib.lib_type):
+                raise ContentError("content_changed")
+            await recover_organizing(lib)
+            async with in_transaction():
+                current = await MediaEvent.get_or_none(id=event.id)
+                if current is None or _reading_event_identity(
+                    current
+                ) != _reading_event_identity(event):
+                    return False
+                if await MediaEvent.filter(
+                    lib_id=lib.id,
+                    event_type__in=("created", "modified", "deleted", "moved"),
+                ).exists():
+                    return False
+                tasks = await MediaEvent.filter(lib_id=lib.id, event_type="reconcile")
+                payloads = {
+                    task.id: ReadingReconcile.model_validate(task.payload)
+                    for task in tasks
+                }
+                facts = {
+                    move.event_id: move
+                    for payload in payloads.values()
+                    for move in payload.moves
+                }
+                if any(facts.get(move.event_id) != move for move in moves):
+                    raise ContentError("content_changed")
+                items = await MediaItem.filter(
+                    Q(dir__in=works) | Q(parent__path__in=works), lib_id=lib.id
+                ).select_related("lib", "parent")
+                for item in items:
+                    _resolve_source(item)
+                paths = {item.id: [Path(item.path)] for item in items}
+                affected: dict[int, MediaItem] = {}
+                for move in moves:
+                    source, destination = Path(move.src_path), Path(move.dest_path)
+                    changed = []
+                    for item in items:
+                        path = Path(item.path)
+                        if not (
+                            path.is_relative_to(source)
+                            if move.is_directory
+                            else path == source
+                        ):
+                            continue
+                        path = (
+                            destination / path.relative_to(source)
+                            if move.is_directory
+                            else destination
+                        )
+                        if item.format not in (None, MediaFormat.DIR) and (
+                            path.suffix.casefold() != f".{item.format}"
+                        ):
+                            raise ContentError("unsupported_media_format")
+                        item.path = str(path)
+                        item.dir = str(
+                            path
+                            if item.format in (None, MediaFormat.DIR)
+                            else path.parent
+                        )
+                        if len(Path(item.dir).relative_to(root).parts) != (
+                            2 if item.parent_id is not None else 1
+                        ) or any(
+                            is_ignored_name(part)
+                            for part in path.relative_to(root).parts
+                        ):
+                            raise ContentError("unsupported_layout")
+                        paths[item.id].append(path)
+                        affected[item.id] = item
+                        changed.append(item)
+                    if len({item.dir for item in items}) != len(items):
+                        raise ContentError("ambiguous_layout")
+                    if changed:
+                        await MediaItem.bulk_update(changed, fields=["path", "dir"])
+                if (
+                    await MediaItem.filter(parent_id__in=affected)
+                    .exclude(id__in=affected)
+                    .exists()
+                ):
+                    raise ContentError("unsupported_layout")
+                by_path = {item.path: item for item in items}
+                parents: list[MediaItem] = []
+                for item in affected.values():
+                    if item.parent_id is not None:
+                        parent_path = str(Path(item.dir).parent)
+                        parent = by_path.get(parent_path)
+                        if parent is None:
+                            parent = MediaItem(
+                                lib=lib,
+                                path=parent_path,
+                                dir=parent_path,
+                                name=Path(parent_path).name,
+                                index_state=IndexState.PENDING,
+                            )
+                            await to_thread(
+                                _validate_reading_source, parent, require_candidate=True
+                            )
+                            await parent.save(force_create=True)
+                            by_path[parent_path] = parent
+                            parents.append(parent)
+                        item.parent = parent
+                    item.name = (
+                        Path(item.path).name
+                        if item.format in (None, MediaFormat.DIR)
+                        else Path(item.path).stem
+                    )
+                    item.index_state = IndexState.PENDING
+                    item.index_error = None
+                await to_thread(_validate_reading_moves, list(affected.values()), paths)
+                if affected:
+                    await MediaItem.bulk_update(
+                        affected.values(),
+                        fields=["name", "parent_id", "index_state", "index_error"],
+                    )
+                if parents and await FlowTriggerService.get_triggers(
+                    GraphCategory.INGEST, lib.id
+                ):
+                    for parent in parents:
+                        await MediaEvent.create(
+                            lib=lib,
+                            event_type="ingest",
+                            src_path=parent.path,
+                            payload={"bootparams": [{"item_id": parent.id}]},
+                        )
+                applied = {move.event_id for move in moves}
+                for task in tasks:
+                    payload = payloads[task.id]
+                    remaining = [m for m in payload.moves if m.event_id not in applied]
+                    if remaining == payload.moves:
+                        continue
+                    payload.moves = remaining
+                    task.payload = payload.model_dump(mode="json", exclude_none=True)
+                    await task.save(update_fields=["payload", "updated_at"])
+                    if task.id == event.id:
+                        current = task
+            event.payload, event.updated_at = current.payload, current.updated_at
+        notify_media_events(lib.id)
+        return True
 
     @classmethod
     async def remove_missing_reading_item(

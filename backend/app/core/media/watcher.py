@@ -673,8 +673,8 @@ async def consume_event(event: MediaEvent) -> bool:
     """Reconcile reading events and consume video events under their lock.
 
     Reading services manage their own locks. Execute only the prepared task version;
-    unsupported move sequences wait for identity reconciliation. Remove absent
-    reading containers after applying moves, then ingest the remaining scopes.
+    apply linked moves before removing absent reading containers and ingesting the
+    remaining scopes. Invalid moves use the same bounded retries as ingestion.
     For video, recover organization and persist ingest work under the lock, then
     run workflows after releasing it, saving progress after each successful trigger.
 
@@ -684,7 +684,7 @@ async def consume_event(event: MediaEvent) -> bool:
 
     Returns:
         True after processing raw events, reading ingestion or video work. False
-        for stale, unprepared or unsupported tasks, including pending identity moves.
+        for stale, unprepared or unsupported tasks.
 
     Raises:
         ContentError: If the reading library changes or completion cannot observe
@@ -830,7 +830,7 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
     The serial consumer calls this after checking its prepared task version.
     Gather linked facts across pending works in arrival order, retaining duplicates
     only once. Collapse a continuous chain of one kind to its current owner's final
-    path. Mixed, branching and cyclic moves remain pending.
+    path. Apply mixed, branching and cyclic moves together in one transaction.
     Unregistered temporary files can publish or replace bodies without transferring
     another item's identity. This step never moves files or removes old companions.
 
@@ -839,8 +839,8 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
         payload: The task scopes and original filesystem move facts.
 
     Returns:
-        True if ingestion can continue after handling the moves; False if the chain
-        or its boundaries need further reconciliation.
+        True if ingestion can continue after handling the moves; False if the
+        prepared task changed before the moves could be applied.
 
     Raises:
         ContentError: If source ownership, layout or destination validation fails.
@@ -887,19 +887,19 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
     paths = [Path(chain[0].src_path)]
     for move in chain:
         if move.is_directory != directory or Path(move.src_path) != paths[-1]:
-            return False
+            return await MediaItemService.move_reading_items(event, chain)
         paths.append(Path(move.dest_path))
     if len(chain) > 1 and (
         len(set(paths)) != len(paths)
         or (not directory and len({path.suffix.casefold() for path in paths}) != 1)
     ):
-        return False
+        return await MediaItemService.move_reading_items(event, chain)
     root = Path(event.lib.dir)
     if any(
         path == root or not path.is_relative_to(root) or ".." in path.parts
         for path in paths
     ):
-        return False
+        raise ContentError("unsupported_layout")
     depths = {
         len((path if directory else path.parent).relative_to(root).parts)
         for path in paths
@@ -907,7 +907,7 @@ async def _handle_reading_moves(event: MediaEvent, payload: ReadingReconcile) ->
     if len(depths) != 1 or not depths.issubset(
         {1} if event.lib.lib_type == LibType.NOVEL else {1, 2}
     ):
-        return False
+        raise ContentError("unsupported_layout")
     owners: list[tuple[Path, MediaItem]] = []
     for path in paths if len(chain) > 1 else paths[:1]:
         if directory:

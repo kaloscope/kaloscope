@@ -1148,6 +1148,201 @@ def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse, c
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("format", "chapter"),
+    [
+        (MediaFormat.TXT, False),
+        (MediaFormat.EPUB, False),
+        (MediaFormat.CBZ, False),
+        (MediaFormat.ZIP, False),
+        (MediaFormat.DIR, False),
+        (MediaFormat.CBZ, True),
+        (MediaFormat.ZIP, True),
+        (MediaFormat.DIR, True),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_consume_mixed_move(tmp_path, monkeypatch, format, chapter, reverse):
+    """Preserve sources, parents and history through nested and mixed renames.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture controlling the event clock and notifications.
+        format: The reading body format to move.
+        chapter: Whether to include a parent collection and an unchanged sibling.
+        reverse: Whether the work moves first and its destination is consumed first.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=chapter)
+            work = source.parent_path or source.directory
+            if chapter:
+                sibling = work / "Sibling"
+                sibling.mkdir()
+                (sibling / "1.png").write_bytes(_PNG)
+            assert not await MediaItemService.ingest_reading_work(lib.id, work)
+            original = await MediaItem.get(path=str(source.path))
+            await MediaItem.filter(id=original.id).update(visible=False)
+            user = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            await UserHistory.create(
+                user=user,
+                rel_type=HistoryType.TEXT
+                if format in (MediaFormat.TXT, MediaFormat.EPUB)
+                else HistoryType.IMAGE,
+                rel_id=original.parent_id or original.id,
+                locator={"chapter_item_id": original.id},
+                percentage=25,
+            )
+            history = await UserHistory.all().values()
+            ids = set(await MediaItem.all().values_list("id", flat=True))
+            destination = work.with_name("Moved")
+            inner = (
+                source.directory
+                if format == MediaFormat.DIR and chapter
+                else source.path / "1.png"
+                if format == MediaFormat.DIR
+                else source.path
+            )
+            inner_directory = format == MediaFormat.DIR and chapter
+            if reverse:
+                work.rename(destination)
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(work),
+                    dest_path=str(destination),
+                    event_type="moved",
+                    is_directory=True,
+                )
+                inner = destination / inner.relative_to(work)
+            renamed = inner.with_name("Renamed" + inner.suffix)
+            before = (
+                {
+                    path.name: path.read_bytes()
+                    for path in inner.iterdir()
+                    if path.is_file()
+                }
+                if inner_directory
+                else inner.read_bytes()
+            )
+            inner.rename(renamed)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(inner),
+                dest_path=str(renamed),
+                event_type="moved",
+                is_directory=inner_directory,
+            )
+            if not reverse:
+                work.rename(destination)
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(work),
+                    dest_path=str(destination),
+                    event_type="moved",
+                    is_directory=True,
+                )
+                renamed = destination / renamed.relative_to(work)
+            clock = [100.0]
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            tasks = await coalesce_reading_events(lib.id)
+            for task in reversed(tasks) if reverse else tasks:
+                assert not await prepare_reading_event(task.id)
+                clock[0] += 2
+                assert await prepare_reading_event(task.id)
+                task = await MediaEvent.get(id=task.id).select_related("lib")
+                assert await media_watcher.consume_event(task)
+                assert not await MediaEvent.filter(id=task.id).exists()
+            current = await MediaItem.get(id=original.id).select_related("parent")
+            assert current.path == str(
+                renamed.parent if format == MediaFormat.DIR and not chapter else renamed
+            )
+            assert current.index_state == IndexState.READY
+            assert current.index_version != original.index_version
+            assert current.parent_id == original.parent_id
+            assert current.visible is False
+            if chapter:
+                assert current.parent is not None
+                assert current.parent.path == str(destination)
+            assert set(await MediaItem.all().values_list("id", flat=True)) == ids
+            assert await UserHistory.all().values() == history
+            assert not await MediaEvent.exists()
+            after = (
+                {
+                    path.name: path.read_bytes()
+                    for path in renamed.iterdir()
+                    if path.is_file()
+                }
+                if inner_directory
+                else renamed.read_bytes()
+            )
+            assert after == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.CBZ, MediaFormat.DIR])
+def test_consume_mixed_chapter(tmp_path, monkeypatch, format):
+    """Move a renamed chapter into a new collection without replacing its identity.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture controlling the event clock.
+        format: The chapter body stored as a comic archive or image directory.
+    """
+
+    async def run():
+        async with _database():
+            lib, source = await _source(tmp_path, format, chapter=True)
+            assert source.parent_path is not None
+            assert not await MediaItemService.ingest_reading_work(
+                lib.id, source.parent_path
+            )
+            original = await MediaItem.get(path=str(source.path))
+            body = source.path / "1.png" if format == MediaFormat.DIR else source.path
+            renamed = body.with_name("Renamed" + body.suffix)
+            body.rename(renamed)
+            await MediaEvent.create(
+                lib=lib, src_path=str(body), dest_path=str(renamed), event_type="moved"
+            )
+            destination = Path(lib.dir) / "New" / "Chapter"
+            destination.parent.mkdir()
+            source.directory.rename(destination)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(source.directory),
+                dest_path=str(destination),
+                event_type="moved",
+                is_directory=True,
+            )
+            clock = [100.0]
+            monkeypatch.setattr(media_events, "time", lambda: clock[0])
+            monkeypatch.setattr(media_watcher, "time", lambda: clock[0])
+            tasks = await coalesce_reading_events(lib.id)
+            for task in reversed(tasks):
+                assert not await prepare_reading_event(task.id)
+                clock[0] += 2
+                assert await prepare_reading_event(task.id)
+                assert await media_watcher.consume_event(
+                    await MediaEvent.get(id=task.id).select_related("lib")
+                )
+            current = await MediaItem.get(id=original.id).select_related("parent")
+            assert current.path == str(
+                destination if format == MediaFormat.DIR else destination / renamed.name
+            )
+            assert current.parent_id != original.parent_id
+            assert current.parent is not None
+            assert current.parent.path == str(destination.parent)
+            assert current.index_state == IndexState.READY
+            assert await MediaItem.all().count() == 3
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
 def test_ingest_empty_scope(tmp_path):
     async def run():
         async with _database():

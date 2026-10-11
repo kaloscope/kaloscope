@@ -1363,7 +1363,7 @@ def test_consume_empty_and_invalid(tmp_path, moment):
 
 @pytest.mark.parametrize("change", ["move", "raw", "merged", "library", "removed"])
 def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
-    """Retain moved or superseded scopes before touching reading items.
+    """Reject superseded scopes and defer unsupported moves before ingestion.
 
     Args:
         tmp_path: The isolated filesystem root.
@@ -1399,7 +1399,7 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
                 await task.delete()
             ingest = AsyncMock(side_effect=AssertionError("unexpected ingestion"))
             monkeypatch.setattr(MediaItemService, "ingest_reading_work", ingest)
-            assert not await consume_event(task)
+            assert await consume_event(task) == (change == "move")
             ingest.assert_not_awaited()
             assert not await MediaItem.exists()
             if change != "removed":
@@ -1407,6 +1407,9 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
                 payload = ReadingReconcile.model_validate(saved.payload)
                 if change in ("raw", "merged"):
                     assert payload.observed_snapshot is None
+                elif change == "move":
+                    assert payload.state == "deferred"
+                    assert payload.error_code == "unsupported_layout"
                 else:
                     assert saved.payload == task.payload
 
@@ -1628,7 +1631,7 @@ def test_consume_move_chain(tmp_path, moment, order, reverse):
         async with _database():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
-            before = await MediaItem.all().values()
+            original = await MediaItem.get(path=str(body))
             middle = Path(lib.dir) / "Middle" / body.name
             destination = Path(lib.dir) / "Last" / body.name
             if order != "directory_last":
@@ -1664,10 +1667,13 @@ def test_consume_move_chain(tmp_path, moment, order, reverse):
                 tasks.reverse()
             for task in tasks:
                 task = await _ready(task, moment)
-                assert not await consume_event(task)
-                assert (await MediaEvent.get(id=task.id)).payload == task.payload
-            assert await MediaItem.all().values() == before
-            assert await MediaEvent.all().count() == 3
+                assert await consume_event(task)
+                assert not await MediaEvent.filter(id=task.id).exists()
+            current = await MediaItem.get(id=original.id)
+            assert current.path == str(destination)
+            assert current.index_state == IndexState.READY
+            assert await MediaItem.all().count() == 1
+            assert not await MediaEvent.exists()
             assert destination.read_text() == "Body"
 
     asyncio.run(run())
@@ -1723,10 +1729,201 @@ def test_consume_chain_order(tmp_path, moment, directory, first):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "failure", ["validation", "cancel", "occupied", "stale", "raw"]
+)
+def test_consume_mixed_failure(tmp_path, monkeypatch, moment, failure):
+    """Roll back partial path updates and retain move facts until a safe retry.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture injecting failures or late events.
+        moment: The controllable task clock.
+        failure: A source failure, cancellation, conflicting owner or changed task.
+    """
+    from app.services import media as media_service
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            original = await MediaItem.get(path=str(body))
+            middle = body.with_name("Renamed.txt")
+            body.rename(middle)
+            await MediaEvent.create(
+                lib=lib, src_path=str(body), dest_path=str(middle), event_type="moved"
+            )
+            destination = body.parent.with_name("Moved")
+            body.parent.rename(destination)
+            await MediaEvent.create(
+                lib=lib,
+                src_path=str(body.parent),
+                dest_path=str(destination),
+                event_type="moved",
+                is_directory=True,
+            )
+            other = None
+            if failure == "occupied":
+                other = await MediaItem.create(
+                    lib=lib,
+                    path=str(destination / middle.name),
+                    dir=str(destination),
+                    name="Other",
+                    format=MediaFormat.TXT,
+                    visible=False,
+                )
+            before = await MediaItem.all().values()
+            task = await _ready((await coalesce_reading_events(lib.id))[0], moment)
+            operation = MediaItemService.move_reading_items
+
+            async def late_event(event, moves):
+                """Add a late source event before entering the move transaction.
+
+                Args:
+                    event: The prepared task from the consumer.
+                    moves: The previously selected move facts.
+
+                Returns:
+                    Whether the move service still accepts the prepared task.
+                """
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(
+                        body if failure == "stale" else destination / middle.name
+                    ),
+                    event_type="modified",
+                )
+                if failure == "stale":
+                    await coalesce_reading_events(lib.id)
+                return await operation(event, moves)
+
+            with monkeypatch.context() as patch:
+                if failure in ("validation", "cancel"):
+                    patch.setattr(
+                        media_service,
+                        "_validate_reading_moves",
+                        Mock(
+                            side_effect=asyncio.CancelledError
+                            if failure == "cancel"
+                            else ContentError("content_changed")
+                        ),
+                    )
+                elif failure in ("stale", "raw"):
+                    patch.setattr(MediaItemService, "move_reading_items", late_event)
+                if failure == "cancel":
+                    with pytest.raises(asyncio.CancelledError):
+                        await consume_event(task)
+                else:
+                    assert await consume_event(task) == (
+                        failure in ("validation", "occupied")
+                    )
+            assert await MediaItem.all().values() == before
+            assert any(
+                ReadingReconcile.model_validate(pending.payload).moves
+                for pending in await MediaEvent.filter(event_type="reconcile")
+            )
+            if other is not None:
+                await other.delete()
+            await coalesce_reading_events(lib.id)
+            for pending in await MediaEvent.filter(event_type="reconcile"):
+                moment[0] += 2
+                if not await prepare_reading_event(pending.id):
+                    moment[0] += 2
+                    assert await prepare_reading_event(pending.id)
+                assert await consume_event(
+                    await MediaEvent.get(id=pending.id).select_related("lib")
+                )
+            await original.refresh_from_db()
+            assert original.path == str(destination / middle.name)
+            assert original.index_state == IndexState.READY
+            assert await MediaItem.all().count() == 1
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_consume_move_swap(tmp_path, monkeypatch, moment, directory, interrupt):
+    """Exchange two sources once, including a restart after committing their paths.
+
+    Args:
+        tmp_path: The isolated filesystem root.
+        monkeypatch: The fixture interrupting ingestion after the move transaction.
+        moment: The controllable task clock.
+        directory: Whether complete work directories move instead of body files.
+        interrupt: Whether ingestion is cancelled after the swap commits.
+    """
+
+    async def run():
+        async with _database():
+            lib, body, task = await _pending(tmp_path)
+            assert await consume_event(await _ready(task, moment))
+            other = body.parent.with_name("Other") / body.name
+            other.parent.mkdir()
+            other.write_text("Other body")
+            assert not await MediaItemService.ingest_reading_work(lib.id, other.parent)
+            original = await MediaItem.get(path=str(body))
+            second = await MediaItem.get(path=str(other))
+            source = body.parent if directory else body
+            target = other.parent if directory else other
+            temporary = body.parent.with_name("Temporary")
+            if not directory:
+                temporary.mkdir()
+                temporary /= body.name
+            for first, last in (
+                (source, temporary),
+                (target, source),
+                (temporary, target),
+            ):
+                first.rename(last)
+                await MediaEvent.create(
+                    lib=lib,
+                    src_path=str(first),
+                    dest_path=str(last),
+                    event_type="moved",
+                    is_directory=directory,
+                )
+            tasks = await coalesce_reading_events(lib.id)
+            task = await _ready(tasks[-1], moment)
+            if interrupt:
+                with monkeypatch.context() as patch:
+                    patch.setattr(
+                        MediaItemService,
+                        "ingest_reading_work",
+                        AsyncMock(side_effect=asyncio.CancelledError),
+                    )
+                    with pytest.raises(asyncio.CancelledError):
+                        await consume_event(task)
+                assert all(
+                    not ReadingReconcile.model_validate(pending.payload).moves
+                    for pending in await MediaEvent.filter(event_type="reconcile")
+                )
+            else:
+                assert await consume_event(task)
+            for pending in await MediaEvent.filter(event_type="reconcile"):
+                if not await prepare_reading_event(pending.id):
+                    moment[0] += 2
+                    assert await prepare_reading_event(pending.id)
+                assert await consume_event(
+                    await MediaEvent.get(id=pending.id).select_related("lib")
+                )
+            await original.refresh_from_db()
+            await second.refresh_from_db()
+            assert original.path == str(other)
+            assert second.path == str(body)
+            assert original.index_state == second.index_state == IndexState.READY
+            assert body.read_text() == "Other body" and other.read_text() == "Body"
+            assert await MediaItem.all().count() == 2
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("directory", [False, True])
 @pytest.mark.parametrize("shape", ["branch", "cycle", "outside", "depth"])
 def test_consume_chain_boundary(tmp_path, moment, directory, shape):
-    """Keep ambiguous chains and unsupported intermediate boundaries pending.
+    """Apply branches and cycles while deferring unsupported intermediate paths.
 
     Args:
         tmp_path: The isolated filesystem root.
@@ -1740,6 +1937,7 @@ def test_consume_chain_boundary(tmp_path, moment, directory, shape):
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             before = await MediaItem.all().values()
+            original = await MediaItem.get(path=str(body))
             source = body.parent if directory else body
             middle = (
                 tmp_path / "Outside" if shape == "outside" else Path(lib.dir) / "Middle"
@@ -1779,9 +1977,23 @@ def test_consume_chain_boundary(tmp_path, moment, directory, shape):
             await coalesce_reading_events(lib.id)
             task = await MediaEvent.get(src_path=str(body.parent))
             task = await _ready(task, moment)
-            assert not await consume_event(task)
-            assert (await MediaEvent.get(id=task.id)).payload == task.payload
-            assert await MediaItem.all().values() == before
+            assert await consume_event(task)
+            if shape in ("outside", "depth"):
+                payload = ReadingReconcile.model_validate(
+                    (await MediaEvent.get(id=task.id)).payload
+                )
+                assert payload.state == "deferred" and payload.attempts == 1
+                assert payload.error_code == "unsupported_layout"
+                assert await MediaItem.all().values() == before
+            else:
+                for pending in await MediaEvent.filter(event_type="reconcile"):
+                    assert await consume_event(await _ready(pending, moment))
+                current = await MediaItem.get(id=original.id)
+                final = middle if shape == "branch" else destination
+                assert current.path == str(final / body.name if directory else final)
+                assert current.index_state == IndexState.READY
+                assert await MediaItem.all().count() == (2 if shape == "branch" else 1)
+                assert not await MediaEvent.exists()
             assert (destination / body.name if directory else destination).exists()
 
     asyncio.run(run())
