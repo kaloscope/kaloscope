@@ -1,6 +1,7 @@
 """Tests for video deletion ownership and shared media cleanup."""
 
 import asyncio
+import shutil
 import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -13,7 +14,8 @@ from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
 from app.core.media.common import ContentError
-from app.models.media import LibType, MediaItem, MediaLib
+from app.core.media.watcher import consume_event
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services import media as media_service
 from app.services.media import MediaItemService
@@ -210,7 +212,8 @@ def test_video_delete(tmp_path, monkeypatch, layout, group, local):
         "directory_link",
     ],
 )
-def test_video_shared_files(tmp_path, shared):
+@pytest.mark.parametrize("external", [False, True])
+def test_video_shared_files(tmp_path, shared, external):
     async def run():
         async with _database():
             lib, item = await _source(tmp_path, "flat")
@@ -251,11 +254,100 @@ def test_video_shared_files(tmp_path, shared):
                     else {subtitle if shared == "link" else cover}
                 )
             before = {path: path.read_bytes() for path in preserve}
-            await MediaItemService.delete(item.id, local=True)
+            if external:
+                video.unlink()
+                event = await MediaEvent.create(
+                    lib=lib, src_path=str(video), event_type="deleted"
+                )
+                assert await consume_event(event)
+            else:
+                await MediaItemService.delete(item.id, local=True)
             assert (
                 not video.exists() and not await MediaItem.filter(id=item.id).exists()
             )
             assert all(path.read_bytes() == content for path, content in before.items())
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("layout", ["flat", "movie", "show", "season"])
+def test_video_external_delete(tmp_path, layout):
+    async def run():
+        async with _database():
+            lib, item = await _source(tmp_path, layout)
+            user = await User.create(
+                username="user", password="unused", role=UserRole.USER
+            )
+            for row in await MediaItem.all():
+                for kind in (HistoryType.VIDEO, HistoryType.TEXT):
+                    await UserHistory.create(user=user, rel_id=row.id, rel_type=kind)
+            for body in await MediaItem.filter(lib=lib, path__endswith=".mkv"):
+                Path(body.path).unlink()
+                event = await MediaEvent.create(
+                    lib=lib, src_path=body.path, event_type="deleted"
+                )
+                assert await consume_event(event)
+            assert not await MediaItem.exists()
+            assert not await UserHistory.filter(rel_type=HistoryType.VIDEO).exists()
+            assert await UserHistory.filter(rel_type=HistoryType.TEXT).exists()
+            assert {
+                path.name for path in Path(lib.dir).rglob("*") if path.is_file()
+            } == {"notes.md", "unrelated.srt"}
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+def test_video_delete_restored(tmp_path, monkeypatch):
+    async def run():
+        async with _database():
+            lib, item = await _source(tmp_path, "flat")
+            video = Path(item.path)
+            video.unlink()
+            remove = media_service._delete_media_files
+
+            def restored(items, others, **kwargs):
+                """Restore a body immediately before filesystem cleanup.
+
+                Args:
+                    items: The selected database rows.
+                    others: The surviving rows protecting shared files.
+                    **kwargs: The cleanup mode forwarded to the original helper.
+                """
+                video.write_bytes(b"restored")
+                return remove(items, others, **kwargs)
+
+            monkeypatch.setattr(media_service, "_delete_media_files", restored)
+            event = await MediaEvent.create(
+                lib=lib, src_path=item.path, event_type="deleted"
+            )
+            with pytest.raises(ContentError, match="content_changed"):
+                await consume_event(event)
+            assert video.read_bytes() == b"restored"
+            assert await MediaItem.filter(id=item.id).exists()
+            assert await MediaEvent.filter(id=event.id).exists()
+            assert Path(item.nfo_path or "").is_file()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("layout", ["movie", "show", "season"])
+def test_video_directory_deleted(tmp_path, layout):
+    async def run():
+        async with _database():
+            lib, _ = await _source(tmp_path, layout)
+            directory = Path(lib.dir) / "Work"
+            shutil.rmtree(directory)
+            event = await MediaEvent.create(
+                lib=lib,
+                src_path=str(directory),
+                event_type="deleted",
+                is_directory=True,
+            )
+            assert await consume_event(event)
+            assert not await MediaItem.exists()
+            assert not await MediaEvent.exists()
+            assert Path(lib.dir).is_dir()
 
     asyncio.run(run())
 

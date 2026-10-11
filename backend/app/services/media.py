@@ -507,13 +507,15 @@ def _check_media_deleted(
 
 
 def _delete_media_files(
-    items: list[MediaItem], others: list[MediaItem]
+    items: list[MediaItem], others: list[MediaItem], *, missing: bool = False
 ) -> tuple[_SourceStates, list[Path]]:
     """Delete selected bodies before companions without deleting whole directories.
 
     Args:
         items: The nonempty scope with validated library and parent ownership.
         others: Other library items used to protect shared video companions.
+        missing: Require absent bodies for external deletion events. Defaults to
+            False so explicit deletion can remove the selected bodies.
 
     Returns:
         Surviving directory snapshots and removed files for database and folder cleanup.
@@ -525,6 +527,8 @@ def _delete_media_files(
     removed = []
     try:
         states, bodies, companions = _media_files(items, others)
+        if missing and bodies:
+            raise ContentError("content_changed")
         for group in (bodies, companions):
             if _media_files(items, others) != (states, bodies, companions):
                 raise ContentError("content_changed")
@@ -3357,12 +3361,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                     await cls.sync_collection(parent_id)
 
     @classmethod
-    async def _delete_local(cls, items: list[MediaItem]):
+    async def _delete_local(cls, items: list[MediaItem], *, missing: bool = False):
         """Delete captured media items while the caller holds the library lock.
 
         Args:
             items: Current rows from the originally requested scope, with library and
                 parent relations loaded; an empty scope is already complete.
+            missing: Refuse to remove a restored body while processing an external
+                deletion. Defaults to False for explicit local deletion.
 
         Raises:
             ContentError: If ownership, sources or filesystem cleanup change or fail.
@@ -3390,7 +3396,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             )
         ):
             raise ContentError("content_changed")
-        states, removed = await write_in_thread(_delete_media_files, items, others)
+        states, removed = await write_in_thread(
+            _delete_media_files, items, others, missing=missing
+        )
         if reading:
             await write_in_thread(_remove_reading_caches, list(ids))
         async with in_transaction():

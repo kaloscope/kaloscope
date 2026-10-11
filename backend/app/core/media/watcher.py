@@ -59,12 +59,10 @@ from app.core.media.organizer import (
 from app.core.media.shelver import get_nfo_path, is_nfo, update_metadata
 from app.models.flow import GraphCategory
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
-from app.models.user import HistoryType, UserHistory
 from app.services.danmaku import DanmakuService
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService
 from app.utils.crypto import encrypt
-from app.utils.disk import delete_path
 
 
 class EventHandler(FileSystemEventHandler):
@@ -1128,55 +1126,36 @@ async def _refresh_replaced(item: MediaItem):
 
 
 async def _handle_deleted(event: MediaEvent):
-    """Handle the deletion event.
+    """Clean missing videos using the same ownership rules as explicit deletion.
 
     Args:
-        event: The media event.
+        event: The deletion or move event with its library loaded. The caller holds
+            the library lock and has checked that the original path is absent.
+
+    Raises:
+        ContentError: If a body reappears or companion cleanup cannot finish safely.
     """
-
-    def _trash_nfo(path: str | None):
-        if not path:
-            return
-        # delete the NFO file according to filesystem trash mode
-        nfo = Path(path)
-        if nfo.exists() and nfo.is_file():
-            delete_path(nfo)
-
-    lib_id = event.lib_id
-    src_path = event.src_path
-    if event.is_directory:
-        # delete all media items under the deleted directory
-        ids: list = await MediaItem.filter(lib_id=lib_id, dir=src_path).values_list(
-            "id", flat=True
-        )
-        if ids:
-            await MediaItem.filter(lib_id=lib_id, id__in=ids).delete()
-            # delete the related user histories
-            await UserHistory.filter(
-                rel_type=HistoryType.VIDEO, rel_id__in=ids
-            ).delete()
-    elif is_nfo(src_path):
-        # update the media item to remove the NFO metadata
-        await MediaItem.filter(lib_id=lib_id, nfo_path=src_path).update(
+    if not event.is_directory and is_nfo(event.src_path):
+        await MediaItem.filter(lib_id=event.lib_id, nfo_path=event.src_path).update(
             nfo_path=None, nfo_mtime=None
         )
-    else:
-        # delete the media item
-        item = await MediaItem.filter(lib_id=lib_id, path=src_path).get_or_none()
-        if item is not None:
-            await item.delete()
-            _trash_nfo(item.nfo_path)
-            # delete the related user histories
-            await UserHistory.filter(
-                rel_type=HistoryType.VIDEO, rel_id=item.id
-            ).delete()
-            # delete the parent item if it has no more children
-            if (pid := item.parent_id) is not None:
-                siblings = await MediaItem.filter(lib_id=lib_id, parent_id=pid).count()
-                if siblings == 0:
-                    parent_item = await MediaItem.filter(id=pid).get()
-                    await parent_item.delete()
-                    _trash_nfo(parent_item.nfo_path)
+        return
+    scope = (
+        Q(dir=event.src_path) | Q(dir__startswith=f"{event.src_path}/")
+        if event.is_directory
+        else Q(path=event.src_path)
+    )
+    items = await MediaItem.filter(scope, lib_id=event.lib_id).select_related(
+        "lib", "parent"
+    )
+    ids = {item.id for item in items}
+    parents = {item.parent_id for item in items if item.parent_id is not None} - ids
+    for parent in await MediaItem.filter(
+        id__in=parents, lib_id=event.lib_id
+    ).select_related("lib", "parent"):
+        if not await MediaItem.filter(parent_id=parent.id).exclude(id__in=ids).exists():
+            items.append(parent)
+    await MediaItemService._delete_local(items, missing=True)
 
 
 async def _handle_moved(event: MediaEvent) -> list[MediaPathInfo] | None:
