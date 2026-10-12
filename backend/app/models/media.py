@@ -118,6 +118,7 @@ class MediaItem(TortoiseModel):
     name = CharField(max_length=255)
     hash = CharField(max_length=32, null=True)
     size = BigIntField(null=True)
+    original = JSONField[dict[str, Any] | None](null=True)
     visible = BooleanField(default=True)
     format = CharEnumField(enum_type=MediaFormat, max_length=16, null=True)
     extra = JSONField[dict[str, Any] | None](null=True)

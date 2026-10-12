@@ -9,10 +9,11 @@ import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from filelock import Timeout
@@ -1338,6 +1339,11 @@ def test_consume_mixed_chapter(tmp_path, monkeypatch, format):
             assert current.parent_id != original.parent_id
             assert current.parent is not None
             assert current.parent.path == str(destination.parent)
+            assert current.original == original.original
+            assert current.original["path"] == str(source.path)
+            assert current.parent.original["path"] == str(destination.parent)
+            assert current.parent.original["type"] == "directory"
+            assert current.parent.original["size"] is None
             assert current.index_state == IndexState.READY
             assert await MediaItem.all().count() == 3
             assert not await MediaEvent.exists()
@@ -1662,6 +1668,15 @@ def test_create_reading(tmp_path, format, chapter):
             assert item.parent_id == (items[0].id if chapter else None)
             assert item.lib.id == lib.id
             for current in items:
+                path = Path(current.path)
+                info = path.stat()
+                assert current.original == {
+                    "path": current.path,
+                    "type": "directory" if path.is_dir() else "file",
+                    "size": None if path.is_dir() else info.st_size,
+                    "mtime": datetime.fromtimestamp(info.st_mtime, tz=UTC).isoformat(),
+                    "link_target": None,
+                }
                 assert current.index_state == IndexState.PENDING and current.visible
                 assert current.hash is current.nfo_path is current.index_version is None
                 assert current.title is current.extra is current.size is None
@@ -1702,12 +1717,15 @@ def test_create_reading(tmp_path, format, chapter):
 
 
 @pytest.mark.parametrize("state", list(IndexState))
-def test_create_preserves(tmp_path, state):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_create_preserves(tmp_path, monkeypatch, state, legacy):
     async def run():
         async with _database():
             lib, source = await _source(tmp_path, MediaFormat.DIR)
             item = await MediaItemService.create_reading(lib.id, source)
+            original = {**item.original, "path": str(tmp_path / "Original")}
             await MediaItem.filter(id=item.id).update(
+                original=None if legacy else original,
                 visible=False,
                 title="Saved title",
                 year=2020,
@@ -1720,7 +1738,10 @@ def test_create_preserves(tmp_path, state):
             if state == IndexState.EMPTY:
                 (source.path / "1.png").unlink()
             before = await MediaItem.all().values()
+            snapshot = Mock(side_effect=AssertionError("existing item was inspected"))
+            monkeypatch.setattr(media_service, "original_file_info", snapshot)
             current = await MediaItemService.create_reading(lib.id, source)
+            snapshot.assert_not_called()
             assert current.id == item.id
             assert await MediaItem.all().values() == before
 
@@ -1950,6 +1971,8 @@ def test_move_reading_file(tmp_path, monkeypatch, format, chapter, cross_contain
             )
             assert current is not None and current.id == first.id
             assert current.path == str(destination) and current.name == "Renamed"
+            assert current.original == first.original
+            assert current.original["path"] == str(source.path)
             assert current.dir == str(destination.parent)
             assert current.parent_id == first.parent_id
             assert current.index_state == IndexState.PENDING
@@ -4942,6 +4965,8 @@ def test_create_concurrent(tmp_path):
                 MediaItemService.create_reading(lib.id, source),
             )
             assert first.id == second.id
+            assert first.original == second.original
+            assert first.original["path"] == str(source.path)
             assert await MediaItem.all().count() == 1
 
     asyncio.run(run())
@@ -5063,19 +5088,35 @@ def test_publish_content(tmp_path, format, chapter):
     asyncio.run(run())
 
 
-def test_rebuild_content(tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_rebuild_content(tmp_path, legacy):
     async def run():
         async with _database():
             item = await _item(tmp_path, MediaFormat.TXT)
+            original = (
+                None
+                if legacy
+                else {
+                    "path": str(tmp_path / "Original.txt"),
+                    "type": "file",
+                    "size": 512,
+                    "mtime": "2020-01-01T00:00:00+00:00",
+                    "link_target": None,
+                }
+            )
+            await MediaItem.filter(id=item.id).update(original=original)
             first = await MediaItemService.index_content(item.id)
+            assert first.original == original
             path = Path(item.path)
             info = path.stat()
             path.write_text("Next")
             os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
             reused = await MediaItemService.index_content(item.id, force=False)
             assert reused.index_version == first.index_version
+            assert reused.original == original
             current = await MediaItemService.index_content(item.id)
             assert current.index_version != first.index_version
+            assert current.original == original
             cache = _cache(current)
             index = load_text_index(cache)
             assert read_text_chapter(cache, index.chapters[0].id) == ["Next"]
@@ -6054,6 +6095,8 @@ def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchr
             assert not await MediaItemService.ingest_reading_work(lib.id, work)
             items = await MediaItem.all()
             versions = {item.id: item.index_version for item in items}
+            snapshots = {item.id: item.original for item in items}
+            assert all(item.original["path"] == item.path for item in items)
             events = await MediaEvent.filter(event_type="ingest")
             assert len(events) == len(items)
             for event in events:
@@ -6093,6 +6136,7 @@ def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchr
                     "metadata.opf" if lib.lib_type == LibType.NOVEL else "ComicInfo.xml"
                 )
                 assert item.index_version == versions[item.id]
+                assert item.original == snapshots[item.id]
                 if format == MediaFormat.EPUB:
                     assert not target.exists() and item.title == "Embedded"
                 else:
@@ -6109,6 +6153,9 @@ def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchr
             )
             assert not await MediaItemService.ingest_reading_work(lib.id, work)
             assert not await MediaEvent.exists()
+            assert {
+                item.id: item.original for item in await MediaItem.all()
+            } == snapshots
 
     asyncio.run(run())
 

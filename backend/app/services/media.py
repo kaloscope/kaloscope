@@ -37,7 +37,7 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
-from app.core.media.common import ContentError, file_state
+from app.core.media.common import ContentError, file_state, original_file_info
 from app.core.media.coordination import (
     index_lock_path,
     library_lock,
@@ -1620,8 +1620,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Register comic collections before their chapters. Validate current paths
         under the library lock, then insert only the missing pending item. Retain a
         first-ingest event when workflows are bound, in the same transaction. Existing
-        items keep their visibility, summaries and index state; ownership changes
-        require reconciliation instead of silently overwriting another source.
+        items keep their original file information, visibility, summaries and index
+        state; ownership changes require reconciliation instead of silently
+        overwriting another source. Capture `original` only for new items.
 
         Args:
             lib_id: The reading library containing the discovered source.
@@ -1672,6 +1673,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             )
             if current is not None:
                 return current
+            candidate.original = await to_thread(original_file_info, source.path)
             async with in_transaction():
                 await candidate.save(force_create=True)
                 if await FlowTriggerService.get_triggers(GraphCategory.INGEST, lib_id):
@@ -2123,6 +2125,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         This operation never moves or deletes files or changes reading histories.
         Chains crossing the library boundary reconcile as departures and arrivals,
         retaining their shared facts until all affected tasks finish.
+        Capture original directory information when creating a new parent collection.
 
         Args:
             event: The prepared reconcile task, refreshed in place after commit.
@@ -2250,6 +2253,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                             )
                             await to_thread(
                                 _validate_reading_source, parent, require_candidate=True
+                            )
+                            parent.original = await to_thread(
+                                original_file_info, parent_path
                             )
                             await parent.save(force_create=True)
                             by_path[parent_path] = parent
@@ -3534,7 +3540,11 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         parent_id: int | None = None,
         default_title: str | None = None,
     ) -> MediaItem:
-        """Get or create a media item.
+        """Get or create a media item and preserve its original file information.
+
+        Capture `original` only for missing records, without resolving the source
+        path's symlinks. Skip snapshot collection for existing records and leave
+        their snapshots and unknown legacy values unchanged.
 
         Args:
             lib_id: The media library ID.
@@ -3546,20 +3556,24 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             The media item instance.
         """
         item_path = path_info.item_path
-        item, created = await MediaItem.get_or_create(
-            lib_id=lib_id,
-            path=item_path,
-            defaults={
-                "parent_id": parent_id,
-                "dir": path_info.item_dir,
-                "name": path_info.item_name,
-                "title": default_title,
-                "year": path_info.year,
-                "season": path_info.season,
-                "episode": path_info.episode,
-                "visible": True,
-            },
-        )
+        item = await MediaItem.get_or_none(lib_id=lib_id, path=item_path)
+        created = False
+        if item is None:
+            item, created = await MediaItem.get_or_create(
+                lib_id=lib_id,
+                path=item_path,
+                defaults={
+                    "parent_id": parent_id,
+                    "dir": path_info.item_dir,
+                    "name": path_info.item_name,
+                    "original": await to_thread(original_file_info, item_path),
+                    "title": default_title,
+                    "year": path_info.year,
+                    "season": path_info.season,
+                    "episode": path_info.episode,
+                    "visible": True,
+                },
+            )
         path_info.item_id = item.id
 
         # calculate hash and size for the newly created item

@@ -851,6 +851,7 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
             if state == "existing":
                 await get_handler(lib_type).gen_items(lib, video)
             original_ids = await MediaItem.all().values_list("id", flat=True)
+            snapshots = {item.id: item.original for item in await MediaItem.all()}
             event = await MediaEvent.create(
                 lib=lib, src_path=str(video), event_type="created"
             )
@@ -861,6 +862,16 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
             assert sorted(fired) == sorted(current_ids)
             if original_ids:
                 assert sorted(current_ids) == sorted(original_ids)
+            for item in await MediaItem.all():
+                assert item.original["path"] == item.path
+                assert item.original["type"] == (
+                    "file" if item.path == str(video) else "directory"
+                )
+                assert item.original["size"] == (
+                    len(b"video") if item.path == str(video) else None
+                )
+                if item.id in snapshots:
+                    assert item.original == snapshots[item.id]
         finally:
             await Tortoise.close_connections()
 
@@ -2409,6 +2420,9 @@ def test_organization_rescan(
             await scan()
             item = await MediaItem.get(lib_id=lib.id, path=str(source))
             original_id = item.id
+            original = item.original
+            assert original["path"] == str(source)
+            assert original["size"] == len(b"video")
             fire.reset_mock()
             lib.rename_template = template
             await lib.save(update_fields=["rename_template"])
@@ -2441,7 +2455,9 @@ def test_organization_rescan(
                 )
             await scan()
             await scan()
-            assert (await MediaItem.get(path=str(destination))).id == original_id
+            current = await MediaItem.get(path=str(destination))
+            assert current.id == original_id
+            assert current.original == original
             assert not await MediaEvent.filter(lib_id=lib.id).exists()
             assert all(
                 Path(row.path).exists() for row in await MediaItem.filter(lib_id=lib.id)
@@ -2813,6 +2829,9 @@ def test_hash_recovery(tmp_path, monkeypatch, restart):
 
             item = await MediaItem.get(lib=lib)
             original_id = item.id
+            original = item.original
+            assert original["path"] == str(source)
+            assert original["size"] == len(b"video")
             assert item.hash is None and item.size is None
             assert item.path == str(source)
             assert destination.is_file() and not source.exists()
@@ -2828,6 +2847,7 @@ def test_hash_recovery(tmp_path, monkeypatch, restart):
 
             await item.refresh_from_db()
             assert item.id == original_id
+            assert item.original == original
             assert item.path == str(destination)
             assert item.hash == hashlib.md5(b"video").hexdigest()
             assert item.size == len(b"video")

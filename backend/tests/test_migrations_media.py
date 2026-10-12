@@ -235,6 +235,8 @@ def test_content_index(tmp_path):
                 user_id=1, rel_type=HistoryType.TEXT, rel_id=10, locator=locator
             )
             await executor.migrate(current)
+            # load the latest schema before querying with current models
+            await executor.migrate()
             assert (await MediaItem.get(id=1)).title == "Updated"
             await reading.refresh_from_db()
             assert reading.locator == locator
@@ -247,6 +249,96 @@ def test_content_index(tmp_path):
                 await MediaItem.create(
                     lib_id=1, path="/movies/a.mkv", dir="/movies", name="Duplicate"
                 )
+            assert await MigrationAutodetector(Tortoise.apps, apps).changes() == []
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_original(tmp_path):
+    apps = {
+        "models": {
+            "models": ["app.models"],
+            "default_connection": "default",
+            "migrations": "app.migrations",
+        }
+    }
+    previous = [MigrationTarget("models", "0007_auto_20261002_2108")]
+    current = [MigrationTarget("models", "0008_media_original")]
+    snapshot = {
+        "path": "/media/原始.mkv",
+        "type": "file",
+        "size": 1024,
+        "mtime": "2026-10-12T00:00:00+00:00",
+        "link_target": None,
+    }
+
+    async def run():
+        await Tortoise.init(
+            config={
+                "connections": {"default": f"sqlite://{tmp_path / 'migration.db'}"},
+                "apps": apps,
+            }
+        )
+        try:
+            connection = Tortoise.get_connection("default")
+            executor = MigrationExecutor(connection, apps)
+            await executor.migrate(previous)
+            await connection.execute_query(
+                "INSERT INTO media_lib "
+                "(id, lib_type, dir, name, priority, danmaku_ttl) "
+                "VALUES (1, 'movie', '/media', 'Library', 1, 24)"
+            )
+            await connection.execute_query(
+                "INSERT INTO media_item (id, lib_id, dir, path, name, visible) "
+                "VALUES (1, 1, '/media', '/media/renamed.mkv', 'renamed', 1)"
+            )
+            original = await connection.execute_query_dict("SELECT * FROM media_item")
+
+            await executor.migrate(current)
+
+            legacy = await MediaItem.get(id=1)
+            assert legacy.path == "/media/renamed.mkv"
+            assert legacy.original is None
+            new = await MediaItem.create(
+                lib_id=1,
+                dir="/media",
+                path="/media/new.mkv",
+                name="new",
+                original=snapshot,
+            )
+            await MediaItem.filter(id=new.id).update(
+                path="/media/organized.mkv", name="organized"
+            )
+            await executor.migrate(current)
+
+            await new.refresh_from_db()
+            assert new.original == snapshot
+            assert new.path == "/media/organized.mkv"
+            assert (await MediaItem.get(id=1)).original is None
+
+            await executor.migrate(previous)
+
+            columns = await connection.execute_query_dict(
+                "PRAGMA table_info(media_item)"
+            )
+            assert "original" not in {column["name"] for column in columns}
+            assert (
+                await connection.execute_query_dict(
+                    "SELECT * FROM media_item WHERE id = 1"
+                )
+                == original
+            )
+            assert await connection.execute_query_dict(
+                "SELECT path FROM media_item WHERE id = ?", [new.id]
+            ) == [{"path": "/media/organized.mkv"}]
+            assert await connection.execute_query_dict("PRAGMA foreign_key_check") == []
+
+            await executor.migrate(current)
+
+            assert await MediaItem.all().count() == 2
+            assert all(item.original is None for item in await MediaItem.all())
             assert await MigrationAutodetector(Tortoise.apps, apps).changes() == []
         finally:
             await Tortoise.close_connections()

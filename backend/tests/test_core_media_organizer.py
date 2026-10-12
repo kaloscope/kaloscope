@@ -21,6 +21,7 @@ from tortoise import Tortoise
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
 from app.core.media import organizer
+from app.core.media.common import original_file_info
 from app.core.media.coordination import library_lock
 from app.core.media.shelver import gen_nfo, update_metadata
 from app.core.media.watcher import LibWatcher, consume_event
@@ -142,6 +143,15 @@ def test_metadata_entity(tmp_path):
 
 
 async def _movie(root: Path, template="{{title}}"):
+    """Create an indexed movie with its original file information and metadata.
+
+    Args:
+        root: The isolated library directory.
+        template: The automatic naming template for the library.
+
+    Returns:
+        The library and its movie item before organization.
+    """
     lib = await MediaLib.create(
         name="Movies",
         dir=str(root),
@@ -158,8 +168,9 @@ async def _movie(root: Path, template="{{title}}"):
         path=str(video),
         dir=str(root),
         name=video.stem,
-        nfo_path=str(nfo),
         hash="a" * 32,
+        original=original_file_info(video),
+        nfo_path=str(nfo),
     )
     return lib, item
 
@@ -447,6 +458,7 @@ def test_journal_cancellation(tmp_path, monkeypatch, cancel_count, failure):
                 await organizer.recover_organizing(lib)
             await item.refresh_from_db()
             assert item.path == str(tmp_path / "New Movie.mkv")
+            assert item.original["path"] == str(tmp_path / "original.mkv")
             assert Path(item.path).read_bytes() == b"video"
             assert not await MediaEvent.filter(id=journal.id).exists()
 
@@ -607,12 +619,16 @@ def test_movie_hierarchy(tmp_path):
     async def run():
         async with _database():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
+            original = item.original
             await organizer.organize_items(lib, [item.id])
             await item.refresh_from_db()
             assert item.parent_id is not None
             parent_id = item.parent_id
             parent = await MediaItem.get(id=parent_id)
             assert parent.path == str(tmp_path / "New Movie")
+            assert parent.original["path"] == parent.path
+            assert parent.original["type"] == "directory"
+            assert parent.original["size"] is None
             assert _path(parent.nfo_path).is_file()
             assert item.nfo_path is None
             lib.rename_template = "{{title}}"
@@ -620,6 +636,7 @@ def test_movie_hierarchy(tmp_path):
             await item.refresh_from_db()
             assert item.parent_id is None
             assert item.path == str(tmp_path / "New Movie.mkv")
+            assert item.original == original
             assert item.title == "New Movie"
             assert _path(item.nfo_path).is_file()
             assert not await MediaItem.filter(id=parent_id).exists()
@@ -958,6 +975,7 @@ def test_recovery(tmp_path, monkeypatch):
     async def run():
         async with _database():
             lib, item = await _movie(tmp_path)
+            original = item.original
             cache = tmp_path / ".original.json"
             cache.write_text('[{"text":"Local comment"}]')
             original_rename = organizer.rename_exclusive
@@ -980,6 +998,7 @@ def test_recovery(tmp_path, monkeypatch):
             await organizer.recover_organizing(lib)
             await item.refresh_from_db()
             assert item.path == str(tmp_path / "New Movie.mkv")
+            assert item.original == original
             assert _path(item.nfo_path).is_file()
             assert (tmp_path / ".New Movie.json").read_text() == (
                 '[{"text":"Local comment"}]'

@@ -1,6 +1,10 @@
 """Share content errors, source snapshots, limits and file stability checks."""
 
 import os
+import stat
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +32,48 @@ class FileSnapshot(BaseModel):
 
     size: int = Field(ge=0)
     mtime_ns: int
+
+
+def original_file_info(path: str | Path) -> dict[str, Any]:
+    """Capture a media source's original location and filesystem attributes.
+
+    Read only filesystem metadata and run this operation in a worker thread.
+    Keep the supplied location without resolving symlinks. For symlinks, store
+    the raw link target and capture the target's size and modification time.
+
+    Args:
+        path: The source file or directory being registered for the first time.
+
+    Returns:
+        The absolute path, entry type, regular-file size in bytes, modification
+        time in UTC ISO 8601 format and raw symlink target. Unavailable attributes
+        remain `None` if filesystem access or timestamp conversion fails.
+        Directory sizes remain `None`.
+    """
+    path = Path(path).absolute()
+    original: dict[str, Any] = {
+        "path": str(path),
+        "type": None,
+        "size": None,
+        "mtime": None,
+        "link_target": None,
+    }
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            original["type"] = "symlink"
+            original["link_target"] = os.readlink(path)
+            info = path.stat()
+        elif stat.S_ISDIR(info.st_mode):
+            original["type"] = "directory"
+        elif stat.S_ISREG(info.st_mode):
+            original["type"] = "file"
+        if stat.S_ISREG(info.st_mode):
+            original["size"] = info.st_size
+        original["mtime"] = datetime.fromtimestamp(info.st_mtime, tz=UTC).isoformat()
+    except (OSError, ValueError, OverflowError):
+        pass
+    return original
 
 
 def file_state(info: os.stat_result) -> tuple[int, ...]:

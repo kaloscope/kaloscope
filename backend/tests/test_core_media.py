@@ -2,19 +2,91 @@
 
 import asyncio
 import hashlib
+import os
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
+from app.core.media.common import original_file_info
 from app.core.media.coordination import library_lock
-from app.core.media.handlers.base import MediaPathInfo
+from app.core.media.handlers.base import MediaPathInfo, get_handler
 from app.core.media.handlers.tvshow import TVShowMediaHandler
 from app.core.media.shelver import update_metadata
 from app.models.media import Language, LibType, MediaItem, MediaLib
 from app.services.media import MediaItemService
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "broken_symlink"])
+def test_original_info(tmp_path, monkeypatch, kind):
+    target = tmp_path / "原始.mkv"
+    if kind == "directory":
+        target.mkdir()
+    elif kind != "broken_symlink":
+        target.write_bytes(b"video")
+    if target.exists():
+        os.utime(target, (1_700_000_000, 1_700_000_000))
+    path = target
+    if "symlink" in kind:
+        path = tmp_path / "link.mkv"
+        path.symlink_to("./原始.mkv")
+    monkeypatch.chdir(tmp_path)
+
+    original = original_file_info(path.name)
+
+    assert original == {
+        "path": str(path),
+        "type": "symlink" if kind == "broken_symlink" else kind,
+        "size": 5 if kind in ("file", "symlink") else None,
+        "mtime": None if kind == "broken_symlink" else "2023-11-14T22:13:20+00:00",
+        "link_target": "./原始.mkv" if "symlink" in kind else None,
+    }
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+def test_original_unavailable(tmp_path, monkeypatch, error):
+    path = tmp_path / "original.mkv"
+
+    def unavailable(self):
+        """Simulate unavailable source attributes.
+
+        Raises:
+            OSError: With the selected filesystem access error.
+        """
+        raise error(str(self))
+
+    monkeypatch.setattr(Path, "lstat", unavailable)
+
+    original = original_file_info(path)
+
+    assert original == {
+        "path": str(path),
+        "type": None,
+        "size": None,
+        "mtime": None,
+        "link_target": None,
+    }
+
+
+@pytest.mark.parametrize("mtime", [253_402_300_800.0, -62_135_596_801.0, float("inf")])
+def test_original_timestamp(tmp_path, monkeypatch, mtime):
+    path = tmp_path / "source.mkv"
+    path.write_bytes(b"video")
+    info = list(path.stat())
+    info[8] = mtime
+    monkeypatch.setattr(Path, "lstat", Mock(return_value=os.stat_result(info)))
+
+    original = original_file_info(path)
+
+    assert original == {
+        "path": str(path),
+        "type": "file",
+        "size": 5,
+        "mtime": None,
+        "link_target": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -37,6 +109,82 @@ def test_tvshow_title(monkeypatch, tmp_path: Path, title: str | None, expected: 
     result = asyncio.run(TVShowMediaHandler().gen_items(lib, path))
 
     assert result[1].title == expected
+
+
+@pytest.mark.parametrize(
+    ("lib_type", "relative"),
+    [
+        (LibType.MOVIE, "Original.mkv"),
+        (LibType.MOVIE, "Original/Original.mkv"),
+        (LibType.TV_SHOW, "Original/Original S01E01.mkv"),
+        (LibType.TV_SHOW, "Original/Season 01/Original S01E01.mkv"),
+    ],
+)
+@pytest.mark.parametrize("legacy", [False, True])
+def test_original(tmp_path, monkeypatch, lib_type, relative, legacy):
+    monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"video")
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+    scheduled = []
+    monkeypatch.setattr("app.services.media.create_task", scheduled.append)
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            handler = get_handler(lib_type)
+            await handler.gen_items(lib, path)
+            items = await MediaItem.all()
+            assert all(item.original["path"] == item.path for item in items)
+            item = next(item for item in items if item.path == str(path))
+            original = {
+                "path": str(path),
+                "type": "file",
+                "size": 5,
+                "mtime": "2023-11-14T22:13:20+00:00",
+                "link_target": None,
+            }
+            assert item.original == original
+            for parent in items:
+                if parent.id != item.id:
+                    assert parent.original["type"] == "directory"
+                    assert parent.original["size"] is None
+            if legacy:
+                await MediaItem.all().update(original=None)
+
+            destination = path.with_name("Renamed.mkv")
+            path.rename(destination)
+            destination.write_bytes(b"changed video")
+            os.utime(destination, (1_800_000_000, 1_800_000_000))
+            await MediaItem.filter(id=item.id).update(
+                path=str(destination), name=destination.stem
+            )
+            await item.refresh_from_db()
+            async with library_lock(lib.dir):
+                await MediaItemService.refresh_hash_and_size(item)
+            before = await MediaItem.all().values()
+            snapshot = Mock(side_effect=AssertionError("existing item was inspected"))
+            monkeypatch.setattr("app.services.media.original_file_info", snapshot)
+            await handler.gen_items(lib, destination)
+
+            snapshot.assert_not_called()
+            assert await MediaItem.all().values() == before
+            await item.refresh_from_db()
+            assert item.original == (None if legacy else original)
+            assert item.size == len(b"changed video")
+        finally:
+            for coroutine in scheduled:
+                coroutine.close()
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("registered", [False, True])

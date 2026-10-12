@@ -18,6 +18,7 @@ from sanic.log import logger
 from tortoise.exceptions import ValidationError
 from tortoise.transactions import in_transaction
 
+from app.core.media.common import original_file_info
 from app.core.media.coordination import notify_media_events, write_in_thread
 from app.core.media.metadata import METADATA_BYTES, _read_xml, merge_metadata
 from app.core.media.naming import render_directory, render_filename, render_path
@@ -1385,6 +1386,7 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     Keep episode NFOs scannable if the journal lacks full metadata, including
     legacy plans. Retain filesystem events for reused sources or destinations
     changed by external writers before the database commit.
+    Preserve existing original snapshots and capture file information for new parents.
 
     Args:
         lib: The media library whose lock is held by the caller.
@@ -1410,8 +1412,16 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
                     Path(data["nfo_path"]).stat().st_mtime, tz=UTC
                 )
                 if parent["id"] is None:
+                    path = data.pop("path")
                     row, _ = await MediaItem.get_or_create(
-                        lib_id=lib.id, path=data.pop("path"), defaults=data
+                        lib_id=lib.id,
+                        path=path,
+                        defaults={
+                            **data,
+                            "original": await asyncio.to_thread(
+                                original_file_info, path
+                            ),
+                        },
                     )
                     parent_id = row.id
                 else:

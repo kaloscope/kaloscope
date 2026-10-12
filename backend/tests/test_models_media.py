@@ -33,12 +33,20 @@ def test_content_fields(media_format):
             parent = await MediaItem.create(
                 lib=lib, dir="/media/work", path="/media/work", name="Work"
             )
+            original = {
+                "path": "/media/original/source",
+                "type": "file",
+                "size": 1024,
+                "mtime": "2026-10-12T00:00:00+00:00",
+                "link_target": None,
+            }
             child = await MediaItem.create(
                 lib=lib,
                 parent=parent,
                 dir="/media/work",
                 path="/media/work/source",
                 name="Source",
+                original=original,
             )
             extra = {"schema_version": 1, "content": {"page_count": 24}}
             await MediaItem.filter(id=child.id).update(
@@ -70,12 +78,15 @@ def test_content_fields(media_format):
             )
             assert all("extra" not in item for item in page["items"])
             saved = next(item for item in page["items"] if item["id"] == child.id)
+            assert saved["original"] == original
             assert saved["format"] == media_format.value
             assert saved["index_state"] == "error"
             assert saved["index_error"] == "invalid_archive"
             assert saved["index_version"] == "a" * 64
 
             detail = await MediaItemService.dump(parent)
+            assert detail["original"] is None
+            assert detail["children"][0]["original"] == original
             assert "extra" not in detail
             assert "extra" not in detail["children"][0]
             assert detail["format"] is None

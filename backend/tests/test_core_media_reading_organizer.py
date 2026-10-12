@@ -165,6 +165,7 @@ def test_standalone(tmp_path, format, legacy):
                 lib.rename_template = "{{collection_title}}/{{title}} - {{authors}}"
                 await lib.save(update_fields=["rename_template"])
             source = Path(item.path)
+            snapshot = item.original
             original = {
                 path.name: path.read_bytes() for path in Path(item.dir).iterdir()
             }
@@ -185,6 +186,8 @@ def test_standalone(tmp_path, format, legacy):
             await item.refresh_from_db()
             await history.refresh_from_db()
             assert item.path == str(target) and item.dir == str(target_dir)
+            assert item.original == snapshot
+            assert item.original["path"] == str(source)
             assert item.index_state == IndexState.PENDING
             assert mapping[str(source)] == str(target)
             assert history.rel_id == item.id and history.locator == locator
@@ -197,6 +200,7 @@ def test_standalone(tmp_path, format, legacy):
             assert await MediaItemService.ingest_reading_work(lib.id, target_dir) == {}
             await item.refresh_from_db()
             assert item.index_state == IndexState.READY
+            assert item.original == snapshot
             assert await MediaItem.filter(lib_id=lib.id).count() == 1
             saved = HistoryEntry.model_validate(entry)
             assert saved.locator is not None

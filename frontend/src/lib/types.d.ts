@@ -271,6 +271,16 @@ export type MediaItem = {
   name: string;
   hash: string | null;
   size: number | null;
+  original: {
+    path: string;
+    type: 'file' | 'directory' | 'symlink' | null;
+    /** The regular file size in bytes, or `null` for directories or unreadable files. */
+    size: number | null;
+    /** The source modification time in UTC ISO 8601 format. */
+    mtime: string | null;
+    /** The raw symlink target, before any renaming. */
+    link_target: string | null;
+  } | null;
   visible: boolean;
   format: 'txt' | 'epub' | 'dir' | 'cbz' | 'zip' | null;
   index_version: string | null;
