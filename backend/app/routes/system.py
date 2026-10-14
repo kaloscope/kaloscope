@@ -1,8 +1,13 @@
+import asyncio
+import re
 import sys
 import tomllib
 from pathlib import Path
 
-from sanic import Blueprint, HTTPResponse, json
+import httpx
+from sanic import Blueprint, HTTPResponse, Request, json
+
+from app.core.exceptions import ErrorCode, KaloscopeException
 
 # path to the project's pyproject.toml (backend/pyproject.toml)
 _PYPROJECT = Path(__file__).parents[2] / "pyproject.toml"
@@ -24,14 +29,18 @@ async def get_platform(_) -> HTTPResponse:
 
 
 @system.get("/version")
-async def get_app_version(_) -> HTTPResponse:
-    """Get current application version.
+async def get_app_version(request: Request) -> HTTPResponse:
+    """Get the current version and optionally check Docker Hub for updates.
 
     Args:
-        _: Unused request.
+        request: Request with an optional `check_update=true` query parameter.
 
     Returns:
-        Response containing the requested data.
+        Current version, plus the latest stable version and update availability
+        when an update check is requested.
+
+    Raises:
+        KaloscopeException: If the update check fails or versions are unavailable.
     """
     try:
         with open(_PYPROJECT, "rb") as f:
@@ -39,4 +48,39 @@ async def get_app_version(_) -> HTTPResponse:
         version = data["project"]["version"]
     except Exception:
         version = ""
-    return json({"version": version})
+    result: dict[str, str | bool] = {"version": version}
+    if request.args.get("check_update") == "true":
+        try:
+            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+                raise ValueError("Current version is unavailable")
+            versions = []
+            page = 1
+            client: httpx.AsyncClient = request.app.ctx.httpx
+            async with asyncio.timeout(10):
+                while True:
+                    response = await client.get(
+                        "https://hub.docker.com/v2/namespaces/kaloscope/repositories/kaloscope/tags",
+                        params={"page_size": 100, "page": page},
+                        headers={"Cache-Control": "no-cache"},
+                        timeout=10,
+                    )
+                    response.raise_for_status()
+                    tags = response.json()
+                    for tag in tags["results"]:
+                        if re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", tag["name"]):
+                            versions.append(
+                                tuple(
+                                    map(int, tag["name"].removeprefix("v").split("."))
+                                )
+                            )
+                    if not tags["next"]:
+                        break
+                    page += 1
+            latest = max(versions)
+            result["latest_version"] = ".".join(map(str, latest))
+            result["has_update"] = latest > tuple(map(int, version.split(".")))
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+            raise KaloscopeException(
+                ErrorCode.HTTP_REQUEST_FAILED, status_code=502
+            ) from exc
+    return json(result)

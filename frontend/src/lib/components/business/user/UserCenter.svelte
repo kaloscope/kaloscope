@@ -34,12 +34,12 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
-  import { Dropdown, Image, confirm } from '$lib/components';
+  import { Dropdown, Image, Modal, confirm } from '$lib/components';
   import { _, duration } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { token, user } from '$lib/stores';
   import { fullscreen } from '$lib/utils/browser';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   let {
     navs = [],
@@ -56,6 +56,42 @@
 
   // the current application version
   let version: string = $state('');
+
+  let updateModal: Modal;
+  let checkingUpdates = $state(false);
+  let updateFailed = $state(false);
+  let latestVersion = $state('');
+
+  /**
+   * Check for a newer stable version and update the dialog.
+   *
+   * @returns A promise that resolves when the check finishes.
+   */
+  async function checkForUpdates() {
+    if (checkingUpdates) {
+      return;
+    }
+    checkingUpdates = true;
+    updateFailed = false;
+    latestVersion = '';
+    await tick();
+    try {
+      const { data } = await api
+        .get('system/version', {
+          searchParams: { check_update: true },
+          timeout: 15000,
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<Resp<{ version: string; latest_version: string; has_update: boolean }>>();
+      version = `v${data.version}`;
+      latestVersion = data.has_update ? `v${data.latest_version}` : '';
+    } catch {
+      updateFailed = true;
+    } finally {
+      checkingUpdates = false;
+    }
+  }
 
   /**
    * Logout the user.
@@ -177,7 +213,8 @@
       icons.stars,
       $_('app.check_updates'),
       () => {
-        window.open('https://hub.docker.com/r/kaloscope/kaloscope/tags', '_blank', 'noreferrer');
+        updateModal.show();
+        checkForUpdates();
       },
       '',
       version
@@ -192,3 +229,35 @@
     )}
   </ul>
 </Dropdown>
+
+<Modal bind:this={updateModal} title={$_('app.check_updates')} icon={icons.stars} maxWidth="24rem">
+  <div class="flex min-h-24 flex-col items-center justify-center gap-3 text-center" role="status" aria-live="polite">
+    {#if checkingUpdates}
+      <span class="loading loading-md loading-spinner" aria-hidden="true"></span>
+      <p>{$_('app.checking_updates')}</p>
+    {:else if updateFailed}
+      <p class="text-error">{$_('app.update_check_failed')}</p>
+    {:else if latestVersion}
+      <p>
+        {$_('app.latest_version')}
+        <a
+          class="link font-semibold link-primary"
+          href="https://hub.docker.com/r/kaloscope/kaloscope/tags"
+          target="_blank"
+          rel="noreferrer"
+        >
+          {latestVersion}
+        </a>
+      </p>
+    {:else}
+      <p>{$_('app.up_to_date')}</p>
+    {/if}
+  </div>
+  {#if updateFailed}
+    <div class="modal-action">
+      <button type="button" class="btn btn-submit" onclick={checkForUpdates}>
+        {$_('action.retry')}
+      </button>
+    </div>
+  {/if}
+</Modal>
