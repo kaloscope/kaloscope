@@ -24,6 +24,7 @@
   import { fly } from 'svelte/transition';
   import { hideAll } from 'tippy.js';
   import { v7 as uuidv7 } from 'uuid';
+  import { waitForGraphWrites } from '../graphWrites';
   import ControlBar from './ControlBar.svelte';
   import EdgeWrapper from './EdgeWrapper.svelte';
   import NodeSchemas from './NodeSchemas.svelte';
@@ -339,28 +340,39 @@
   const hideAllTips = () => hideAll();
 
   onMount(() => {
+    let disposed = false;
     // get the flow graph draft
     loading.start();
     nodes = [];
     edges = [];
-    api
-      .get(`flow/graph/${graphId}`)
-      .json<Resp<FlowGraph>>()
-      .then(({ data }) => {
-        graph = data;
+    waitForGraphWrites(Number(graphId))
+      .then(() => {
+        if (!disposed) {
+          return api.get(`flow/graph/${graphId}`).json<Resp<FlowGraph>>();
+        }
+      })
+      .then((response) => {
+        if (disposed || !response) {
+          return;
+        }
+        graph = response.data;
         if (graph.draft) {
           nodes = graph.draft.nodes;
           edges = graph.draft.edges;
         }
         jsonGraph = JSON.stringify({ nodes, edges });
       })
+      .catch(() => {})
       .finally(() => {
         loading.end();
       });
     // hide all visible tooltips when the pane is touched
     const pane = document.getElementsByClassName('svelte-flow__pane')[0];
     pane.addEventListener('touchstart', hideAllTips);
-    return () => pane.removeEventListener('touchstart', hideAllTips);
+    return () => {
+      disposed = true;
+      pane.removeEventListener('touchstart', hideAllTips);
+    };
   });
 </script>
 

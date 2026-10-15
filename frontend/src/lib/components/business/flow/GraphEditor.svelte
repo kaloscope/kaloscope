@@ -21,6 +21,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { loadFile } from '$lib/utils/browser';
+  import { trackGraphWrite } from './graphWrites';
 
   let { id, name, icon, description, category, onsave }: GraphEditorProps = $props();
 
@@ -45,6 +46,7 @@
    *
    * @param form - Form element.
    * @param data - Form data.
+   * @returns A promise that resolves after the save request settles.
    */
   async function upsert(form: HTMLFormElement, data: FormData) {
     loading.start();
@@ -54,18 +56,28 @@
     if (icon) {
       data.append('icon', icon);
     }
-    const image = cropSrc && (await cropImg);
-    if (image) {
-      data.append('image', image);
-    }
-    api
-      .post('flow/graph/upsert', { body: data })
-      .json<Resp<FlowGraph>>()
-      .then(({ data }) => {
+    const imageRequest = cropSrc ? cropImg : null;
+    /**
+     * Prepare the icon and save the graph metadata.
+     *
+     * @param signal - Signal canceled when the originating login session changes.
+     * @returns The saved graph.
+     */
+    const operation = async (signal?: AbortSignal) => {
+      const image = await imageRequest;
+      if (image) {
+        data.append('image', image);
+      }
+      const { data: result } = await api.post('flow/graph/upsert', { body: data, signal }).json<Resp<FlowGraph>>();
+      return result;
+    };
+    return (id ? trackGraphWrite(id, operation) : operation())
+      .then((data) => {
         cropSrc = null;
         onsave?.(data);
-        id ? modal.close() : setTimeout(() => form.reset(), 200);
+        id ? modal?.close() : setTimeout(() => form.reset(), 200);
       })
+      .catch(() => {})
       .finally(() => {
         loading.end();
       });

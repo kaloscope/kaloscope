@@ -14,6 +14,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import { v4 as uuidv4 } from 'uuid';
+  import { trackGraphWrite } from '../graphWrites';
 
   let {
     nodes: _nodes = $bindable(),
@@ -192,22 +193,27 @@
    * Save flow graph.
    */
   function save() {
-    if (saving || !savable) {
+    if (!graph || saving || !savable) {
       return;
     }
-    const data = { nodes, edges };
+    const id = graph.id;
+    const data = $state.snapshot({ nodes, edges } as unknown) as History;
+    const submittedHistoryId = historyId;
     const startTime = new Date().getTime();
     saving = true;
-    api
-      .post(`flow/graph/${graph?.id}/save`, { json: data })
-      .json<Resp<FlowGraph>>()
-      .then(({ data }) => {
+    trackGraphWrite(id, (signal) =>
+      api
+        .post(`flow/graph/${id}/save`, { json: data, signal })
+        .json<Resp<FlowGraph>>()
+        .then(({ data }) => data)
+    )
+      .then((result) => {
+        graph = result;
+        jsonGraph = JSON.stringify(data);
+        savedHistoryId = submittedHistoryId;
+        autoSaveSignal = false;
         const timeout = Math.max(0, 450 - (new Date().getTime() - startTime));
         setTimeout(() => {
-          graph = data;
-          jsonGraph = JSON.stringify(data);
-          savedHistoryId = historyId;
-          autoSaveSignal = false;
           saving = false;
         }, timeout);
       })
@@ -249,18 +255,27 @@
    * Publish the flow graph.
    */
   function publish() {
+    if (!graph) {
+      publishing = false;
+      return;
+    }
     // save and publish the flow graph
-    const data = { nodes, edges };
+    const id = graph.id;
+    const data = $state.snapshot({ nodes, edges } as unknown) as History;
+    const submittedHistoryId = historyId;
     const startTime = new Date().getTime();
-    api
-      .post(`flow/graph/${graph?.id}/publish`, { json: data })
-      .json<Resp<FlowGraph>>()
-      .then(({ data }) => {
+    trackGraphWrite(id, (signal) =>
+      api
+        .post(`flow/graph/${id}/publish`, { json: data, signal })
+        .json<Resp<FlowGraph>>()
+        .then(({ data }) => data)
+    )
+      .then((result) => {
+        graph = result;
+        jsonGraph = JSON.stringify(data);
+        savedHistoryId = submittedHistoryId;
         const timeout = Math.max(0, 450 - (new Date().getTime() - startTime));
         setTimeout(() => {
-          graph = data;
-          jsonGraph = JSON.stringify(data);
-          savedHistoryId = historyId;
           publishing = false;
         }, timeout);
       })

@@ -4,5 +4,7 @@
 </script>
 
 {#if page.params.graph_id}
-  <FlowDesigner id={page.params.graph_id} readonly={page.params.mode === 'r'} />
+  {#key `${page.params.mode ?? ''}/${page.params.graph_id}`}
+    <FlowDesigner id={page.params.graph_id} readonly={page.params.mode === 'r'} />
+  {/key}
 {/if}
