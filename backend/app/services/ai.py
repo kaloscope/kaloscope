@@ -2,9 +2,11 @@
 
 import asyncio
 
+import httpx
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
+from app.core.ai.discovery import fetch_models
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
@@ -12,13 +14,44 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
-from app.models.ai import AIProvider, AIProviderUpsert
+from app.core.network import NetworkTransport
+from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
 from app.services.base import BaseService
-from app.utils.crypto import fernet_encrypt
+from app.utils.crypto import fernet_decrypt, fernet_encrypt
 
 
 class AIProviderService(BaseService[AIProvider], model=AIProvider):
     """Persist administrator-managed provider settings and encrypted credentials."""
+
+    @classmethod
+    async def discover_models(cls, obj: AIProviderConnection) -> list[str]:
+        """Discover models from draft settings without modifying the saved provider.
+
+        Args:
+            obj: Draft endpoint and optional key; omitted keys reuse saved
+                credentials only when the endpoint remains unchanged.
+
+        Returns:
+            Available model IDs, without credentials or upstream metadata.
+
+        Raises:
+            NotFoundException: If the referenced provider does not exist.
+            BadRequestException: If a new endpoint would receive the saved key.
+            KaloscopeException: If the upstream catalog cannot be fetched.
+            RuntimeError: If the encryption key or ciphertext is invalid.
+            OSError: If the encryption key cannot be read.
+        """
+        provider = await cls.get(obj.id) if obj.id is not None else None
+        secret = obj.api_key.get_secret_value() if obj.api_key is not None else None
+        if obj.api_key is None and provider is not None and provider.api_key:
+            if provider.base_url != obj.base_url:
+                raise BadRequestException
+            secret = await asyncio.to_thread(
+                fernet_decrypt, provider.api_key, KaloscopeConfig.get().secret_key_path
+            )
+        # isolate credentials from the media client's persistent cache and cookies
+        async with httpx.AsyncClient(transport=NetworkTransport(http2=True)) as client:
+            return await fetch_models(client, obj.base_url, obj.preset, secret)
 
     @classmethod
     async def get(cls, id: int) -> AIProvider:

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.core.ai.presets import get_provider_presets
 from app.models.ai import (
     AIProtocol,
+    AIProviderConnection,
     AIProviderPreset,
     AIProviderUpsert,
 )
@@ -46,9 +47,29 @@ def test_custom_provider():
         "https://example.com/path\npart",
     ],
 )
-def test_invalid_url(url):
+@pytest.mark.parametrize("model", [AIProviderConnection, AIProviderUpsert])
+def test_invalid_url(url, model):
     with pytest.raises(ValidationError):
-        AIProviderUpsert(name="Invalid", base_url=url)
+        model.model_validate(
+            {
+                "base_url": url,
+                **({"name": "Invalid"} if model is AIProviderUpsert else {}),
+            }
+        )
+
+
+def test_draft_connection():
+    draft = AIProviderConnection(
+        base_url=" https://AI.Example.com:443/v1/ ", api_key=" key "
+    )
+
+    assert draft.base_url == "https://ai.example.com/v1"
+    assert draft.api_key.get_secret_value() == "key"
+    assert '"key"' not in draft.model_dump_json()
+    assert draft.id is None
+
+    with pytest.raises(ValidationError):
+        AIProviderConnection(base_url="https://example.com", api_key="key\nheader")
 
 
 @pytest.mark.parametrize(

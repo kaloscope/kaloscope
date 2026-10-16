@@ -75,13 +75,11 @@ type ModelID = Annotated[
 ]
 
 
-class AIProviderUpsert(BaseModel):
-    """Create or replace connection settings while treating credentials separately.
+class AIProviderConnection(BaseModel):
+    """Validate a draft connection and optional reference to its saved credential.
 
-    Omit `api_key` or use `null` to retain an existing credential. An empty string
-    clears it. Changing `base_url` with a stored credential requires an explicit
-    replacement or an empty string. An empty `model_ids` list is valid while the
-    connection is being configured. A `null` preset represents a custom provider.
+    Omit `api_key` or use `null` to reuse the saved key at the same endpoint.
+    An empty string explicitly requests a connection without a key.
     """
 
     model_config = ConfigDict(
@@ -89,13 +87,9 @@ class AIProviderUpsert(BaseModel):
     )
 
     id: PositiveInt | None = None
-    name: str = Field(min_length=1, max_length=64)
     preset: AIProviderPreset | None = None
-    protocol: AIProtocol = AIProtocol.CHAT_COMPLETIONS
     base_url: str = Field(min_length=1, max_length=2048)
     api_key: SecretStr | None = Field(default=None, max_length=4096)
-    model_ids: list[ModelID] = Field(default_factory=list, max_length=100)
-    enabled: bool = True
 
     @field_validator("base_url")
     @classmethod
@@ -127,26 +121,6 @@ class AIProviderUpsert(BaseModel):
             raise ValueError("Use an HTTP URL without credentials, query, or fragment")
         return str(url).rstrip("/")
 
-    @field_validator("model_ids")
-    @classmethod
-    def validate_model_ids(cls, value: list[str]) -> list[str]:
-        """Require distinct model IDs that can be displayed safely.
-
-        Args:
-            value: Trimmed model identifiers supplied by the administrator.
-
-        Returns:
-            Model identifiers in the supplied order.
-
-        Raises:
-            ValueError: If identifiers are duplicated or contain control characters.
-        """
-        if len(set(value)) != len(value):
-            raise ValueError("Model IDs must be unique")
-        if any(ord(char) < 32 or ord(char) == 127 for item in value for char in item):
-            raise ValueError("Model IDs must not contain control characters")
-        return value
-
     @field_validator("api_key")
     @classmethod
     def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
@@ -168,3 +142,38 @@ class AIProviderUpsert(BaseModel):
         if any(not 33 <= ord(char) <= 126 for char in secret):
             raise ValueError("API key must contain only printable ASCII without spaces")
         return SecretStr(secret)
+
+
+class AIProviderUpsert(AIProviderConnection):
+    """Create or replace connection settings while treating credentials separately.
+
+    Omit `api_key` or use `null` to retain an existing credential. An empty string
+    clears it. Changing `base_url` with a stored credential requires an explicit
+    replacement or an empty string. An empty `model_ids` list is valid while the
+    connection is being configured. A `null` preset represents a custom provider.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    protocol: AIProtocol = AIProtocol.CHAT_COMPLETIONS
+    model_ids: list[ModelID] = Field(default_factory=list, max_length=100)
+    enabled: bool = True
+
+    @field_validator("model_ids")
+    @classmethod
+    def validate_model_ids(cls, value: list[str]) -> list[str]:
+        """Require distinct model IDs that can be displayed safely.
+
+        Args:
+            value: Trimmed model identifiers supplied by the administrator.
+
+        Returns:
+            Model identifiers in the supplied order.
+
+        Raises:
+            ValueError: If identifiers are duplicated or contain control characters.
+        """
+        if len(set(value)) != len(value):
+            raise ValueError("Model IDs must be unique")
+        if any(ord(char) < 32 or ord(char) == 127 for item in value for char in item):
+            raise ValueError("Model IDs must not contain control characters")
+        return value

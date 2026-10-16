@@ -5,11 +5,35 @@ from sanic_ext import validate
 
 from app.core.ai.presets import get_provider_presets
 from app.core.decorators import authorize
-from app.models.ai import AIProvider, AIProviderUpsert
+from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
 from app.models.user import UserRole
 from app.services.ai import AIProviderService
 
 ai = Blueprint("ai", url_prefix="/ai")
+
+
+@ai.post("/provider/models")
+@authorize(role=UserRole.ADMIN)
+@validate(json=AIProviderConnection)
+async def discover_models(_: Request, body: AIProviderConnection) -> HTTPResponse:
+    """List models using draft connection settings or a saved credential.
+
+    Args:
+        _: Authenticated administrator request.
+        body: Validated connection details without requiring a saved name.
+
+    Returns:
+        Available model IDs without persisting draft settings.
+
+    Raises:
+        NotFoundException: If the saved provider no longer exists.
+        BadRequestException: If a changed endpoint would reuse a saved key.
+        KaloscopeException: If model discovery fails.
+    """
+    return json(
+        await AIProviderService.discover_models(body),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @ai.get("/provider/presets")

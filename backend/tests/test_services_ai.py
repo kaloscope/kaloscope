@@ -3,7 +3,9 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from tortoise import Tortoise
 
@@ -13,7 +15,8 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
-from app.models.ai import AIProvider, AIProviderUpsert
+from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
+from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.utils.crypto import fernet_decrypt
 
@@ -247,5 +250,116 @@ def test_lost_key(key_path):
             assert not key_path.exists()
             assert await AIProvider.all().count() == 1
             assert (await AIProviderService.dump(provider))["has_api_key"] is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, "saved-key"),
+        ({"api_key": None}, "saved-key"),
+        ({"api_key": "draft-key"}, "draft-key"),
+        ({"api_key": ""}, ""),
+        ({"base_url": "https://other.example/v1", "api_key": "draft-key"}, "draft-key"),
+        ({"base_url": "http://localhost:1234/v1", "api_key": ""}, ""),
+    ],
+)
+def test_discovery_credentials(key_path, monkeypatch, changes, expected):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{"id": "discovered-model"}]})
+
+    monkeypatch.setattr(
+        ai_service, "NetworkTransport", lambda **_: httpx.MockTransport(respond)
+    )
+
+    async def run():
+        async with database():
+            provider = await AIProviderService.upsert(settings(api_key="saved-key"))
+            original = provider.api_key
+            draft = AIProviderConnection.model_validate(
+                {"id": provider.id, "base_url": provider.base_url, **changes}
+            )
+
+            assert await AIProviderService.discover_models(draft) == [
+                "discovered-model"
+            ]
+
+            assert len(requests) == 1
+            assert str(requests[0].url) == draft.base_url + "/models"
+            assert requests[0].headers.get("Authorization") == (
+                f"Bearer {expected}" if expected else None
+            )
+            await provider.refresh_from_db()
+            assert provider.api_key == original
+            assert provider.base_url == "https://example.com/v1"
+            assert provider.model_ids == ["test-model"]
+
+    asyncio.run(run())
+
+
+def test_draft_discovery(key_path, monkeypatch):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert "Authorization" not in request.headers
+        assert "Cookie" not in request.headers
+        return httpx.Response(
+            200,
+            json={"data": [{"id": f"model-{len(requests)}"}]},
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "Set-Cookie": "upstream=value",
+            },
+        )
+
+    monkeypatch.setattr(
+        ai_service, "NetworkTransport", lambda **_: httpx.MockTransport(respond)
+    )
+
+    async def run():
+        async with database():
+            draft = AIProviderConnection(base_url="http://localhost:11434/v1")
+
+            assert await AIProviderService.discover_models(draft) == ["model-1"]
+            assert await AIProviderService.discover_models(draft) == ["model-2"]
+
+            assert len(requests) == 2
+            assert await AIProvider.all().count() == 0
+            assert not key_path.exists()
+
+    asyncio.run(run())
+
+
+def test_unsafe_discovery(key_path, monkeypatch):
+    fetch = AsyncMock()
+    monkeypatch.setattr(ai_service, "fetch_models", fetch)
+
+    async def run():
+        async with database():
+            provider = await AIProviderService.upsert(settings(api_key="saved-key"))
+
+            with pytest.raises(BadRequestException):
+                await AIProviderService.discover_models(
+                    AIProviderConnection(
+                        id=provider.id, base_url="https://other.example/v1"
+                    )
+                )
+            with pytest.raises(NotFoundException):
+                await AIProviderService.discover_models(
+                    AIProviderConnection(id=999, base_url=provider.base_url)
+                )
+            key_path.unlink()
+            with pytest.raises(RuntimeError):
+                await AIProviderService.discover_models(
+                    AIProviderConnection(id=provider.id, base_url=provider.base_url)
+                )
+
+            fetch.assert_not_awaited()
+            assert not key_path.exists()
 
     asyncio.run(run())
