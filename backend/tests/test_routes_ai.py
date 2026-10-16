@@ -15,7 +15,7 @@ from tortoise import Tortoise
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.middleware import on_response
-from app.models.ai import AIProviderUpsert
+from app.models.ai import AIProviderConnection, AIProviderUpsert
 from app.models.user import UserRole
 from app.routes import ai as routes
 from app.utils.json import dumps
@@ -62,6 +62,7 @@ def request(body=None, role=UserRole.ADMIN):
         (routes.list_providers, {}),
         (routes.get_provider, {"id": 1}),
         (routes.upsert_provider, {}),
+        (routes.discover_models, {}),
         (routes.delete_provider, {"id": 1}),
     ],
 )
@@ -142,6 +143,39 @@ def test_delete(monkeypatch):
 
     assert response.status == 204
     delete.assert_awaited_once_with(2)
+
+
+def test_discover(monkeypatch):
+    discover = AsyncMock(return_value=["model-one"])
+    monkeypatch.setattr(routes.AIProviderService, "discover_models", discover)
+
+    response = asyncio.run(
+        routes.discover_models(request({"base_url": "https://example.com/v1"}))
+    )
+
+    assert json.loads(response.body) == ["model-one"]
+    assert response.headers["Cache-Control"] == "no-store"
+    assert isinstance(discover.await_args.args[0], AIProviderConnection)
+
+
+def test_invalid_discovery(monkeypatch):
+    discover = AsyncMock()
+    monkeypatch.setattr(routes.AIProviderService, "discover_models", discover)
+
+    with pytest.raises(ValidationError) as error:
+        asyncio.run(
+            routes.discover_models(
+                request(
+                    {
+                        "base_url": "https://example.com",
+                        "api_key": "private-key\nheader",
+                    }
+                )
+            )
+        )
+
+    discover.assert_not_awaited()
+    assert "private-key" not in str(error.value)
 
 
 @pytest.mark.parametrize("preset", [None, "deepseek"])
