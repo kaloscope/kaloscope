@@ -1,10 +1,19 @@
-"""Password hashing and lightweight encoding utilities."""
+"""Provide password hashing, legacy XOR encoding, and Fernet encryption.
+
+Keep XOR ciphertext and the active instance key compatible with existing data.
+Fernet reads the same raw 32-byte `secret.key` and converts it to Base64 only in
+memory. It never falls back to XOR or the application-name key.
+"""
 
 import base64
 import hashlib
 import os
 import secrets
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+from cryptography.fernet import Fernet, InvalidToken
+from filelock import FileLock
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import APP_NAME, ENCODING
@@ -36,23 +45,31 @@ def load_key(app_config: KaloscopeConfig, *, create: bool = False) -> bytes:
 
 
 def _create_key(path: Path):
-    """Create secret key exclusively with owner-only permissions.
+    """Initialize a raw 32-byte secret key atomically with private permissions.
 
     Args:
-        path: Secret key file path; an existing key is preserved.
+        path: Shared secret key file; existing contents are never replaced.
+
+    Raises:
+        OSError: If the directory or key cannot be created or secured.
+        Timeout: If another process holds the initialization lock too long.
     """
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        path.chmod(0o600)
-        return
-    try:
-        with os.fdopen(descriptor, "wb") as file:
-            file.write(secrets.token_bytes(_KEY_SIZE))
-        path.chmod(0o600)
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(f"{path}.lock", timeout=10):
+        if path.exists():
+            path.chmod(0o600)
+            return
+        with NamedTemporaryFile(
+            dir=path.parent, prefix=".secret-key-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(secrets.token_bytes(_KEY_SIZE))
+                stream.flush()
+                os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
 
 def _key_bytes(key: str | bytes | None) -> bytes:
@@ -133,3 +150,72 @@ def xor_decrypt(encrypted_text: str, *, key: str | bytes | None = None) -> str:
     """
     encrypted_bytes = base64.b64decode(encrypted_text)
     return xor(encrypted_bytes, key=key).decode(ENCODING)
+
+
+def _load_fernet_cipher(key_path: Path, *, create_key: bool) -> Fernet:
+    """Load a Fernet cipher from the existing raw secret key format.
+
+    Args:
+        key_path: File containing the raw 32-byte instance key used by XOR.
+        create_key: Whether initialization is allowed when the file is missing.
+            Callers must disable this when existing ciphertext depends on the key.
+
+    Returns:
+        Authenticated cipher using the same key bytes, encoded only in memory.
+
+    Raises:
+        RuntimeError: If the key is missing or malformed.
+        OSError: If the key cannot be read or written.
+        Timeout: If another process holds the initialization lock too long.
+    """
+    if create_key:
+        _create_key(key_path)
+    try:
+        return Fernet(base64.urlsafe_b64encode(key_path.read_bytes()))
+    except (FileNotFoundError, ValueError):
+        raise RuntimeError("Fernet key is missing or invalid") from None
+
+
+def fernet_encrypt(plain_text: str, key_path: Path, *, create_key: bool = False) -> str:
+    """Encrypt text using Fernet and an explicitly selected key file.
+
+    Args:
+        plain_text: Text to encrypt.
+        key_path: Shared raw 32-byte `secret.key`, also usable by the XOR helpers.
+        create_key: Whether a missing key may be initialized. Defaults to `False`;
+            enable only when no stored ciphertext relies on this key.
+
+    Returns:
+        URL-safe Base64-encoded Fernet token.
+
+    Raises:
+        RuntimeError: If the key is missing or malformed.
+        OSError: If the key cannot be read or written.
+        Timeout: If another process holds the initialization lock too long.
+    """
+    return (
+        _load_fernet_cipher(key_path, create_key=create_key)
+        .encrypt(plain_text.encode(ENCODING))
+        .decode("ascii")
+    )
+
+
+def fernet_decrypt(encrypted_text: str, key_path: Path) -> str:
+    """Decrypt a Fernet token without creating keys or trying legacy XOR.
+
+    Args:
+        encrypted_text: Fernet token containing UTF-8 text.
+        key_path: Shared raw 32-byte `secret.key` used to encrypt the token.
+
+    Returns:
+        Original plaintext after successful authentication.
+
+    Raises:
+        RuntimeError: If the key is missing, malformed, or cannot decrypt the token.
+        OSError: If the key cannot be read.
+    """
+    cipher = _load_fernet_cipher(key_path, create_key=False)
+    try:
+        return cipher.decrypt(encrypted_text).decode(ENCODING)
+    except (InvalidToken, UnicodeError):
+        raise RuntimeError("Fernet ciphertext cannot be decrypted") from None

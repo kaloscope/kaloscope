@@ -118,11 +118,14 @@ dependency and tooling configuration. `backend/poetry.toml` keeps the Python env
 - Keep ORM and Pydantic request models in the relevant `backend/app/models` domain module. Reuse `TortoiseModel`,
   `Pageable`, and the other existing base models.
 - Use Tortoise's built-in migrations. `backend/pyproject.toml` points to `app.main.tortoise_config`; after a persistent
-  schema change, run `poetry run tortoise makemigrations` from `backend` and review the generated files in
-  `backend/app/migrations`. Startup applies migrations through `upgrade_db`.
-- Add a migration instead of rewriting a released schema. Check defaults, enum values, indexes, and compatibility with
-  existing data. Test upgrades, repeated application, and rollback with temporary SQLite databases; use
-  `backend/tests/test_migrations_media.py` as an example.
+  schema change, run `poetry run tortoise makemigrations --name <descriptive_name>` from `backend` and review the generated
+  files in `backend/app/migrations`. Always use a concise, descriptive custom name in `snake_case`. Startup applies
+  migrations through `upgrade_db`.
+- Before a release, consolidate all schema changes for that release into a single unreleased migration. Update or
+  regenerate that migration instead of adding another one. Start a new migration for the next release only after the
+  current one has been released.
+- Never rewrite a released migration. Review defaults, enum values, indexes, and compatibility with existing data.
+  Keep behavioral coverage in model and service tests; do not add dedicated tests for migration files.
 
 ## Code and documentation style
 
@@ -187,7 +190,7 @@ when new changes, failures, or unresolved concerns justify it.
 | Documentation only                                                  | Verify referenced paths, commands, Markdown formatting, and `git diff --check`; application tests and builds are unnecessary |
 | Backend behavior                                                    | Run focused Pytest tests and both Ruff checks from the command table                                                         |
 | Shared backend infrastructure, models, or behavior spanning domains | Also run the full backend test suite                                                                                         |
-| Persistent schema                                                   | Include migration upgrade, repeat-application, and rollback coverage                                                         |
+| Persistent schema                                                   | Review migration operations and data compatibility; verify affected model and service behavior                               |
 | Frontend code                                                       | Run `pnpm run check` and `pnpm run lint`                                                                                     |
 | Frontend routes, build configuration, dependencies, or PWA          | Also run `pnpm run build`                                                                                                    |
 | UI behavior or layout                                               | Inspect the affected states in the browser when available; include screenshots in a PR                                       |
