@@ -61,7 +61,8 @@
         "network": "网络设置",
         "general": "通用设置",
         "medialibs": "媒体库管理",
-        "downloaders": "下载器设置"
+        "downloaders": "下载器设置",
+        "ai": "模型提供商"
       },
       "monitor": {
         "title": "系统监控",
@@ -241,7 +242,8 @@
     "dns_resolver": " DNS 解析器",
     "dns_resolvers": " DNS 解析器",
     "proxy_server": "代理服务器",
-    "proxy_servers": "代理服务器"
+    "proxy_servers": "代理服务器",
+    "provider": "提供商"
   },
   "action": {
     "add": "新增{0}",
@@ -914,6 +916,45 @@
     "invalid_image": "图片格式无效！",
     "invalid_metadata": "元数据文件无效！",
     "metadata_write_failed": "元数据文件保存失败！",
-    "ambiguous_metadata": "存在多个无法确定归属的元数据文件！"
+    "ambiguous_metadata": "存在多个无法确定归属的元数据文件！",
+    "ai_models_auth_failed": "提供商认证失败，请检查 API Key 及模型列表访问权限。",
+    "ai_models_unsupported": "该地址不支持获取模型，请检查 API 地址或手动填写模型 ID。",
+    "ai_models_rate_limited": "提供商请求过于频繁，请稍后重试。",
+    "ai_models_timeout": "获取模型超时，请检查连接后重试。",
+    "ai_models_invalid_response": "提供商返回的模型列表无效或过大，请手动填写模型 ID。",
+    "ai_models_fetch_failed": "无法获取模型，请检查 API 地址和网络，或手动填写模型 ID。"
+  },
+  "ai": {
+    "custom": "自定义提供商",
+    "configured": "已配置的提供商",
+    "empty": "尚未配置提供商",
+    "base_url": "API 地址",
+    "base_url_hint": "按需包含 API 版本路径，不要填写 /chat/completions。",
+    "api_key": "API Key",
+    "key_keep": "留空保留已保存的密钥",
+    "key_optional_hint": "如果该地址无需认证，可以留空。",
+    "key_saved": "已配置 API Key",
+    "key_missing": "未配置 API Key",
+    "models": "模型",
+    "models_hint": "每行一个模型 ID，最多 100 个。",
+    "enabled": "已启用",
+    "disabled": "已停用",
+    "toggle": "启用 {0}",
+    "model_count": "{0} 个模型",
+    "load_failed": "加载提供商失败，请重试。",
+    "save_failed": "保存失败，请重试。",
+    "update_failed": "更新失败，请重试。",
+    "delete_failed": "删除失败，请重试。",
+    "name_required": "请输入连接名称。",
+    "invalid_url": "请输入 HTTP 或 HTTPS 地址，不要包含账号密码、查询参数或片段。",
+    "invalid_key": "API Key 只能包含可打印的 ASCII 字符，且不能含空格。",
+    "invalid_models": "最多填写 100 个模型 ID，每个不超过 255 个字符，且不能包含控制字符。",
+    "duplicate_models": "模型 ID 不能重复。",
+    "endpoint_key_hint": "地址已修改；填写新密钥，或留空在保存时清除原密钥。",
+    "endpoint_key_required_hint": "地址已修改，请填写新 API Key。",
+    "models_fetch": "获取模型",
+    "models_no_match": "没有匹配的模型，可手动填写。",
+    "models_empty": "模型列表为空，可手动填写。",
+    "models_selected": "已选模型（{0}/100）"
   }
 }

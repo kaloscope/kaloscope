@@ -1,3 +1,6 @@
+export { default as ProviderEditor } from './ai/ProviderEditor.svelte';
+export { default as ProviderIcon } from './ai/ProviderIcon.svelte';
+
 export { default as DownloadDelConfirm } from './download/DownloadDelConfirm.svelte';
 export { default as DownloaderEditor } from './download/DownloaderEditor.svelte';
 export { downloadPrompt, default as DownloadPrompt } from './download/DownloadPrompt.svelte';

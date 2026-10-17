@@ -39,6 +39,45 @@ export interface Resp<T> extends BaseResp {
   data: T;
 }
 
+/** An API format supported by AI provider connections. */
+export type AIProtocol = 'chat_completions';
+
+/** A built-in AI provider preset identifier. */
+export type AIProviderPresetID =
+  'openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'openrouter' | 'ollama' | 'lmstudio';
+
+/** Editable connection defaults returned by the backend. */
+export interface AIProviderPreset {
+  id: AIProviderPresetID;
+  name: string;
+  protocol: AIProtocol;
+  base_url: string;
+  api_key_required: boolean;
+}
+
+/** A saved AI connection, excluding its stored credential. */
+export interface AIProvider {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  name: string;
+  preset: AIProviderPresetID | null;
+  protocol: AIProtocol;
+  base_url: string;
+  model_ids: string[];
+  enabled: boolean;
+  has_api_key: boolean;
+}
+
+/** A provider update; omit the key to retain it or use an empty string to clear it. */
+export type AIProviderUpsert = Omit<AIProvider, 'id' | 'created_at' | 'updated_at' | 'has_api_key'> & {
+  id?: number;
+  api_key?: string;
+};
+
+/** Draft settings for model discovery; an omitted key reuses the saved credential. */
+export type AIProviderConnection = Pick<AIProviderUpsert, 'id' | 'preset' | 'base_url' | 'api_key'>;
+
 /**
  * A paginated list wrapper.
  */
