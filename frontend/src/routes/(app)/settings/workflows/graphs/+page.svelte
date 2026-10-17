@@ -543,11 +543,11 @@
         {
           condition: !draft,
           icon: icons.back,
-          text: $_('action.retract', $_('entity.graph')),
+          text: $_('action.unpublish', $_('entity.graph')),
           onclick: () => {
             confirm({
               icon: icons.back,
-              title: `${$_('action.retract', $_('entity.graph'))} [${graph.name}]`,
+              title: `${$_('action.unpublish', $_('entity.graph'))} [${graph.name}]`,
               onconfirm: () => retract(graph.id)
             });
           }
