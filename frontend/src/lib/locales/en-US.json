@@ -265,7 +265,7 @@
     "scrape": "Scrape {0}",
     "select": "Select {0}",
     "upgrade": "Upgrade {0}",
-    "retract": "Retract {0}",
+    "unpublish": "Unpublish {0}",
     "execute": "Execute {0}",
     "download": "Download {0}",
     "favorite": "Favorite {0}",
@@ -345,7 +345,7 @@
       "watch": "Watch Records",
       "read": "Reading Records",
       "permanent": "Keep Forever",
-      "untrack": "Not Saving"
+      "untrack": "Do Not Save"
     }
   },
   "filesystem": {
@@ -382,7 +382,7 @@
         "supported": "Enter a URI supported by the selected tool"
       }
     },
-    "dir": "Save at",
+    "dir": "Save to",
     "start": "Start when added",
     "prompt": "Enter URI or choose a torrent file",
     "supported": "Magnet link or info-hash are supported",
@@ -779,7 +779,7 @@
         "force_end": "Force End"
       },
       "tooltip": {
-        "format_response": "Format the response and merge it into the global context.",
+        "format_response": "Format the response and merge it into the current workflow context.",
         "cache_ttl": "Set to 0 to never expire. The value loads on the next workflow run.",
         "merge_maximum": "Max inputs to wait for before output; extras are discarded.",
         "merge_timeout": "Max wait time after the first input arrives.",
@@ -800,7 +800,7 @@
       "last_sync": "Last sync: {0}",
       "confirm_repo": "Please enter the GitHub repository full name or URL:",
       "confirm_name": "Please confirm the name to use:",
-      "confirm_upgrade": "Upgrade to the latest version? Published items will be retracted.",
+      "confirm_upgrade": "Upgrade to the latest version? Published workflows will be unpublished.",
       "risk_warning": "Using workflow definitions from third-party repositories may pose security risks, please ensure you trust the source."
     },
     "trigger": {
