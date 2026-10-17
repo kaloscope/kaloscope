@@ -6,6 +6,7 @@ import httpx
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
+from app.core.ai.completion import complete
 from app.core.ai.discovery import fetch_models
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
@@ -15,13 +16,81 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.network import NetworkTransport
-from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
+from app.models.ai import (
+    AICompletionConfig,
+    AIModelSelection,
+    AIProvider,
+    AIProviderConnection,
+    AIProviderPreset,
+    AIProviderUpsert,
+)
 from app.services.base import BaseService
 from app.utils.crypto import fernet_decrypt, fernet_encrypt
 
 
 class AIProviderService(BaseService[AIProvider], model=AIProvider):
     """Persist administrator-managed provider settings and encrypted credentials."""
+
+    @classmethod
+    async def resolve_model(cls, selection: AIModelSelection) -> AIProvider:
+        """Resolve the current configuration before publishing or calling a model.
+
+        Args:
+            selection: Stable provider ID and explicitly configured model ID.
+
+        Returns:
+            Current enabled provider with the selected model still configured.
+
+        Raises:
+            KaloscopeException: If the provider is deleted, disabled, lacks a
+                required key, or no longer contains the selected model.
+        """
+        provider = await AIProvider.get_or_none(id=selection.provider_id)
+        if provider is None:
+            raise KaloscopeException(ErrorCode.AI_PROVIDER_MISSING, status_code=409)
+        if not provider.enabled:
+            raise KaloscopeException(ErrorCode.AI_PROVIDER_DISABLED, status_code=409)
+        if selection.model_id not in provider.model_ids:
+            raise KaloscopeException(ErrorCode.AI_MODEL_MISSING, status_code=409)
+        if (
+            provider.preset
+            not in {None, AIProviderPreset.OLLAMA, AIProviderPreset.LMSTUDIO}
+            and not provider.api_key
+        ):
+            raise KaloscopeException(ErrorCode.AI_KEY_UNAVAILABLE, status_code=409)
+        return provider
+
+    @classmethod
+    async def complete(cls, config: AICompletionConfig) -> dict:
+        """Execute a model call using current settings and an isolated credential.
+
+        Args:
+            config: Node settings with rendered prompts and validated model selection.
+
+        Returns:
+            Completion text, validated JSON data, model ID, and token usage.
+
+        Raises:
+            KaloscopeException: If configuration, credential decryption, model
+                execution, or output validation fails.
+        """
+        provider = await cls.resolve_model(config.model)
+        secret = None
+        if provider.api_key:
+            try:
+                secret = await asyncio.to_thread(
+                    fernet_decrypt,
+                    provider.api_key,
+                    KaloscopeConfig.get().secret_key_path,
+                )
+            except (RuntimeError, OSError):
+                raise KaloscopeException(
+                    ErrorCode.AI_KEY_UNAVAILABLE, status_code=409
+                ) from None
+        async with httpx.AsyncClient(transport=NetworkTransport(http2=True)) as client:
+            return await complete(
+                client, provider.base_url, provider.preset, secret, config
+            )
 
     @classmethod
     async def discover_models(cls, obj: AIProviderConnection) -> list[str]:

@@ -1,7 +1,7 @@
 """Define AI provider configuration and request validation."""
 
 from enum import StrEnum, auto
-from typing import Annotated
+from typing import Annotated, Literal
 
 from httpx import URL, InvalidURL
 from pydantic import (
@@ -177,3 +177,32 @@ class AIProviderUpsert(AIProviderConnection):
         if any(ord(char) < 32 or ord(char) == 127 for item in value for char in item):
             raise ValueError("Model IDs must not contain control characters")
         return value
+
+
+class AIModelSelection(BaseModel):
+    """Reference a saved provider and one explicitly configured model."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    provider_id: int = Field(gt=0, strict=True)
+    model_id: ModelID
+
+
+class AICompletionConfig(BaseModel):
+    """Validate AI node settings without storing connection details in workflows."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    model: AIModelSelection
+    system_prompt: str = Field(default="", max_length=65536)
+    prompt: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=131072)
+    ]
+    response_format: Literal["text", "json_object"] = "text"
+    native_schema: bool = Field(default=False, strict=True)
+    output_schema: str = Field(default="", max_length=32768)
+    timeout: int = Field(default=60, ge=1, le=300, strict=True)
+    max_tokens: int = Field(default=0, ge=0, le=131072, strict=True)
+    result_key: str = Field(
+        default="ai_result", pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$"
+    )

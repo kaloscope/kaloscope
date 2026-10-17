@@ -19,6 +19,7 @@ from app.core.constants import ENCODING
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node
+from app.core.flow.nodes.general.ai import AINode
 from app.models.flow import (
     FlowGraph,
     FlowJob,
@@ -309,18 +310,24 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
 
         Returns:
             Published flow graph instance.
+
+        Raises:
+            KaloscopeException: If an AI node has invalid settings or an unavailable
+                provider or model. Existing published definitions remain unchanged.
         """
         graph = await FlowGraph.get(id=id)
         definition = Node.compress(definition)
-        # return if the graph has not changed
-        if graph.state == GraphState.PUBLISHED and graph.definition == definition:
-            return graph
         # check if the graph is editable
         if not graph.editable:
             if graph.draft:
                 definition = graph.draft
             else:
                 return graph
+
+        await AINode.validate_definition(definition)
+        # recheck dependencies even when the definition has not changed
+        if graph.state == GraphState.PUBLISHED and graph.definition == definition:
+            return graph
 
         # generate the revision number
         now = timezone.now()
@@ -514,6 +521,7 @@ class FlowLogService(BaseService[FlowLog], model=FlowLog):
                 - type: The type of the log entry (start, node_type, end).
                 - data: The data associated with the log entry.
                 - document: The document or additional information related to the log.
+                - error: A translated error code when supplied by a failed node.
         """
         all = await FlowLog.filter(graph_id=graph_id)
         groups: list[list[dict]] = []
@@ -536,6 +544,7 @@ class FlowLogService(BaseService[FlowLog], model=FlowLog):
                             "type": log.node_type,
                             "data": log.node_data,
                             "document": log.exc_info,
+                            "error": (log.node_data or {}).get("$error"),
                         }
                     )
                 else:
