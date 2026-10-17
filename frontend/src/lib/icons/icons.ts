@@ -42,6 +42,7 @@ const fluentUISystemIcons = {
   cloudCube: 'fluent:cloud-cube-24-regular',
   cloudSync: 'fluent:cloud-sync-24-regular',
   code: 'fluent:code-24-regular',
+  collectionsEmpty: 'fluent:collections-empty-24-regular',
   contentView: 'fluent:content-view-24-regular',
   contentViewFilled: 'fluent:content-view-24-filled',
   delete: 'fluent:delete-24-regular',

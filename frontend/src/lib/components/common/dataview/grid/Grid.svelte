@@ -176,7 +176,7 @@
   <li class="col-span-full h-96">
     {#if notLoading}
       <div class="flex-col-center h-full gap-2 opacity-20" in:fade={{ duration: 200 }}>
-        <iconify-icon icon={icons.layerDiagonalSparkle} width="5rem"></iconify-icon>
+        <iconify-icon icon={icons.collectionsEmpty} width="5rem" aria-hidden="true"></iconify-icon>
         <span class="text-2xl">{$_('data.nodata')}</span>
       </div>
     {/if}
