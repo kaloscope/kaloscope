@@ -1,20 +1,30 @@
 <script lang="ts">
   let { class: _class }: { class?: string } = $props();
+  const uid = $props.id();
 </script>
 
-<svg aria-hidden="true" class={_class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <g>
-    <rect fill="#4338CA" width="32" height="32" rx="8" />
-    <g transform="translate(4, 4)">
-      <path
-        fill="#FFFFFF"
-        fill-opacity="0.3"
-        d="M2.84 2a1.273 1.273 0 100 2.547h14.107a1.273 1.273 0 100-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H22.04a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h14.106a1.274 1.274 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H15.38a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h14.106a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h9.698a1.273 1.273 0 100-2.547h-9.698z"
-      />
-      <path
-        fill="#FFFFFF"
-        d="M2.84 2a1.273 1.273 0 100 2.547h10.287a1.274 1.274 0 000-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H18.22a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H11.56a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h5.78a1.273 1.273 0 100-2.547h-5.78z"
-      />
-    </g>
-  </g>
+<!-- https://lmstudio.ai/assets/marketing/brand/download/logos/lm-studio-icon-color.svg -->
+<svg aria-hidden="true" class={_class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <path
+    d="M0 179.2C0 116.474 0 85.1112 12.2073 61.1531C22.9451 40.0789 40.0789 22.9451 61.1531 12.2073C85.1112 0 116.474 0 179.2 0H332.8C395.526 0 426.889 0 450.847 12.2073C471.921 22.9451 489.055 40.0789 499.793 61.1531C512 85.1112 512 116.474 512 179.2V332.8C512 395.526 512 426.889 499.793 450.847C489.055 471.921 471.921 489.055 450.847 499.793C426.889 512 395.526 512 332.8 512H179.2C116.474 512 85.1112 512 61.1531 499.793C40.0789 489.055 22.9451 471.921 12.2073 450.847C0 426.889 0 395.526 0 332.8V179.2Z"
+    fill="url(#{uid}-fill)"
+  />
+  <rect opacity="0.25" x="128" y="84" width="224" height="44" rx="22" fill="white" />
+  <rect x="64" y="84" width="224" height="44" rx="22" fill="white" />
+  <rect opacity="0.25" x="224" y="144" width="224" height="44" rx="22" fill="white" />
+  <rect x="160" y="144" width="224" height="44" rx="22" fill="white" />
+  <rect opacity="0.25" x="168" y="204" width="224" height="44" rx="22" fill="white" />
+  <rect x="104" y="204" width="224" height="44" rx="22" fill="white" />
+  <rect opacity="0.25" x="112" y="264" width="224" height="44" rx="22" fill="white" />
+  <rect x="48" y="264" width="224" height="44" rx="22" fill="white" />
+  <rect opacity="0.25" x="176" y="324" width="224" height="44" rx="22" fill="white" />
+  <rect x="112" y="324" width="224" height="44" rx="22" fill="white" />
+  <rect opacity="0.25" x="304" y="384" width="152" height="44" rx="22" fill="white" />
+  <rect x="240" y="384" width="152" height="44" rx="22" fill="white" />
+  <defs>
+    <linearGradient id="{uid}-fill" x1="-219.792" y1="229.426" x2="239.06" y2="702.601" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6E7EF3" style="stop-color:color(display-p3 0.4303 0.4946 0.9515);stop-opacity:1;" />
+      <stop offset="1" stop-color="#4F13BE" style="stop-color:color(display-p3 0.3079 0.0763 0.7470);stop-opacity:1;" />
+    </linearGradient>
+  </defs>
 </svg>
