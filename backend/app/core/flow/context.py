@@ -134,6 +134,17 @@ class Context:
         self.storage[key] = value
 
     @after("union")
+    def replace(self, key: str, value: Any) -> None:
+        """Replace a variable atomically when this node context is merged.
+
+        Args:
+            key: Storage variable name whose previous nested fields must be removed.
+            value: Complete replacement value, rather than a partial update.
+        """
+        self._deleted.add(key)
+        self.storage[key] = value
+
+    @after("union")
     def setdefault(self, key: str, default: Any):
         """Set a missing storage variable and rebuild the context.
 

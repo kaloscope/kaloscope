@@ -1,3 +1,4 @@
+from app.core.flow.fields.ai_model import AIModelField
 from app.core.flow.fields.base import Field
 from app.core.flow.fields.code import CodeField
 from app.core.flow.fields.divider import DividerField
@@ -11,6 +12,7 @@ from app.core.flow.fields.toggle import ToggleField
 from app.core.flow.fields.url import URLField
 
 __all__ = [
+    "AIModelField",
     "Field",
     "CodeField",
     "DividerField",

@@ -11,6 +11,7 @@ class Field[V](ABC):
 
     id: str = field(init=False, repr=False)
     field_type: str = field(init=False, repr=False)
+    visible_when: dict[str, str | int | bool] | None = None
     span: int | None = None
     label: str | None = field(kw_only=False, default=None)
     tooltip: str | None = None
