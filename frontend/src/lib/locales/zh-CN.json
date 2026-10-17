@@ -14,11 +14,11 @@
     "checking_updates": "正在检查更新...",
     "up_to_date": "当前已是最新版本",
     "latest_version": "发现新版本：",
-    "update_check_failed": "检查更新失败，请重试。",
+    "update_check_failed": "检查更新失败，请重试",
     "exit_fullscreen": "退出全屏",
     "enter_fullscreen": "进入全屏",
     "pwa_install": "安装应用",
-    "pwa_prompt": "有新内容可用，请点击刷新按钮更新。"
+    "pwa_prompt": "有新内容可用，请点击刷新按钮更新"
   },
   "nav": {
     "dashboard": {
@@ -328,19 +328,19 @@
       "homepage": "主页设置",
       "vibration": {
         "title": "震动反馈",
-        "tip": "仅在支持 Vibration API 的设备上生效。"
+        "tip": "仅在支持 Vibration API 的设备上生效"
       }
     },
     "dashboard": {
       "title": "首页设置",
-      "tip": "设置首页中展示的模块。",
+      "tip": "设置首页中展示的模块",
       "search": "最近搜索",
       "watch": "最近观看",
       "read": "最近阅读"
     },
     "privacy": {
       "title": "隐私设置",
-      "tip": "设置各类历史记录的保留时间。",
+      "tip": "设置各类历史记录的保留时间",
       "search": "搜索记录",
       "watch": "观看记录",
       "read": "阅读记录",
@@ -364,10 +364,10 @@
       "config": "配置",
       "url": "服务地址",
       "unix_socket": "Unix Socket 路径",
-      "unix_socket_tip": "填写 Socket 文件的绝对路径，Docker 部署时使用挂载后的容器内路径。",
+      "unix_socket_tip": "填写 Socket 文件的绝对路径，Docker 部署时使用挂载后的容器内路径",
       "rpc_secret": "RPC 密钥",
       "advanced_mode": "YAML 高级模式",
-      "custom_yaml_only": "自定义下载器仅支持完整 YAML 配置。",
+      "custom_yaml_only": "自定义下载器仅支持完整 YAML 配置",
       "openlist": {
         "token": "API Token",
         "tool": "离线下载工具",
@@ -424,13 +424,13 @@
     "episodes": "剧集",
     "rename": {
       "template": "自动重命名模板",
-      "tip": "按模板重命名并整理，留空关闭。"
+      "tip": "按模板重命名并整理，留空关闭"
     },
     "scan_on_startup": "启动时全量扫描",
-    "movie_layout": "库目录下可直接存放视频，也可按电影分文件夹。",
-    "tv_show_layout": "库目录下按剧分文件夹，视频可直接放入或按季分文件夹。",
-    "novel_layout": "库目录下每部小说一个文件夹，内含单个 TXT 或 EPUB 文件。",
-    "comic_layout": "库目录下每部漫画一个文件夹，可按话再分一层，各含图片或单个 CBZ/ZIP。",
+    "movie_layout": "库目录下可直接存放视频，也可按电影分文件夹",
+    "tv_show_layout": "库目录下按剧分文件夹，视频可直接放入或按季分文件夹",
+    "novel_layout": "库目录下每部小说一个文件夹，内含单个 TXT 或 EPUB 文件",
+    "comic_layout": "库目录下每部漫画一个文件夹，可按话再分一层，各含图片或单个 CBZ/ZIP",
     "loading": "正在加载正文",
     "loading_chapters": "正在加载章节",
     "delete_local": "同时删除本地文件",
@@ -495,13 +495,13 @@
       "press_rate": "长按倍率",
       "landscape": {
         "title": "横屏模式",
-        "tip": "仅部分移动设备支持 Web API 方式锁定横屏。",
+        "tip": "仅部分移动设备支持 Web API 方式锁定横屏",
         "rotate": "旋转横屏",
         "web_api": "Web API"
       },
       "playback": {
         "title": "播放方式",
-        "tip": "服务端转码可将视频转为浏览器兼容格式，但会增加服务器负载。",
+        "tip": "服务端转码可将视频转为浏览器兼容格式，但会增加服务器负载",
         "direct": "客户端解码",
         "transcode": "服务端转码"
       }
@@ -510,7 +510,7 @@
       "auto_show": "自动显示",
       "language_preference": "语言偏好",
       "language_preference_placeholder": "chs|zh-CN",
-      "language_preference_tip": "自动显示时按正则优先匹配，留空则使用第一个字幕轨道。",
+      "language_preference_tip": "自动显示时按正则优先匹配，留空则使用第一个字幕轨道",
       "display_mode": "显示样式",
       "display_mode_options": {
         "stroke": "描边",
@@ -529,9 +529,9 @@
       "font_size": "弹幕字号",
       "block": "屏蔽类型",
       "merge": "合并重复",
-      "merge_tip": "合并内容相同的弹幕。",
+      "merge_tip": "合并内容相同的弹幕",
       "block_pattern": "正则过滤",
-      "block_pattern_tip": "屏蔽匹配正则表达式的弹幕。",
+      "block_pattern_tip": "屏蔽匹配正则表达式的弹幕",
       "mode": {
         "scroll": "滚动",
         "top": "顶部",
@@ -540,7 +540,7 @@
       },
       "match": "匹配",
       "server": "弹幕服务器",
-      "server_tip": "兼容 dandanplay API 格式的弹幕服务器地址。",
+      "server_tip": "兼容 dandanplay API 格式的弹幕服务器地址",
       "ttl": "弹幕缓存（小时）",
       "cache": "本地缓存",
       "manual": "手动搜索"
@@ -646,18 +646,18 @@
     "title": "FFmpeg",
     "path": {
       "title": "自定义路径",
-      "tip": "FFmpeg 可执行文件路径，留空则使用系统默认值。"
+      "tip": "FFmpeg 可执行文件路径，留空则使用系统默认值"
     }
   },
   "transcode": {
     "title": "转码设置",
     "auto": {
       "title": "自动转码播放",
-      "tip": "浏览器播放失败时自动切换为服务端转码。"
+      "tip": "浏览器播放失败时自动切换为服务端转码"
     },
     "quality": {
       "title": "转码质量",
-      "tip": "更高质量产生更好的画质，但消耗更多存储空间和 CPU/GPU 资源。",
+      "tip": "更高质量产生更好的画质，但消耗更多存储空间和 CPU/GPU 资源",
       "low": "低",
       "medium": "中",
       "high": "高"
@@ -670,7 +670,7 @@
     },
     "hwaccel": {
       "title": "硬件加速",
-      "tip": "选择视频转码的硬件加速方式。",
+      "tip": "选择视频转码的硬件加速方式",
       "none": "无",
       "qsv": "QSV",
       "vaapi": "VAAPI",
@@ -679,7 +679,7 @@
     },
     "vaapi_device": {
       "title": "VAAPI 设备",
-      "tip": "VAAPI 渲染设备路径，留空则使用系统默认值。"
+      "tip": "VAAPI 渲染设备路径，留空则使用系统默认值"
     },
     "segments": "{0} 个分片",
     "batch_delete_title": "删除 {0} 个转码任务"
@@ -779,11 +779,11 @@
         "force_end": "立即结束"
       },
       "tooltip": {
-        "format_response": "格式化响应结果并合并到全局上下文中。",
-        "cache_ttl": "设为 0 表示永不过期。缓存值将在工作流下次执行时载入。",
-        "merge_maximum": "输出前等待的最大输入数量，超出部分将被丢弃。",
-        "merge_timeout": "首次输入到达后的最大等待时间。",
-        "force_end": "立即结束流程，无需等待其它节点执行完毕。"
+        "format_response": "格式化响应结果并合并到全局上下文中",
+        "cache_ttl": "0 表示永不过期，缓存值在下次运行工作流时加载",
+        "merge_maximum": "输出前等待的最大输入数量，超出部分将被丢弃",
+        "merge_timeout": "首次输入到达后的最大等待时间",
+        "force_end": "立即结束流程，无需等待其它节点执行完毕"
       },
       "placeholder": {
         "key": "键",
@@ -800,8 +800,8 @@
       "last_sync": "上次同步：{0}",
       "confirm_repo": "请输入 GitHub 仓库全称或地址：",
       "confirm_name": "请确认要使用的名称：",
-      "confirm_upgrade": "是否更新到最新版本？已发布的流程将被撤回。",
-      "risk_warning": "使用第三方仓库流程定义可能存在安全风险，请确保信任该来源。"
+      "confirm_upgrade": "是否更新到最新版本？已发布的流程将被撤回",
+      "risk_warning": "使用第三方仓库流程定义可能存在安全风险，请确保信任该来源"
     },
     "trigger": {
       "count": "流程数量",
@@ -842,7 +842,7 @@
     },
     "download_completed": {
       "title": "下载完成",
-      "content": "\"{name}\" 下载完成！"
+      "content": "\"{name}\" 下载完成"
     }
   },
   "message": {
@@ -862,101 +862,101 @@
     }
   },
   "alert": {
-    "internal_server_error": "服务器内部错误！",
-    "unauthorized": "认证失败！",
-    "bad_request": "参数错误！",
-    "forbidden": "禁止访问！",
-    "not_found": "请求的资源不存在！",
-    "login_failed": "登录失败！",
-    "login_expired": "登录已过期！",
-    "user_not_found": "用户不存在！",
-    "flow_not_found": "流程定义不存在！",
-    "flow_not_published": "流程定义未发布！",
-    "flow_already_running": "流程任务已在运行！",
-    "name_already_exists": "该名称已存在！",
-    "username_already_exists": "该用户名已存在！",
-    "pattern_already_exists": "该匹配模式已存在！",
-    "scan_in_progress": "扫描进行中，请稍后再试！",
-    "incorrect_password": "密码错误！",
-    "passwords_mismatch": "两次输入的密码不一致！",
-    "password_changed": "密码修改成功！",
-    "permission_denied": "权限不足！",
-    "duplicate_directory": "目标目录重复！",
-    "invalid_flow_graph": "必填字段未填写完整！",
-    "invalid_boot_params": "无效的启动参数！",
-    "invalid_yaml_config": "无效的 YAML 配置！",
-    "invalid_github_repo": "无效的 GitHub 仓库！",
-    "invalid_download_source": "所选下载器不支持该来源！",
-    "info_hash_collision": "下载任务已存在！",
-    "http_request_failed": "发送 HTTP 请求失败！",
-    "danmaku_server_required": "请先配置媒体库的弹幕服务器。",
-    "danmaku_match_failed": "弹幕匹配失败，请重试或选择其他结果。",
+    "internal_server_error": "服务器内部错误",
+    "unauthorized": "认证失败",
+    "bad_request": "参数错误",
+    "forbidden": "禁止访问",
+    "not_found": "请求的资源不存在",
+    "login_failed": "登录失败",
+    "login_expired": "登录已过期",
+    "user_not_found": "用户不存在",
+    "flow_not_found": "流程定义不存在",
+    "flow_not_published": "流程定义未发布",
+    "flow_already_running": "流程任务已在运行",
+    "name_already_exists": "该名称已存在",
+    "username_already_exists": "该用户名已存在",
+    "pattern_already_exists": "该匹配模式已存在",
+    "scan_in_progress": "扫描进行中，请稍后再试",
+    "incorrect_password": "密码错误",
+    "passwords_mismatch": "两次输入的密码不一致",
+    "password_changed": "密码修改成功",
+    "permission_denied": "权限不足",
+    "duplicate_directory": "目标目录重复",
+    "invalid_flow_graph": "必填字段未填写完整",
+    "invalid_boot_params": "无效的启动参数",
+    "invalid_yaml_config": "无效的 YAML 配置",
+    "invalid_github_repo": "无效的 GitHub 仓库",
+    "invalid_download_source": "所选下载器不支持该来源",
+    "info_hash_collision": "下载任务已存在",
+    "http_request_failed": "发送 HTTP 请求失败",
+    "danmaku_server_required": "请先配置媒体库的弹幕服务器",
+    "danmaku_match_failed": "弹幕匹配失败，请重试或选择其他结果",
     "resource_load_failed": "内容加载失败，请尝试其他资源或稍后重试",
-    "magnet_link_copied": "磁力链接已复制！",
-    "select_export_items": "请先选择要导出的数据。",
-    "select_delete_items": "请先选择要删除的数据。",
-    "export_items_failed": "导出数据失败！",
-    "import_items_failed": "导入数据失败！",
-    "import_items_success": "成功导入 {0} 条数据！",
-    "upgrade_success": "更新成功！",
-    "file_not_exists": "文件不存在！",
-    "media_source_unavailable": "无法访问媒体源文件！",
-    "content_changed": "媒体内容已变化，请重试！",
-    "reading_history_load_failed": "阅读进度加载失败，本次从章节起点开始。",
-    "reading_progress_save_failed": "阅读进度保存失败，请稍后重试！",
-    "reading_position_reset": "阅读位置已失效，已从可用章节起点开始。",
-    "content_not_ready": "媒体内容尚未准备好，请稍后重试！",
-    "empty_content": "媒体来源没有可阅读的内容！",
-    "unsupported_layout": "媒体目录结构不受支持！",
-    "ambiguous_layout": "媒体目录包含冲突的正文来源！",
-    "unsupported_media_format": "媒体格式不受支持！",
-    "media_limit_exceeded": "媒体文件超过读取限制！",
-    "invalid_archive": "压缩包损坏或格式无效！",
-    "invalid_epub": "EPUB 文件结构无效！",
-    "invalid_image": "图片格式无效！",
-    "invalid_metadata": "元数据文件无效！",
-    "metadata_write_failed": "元数据文件保存失败！",
-    "ambiguous_metadata": "存在多个无法确定归属的元数据文件！",
-    "ai_models_auth_failed": "提供商认证失败，请检查 API Key 及模型列表访问权限。",
-    "ai_models_unsupported": "该地址不支持获取模型，请检查 API 地址或手动填写模型 ID。",
-    "ai_models_rate_limited": "提供商请求过于频繁，请稍后重试。",
-    "ai_models_timeout": "获取模型超时，请检查连接后重试。",
-    "ai_models_invalid_response": "提供商返回的模型列表无效或过大，请手动填写模型 ID。",
-    "ai_models_fetch_failed": "无法获取模型，请检查 API 地址和网络，或手动填写模型 ID。"
+    "magnet_link_copied": "磁力链接已复制",
+    "select_export_items": "请先选择要导出的数据",
+    "select_delete_items": "请先选择要删除的数据",
+    "export_items_failed": "导出数据失败",
+    "import_items_failed": "导入数据失败",
+    "import_items_success": "成功导入 {0} 条数据",
+    "upgrade_success": "更新成功",
+    "file_not_exists": "文件不存在",
+    "media_source_unavailable": "无法访问媒体源文件",
+    "content_changed": "媒体内容已变化，请重试",
+    "reading_history_load_failed": "阅读进度加载失败，本次从章节起点开始",
+    "reading_progress_save_failed": "阅读进度保存失败，请稍后重试",
+    "reading_position_reset": "阅读位置已失效，已从可用章节起点开始",
+    "content_not_ready": "媒体内容尚未准备好，请稍后重试",
+    "empty_content": "媒体来源没有可阅读的内容",
+    "unsupported_layout": "媒体目录结构不受支持",
+    "ambiguous_layout": "媒体目录包含冲突的正文来源",
+    "unsupported_media_format": "媒体格式不受支持",
+    "media_limit_exceeded": "媒体文件超过读取限制",
+    "invalid_archive": "压缩包损坏或格式无效",
+    "invalid_epub": "EPUB 文件结构无效",
+    "invalid_image": "图片格式无效",
+    "invalid_metadata": "元数据文件无效",
+    "metadata_write_failed": "元数据文件保存失败",
+    "ambiguous_metadata": "存在多个无法确定归属的元数据文件",
+    "ai_models_auth_failed": "提供商认证失败，请检查 API Key 及模型列表访问权限",
+    "ai_models_unsupported": "该地址不支持获取模型，请检查 API 地址或手动填写模型 ID",
+    "ai_models_rate_limited": "提供商请求过于频繁，请稍后重试",
+    "ai_models_timeout": "获取模型超时，请检查连接后重试",
+    "ai_models_invalid_response": "提供商返回的模型列表无效或过大，请手动填写模型 ID",
+    "ai_models_fetch_failed": "无法获取模型，请检查 API 地址和网络，或手动填写模型 ID"
   },
   "ai": {
     "custom": "自定义提供商",
     "configured": "已配置的提供商",
     "empty": "尚未配置提供商",
     "base_url": "API 地址",
-    "base_url_hint": "按需包含 API 版本路径，不要填写 /chat/completions。",
+    "base_url_hint": "按需包含 API 版本路径，不要填写 /chat/completions",
     "api_key": "API Key",
     "key_keep": "留空保留已保存的密钥",
-    "key_optional_hint": "如果该地址无需认证，可以留空。",
+    "key_optional_hint": "如果该地址无需认证，可以留空",
     "key_saved": "已配置 API Key",
     "key_missing": "未配置 API Key",
     "test": "测试连接",
-    "test_success": "连接成功。",
+    "test_success": "连接成功",
     "models": "模型",
-    "models_hint": "每行一个模型 ID，最多 100 个。",
+    "models_hint": "每行一个模型 ID，最多 100 个",
     "enabled": "已启用",
     "disabled": "已停用",
     "toggle": "启用 {0}",
     "model_count": "{0} 个模型",
-    "load_failed": "加载提供商失败，请重试。",
-    "save_failed": "保存失败，请重试。",
-    "update_failed": "更新失败，请重试。",
-    "delete_failed": "删除失败，请重试。",
-    "name_required": "请输入连接名称。",
-    "invalid_url": "请输入 HTTP 或 HTTPS 地址，不要包含账号密码、查询参数或片段。",
-    "invalid_key": "API Key 只能包含可打印的 ASCII 字符，且不能含空格。",
-    "invalid_models": "最多填写 100 个模型 ID，每个不超过 255 个字符，且不能包含控制字符。",
-    "duplicate_models": "模型 ID 不能重复。",
-    "endpoint_key_hint": "地址已修改；填写新密钥，或留空在保存时清除原密钥。",
-    "endpoint_key_required_hint": "地址已修改，请填写新 API Key。",
+    "load_failed": "加载提供商失败，请重试",
+    "save_failed": "保存失败，请重试",
+    "update_failed": "更新失败，请重试",
+    "delete_failed": "删除失败，请重试",
+    "name_required": "请输入连接名称",
+    "invalid_url": "请输入 HTTP 或 HTTPS 地址，不要包含账号密码、查询参数或片段",
+    "invalid_key": "API Key 只能包含可打印的 ASCII 字符，且不能含空格",
+    "invalid_models": "最多填写 100 个模型 ID，每个不超过 255 个字符，且不能包含控制字符",
+    "duplicate_models": "模型 ID 不能重复",
+    "endpoint_key_hint": "地址已修改；填写新密钥，或留空在保存时清除原密钥",
+    "endpoint_key_required_hint": "地址已修改，请填写新 API Key",
     "models_fetch": "获取模型",
-    "models_no_match": "没有匹配的模型，可手动填写。",
-    "models_empty": "模型列表为空，可手动填写。",
+    "models_no_match": "没有匹配的模型，可手动填写",
+    "models_empty": "模型列表为空，可手动填写",
     "models_selected": "已选模型（{0}/100）"
   }
 }
