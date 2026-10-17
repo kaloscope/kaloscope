@@ -935,6 +935,8 @@
     "key_optional_hint": "Leave blank if this endpoint does not require authentication.",
     "key_saved": "API key configured",
     "key_missing": "No API key",
+    "test": "Test connection",
+    "test_success": "Connection successful.",
     "models": "Models",
     "models_hint": "One model ID per line, up to 100.",
     "enabled": "Enabled",

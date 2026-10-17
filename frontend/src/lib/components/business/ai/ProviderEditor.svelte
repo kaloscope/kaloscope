@@ -22,6 +22,7 @@
 
   const uid = $props.id();
   const loading = createLoading();
+  const testLoading = createLoading();
   const modelsLoading = createLoading();
   const schema = createFormSchema(({ text, url, password }) => ({
     name: text().maxlength(64),
@@ -31,7 +32,7 @@
 
   let modal: Modal;
   let form: HTMLFormElement;
-  let discoveryAbort: AbortController | null = null;
+  let connectionRequests: Partial<Record<'discover' | 'test', AbortController>> = {};
   let original: AIProvider | null = $state(null);
   let preset: AIProviderPreset | null = $state(null);
   let name = $state('');
@@ -62,7 +63,7 @@
         : null
   );
 
-  onDestroy(() => discoveryAbort?.abort());
+  onDestroy(resetDiscovery);
 
   /**
    * Open a fresh form for a saved connection or an editable preset.
@@ -82,17 +83,18 @@
     modal.show();
   }
 
-  /** Clear the transient credential and model discovery when the dialog closes. */
+  /** Clear the transient credential and cancel connection requests when the dialog closes. */
   function clearSecret() {
     apiKey = '';
     resetDiscovery();
   }
 
-  /** Discard a stale catalog and cancel its request while retaining selected models. */
+  /** Discard a stale catalog and cancel connection requests while retaining selected models. */
   function resetDiscovery() {
-    discoveryAbort?.abort();
-    discoveryAbort = null;
+    for (const controller of Object.values(connectionRequests)) controller.abort();
+    connectionRequests = {};
     modelsLoading.end();
+    testLoading.end();
     availableModels = null;
   }
 
@@ -146,17 +148,19 @@
   }
 
   /**
-   * Fetch candidates without saving the draft or changing selected models.
+   * Fetch model candidates or test connectivity independently of other actions.
    *
-   * @returns A promise that resolves when discovery finishes or is cancelled.
+   * @param action - Whether to populate model candidates or report the connection test result.
+   * @returns A promise that resolves when the request finishes or is cancelled.
    */
-  async function discoverModels(): Promise<void> {
-    if (!hasRequiredApiKey || $modelsLoading !== null || $loading !== null) return;
+  async function fetchModels(action: 'discover' | 'test'): Promise<void> {
+    if (!hasRequiredApiKey || (action === 'test' ? $testLoading : $modelsLoading) !== null) return;
     const payload = connection();
     if (!payload) return;
     const controller = new AbortController();
-    discoveryAbort = controller;
-    modelsLoading.start();
+    const requestLoading = action === 'test' ? testLoading : modelsLoading;
+    connectionRequests[action] = controller;
+    requestLoading.start();
     try {
       const { data } = await api
         .post('ai/provider/models', {
@@ -166,9 +170,14 @@
           context: { silentErrors: true }
         })
         .json<Resp<string[]>>();
-      if (discoveryAbort === controller) availableModels = data;
+      if (connectionRequests[action] !== controller || !modal.isOpen()) return;
+      if (action === 'test') {
+        alert({ level: 'success', message: $_('ai.test_success') });
+      } else {
+        availableModels = data;
+      }
     } catch (cause) {
-      if (discoveryAbort !== controller) return;
+      if (connectionRequests[action] !== controller || !modal.isOpen()) return;
       const response = isHTTPError(cause) ? (cause.data as BaseResp | undefined) : undefined;
       if (response?.status === 401) return;
       alert({
@@ -178,15 +187,15 @@
           : $_('alert.ai_models_fetch_failed')
       });
     } finally {
-      if (discoveryAbort === controller) {
-        discoveryAbort = null;
-        modelsLoading.end();
+      if (connectionRequests[action] === controller) {
+        delete connectionRequests[action];
+        requestLoading.end();
       }
     }
   }
 
   /**
-   * Validate and save a connection when its required API key is available.
+   * Validate and save a connection independently of discovery and testing.
    *
    * @param form - Submitted form containing the editable connection fields.
    * @returns A promise that resolves after the save attempt finishes.
@@ -255,7 +264,7 @@
     oninput={clearValidation}
     onchange={clearValidation}
   >
-    <fieldset class="fieldset" disabled={$loading !== null}>
+    <fieldset class="fieldset">
       <Label required preventDefault={false}>
         <label for="{uid}-name">{$_('field.name')}</label>
       </Label>
@@ -310,7 +319,7 @@
         available={availableModels}
         loading={$modelsLoading}
         fetchDisabled={!hasRequiredApiKey}
-        onfetch={discoverModels}
+        onfetch={() => fetchModels('discover')}
       />
       <div class="flex items-center gap-3">
         <Label class="grow" preventDefault={false}>
@@ -319,12 +328,24 @@
         <input id="{uid}-enabled" type="checkbox" class="toggle mt-2 toggle-sm" bind:checked={enabled} />
       </div>
     </fieldset>
-    <div class="modal-action">
-      <button type="button" class="btn" onclick={() => modal.close()}>{$_('message.cancel')}</button>
-      <button type="submit" class="btn btn-submit" disabled={!hasRequiredApiKey || $loading !== null}>
-        {$_('message.confirm')}
-        {#if $loading}<span class="loading loading-xs loading-dots"></span>{/if}
+    <div class="modal-action flex-wrap">
+      <button
+        type="button"
+        class="btn mr-auto btn-soft"
+        disabled={!hasRequiredApiKey || $testLoading !== null}
+        aria-busy={$testLoading !== null}
+        onclick={() => fetchModels('test')}
+      >
+        {$_('ai.test')}
+        {#if $testLoading}<span class="loading loading-xs loading-dots"></span>{/if}
       </button>
+      <div class="flex gap-2">
+        <button type="button" class="btn min-w-20" onclick={() => modal.close()}>{$_('message.cancel')}</button>
+        <button type="submit" class="btn min-w-20 btn-submit" disabled={!hasRequiredApiKey || $loading !== null}>
+          {$_('message.confirm')}
+          {#if $loading}<span class="loading loading-xs loading-dots"></span>{/if}
+        </button>
+      </div>
     </div>
   </form>
 </Modal>
