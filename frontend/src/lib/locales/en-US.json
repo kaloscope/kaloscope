@@ -61,7 +61,8 @@
         "network": "Network",
         "general": "General",
         "medialibs": "Libraries",
-        "downloaders": "Downloaders"
+        "downloaders": "Downloaders",
+        "ai": "Model Providers"
       },
       "monitor": {
         "title": "Monitoring",
@@ -241,7 +242,8 @@
     "dns_resolver": "DNS Resolver",
     "dns_resolvers": "DNS Resolvers",
     "proxy_server": "Proxy Server",
-    "proxy_servers": "Proxy Servers"
+    "proxy_servers": "Proxy Servers",
+    "provider": "Provider"
   },
   "action": {
     "add": "New {0}",
@@ -914,6 +916,45 @@
     "invalid_image": "The image format is invalid!",
     "invalid_metadata": "The metadata file is invalid!",
     "metadata_write_failed": "The metadata file could not be saved!",
-    "ambiguous_metadata": "The metadata source is ambiguous!"
+    "ambiguous_metadata": "The metadata source is ambiguous!",
+    "ai_models_auth_failed": "Provider authentication failed. Check the API key and its permission to list models.",
+    "ai_models_unsupported": "This URL does not support model discovery. Check the API URL or enter model IDs manually.",
+    "ai_models_rate_limited": "The provider rate limit was reached. Try again later.",
+    "ai_models_timeout": "Model discovery timed out. Check the connection and retry.",
+    "ai_models_invalid_response": "The provider returned an invalid or oversized model list. Enter model IDs manually.",
+    "ai_models_fetch_failed": "Could not fetch models. Check the API URL and network, or enter model IDs manually."
+  },
+  "ai": {
+    "custom": "Custom provider",
+    "configured": "Configured providers",
+    "empty": "No providers configured",
+    "base_url": "Base URL",
+    "base_url_hint": "Include the API version path when needed, without /chat/completions.",
+    "api_key": "API Key",
+    "key_keep": "Leave blank to keep the saved key",
+    "key_optional_hint": "Leave blank if this endpoint does not require authentication.",
+    "key_saved": "API key configured",
+    "key_missing": "No API key",
+    "models": "Models",
+    "models_hint": "One model ID per line, up to 100.",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "toggle": "Enable {0}",
+    "model_count": "{0} models",
+    "load_failed": "Could not load providers. Please retry.",
+    "save_failed": "Could not save this provider. Please retry.",
+    "update_failed": "Could not update the provider. Please retry.",
+    "delete_failed": "Could not delete the provider. Please retry.",
+    "name_required": "Enter a connection name.",
+    "invalid_url": "Enter an HTTP or HTTPS URL without credentials, query parameters, or a fragment.",
+    "invalid_key": "Use an API key containing only printable ASCII characters, without spaces.",
+    "invalid_models": "Use up to 100 model IDs, each no longer than 255 characters, without control characters.",
+    "duplicate_models": "Model IDs must be unique.",
+    "endpoint_key_hint": "The URL changed. Enter a new key, or leave blank to clear the saved key on save.",
+    "endpoint_key_required_hint": "The URL changed. Enter a new API key.",
+    "models_fetch": "Fetch models",
+    "models_no_match": "No matching models. Enter model IDs manually.",
+    "models_empty": "No models returned. Enter model IDs manually.",
+    "models_selected": "Selected models ({0}/100)"
   }
 }

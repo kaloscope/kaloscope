@@ -102,6 +102,11 @@ export const load: LayoutLoad = async () => {
             title: 'nav.settings.system.downloaders',
             path: '/settings/system/downloaders',
             icon: icons.box3dDownload
+          },
+          {
+            title: 'nav.settings.system.ai',
+            path: '/settings/system/ai',
+            icon: icons.layerDiagonalSparkle
           }
         ]
       },
