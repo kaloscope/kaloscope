@@ -146,6 +146,7 @@
       maxWidth={field.width}
       class="{validatorClass} {_class}"
       editorClass="nodrag nowheel"
+      debounceTime={field.visible_when ? 0 : undefined}
       onchange={(doc) => {
         updateNodeData(field.nodeId, { [field.id]: doc });
       }}

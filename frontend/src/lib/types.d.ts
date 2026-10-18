@@ -78,6 +78,12 @@ export type AIProviderUpsert = Omit<AIProvider, 'id' | 'created_at' | 'updated_a
 /** Draft settings for model discovery; an omitted key reuses the saved credential. */
 export type AIProviderConnection = Pick<AIProviderUpsert, 'id' | 'preset' | 'base_url' | 'api_key'>;
 
+/** A workflow reference to a saved provider and configured model. */
+export interface AIModelSelection {
+  provider_id: number;
+  model_id: string;
+}
+
 /**
  * A paginated list wrapper.
  */
@@ -814,6 +820,7 @@ export type FlowLog = {
   type: string;
   data: Record<string, any> | null; // eslint-disable-line
   document: any; // eslint-disable-line
+  error?: string | null;
 };
 
 /**
@@ -856,6 +863,7 @@ export type Handle = {
 export type Field = {
   id: string;
   field_type: string;
+  visible_when?: Record<string, string | number | boolean> | null;
   span?: number | null;
   label: string | null;
   tooltip: string | null;
