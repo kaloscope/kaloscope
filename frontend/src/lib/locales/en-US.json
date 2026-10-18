@@ -783,6 +783,7 @@
         "ai_prompt": "Prompt",
         "ai_max_retries": "Max Retries",
         "ai_max_tokens": "Max Output Tokens",
+        "ai_temperature": "Temperature",
         "ai_response_format": "Output Format",
         "ai_text": "Text",
         "ai_json": "Structured JSON",
@@ -798,11 +799,13 @@
         "force_end": "End the workflow immediately without waiting for other nodes to complete.",
         "ai_max_retries": "Retry transient request failures only. 0 disables retries. The timeout applies to each attempt.",
         "ai_max_tokens": "0 uses the model default; some models count reasoning tokens in this limit.",
+        "ai_temperature": "Leave empty to use the model default. Higher values make output more random. Requires model support.",
         "ai_response_format": "Structured JSON must pass validation against the schema below. Use an object schema without references.",
         "ai_native_schema": "Advanced option: ask the provider to enforce the schema during generation. Requires model support. When off, the schema is supplied in the prompt. Both modes validate the result.",
         "ai_result_key": "Access text, json, model, and usage under this variable, for example ai_result.json.result. Use a letter followed by letters, digits, or underscores."
       },
       "placeholder": {
+        "ai_model_default": "Use model default",
         "key": "Key",
         "value": "Value"
       }
@@ -950,7 +953,7 @@
     "ai_auth_failed": "AI authentication failed; check the API key and model permissions.",
     "ai_rate_limited": "The AI provider rate limit or quota was exceeded; check the quota and retry later.",
     "ai_timeout": "The AI request timed out; check the connection or increase the node timeout.",
-    "ai_request_rejected": "The AI provider rejected the request; check the API address, model, output format, and token limit.",
+    "ai_request_rejected": "The AI provider rejected the request; check the API address, model, and generation parameters.",
     "ai_request_failed": "The AI request failed; check the provider and network connection.",
     "ai_response_invalid": "The AI provider returned an empty, invalid, or oversized response.",
     "ai_output_invalid": "The AI output does not match the JSON schema; check the prompt, model, and output schema.",

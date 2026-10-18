@@ -45,6 +45,16 @@ class AINode(Node):
     max_tokens = NumberField(
         min=0, max=131072, default=0, tooltip="ai_max_tokens", span=50
     )
+    temperature = NumberField(
+        min=0,
+        max=2,
+        step=0.1,
+        precision=1,
+        default=None,
+        placeholder="ai_model_default",
+        tooltip="ai_temperature",
+        span=50,
+    )
     response_format = SelectField(
         required=True,
         options={
@@ -53,7 +63,6 @@ class AINode(Node):
         },
         default="text",
         tooltip="ai_response_format",
-        span=50,
     )
     output_schema = CodeField(
         language="json",

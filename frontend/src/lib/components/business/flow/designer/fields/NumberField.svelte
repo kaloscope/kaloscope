@@ -9,7 +9,8 @@
     ...field
   }: Field & {
     nodeId: string;
-    data?: number;
+    data?: number | null;
+    placeholder: string | null;
     min: number | null;
     max: number | null;
     step: number;
@@ -17,12 +18,17 @@
   } = $props();
 
   const { updateNodeData } = useSvelteFlow();
-  const { label, tooltip } = nodeFormatter;
+  const { label, tooltip, placeholder } = nodeFormatter;
 
   /**
-   * Handle the input event on the number input field.
+   * Store a bounded number or restore the field default when cleared.
    */
   function updateFieldData() {
+    if (data == null) {
+      data = field.default;
+      updateNodeData(field.nodeId, { [field.id]: data });
+      return;
+    }
     // clamp the value to the min and max values
     if (field.min !== null && data < field.min) {
       data = field.min;
@@ -52,6 +58,7 @@
     min={field.min}
     max={field.max}
     step={field.step}
+    placeholder={$placeholder(field.placeholder)}
     bind:value={data}
     oninput={updateFieldData}
   />
