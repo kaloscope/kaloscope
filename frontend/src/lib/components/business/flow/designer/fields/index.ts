@@ -1,3 +1,4 @@
+export { default as ai_model } from './AIModelField.svelte';
 export { default as code } from './CodeField.svelte';
 export { default as divider } from './DividerField.svelte';
 export { default as kvpairs } from './KVPairsField.svelte';

@@ -737,7 +737,8 @@
         "text": "Save Text",
         "variables": "Variables",
         "cache": "Cache",
-        "script": "Script"
+        "script": "Script",
+        "ai": "AI"
       },
       "handle": {
         "input": "Input",
@@ -776,14 +777,28 @@
         "exclusive": "Exclusive Create",
         "overwrite": "Overwrite",
         "append": "Append",
-        "force_end": "Force End"
+        "force_end": "Force End",
+        "ai_model": "Provider and Model",
+        "ai_system_prompt": "System Prompt",
+        "ai_prompt": "Prompt",
+        "ai_max_tokens": "Max Output Tokens",
+        "ai_response_format": "Output Format",
+        "ai_text": "Text",
+        "ai_json": "Structured JSON",
+        "ai_native_schema": "Native Schema Enforcement",
+        "ai_output_schema": "JSON Schema",
+        "ai_result_key": "Output Variable"
       },
       "tooltip": {
         "format_response": "Format the response and merge it into the current workflow context.",
         "cache_ttl": "Set to 0 to never expire. The value loads on the next workflow run.",
         "merge_maximum": "Max inputs to wait for before output; extras are discarded.",
         "merge_timeout": "Max wait time after the first input arrives.",
-        "force_end": "End the workflow immediately without waiting for other nodes to complete."
+        "force_end": "End the workflow immediately without waiting for other nodes to complete.",
+        "ai_max_tokens": "0 uses the model default; some models count reasoning tokens in this limit.",
+        "ai_response_format": "Structured JSON must pass validation against the schema below. Use an object schema without references.",
+        "ai_native_schema": "Advanced option: ask the provider to enforce the schema during generation. Requires model support. When off, the schema is supplied in the prompt. Both modes validate the result.",
+        "ai_result_key": "Access text, json, model, and usage under this variable, for example ai_result.json.result. Use a letter followed by letters, digits, or underscores."
       },
       "placeholder": {
         "key": "Key",
@@ -922,7 +937,23 @@
     "ai_models_rate_limited": "The provider rate limit was reached. Try again later.",
     "ai_models_timeout": "Model discovery timed out. Check the connection and retry.",
     "ai_models_invalid_response": "The provider returned an invalid or oversized model list. Enter model IDs manually.",
-    "ai_models_fetch_failed": "Could not fetch models. Check the API URL and network, or enter model IDs manually."
+    "ai_models_fetch_failed": "Could not fetch models. Check the API URL and network, or enter model IDs manually.",
+    "ai_provider_missing": "The AI provider was deleted or is unavailable; select another provider in the node.",
+    "ai_provider_disabled": "The AI provider is disabled; enable it or select another provider in the node.",
+    "ai_model_missing": "The selected model is no longer configured; select it again in the node.",
+    "ai_key_unavailable": "The AI provider key is missing or unreadable; save a valid API key in provider settings.",
+    "ai_config_invalid": "Invalid AI node settings; check the model, prompt, limits, and output variable.",
+    "ai_prompt_invalid": "The AI prompt is empty, too long, or contains an invalid template or missing variable.",
+    "ai_schema_invalid": "Invalid output schema; use a Draft 2020-12 object schema without references.",
+    "ai_auth_failed": "AI authentication failed; check the API key and model permissions.",
+    "ai_rate_limited": "The AI provider rate limit or quota was exceeded; check the quota and retry later.",
+    "ai_timeout": "The AI request timed out; check the connection or increase the node timeout.",
+    "ai_request_rejected": "The AI provider rejected the request; check the API address, model, output format, and token limit.",
+    "ai_request_failed": "The AI request failed; check the provider and network connection.",
+    "ai_response_invalid": "The AI provider returned an empty, invalid, or oversized response.",
+    "ai_output_invalid": "The AI output does not match the JSON schema; check the prompt, model, and output schema.",
+    "ai_output_truncated": "The AI output was truncated; increase the output token limit or shorten the requested response.",
+    "ai_output_refused": "The model refused the request or filtered its response; review the prompt."
   },
   "ai": {
     "custom": "Custom provider",

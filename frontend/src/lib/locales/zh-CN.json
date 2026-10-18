@@ -737,7 +737,8 @@
         "text": "保存文本",
         "variables": "设置变量",
         "cache": "缓存数据",
-        "script": "脚本"
+        "script": "脚本",
+        "ai": "AI"
       },
       "handle": {
         "input": "输入",
@@ -776,14 +777,28 @@
         "exclusive": "独占",
         "overwrite": "覆盖",
         "append": "追加",
-        "force_end": "立即结束"
+        "force_end": "立即结束",
+        "ai_model": "提供商与模型",
+        "ai_system_prompt": "系统提示词",
+        "ai_prompt": "提示词",
+        "ai_max_tokens": "最大输出 Token",
+        "ai_response_format": "输出格式",
+        "ai_text": "文本",
+        "ai_json": "结构化 JSON",
+        "ai_native_schema": "原生结构约束",
+        "ai_output_schema": "JSON Schema",
+        "ai_result_key": "输出变量"
       },
       "tooltip": {
         "format_response": "格式化响应结果并合并到当前工作流上下文中",
         "cache_ttl": "0 表示永不过期，缓存值在下次运行工作流时加载",
         "merge_maximum": "输出前等待的最大输入数量，超出部分将被丢弃",
         "merge_timeout": "首次输入到达后的最大等待时间",
-        "force_end": "立即结束流程，无需等待其它节点执行完毕"
+        "force_end": "立即结束流程，无需等待其它节点执行完毕",
+        "ai_max_tokens": "0 表示使用模型默认值，部分模型的推理 Token 也计入此限制",
+        "ai_response_format": "结构化 JSON 输出须通过下方 Schema 校验，请使用不含引用的对象结构",
+        "ai_native_schema": "高级选项，要求提供商按 Schema 约束生成，需要模型支持；关闭时通过提示词约束，两种方式均会校验结果",
+        "ai_result_key": "通过此变量读取 text、json、model 和 usage，例如 ai_result.json.result。变量名以字母开头，仅含字母、数字和下划线"
       },
       "placeholder": {
         "key": "键",
@@ -922,7 +937,23 @@
     "ai_models_rate_limited": "提供商请求过于频繁，请稍后重试",
     "ai_models_timeout": "获取模型超时，请检查连接后重试",
     "ai_models_invalid_response": "提供商返回的模型列表无效或过大，请手动填写模型 ID",
-    "ai_models_fetch_failed": "无法获取模型，请检查 API 地址和网络，或手动填写模型 ID"
+    "ai_models_fetch_failed": "无法获取模型，请检查 API 地址和网络，或手动填写模型 ID",
+    "ai_provider_missing": "AI 提供商已删除或不存在，请在节点中重新选择",
+    "ai_provider_disabled": "AI 提供商已禁用，请启用提供商或在节点中重新选择",
+    "ai_model_missing": "所选模型已从提供商配置中移除，请在节点中重新选择",
+    "ai_key_unavailable": "AI 提供商密钥缺失或无法读取，请在提供商设置中重新保存 API Key",
+    "ai_config_invalid": "AI 节点配置无效，请检查模型、提示词、参数范围和输出变量",
+    "ai_prompt_invalid": "AI 提示词为空、过长，或包含模板错误及未定义的变量",
+    "ai_schema_invalid": "输出结构无效，请使用不含引用的 Draft 2020-12 对象结构",
+    "ai_auth_failed": "AI 认证失败，请检查 API Key 和模型访问权限",
+    "ai_rate_limited": "AI 提供商请求限流或额度不足，请检查额度后重试",
+    "ai_timeout": "AI 请求超时，请检查连接或增加节点超时时间",
+    "ai_request_rejected": "AI 提供商拒绝请求，请检查 API 地址、模型、输出格式和 Token 限制",
+    "ai_request_failed": "AI 请求失败，请检查提供商状态和网络连接",
+    "ai_response_invalid": "AI 提供商返回内容为空、格式无效或超过大小限制",
+    "ai_output_invalid": "AI 输出不符合 JSON 结构，请检查提示词、模型和输出结构",
+    "ai_output_truncated": "AI 输出被截断，请增加输出 Token 限制或缩短要求的内容",
+    "ai_output_refused": "模型拒绝回答或返回内容被过滤，请调整提示词"
   },
   "ai": {
     "custom": "自定义提供商",

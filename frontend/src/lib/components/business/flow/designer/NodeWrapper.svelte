@@ -81,6 +81,18 @@
     const span = field.span ?? 100;
     return `grid-column: span ${span} / span ${span};`;
   }
+
+  /**
+   * Show a field when its dependencies match the current values or schema defaults.
+   *
+   * @param field - Field schema with optional visibility conditions.
+   * @returns Whether all visibility conditions match.
+   */
+  function fieldVisible(field: Field): boolean {
+    return Object.entries(field.visible_when ?? {}).every(
+      ([key, value]) => (data[key] ?? schema.fields.find((item) => item.id === key)?.default) === value
+    );
+  }
 </script>
 
 <div class="group relative w-max min-w-80 rounded-box backdrop-blur-lg transition-all {shadowClass} {borderClass}">
@@ -105,9 +117,11 @@
     <div class="-mx-1 grid" style="grid-template-columns: repeat(100, minmax(0, 1fr));" style:width={schema.width}>
       {#each schema.fields as field (field.id)}
         {@const Field = fields[field.field_type]}
-        <div class="min-w-0 px-1 [&:not(:first-child):has(>.collapse)]:mt-3" style={fieldLayoutStyle(field)}>
-          <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
-        </div>
+        {#if fieldVisible(field)}
+          <div class="min-w-0 px-1 [&:not(:first-child):has(>.collapse)]:mt-3" style={fieldLayoutStyle(field)}>
+            <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
+          </div>
+        {/if}
       {/each}
     </div>
     {#each schema.handles as handle (handle.id)}

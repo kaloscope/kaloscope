@@ -86,7 +86,7 @@
   }
 </script>
 
-<Modal icon={icons.documentSearch} title={$_('action.view', $_('entity.logs'))} bind:this={modal}>
+<Modal icon={icons.documentSearch} title={$_('action.view', $_('entity.logs'))} maxWidth="38rem" bind:this={modal}>
   <div class="relative min-h-[50vh] overflow-y-auto rounded-box border">
     <Overlay loading={$loading} />
     {#if groups.length > 0}
@@ -101,14 +101,19 @@
               <span class="w-2 text-base font-thin opacity-50">{j === 0 ? i + 1 : ''}</span>
               <iconify-icon icon={start ? icons.arrowRouting : end ? icons.record : icons.warning}></iconify-icon>
               <span class="max-sm:w-24">{formatDate(log.at)}</span>
-              <span class="flex items-center gap-1 font-medium list-col-grow sm:pl-2">
-                {$_(`flow.node.${start || end ? 'group' : 'name'}.${log.type}`)}
-                {#if log.data}
-                  <Button
-                    icon={icons.eye}
-                    text={$_('flow.exec.node_data')}
-                    onclick={() => showDocModal(log.data, $_('flow.exec.node_data'))}
-                  />
+              <span class="list-col-grow sm:pl-2">
+                <span class="flex items-center gap-1 font-medium">
+                  {$_(`flow.node.${start || end ? 'group' : 'name'}.${log.type}`)}
+                  {#if log.data}
+                    <Button
+                      icon={icons.eye}
+                      text={$_('flow.exec.node_data')}
+                      onclick={() => showDocModal(log.data, $_('flow.exec.node_data'))}
+                    />
+                  {/if}
+                </span>
+                {#if log.error}
+                  <span class="mt-1 block text-xs text-error">{$_(`alert.${log.error}`)}</span>
                 {/if}
               </span>
               <Button
