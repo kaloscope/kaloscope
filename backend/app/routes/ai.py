@@ -5,7 +5,7 @@ from sanic_ext import validate
 
 from app.core.ai.presets import get_provider_presets
 from app.core.decorators import authorize
-from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
+from app.models.ai import AIProviderConnection, AIProviderUpsert
 from app.models.user import UserRole
 from app.services.ai import AIProviderService
 
@@ -52,16 +52,16 @@ async def provider_presets(_: Request) -> HTTPResponse:
 
 @ai.get("/provider/list")
 @authorize(role=UserRole.ADMIN)
-async def list_providers(_: Request) -> HTTPResponse:
+async def list_providers(request: Request) -> HTTPResponse:
     """List saved connections without exposing their credentials.
 
     Args:
-        _: Authenticated administrator request.
+        request: Authenticated administrator request.
 
     Returns:
         Provider settings with `has_api_key` flags.
     """
-    return json(await AIProviderService.dump_list(AIProvider.all()))
+    return json(await AIProviderService.list_providers(request.ctx.user))
 
 
 @ai.get("/provider/<id:int>")

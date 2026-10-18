@@ -1,0 +1,654 @@
+"""Unit tests for read-only HTTP MCP and workflow permissions."""
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+from mcp.client import Client
+from sanic import Request, Sanic
+from sanic.compat import Header
+from sanic.response.types import BaseHTTPResponse
+from tortoise import Tortoise, timezone
+
+from app.core.config import KaloscopeConfig
+from app.core.constants import SESSION_ID
+from app.core.exceptions import ForbiddenException, UnauthorizedException
+from app.core.middleware import on_request, on_response
+from app.mcp import MCP_PATH, close_mcp, create_server, start_mcp
+from app.models.ai import AIProvider
+from app.models.download import Downloader, DownloadTask
+from app.models.flow import FlowGraph, FlowJob, FlowLog, GraphCategory, GraphState
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
+from app.models.user import PermType, User, UserInfo, UserPermission
+from app.routes.mcp import dispatch
+from app.services.flow import FlowGraphService
+from app.utils.json import dumps, loads
+
+
+@asynccontextmanager
+async def application():
+    """Open an isolated application with the real MCP transport and database.
+
+    Yields:
+        Application containing reader and administrator sessions.
+    """
+    original_dumps = BaseHTTPResponse._dumps
+    app = Sanic("mcp-test", configure_logging=False, dumps=dumps)
+    app.config.update(AUTH_EXCLUDE_PATHS=[], TOKEN_EXPIRATION_HOURS=120)
+    app.shared_ctx.sessions = {}
+    app.ctx.lib_watcher = SimpleNamespace(is_scanning=lambda _: False)
+    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
+    try:
+        await Tortoise.generate_schemas()
+        for name, role in (("reader", "user"), ("admin", "admin")):
+            user = await User.create(username=name, password="unused", role=role)
+            now = timezone.now()
+            app.shared_ctx.sessions[name] = UserInfo(
+                id=user.id,
+                username=name,
+                role=role,
+                login_id=name,
+                avatar=None,
+                preferences={},
+                client_ip="127.0.0.1",
+                login_at=now,
+                last_activity=now,
+                expire_at=now + timedelta(hours=1),
+            )
+        await start_mcp(app)
+        yield app
+    finally:
+        await close_mcp(app)
+        await Tortoise.close_connections()
+        Sanic.unregister_app(app)
+        BaseHTTPResponse._dumps = original_dumps
+
+
+async def post(
+    app, method, params=None, *, token="reader", headers=None, http_method="POST"
+):
+    """Dispatch JSON-RPC through the real session middleware and MCP route.
+
+    Args:
+        app: Isolated application.
+        method: JSON-RPC method.
+        params: JSON-RPC parameters; `None` sends an empty object.
+        token: Session token; `None` omits bearer authentication.
+        headers: Optional header overrides.
+        http_method: HTTP method used for the request.
+
+    Returns:
+        Sanic response after the existing response middleware.
+    """
+    request_headers = {
+        "host": "localhost:8000",
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+        "mcp-protocol-version": "2025-11-25",
+    }
+    if token is not None:
+        request_headers["authorization"] = f"Bearer {token}"
+    request_headers.update(headers or {})
+    request = Request(
+        url_bytes=MCP_PATH.encode(),
+        headers=Header(request_headers),
+        version="1.1",
+        method=http_method,
+        transport=None,
+        app=app,
+    )
+    message = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+    if not method.startswith("notifications/"):
+        message["id"] = 1
+    request.body = dumps(message)
+    await on_request(request)
+    response = await dispatch(request)
+    return await on_response(request, response)
+
+
+async def call(app, name, arguments=None, *, token="reader"):
+    """Call a tool through the HTTP protocol and return its JSON-RPC result.
+
+    Args:
+        app: Isolated application.
+        name: Tool name.
+        arguments: Tool arguments; `None` supplies an empty object.
+        token: Account session to use.
+
+    Returns:
+        Tool result, including structured data or a safe error message.
+    """
+    response = await post(
+        app, "tools/call", {"name": name, "arguments": arguments or {}}, token=token
+    )
+    assert response.status == 200
+    payload = loads(response.body)
+    assert "request_id" not in payload and "data" not in payload
+    return payload["result"]
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_protocol(mode):
+    async def run():
+        async with Client(create_server(), mode=mode) as client:
+            result = await client.list_tools()
+            assert {tool.name for tool in result.tools} == {
+                "list_workflows",
+                "get_workflow",
+                "list_node_types",
+                "get_workflow_logs",
+                "list_media_libraries",
+                "list_media_items",
+                "get_media_item",
+                "list_download_tasks",
+                "list_workflow_jobs",
+                "list_ai_providers",
+            }
+            for tool in result.tools:
+                assert tool.annotations.read_only_hint is True
+                assert tool.annotations.destructive_hint is False
+                assert tool.annotations.idempotent_hint is True
+                assert (
+                    not {"ctx", "token", "url"} & tool.input_schema["properties"].keys()
+                )
+            result = await client.call_tool("list_workflows", {})
+            assert result.is_error
+            assert "authenticated" in result.content[0].text
+
+    asyncio.run(run())
+
+
+def test_http_protocol():
+    async def run():
+        async with application() as app:
+            response = await post(
+                app,
+                "initialize",
+                {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-client", "version": "1.0"},
+                },
+            )
+            assert response.status == 200
+            data = loads(response.body)
+            assert data["jsonrpc"] == "2.0"
+            assert data["result"]["serverInfo"]["name"] == "Kaloscope"
+            assert "mcp-session-id" not in response.headers
+            response = await post(app, "notifications/initialized")
+            assert response.status == 202
+            response = await post(app, "tools/list")
+            assert len(loads(response.body)["result"]["tools"]) == 10
+            response = await post(
+                app, "ping", headers={"origin": "http://localhost:8000"}
+            )
+            assert response.status == 200
+            for method in ("GET", "DELETE"):
+                response = await post(app, "ping", http_method=method)
+                assert response.status == 405
+                assert response.headers["allow"] == "POST"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("token", [None, "missing", "expired"])
+def test_authentication(token):
+    async def run():
+        async with application() as app:
+            if token == "expired":
+                user = app.shared_ctx.sessions["reader"].model_copy(deep=True)
+                user.expire_at = timezone.now() - timedelta(seconds=1)
+                app.shared_ctx.sessions[token] = user
+            with pytest.raises(UnauthorizedException):
+                await post(app, "tools/list", token=token)
+            if token == "expired":
+                assert token not in app.shared_ctx.sessions
+            with pytest.raises(UnauthorizedException):
+                await post(
+                    app,
+                    "tools/list",
+                    token=None,
+                    headers={"cookie": f"{SESSION_ID}=reader"},
+                )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://foreign.test",
+        "null",
+        "http://localhost:8000.evil.test",
+        "http://[invalid",
+        "http://localhost:8000/path",
+    ],
+)
+def test_foreign_origin(origin):
+    async def run():
+        async with application() as app:
+            with pytest.raises(ForbiddenException):
+                await post(app, "tools/list", headers={"origin": origin})
+
+    asyncio.run(run())
+
+
+def test_reads():
+    async def run():
+        async with application() as app:
+            graph = await FlowGraph.create(
+                name="Allowed",
+                category=GraphCategory.INDEXER,
+                state=GraphState.DRAFT,
+                draft={
+                    "nodes": [
+                        {"id": "ai", "data": {"$schema": "ai", "prompt": "Summarize"}}
+                    ],
+                    "edges": [],
+                },
+            )
+            hidden = await FlowGraph.create(
+                name="Hidden", category=GraphCategory.SCHEDULE, state=GraphState.DRAFT
+            )
+            permission = await UserPermission.create(
+                user_id=app.shared_ctx.sessions["reader"].id,
+                rel_type=PermType.INDEXER,
+                rel_id=graph.id,
+            )
+            await FlowLog.create(
+                graph=graph,
+                started_at=timezone.now(),
+                node_id="ai",
+                node_type="ai",
+                node_data={"$error": "ai_timeout"},
+            )
+            before = await FlowGraph.all().values()
+
+            result = await call(
+                app,
+                "list_workflows",
+                {"name": "allow", "category": "indexer", "state": "draft"},
+            )
+            assert result["structuredContent"]["total"] == 1
+            assert "draft" not in result["structuredContent"]["items"][0]
+            details = await call(app, "get_workflow", {"workflow_id": graph.id})
+            node = details["structuredContent"]["draft"]["nodes"][0]["data"]
+            assert node["prompt"] == "Summarize"
+            assert node["$schema"]["node_type"] == "ai"
+            logs = await call(
+                app, "get_workflow_logs", {"workflow_id": graph.id, "limit": 1}
+            )
+            assert logs["structuredContent"]["runs"][0][1]["error"] == "ai_timeout"
+            schemas = await call(
+                app, "list_node_types", {"node_type": "ai", "category": "schedule"}
+            )
+            assert len(schemas["structuredContent"]["general"]) == 1
+            assert schemas["structuredContent"]["general"][0]["node_type"] == "ai"
+
+            for tool in ("get_workflow", "get_workflow_logs"):
+                denied = await call(app, tool, {"workflow_id": hidden.id})
+                assert (
+                    denied["isError"] and "not allowed" in denied["content"][0]["text"]
+                )
+                for token in ("reader", "admin"):
+                    missing = await call(app, tool, {"workflow_id": 9999}, token=token)
+                    assert (
+                        missing["isError"]
+                        and "not found" in missing["content"][0]["text"]
+                    )
+            await permission.delete()
+            denied = await call(app, "get_workflow", {"workflow_id": graph.id})
+            assert denied["isError"]
+            assert (await call(app, "list_workflows"))["structuredContent"][
+                "total"
+            ] == 0
+            assert await FlowGraph.all().values() == before
+            assert await FlowLog.all().count() == 1
+
+    asyncio.run(run())
+
+
+def test_concurrent_accounts():
+    async def run():
+        async with application() as app:
+            await FlowGraph.create(
+                name="Private", category=GraphCategory.SCHEDULE, state=GraphState.DRAFT
+            )
+            results = await asyncio.gather(
+                *(
+                    call(app, "list_workflows", token=token)
+                    for token in ["reader", "admin"] * 4
+                )
+            )
+            assert [r["structuredContent"]["total"] for r in results] == [0, 1] * 4
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("list_workflows", {"page_num": 0}),
+        ("list_workflows", {"page_num": True}),
+        ("list_workflows", {"page_size": 101}),
+        ("list_workflows", {"page_size": True}),
+        ("list_workflows", {"category": "unknown"}),
+        ("get_workflow", {"workflow_id": 0}),
+        ("get_workflow", {"workflow_id": True}),
+        ("get_workflow", {"workflow_id": "../admin"}),
+        ("get_workflow_logs", {"workflow_id": 1, "limit": 21}),
+        ("list_media_items", {"library_id": True}),
+        ("list_media_items", {"page_size": 101}),
+        ("get_media_item", {"item_id": 0}),
+        ("list_download_tasks", {"state": "unknown"}),
+        ("list_download_tasks", {"page_num": 0}),
+        ("list_workflow_jobs", {"trigger": "unknown"}),
+        ("list_workflow_jobs", {"page_size": 101}),
+        ("scan_library", {"library_id": 1}),
+        ("add_download", {"url": "https://example.test/file"}),
+        ("execute_workflow", {"workflow_id": 1}),
+        ("publish_workflow", {"workflow_id": 1}),
+        ("delete_workflow", {"workflow_id": 1}),
+    ],
+)
+def test_invalid_calls(name, arguments):
+    async def run():
+        async with application() as app:
+            result = await call(app, name, arguments)
+            assert result["isError"]
+            assert await FlowGraph.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_internal_error(monkeypatch):
+    monkeypatch.setattr(
+        FlowGraphService,
+        "list_graphs",
+        AsyncMock(side_effect=RuntimeError("private database details")),
+    )
+
+    async def run():
+        async with application() as app:
+            result = await call(app, "list_workflows")
+            assert result["isError"]
+            assert "private database details" not in str(result)
+
+    asyncio.run(run())
+
+
+def test_media_reads(tmp_path):
+    nfo = tmp_path / "movie.nfo"
+    nfo.write_text("<movie><title>MCP Movie</title><year>2026</year></movie>")
+
+    async def run():
+        async with application() as app:
+            library = await MediaLib.create(
+                name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
+            )
+            private = await MediaLib.create(
+                name="Private",
+                dir=str(tmp_path / "private"),
+                lib_type=LibType.MOVIE,
+                priority=2,
+            )
+            item = await MediaItem.create(
+                lib=library,
+                name="movie.mp4",
+                title="MCP Movie",
+                dir=str(tmp_path),
+                path=str(tmp_path / "movie.mp4"),
+                nfo_path=str(nfo),
+            )
+            hidden = await MediaItem.create(
+                lib=private,
+                name="Private.mp4",
+                dir=private.dir,
+                path=f"{private.dir}/Private.mp4",
+            )
+            permission = await UserPermission.create(
+                user_id=app.shared_ctx.sessions["reader"].id,
+                rel_type=PermType.MEDIA_LIB,
+                rel_id=library.id,
+            )
+            await MediaEvent.create(
+                lib=library,
+                src_path=library.dir,
+                event_type="reconcile",
+                payload={"state": "pending"},
+            )
+            before = await MediaItem.all().values()
+            events_before = await MediaEvent.all().values()
+
+            libraries = (await call(app, "list_media_libraries"))["structuredContent"][
+                "items"
+            ]
+            assert [lib["id"] for lib in libraries] == [library.id]
+            assert libraries[0]["scanning"] is True
+            listed = await call(
+                app,
+                "list_media_items",
+                {"keyword": "mcp", "library_id": library.id, "page_size": 1},
+            )
+            assert [row["id"] for row in listed["structuredContent"]["items"]] == [
+                item.id
+            ]
+            empty_page = await call(
+                app, "list_media_items", {"page_num": 2, "page_size": 1}
+            )
+            assert empty_page["structuredContent"] == {"total": 1, "items": []}
+            excluded = await call(app, "list_media_items", {"library_id": private.id})
+            assert excluded["structuredContent"]["total"] == 0
+            details = (await call(app, "get_media_item", {"item_id": item.id}))[
+                "structuredContent"
+            ]
+            assert details["metadata"]["title"] == "MCP Movie"
+            assert details["metadata_state"] == "ready"
+            assert (await call(app, "get_media_item", {"item_id": hidden.id}))[
+                "isError"
+            ]
+            assert (await call(app, "get_media_item", {"item_id": 9999}))["isError"]
+            admin = await call(app, "list_media_libraries", token="admin")
+            assert len(admin["structuredContent"]["items"]) == 2
+            assert await MediaItem.all().values() == before
+            assert await MediaEvent.all().values() == events_before
+
+            await permission.delete()
+            assert (await call(app, "get_media_item", {"item_id": item.id}))["isError"]
+            assert (await call(app, "list_media_items"))["structuredContent"][
+                "total"
+            ] == 0
+
+    asyncio.run(run())
+    assert nfo.read_text() == "<movie><title>MCP Movie</title><year>2026</year></movie>"
+
+
+def test_application_scope(tmp_path):
+    async def run():
+        async with application() as app:
+            other = Sanic("mcp-other-app", configure_logging=False, dumps=dumps)
+            try:
+                app.ctx.lib_watcher = SimpleNamespace(is_scanning=lambda _: True)
+                await MediaLib.create(
+                    name="Movies", dir=str(tmp_path), lib_type="movie", priority=1
+                )
+                result = await call(app, "list_media_libraries", token="admin")
+                assert result["structuredContent"]["items"][0]["scanning"] is True
+            finally:
+                Sanic.unregister_app(other)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("parent_state", ["hidden", "foreign"])
+def test_inaccessible_media(tmp_path, parent_state):
+    async def run():
+        async with application() as app:
+            lib = await MediaLib.create(
+                name="Series", dir=str(tmp_path), lib_type="tv_show", priority=1
+            )
+            parent_lib = lib
+            if parent_state == "foreign":
+                parent_lib = await MediaLib.create(
+                    name="Other",
+                    dir=str(tmp_path / "other"),
+                    lib_type="tv_show",
+                    priority=2,
+                )
+            parent = await MediaItem.create(
+                lib=parent_lib,
+                dir=parent_lib.dir,
+                path=f"{parent_lib.dir}/parent",
+                name="Parent",
+                visible=parent_state != "hidden",
+            )
+            child = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                dir=parent.path,
+                path=f"{parent.path}/child.mp4",
+                name="Child",
+            )
+            await UserPermission.create(
+                user_id=app.shared_ctx.sessions["reader"].id,
+                rel_type=PermType.MEDIA_LIB,
+                rel_id=lib.id,
+            )
+            for item in (parent, child):
+                assert (await call(app, "get_media_item", {"item_id": item.id}))[
+                    "isError"
+                ]
+                page = await call(app, "list_media_items", {"path": item.path})
+                assert page["structuredContent"]["items"] == []
+
+    asyncio.run(run())
+
+
+def test_job_reads():
+    async def run():
+        async with application() as app:
+            allowed = await FlowGraph.create(
+                name="Allowed", category="indexer", state="published"
+            )
+            hidden = await FlowGraph.create(
+                name="Hidden", category="schedule", state="published"
+            )
+            for graph in (allowed, hidden):
+                await FlowJob.create(
+                    graph=graph, state="pending", trigger="cron", cron_expr="0 8 * * *"
+                )
+            permission = await UserPermission.create(
+                user_id=app.shared_ctx.sessions["reader"].id,
+                rel_type=PermType.INDEXER,
+                rel_id=allowed.id,
+            )
+            before = await FlowJob.all().values()
+
+            page = await call(
+                app,
+                "list_workflow_jobs",
+                {"name": "allow", "trigger": "cron", "state": "pending"},
+            )
+            assert page["structuredContent"]["total"] == 1
+            assert page["structuredContent"]["items"][0]["graph_name"] == "Allowed"
+            assert page["structuredContent"]["items"][0]["cron_expr"] == "0 8 * * *"
+            admin = await call(app, "list_workflow_jobs", token="admin")
+            assert admin["structuredContent"]["total"] == 2
+            assert await FlowJob.all().values() == before
+            await permission.delete()
+            assert (await call(app, "list_workflow_jobs"))["structuredContent"][
+                "total"
+            ] == 0
+
+    asyncio.run(run())
+
+
+def test_provider_reads(monkeypatch):
+    network = AsyncMock(
+        side_effect=AssertionError("Read-only access must not call providers")
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "send", network)
+
+    async def run():
+        async with application() as app:
+            provider = await AIProvider.create(
+                name="Offline",
+                base_url="https://example.test/v1",
+                api_key="encrypted-private-key",
+                enabled=False,
+                model_ids=["fixture-model"],
+            )
+            before = await AIProvider.all().values()
+            result = await call(app, "list_ai_providers", token="admin")
+            data = result["structuredContent"]["items"][0]
+            assert data["id"] == provider.id and data["enabled"] is False
+            assert (
+                data["model_ids"] == ["fixture-model"] and data["has_api_key"] is True
+            )
+            assert "api_key" not in data and "encrypted-private-key" not in str(result)
+            assert (await call(app, "list_ai_providers"))["isError"]
+            assert await AIProvider.all().values() == before
+            network.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_download_reads(monkeypatch):
+    monkeypatch.setattr(
+        KaloscopeConfig, "_config", SimpleNamespace(secret_key_enabled=False)
+    )
+    network = AsyncMock(
+        side_effect=AssertionError("Read-only access must not poll downloaders")
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "send", network)
+    config = """driver: rpc
+name: Test downloader
+protocol: http
+host: localhost
+port: 9000
+auth:
+  password: private-downloader-password
+methods:
+  list:
+    get: /tasks
+"""
+
+    async def run():
+        async with application() as app:
+            downloader = await Downloader.create(name="Test", config=config, priority=1)
+            task = await DownloadTask.create(
+                downloader=downloader,
+                name="MCP Movie",
+                dir="/private/downloads",
+                state="error",
+                error_msg="Connection unavailable",
+                percentage=25,
+                total_size=100,
+                completed_size=25,
+                magnet_link="https://example.test/?token=private-source-token",
+                files=["private-file"],
+            )
+            before = await DownloadTask.all().values()
+            result = await call(
+                app,
+                "list_download_tasks",
+                {"name": "mcp", "state": "error", "downloader_id": downloader.id},
+            )
+            data = result["structuredContent"]["items"][0]
+            assert data["id"] == task.id and data["percentage"] == 25
+            assert data["error_msg"] == "Connection unavailable"
+            assert not {"config", "magnet_link", "files", "dir"} & data.keys()
+            assert "private-downloader-password" not in str(result)
+            assert "private-source-token" not in str(result)
+            empty_page = await call(
+                app, "list_download_tasks", {"page_num": 2, "page_size": 1}
+            )
+            assert empty_page["structuredContent"] == {"total": 1, "items": []}
+            assert await DownloadTask.all().values() == before
+            network.assert_not_awaited()
+
+    asyncio.run(run())

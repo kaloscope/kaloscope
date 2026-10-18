@@ -13,7 +13,7 @@ from sanic_ext.exceptions import ValidationError
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
-from app.core.exceptions import ForbiddenException, UnauthorizedException
+from app.core.exceptions import ErrorCode, ForbiddenException, UnauthorizedException
 from app.core.middleware import on_response
 from app.models.ai import AIProviderConnection, AIProviderUpsert
 from app.models.user import UserRole
@@ -67,12 +67,16 @@ def request(body=None, role=UserRole.ADMIN):
     ],
 )
 @pytest.mark.parametrize(
-    ("role", "error"),
-    [(None, UnauthorizedException), (UserRole.USER, ForbiddenException)],
+    ("role", "error", "code"),
+    [
+        (None, UnauthorizedException, ErrorCode.UNAUTHORIZED),
+        (UserRole.USER, ForbiddenException, ErrorCode.FORBIDDEN),
+    ],
 )
-def test_authorization(handler, arguments, role, error):
-    with pytest.raises(error):
+def test_authorization(handler, arguments, role, error, code):
+    with pytest.raises(error) as exc_info:
         asyncio.run(handler(request(role=role), **arguments))
+    assert exc_info.value.message == code
 
 
 def test_presets():

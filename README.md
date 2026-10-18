@@ -147,6 +147,44 @@ docker run -d \
 - 支持以 [`PWA`](https://web.dev/explore/progressive-web-apps) 方式安装到桌面或移动设备
 - PWA 主题颜色可随应用内主题同步切换
 
+## 只读 MCP 接入
+
+Codex 等 MCP 客户端可以通过 Streamable HTTP 直接连接 Kaloscope，查询工作流、媒体库、媒体详情、
+下载进度、定时任务及模型配置。入口为 `/_api/mcp`，使用 Kaloscope 现有端口，不需要客户端安装 Python、
+检出源码或启动桥接进程。MCP 复用现有业务服务、登录会话和工作流权限，不提供编辑、发布或执行工具。
+
+在 Codex 配置中添加：
+
+```toml
+[mcp_servers.kaloscope]
+url = "http://127.0.0.1:8000/_api/mcp"
+bearer_token_env_var = "KALOSCOPE_TOKEN"
+```
+
+将地址替换为实际的 Kaloscope 实例地址。通过现有登录接口 `POST /_api/auth/login` 获取响应中的
+`data.token`，在启动 Codex 的环境中设置 `KALOSCOPE_TOKEN`。令牌不放入工具参数或项目文件；
+会话过期或退出登录后，需要重新登录并更新令牌。远程连接建议使用 HTTPS。
+其它支持 Streamable HTTP 的 MCP 客户端使用相同地址，并通过 `Authorization: Bearer <token>` 认证。
+
+| 工具                   | 用途                                                                 |
+| ---------------------- | -------------------------------------------------------------------- |
+| `list_workflows`       | 按名称、分类和状态分页读取有权限访问的工作流                         |
+| `get_workflow`         | 读取指定工作流的元数据、草稿和已发布定义                             |
+| `list_node_types`      | 读取节点字段、默认值、约束和连接点，支持按分类或节点类型过滤         |
+| `get_workflow_logs`    | 读取工作流最近保留的运行日志，不触发执行                             |
+| `list_workflow_jobs`   | 按工作流名称、状态和触发方式查询有权限访问的定时任务                 |
+| `list_media_libraries` | 读取有权限访问的媒体库及当前扫描状态，不触发扫描                     |
+| `list_media_items`     | 按标题或文件名、媒体库分页检索已入库媒体，支持查询已有条目的精确路径 |
+| `get_media_item`       | 读取媒体详情、可见子条目和当前元数据异常，不播放或重新索引           |
+| `list_download_tasks`  | 查询已保存的下载状态、进度和错误摘要，不主动刷新下载器               |
+| `list_ai_providers`    | 管理员查看提供商状态和已配置模型，不返回 API Key 或调用模型          |
+
+分页工具每页最多返回 100 项。媒体和定时任务遵循对应媒体库、工作流的访问权限；下载任务沿用下载页面的
+共享可见范围，不返回源链接、文件列表或下载器凭据。提供商列表包含已禁用的配置，便于排查 AI 节点配置失效。
+
+连接后可以让 Codex 分析失败工作流的日志、核对 AI 节点与提供商配置、查找已入库媒体，或汇总下载失败的任务。
+所有工具均为只读，不包含编辑、发布、执行、下载、扫描或模型推理操作。
+
 ## 星标历史
 
 [![Star History Chart](https://api.star-history.com/chart?repos=kaloscope/kaloscope&type=date&legend=top-left)](https://www.star-history.com/?repos=kaloscope%2Fkaloscope&type=date&legend=top-left)

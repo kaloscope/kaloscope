@@ -12,10 +12,13 @@ from tortoise import Tortoise
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
+    ErrorCode,
+    ForbiddenException,
     KaloscopeException,
     NotFoundException,
 )
 from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
+from app.models.user import UserRole
 from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.utils.crypto import fernet_decrypt
@@ -63,6 +66,16 @@ def settings(**overrides):
             **overrides,
         }
     )
+
+
+def test_list_forbidden():
+    user = SimpleNamespace(role=UserRole.USER)
+
+    with pytest.raises(ForbiddenException) as exc_info:
+        asyncio.run(AIProviderService.list_providers(user))
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.message == ErrorCode.FORBIDDEN
 
 
 def test_save_and_read(key_path):

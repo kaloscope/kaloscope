@@ -1,6 +1,7 @@
 """Manage AI connections without exposing their stored credentials."""
 
 import asyncio
+from typing import Any
 
 import httpx
 from tortoise.exceptions import IntegrityError
@@ -12,6 +13,7 @@ from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
     ErrorCode,
+    ForbiddenException,
     KaloscopeException,
     NotFoundException,
 )
@@ -24,12 +26,30 @@ from app.models.ai import (
     AIProviderPreset,
     AIProviderUpsert,
 )
+from app.models.user import UserInfo, UserRole
 from app.services.base import BaseService
 from app.utils.crypto import fernet_decrypt, fernet_encrypt
 
 
 class AIProviderService(BaseService[AIProvider], model=AIProvider):
     """Persist administrator-managed provider settings and encrypted credentials."""
+
+    @classmethod
+    async def list_providers(cls, user: UserInfo) -> list[dict[str, Any]]:
+        """List saved provider and model settings without revealing credentials.
+
+        Args:
+            user: Authenticated account requesting the provider settings.
+
+        Returns:
+            Configured providers, including disabled ones and `has_api_key` flags.
+
+        Raises:
+            ForbiddenException: If the account is not an administrator.
+        """
+        if user.role != UserRole.ADMIN:
+            raise ForbiddenException
+        return await cls.dump_list(AIProvider.all())
 
     @classmethod
     async def resolve_model(cls, selection: AIModelSelection) -> AIProvider:

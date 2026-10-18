@@ -117,7 +117,7 @@ class UserService(BaseService[User], model=User):
             new_pwd: New password.
         """
         if KaloscopeConfig.get().public_instance_mode:
-            raise ForbiddenException()
+            raise ForbiddenException
         user = await cls.login(username, cur_pwd, ambiguity=False)
         await User.filter(id=user.id).update(password=encrypt(new_pwd))
         # remove the user's token

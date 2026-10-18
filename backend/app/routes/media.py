@@ -9,7 +9,6 @@ from sanic.exceptions import InvalidRangeType, RangeNotSatisfiable
 from sanic.log import logger
 from sanic.response import ResponseStream, file_stream
 from sanic_ext import validate
-from tortoise.expressions import Q, RawSQL
 
 from app.core.config import KaloscopeConfig
 from app.core.decorators import authorize
@@ -44,7 +43,6 @@ from app.models.media import (
     MediaAssetQuery,
     MediaContentQuery,
     MediaDel,
-    MediaEvent,
     MediaItem,
     MediaLib,
     MediaLibUpsert,
@@ -54,7 +52,7 @@ from app.models.media import (
     TranscodeQuery,
     TranscodeTaskQuery,
 )
-from app.models.user import UserInfo, UserRole
+from app.models.user import UserRole
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.extractor import extract_title
@@ -74,28 +72,11 @@ async def list_libraries(request: Request) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    queries = []
-    # filter the libraries by the user's permissions
-    user: UserInfo = request.ctx.user
-    if user.perms is not None:
-        queries.append(Q(id__in=user.perms.media_lib_ids))
-    # list the libraries without pagination
-    media_libs = await MediaLibService.dump_list(MediaLib.filter(*queries))
-    scanning = {
-        lib_id
-        for lib_id, payload in await MediaEvent.filter(
-            lib_id__in=[lib["id"] for lib in media_libs], event_type="reconcile"
-        ).values_list("lib_id", "payload")
-        if (payload or {}).get("state") != "failed"
-    }
-    # attach the triggers and scanning status for each library
-    watcher: LibWatcher = request.app.ctx.lib_watcher
-    for lib in media_libs:
-        lib["triggers"] = await FlowTriggerService.get_triggers(
-            GraphCategory.INGEST, lib["id"]
+    return json(
+        await MediaLibService.list_libraries(
+            request.ctx.user, request.app.ctx.lib_watcher
         )
-        lib["scanning"] = watcher.is_scanning(lib["dir"]) or lib["id"] in scanning
-    return json(media_libs)
+    )
 
 
 @media.post("/lib/sort")
@@ -189,29 +170,7 @@ async def list_items(request: Request, query: MediaQuery) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    queries = [
-        Q(visible=True),
-        Q(parent_id__isnull=True) | Q(parent__visible=True),
-        # only list the top-level items if no path is specified
-        Q(path=query.path) if query.path else Q(parent_id__isnull=True),
-    ]
-    user: UserInfo = request.ctx.user
-    if user.perms is not None:
-        queries.append(Q(lib_id__in=user.perms.media_lib_ids))
-    if query.lib_id:
-        queries.append(Q(lib_id=query.lib_id))
-    if query.keyword:
-        queries.append(Q(keyword__icontains=query.keyword))
-    page = await MediaItem.page(
-        *queries,
-        **query.page_params,
-        annotations={
-            "keyword": RawSQL('IFNULL("media_item"."title", "media_item"."name")')
-        },
-    )
-    return json(
-        await MediaItemService.dump_page(page, exclude={"lib", "parent", "children"})
-    )
+    return json(await MediaItemService.list_items(query, request.ctx.user))
 
 
 @media.post("/delete")

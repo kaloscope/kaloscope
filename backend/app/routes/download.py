@@ -27,7 +27,6 @@ from app.models.download import (
     DownloadPlanQuery,
     DownloadPlanUpsert,
     DownloadQuery,
-    DownloadTask,
 )
 from app.models.flow import FlowGraph, GraphState
 from app.models.user import UserRole
@@ -303,17 +302,7 @@ async def list_tasks(_, query: DownloadQuery) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    queries = []
-    if query.name:
-        queries.append(Q(name__icontains=query.name))
-    if query.state:
-        queries.append(Q(state=query.state))
-    if query.states:
-        queries.append(Q(state__in=query.states))
-    if query.downloader_id:
-        queries.append(Q(downloader_id=query.downloader_id))
-    page = await DownloadTask.page(*queries, **query.page_params)
-    return json(await DownloadTaskService.dump_page(page))
+    return json(await DownloadTaskService.list_tasks(query))
 
 
 @download.post("/validate")

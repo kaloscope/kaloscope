@@ -147,6 +147,48 @@ The parameters used above are described below.
 - Installable on desktop and mobile devices as a [`PWA`](https://web.dev/explore/progressive-web-apps)
 - PWA Theme color stays synchronized with the active application Theme
 
+## Read-only MCP Access
+
+MCP clients such as Codex can connect directly to Kaloscope over Streamable HTTP to inspect workflows,
+media libraries and metadata, download progress, schedules, and AI provider settings. The `/_api/mcp` endpoint uses Kaloscope's
+existing port; clients do not need Python, a source checkout, or a bridge process. MCP reuses the application's
+business services, login sessions, and workflow permissions. It exposes no editing, publishing, or execution tools.
+
+Add the following to your Codex configuration:
+
+```toml
+[mcp_servers.kaloscope]
+url = "http://127.0.0.1:8000/_api/mcp"
+bearer_token_env_var = "KALOSCOPE_TOKEN"
+```
+
+Replace the URL with your Kaloscope instance address. Obtain `data.token` from the existing
+`POST /_api/auth/login` endpoint and set `KALOSCOPE_TOKEN` in the environment that launches Codex.
+Keep the token out of tool arguments and project files. Sign in again and update the token after the session
+expires or is logged out. Use HTTPS for remote connections. Other MCP clients supporting Streamable HTTP
+can use the same URL with an `Authorization: Bearer <token>` header.
+
+| Tool                   | Purpose                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| `list_workflows`       | Page through accessible workflows, filtered by name, category, and state           |
+| `get_workflow`         | Read a workflow's metadata, draft, and published definition                        |
+| `list_node_types`      | Read fields, defaults, constraints, and handles, filtered by category or node type |
+| `get_workflow_logs`    | Read retained workflow execution logs without running the workflow                 |
+| `list_workflow_jobs`   | Query accessible schedules by workflow name, state, and trigger                    |
+| `list_media_libraries` | List accessible libraries and their current scan status without starting a scan    |
+| `list_media_items`     | Search indexed media by title or filename, library, or an existing item's path     |
+| `get_media_item`       | Read metadata issues and visible children without playback or reindexing           |
+| `list_download_tasks`  | Read stored download progress and error summaries without polling downloaders      |
+| `list_ai_providers`    | Let administrators inspect configured models and provider states without API keys  |
+
+Paginated tools return at most 100 items per page. Media and schedules follow the account's library and workflow
+permissions. Download tasks retain the download page's shared visibility, but exclude source links, file lists,
+and downloader credentials. Provider results include disabled configurations to help diagnose invalid AI nodes.
+
+After connecting, ask Codex to diagnose workflow failures, compare AI node settings with configured providers,
+find indexed media, or summarize failed downloads. All tools are read-only: none edit, publish, execute,
+download, scan, or run model inference.
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/chart?repos=kaloscope/kaloscope&type=date&legend=top-left)](https://www.star-history.com/?repos=kaloscope%2Fkaloscope&type=date&legend=top-left)

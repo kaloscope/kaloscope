@@ -26,7 +26,7 @@ from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
 from tortoise.exceptions import DoesNotExist
-from tortoise.expressions import Q
+from tortoise.expressions import F, Q, RawSQL
 from tortoise.transactions import atomic, in_transaction
 
 from app.core.config import KaloscopeConfig
@@ -65,6 +65,7 @@ from app.models.media import (
     MediaLib,
     MediaLibUpsert,
     MediaMetadata,
+    MediaQuery,
     NFOType,
     ReadingMetadataSync,
     TextContent,
@@ -94,6 +95,7 @@ if TYPE_CHECKING:
     from app.core.media.image import ImageIndex
     from app.core.media.reader import MetadataRead
     from app.core.media.text import TextIndex
+    from app.core.media.watcher import LibWatcher
     from app.core.media.writer import MetadataWrite
 
 type _SourceStates = dict[Path, tuple[int, ...]]
@@ -1373,6 +1375,37 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
     """The service class for all media library related operations."""
 
     @classmethod
+    async def list_libraries(
+        cls, user: UserInfo, watcher: LibWatcher
+    ) -> list[dict[str, Any]]:
+        """List accessible libraries with their triggers and current scan status.
+
+        Args:
+            user: Authenticated user with permissions loaded by `authorize`.
+            watcher: Library watcher owned by the current application.
+
+        Returns:
+            Libraries visible to the account, without starting a scan.
+        """
+        queries = []
+        if user.role != UserRole.ADMIN:
+            queries.append(Q(id__in=user.perms.media_lib_ids if user.perms else []))
+        libraries = await cls.dump_list(MediaLib.filter(*queries))
+        scanning = {
+            lib_id
+            for lib_id, payload in await MediaEvent.filter(
+                lib_id__in=[lib["id"] for lib in libraries], event_type="reconcile"
+            ).values_list("lib_id", "payload")
+            if (payload or {}).get("state") != "failed"
+        }
+        for lib in libraries:
+            lib["triggers"] = await FlowTriggerService.get_triggers(
+                GraphCategory.INGEST, lib["id"]
+            )
+            lib["scanning"] = watcher.is_scanning(lib["dir"]) or lib["id"] in scanning
+        return libraries
+
+    @classmethod
     @atomic()
     async def update_priorities(cls, ids: list):
         """Update media library priorities.
@@ -1423,7 +1456,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         lib = await MediaLib.get(id=obj.id) if obj.id else None
         lib_type = lib.lib_type if lib is not None else obj.lib_type
         if lib_type in (LibType.NOVEL, LibType.COMIC) and obj.danmaku_server:
-            raise BadRequestException()
+            raise BadRequestException
         if lib is not None:
             extra = {}
             if obj.danmaku_ttl is not None:
@@ -1436,7 +1469,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
                         obj.rename_template or "", lib.lib_type
                     )
                 except ValueError as exc:
-                    raise BadRequestException() from exc
+                    raise BadRequestException from exc
             # update the media library
             await MediaLib.filter(id=lib.id).update(
                 name=obj.name,
@@ -1494,6 +1527,40 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
     """The service class for all media item related operations."""
 
     HASH_READ_SIZE = 16 * 1024 * 1024  # 16MB
+
+    @classmethod
+    async def list_items(cls, query: MediaQuery, user: UserInfo) -> dict[str, Any]:
+        """Search visible media within the account's library permissions.
+
+        Child items require a visible parent in the same library.
+
+        Args:
+            query: Pagination, title keyword, library, and optional exact item path.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            A page of top-level items, or matching paths when supplied.
+        """
+        queries = [
+            Q(visible=True),
+            Q(parent_id__isnull=True)
+            | Q(parent__visible=True, lib_id=F("parent__lib_id")),
+            Q(path=query.path) if query.path else Q(parent_id__isnull=True),
+        ]
+        if user.role != UserRole.ADMIN:
+            queries.append(Q(lib_id__in=user.perms.media_lib_ids if user.perms else []))
+        if query.lib_id:
+            queries.append(Q(lib_id=query.lib_id))
+        if query.keyword:
+            queries.append(Q(keyword__icontains=query.keyword))
+        page = await MediaItem.page(
+            *queries,
+            **query.page_params,
+            annotations={
+                "keyword": RawSQL('IFNULL("media_item"."title", "media_item"."name")')
+            },
+        )
+        return await cls.dump_page(page, exclude={"lib", "parent", "children"})
 
     @classmethod
     async def ingest_reading_work(
@@ -3060,7 +3127,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             "lib", "parent"
         )
         if item is None:
-            raise NotFoundException()
+            raise NotFoundException
         if user.role != UserRole.ADMIN and (
             user.perms is None or item.lib_id not in user.perms.media_lib_ids
         ):
@@ -3070,7 +3137,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             or not item.parent.visible
             or item.parent.lib_id != item.lib_id
         ):
-            raise NotFoundException()
+            raise NotFoundException
         return item
 
     @classmethod
@@ -3285,7 +3352,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         item = await cls.get_accessible(id, user)
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
-            raise NotFoundException()
+            raise NotFoundException
         _, _, cover, _ = await cls._get_metadata(item, user, with_cover=True)
         return cover
 
@@ -3315,7 +3382,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         """
         item = await cls.get_accessible(id, user)
         if item.lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
-            raise NotFoundException()
+            raise NotFoundException
         formats = (
             (MediaFormat.TXT, MediaFormat.EPUB)
             if item.lib.lib_type == LibType.NOVEL
