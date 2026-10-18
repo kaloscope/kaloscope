@@ -53,7 +53,8 @@
         "title": "个人设置",
         "account": "账号设置",
         "sessions": "在线设备",
-        "preferences": "偏好设置"
+        "preferences": "偏好设置",
+        "tokens": "访问令牌"
       },
       "system": {
         "title": "系统设置",
@@ -300,6 +301,38 @@
       "one": "退出该次登录？",
       "others": "退出其它登录？"
     }
+  },
+  "access_token": {
+    "description": "用于 MCP 接入，仅可读取当前账号有权访问的数据",
+    "create": "创建令牌",
+    "created": "令牌已创建",
+    "empty": "尚未创建访问令牌",
+    "lifetime": "有效期",
+    "created_at": "创建时间",
+    "expires_at": "到期时间",
+    "last_used_at": "最近使用",
+    "unused": "尚未使用",
+    "read_only": "只读",
+    "status": {
+      "active": "有效",
+      "expired": "已过期",
+      "revoked": "已撤销"
+    },
+    "revoke": "撤销令牌",
+    "revoke_confirm": "撤销“{0}”后，使用该令牌的客户端将无法继续访问，是否撤销？",
+    "once_hint": "完整令牌仅显示一次，请复制保存，关闭后无法再次查看",
+    "connection": "MCP 接入",
+    "connection_hint": "在支持 Streamable HTTP 和 Bearer 认证的 MCP 客户端中添加服务器，填写以下连接信息",
+    "transport": "传输协议",
+    "authentication": "认证方式",
+    "endpoint": "MCP 地址",
+    "auth_header": "认证请求头",
+    "auth_hint": "将 <token> 替换为创建时复制的完整令牌；若客户端提供 Bearer Token 输入框，只填写令牌本身",
+    "copied": "已复制",
+    "copy_failed": "无法自动复制，请手动复制已选中的内容",
+    "load_failed": "访问令牌加载失败",
+    "create_failed": "令牌创建失败，请刷新列表确认后重试",
+    "revoke_failed": "令牌撤销失败，请重试"
   },
   "duration": {
     "millisecond": "毫秒",

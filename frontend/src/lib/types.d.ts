@@ -186,6 +186,29 @@ export type User = {
   last_activity: string | null;
 };
 
+/** An owned MCP access token, excluding its credential. */
+export interface MCPAccessToken {
+  id: number;
+  created_at: string;
+  updated_at: string;
+  name: string;
+  prefix: string;
+  scope: 'read_only';
+  expires_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  status: 'active' | 'expired' | 'revoked';
+}
+
+/** Settings for creating a token with a fixed lifetime. */
+export interface MCPAccessTokenCreate {
+  name: string;
+  expires_in_days: 30 | 90 | 365;
+}
+
+/** A creation response containing the credential shown only once. */
+export type MCPAccessTokenCreated = MCPAccessToken & { token: string };
+
 /**
  * A notification delivered to a user.
  */
