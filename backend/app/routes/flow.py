@@ -1,5 +1,4 @@
 import time
-from itertools import groupby
 
 from sanic import Blueprint, HTTPResponse, Request, empty, json, raw, text
 from sanic.log import logger
@@ -17,7 +16,7 @@ from app.core.exceptions import (
 )
 from app.core.flow.context import AUTH_KEY, MANUAL_KEY
 from app.core.flow.engine import FlowEngine
-from app.core.flow.nodes.base import Node, start_config
+from app.core.flow.nodes.base import start_config
 from app.models.base import IDs
 from app.models.flow import (
     FlowGraph,
@@ -195,29 +194,7 @@ async def list_graphs(request: Request, query: GraphQuery) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    queries = []
-    if query.name:
-        queries.append(Q(name__icontains=query.name))
-    if query.state:
-        queries.append(Q(state=query.state))
-    if query.states:
-        queries.append(Q(state__in=query.states))
-    if query.category:
-        queries.append(Q(category=query.category))
-    # filter the graphs by the user's permissions
-    user: UserInfo = request.ctx.user
-    if user.perms is not None:
-        queries.append(Q(id__in=user.perms.indexer_ids))
-    # list the graphs with pagination
-    page = await FlowGraph.page(*queries, **query.page_params)
-    result = await FlowGraphService.dump_page(
-        page, exclude={"draft", "definition", "logs"}
-    )
-    # attach the newest template for each graph
-    for graph in result["items"]:
-        if tmpl := graph["tmpl"]:
-            graph["newest_tmpl"] = await FlowTemplateService.get_newest(tmpl)
-    return json(result)
+    return json(await FlowGraphService.list_graphs(query, request.ctx.user))
 
 
 @flow.post("/graph/upsert")
@@ -238,36 +215,33 @@ async def upsert_graph(_, body: GraphBasics) -> HTTPResponse:
 
 
 @flow.get("/graph/<id:int>")
-async def get_graph_details(_, id: int) -> HTTPResponse:
+@authorize()
+async def get_graph_details(request: Request, id: int) -> HTTPResponse:
     """Get details of the flow graph.
 
     Args:
-        _: Unused request.
+        request: Incoming request with the authenticated user's permissions.
         id: Graph ID.
 
     Returns:
         Response containing the requested data.
     """
-    graph = await FlowGraph.get(id=id)
-    if isinstance(graph.draft, dict):
-        graph.draft = Node.decompress(graph.draft)
-    if isinstance(graph.definition, dict):
-        graph.definition = Node.decompress(graph.definition)
-    return json(await FlowGraphService.dump(graph))
+    return json(await FlowGraphService.get_details(id, request.ctx.user))
 
 
 @flow.get("/graph/<id:int>/logs")
-async def get_graph_logs(_, id: int) -> HTTPResponse:
+@authorize()
+async def get_graph_logs(request: Request, id: int) -> HTTPResponse:
     """Get execution logs of the flow graph.
 
     Args:
-        _: Unused request.
+        request: Incoming request with the authenticated user's permissions.
         id: Graph ID.
 
     Returns:
         Response containing the requested data.
     """
-    return json(await FlowLogService.get_logs(id))
+    return json(await FlowLogService.get_accessible_logs(id, request.ctx.user))
 
 
 @flow.post("/graph/<id:int>/save")
@@ -431,6 +405,7 @@ async def import_graphs(_, body: GraphImport) -> HTTPResponse:
 
 
 @flow.get("/node/schemas")
+@authorize()
 @validate(query=GraphQuery)
 async def get_node_schemas(_, query: GraphQuery) -> HTTPResponse:
     """Get node schemas.
@@ -442,18 +417,7 @@ async def get_node_schemas(_, query: GraphQuery) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    schemas = Node.schemas
-    # filter the schemas by category
-    if query.category:
-        schemas = filter(
-            lambda s: not s.categories or query.category in s.categories, schemas
-        )
-    # sort and group the schemas
-    schemas = groupby(
-        sorted(schemas, key=lambda s: (s.group.order, s.order)),
-        key=lambda s: s.group,
-    )
-    return json({k.name.lower(): list(v) for k, v in schemas})
+    return json(FlowGraphService.get_node_schemas(query.category))
 
 
 @flow.get("/indexer/<id:int>/config")
@@ -575,32 +539,19 @@ async def unfavorite_resource(
 
 
 @flow.get("/job/list")
+@authorize()
 @validate(query=JobQuery)
-async def list_jobs(_, query: JobQuery) -> HTTPResponse:
-    """List the flow jobs.
+async def list_jobs(request: Request, query: JobQuery) -> HTTPResponse:
+    """List schedules within the account's workflow permissions.
 
     Args:
-        _: Unused request.
-        query: Query filters and options.
+        request: Authenticated request with loaded workflow permissions.
+        query: Pagination and schedule filters.
 
     Returns:
-        Response containing the requested data.
+        Page of accessible schedules with their workflow names.
     """
-    queries = []
-    if query.name:
-        queries.append(Q(graph__name__icontains=query.name))
-    if query.state:
-        queries.append(Q(state=query.state))
-    if query.trigger:
-        queries.append(Q(trigger=query.trigger))
-    page = await FlowJob.page(*queries, **query.page_params)
-    result = await FlowJobService.dump_page(page)
-    # attach the graph name for each job
-    graph_ids = {job.graph_id for job in page.items}
-    graphs = {g.id: g.name for g in await FlowGraph.filter(id__in=graph_ids)}
-    for job in result["items"]:
-        job["graph_name"] = graphs.get(job["graph_id"])
-    return json(result)
+    return json(await FlowJobService.list_jobs(query, request.ctx.user))
 
 
 @flow.post("/job/upsert")

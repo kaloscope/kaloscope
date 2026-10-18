@@ -11,7 +11,7 @@ from lxml import etree
 from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, ErrorCode
 from app.core.media import organizer
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
@@ -75,6 +75,58 @@ def test_list_permissions(tmp_path, lib_type, access):
                     "/_api/media/list", headers={"Authorization": ""}
                 )
                 assert response.status_code == 401
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_foreign_parent(tmp_path, admin):
+    async def run():
+        async with _database():
+            lib = await MediaLib.create(
+                name="Library",
+                dir=str(tmp_path / "library"),
+                lib_type=LibType.TV_SHOW,
+                priority=1,
+            )
+            other_lib = await MediaLib.create(
+                name="Other",
+                dir=str(tmp_path / "other"),
+                lib_type=LibType.TV_SHOW,
+                priority=2,
+            )
+            parent = await MediaItem.create(
+                lib=other_lib,
+                path=str(tmp_path / "other" / "Series"),
+                dir=other_lib.dir,
+                name="Series",
+            )
+            child = await MediaItem.create(
+                lib=lib,
+                parent=parent,
+                path=str(tmp_path / "library" / "Episode.mp4"),
+                dir=lib.dir,
+                name="Episode",
+            )
+            user = _user() if admin else _user([])
+            await User.create(
+                id=user.id, username=user.username, password="unused", role=user.role
+            )
+            await UserPermission.create(
+                user_id=user.id, rel_type=PermType.MEDIA_LIB, rel_id=lib.id
+            )
+
+            async with _client(user) as client:
+                details = await client.get(f"/_api/media/{child.id}")
+                assert details.status_code == 404
+                assert details.json()["message"] == ErrorCode.NOT_FOUND
+
+                listed = await client.get(
+                    "/_api/media/list", params={"path": child.path, "page_size": 1}
+                )
+                assert listed.status_code == 200
+                assert listed.json()["data"]["total"] == 0
+                assert listed.json()["data"]["items"] == []
 
     asyncio.run(run())
 

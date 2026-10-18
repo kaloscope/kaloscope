@@ -16,9 +16,14 @@ from tortoise.transactions import atomic
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
-from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
+from app.core.exceptions import (
+    ErrorCode,
+    ForbiddenException,
+    KaloscopeException,
+    NotFoundException,
+)
 from app.core.flow.fetcher import fetch_origin, save_icon
-from app.core.flow.nodes.base import Node
+from app.core.flow.nodes.base import Node, NodeSchema
 from app.core.flow.nodes.general.ai import AINode
 from app.models.flow import (
     FlowGraph,
@@ -29,13 +34,22 @@ from app.models.flow import (
     FlowTrigger,
     GraphBasics,
     GraphCategory,
+    GraphQuery,
     GraphRef,
     GraphState,
+    JobQuery,
     JobState,
     JobUpsert,
     RepositoryAdd,
 )
-from app.models.user import HistoryType, PermType, UserHistory, UserPermission
+from app.models.user import (
+    HistoryType,
+    PermType,
+    UserHistory,
+    UserInfo,
+    UserPermission,
+    UserRole,
+)
 from app.services.base import BaseService
 from app.utils import json
 from app.utils.disk import delete_path
@@ -212,6 +226,106 @@ class FlowTemplateService(BaseService[FlowTemplate], model=FlowTemplate):
 
 class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
     """The service class for all flow graph related operations."""
+
+    @classmethod
+    async def list_graphs(cls, query: GraphQuery, user: UserInfo) -> dict[str, Any]:
+        """List workflows within the user's authorized scope.
+
+        Args:
+            query: Pagination and workflow filters.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            Workflow page without drafts, definitions, or logs.
+        """
+        queries = []
+        if query.name:
+            queries.append(Q(name__icontains=query.name))
+        if query.state:
+            queries.append(Q(state=query.state))
+        if query.states:
+            queries.append(Q(state__in=query.states))
+        if query.category:
+            queries.append(Q(category=query.category))
+        if user.role != UserRole.ADMIN:
+            queries.append(Q(id__in=user.perms.indexer_ids if user.perms else []))
+        page = await FlowGraph.page(*queries, **query.page_params)
+        result = await cls.dump_page(page, exclude={"draft", "definition", "logs"})
+        for graph in result["items"]:
+            if tmpl := graph["tmpl"]:
+                graph["newest_tmpl"] = await FlowTemplateService.get_newest(tmpl)
+        return result
+
+    @classmethod
+    async def get_accessible(cls, id: int, user: UserInfo) -> FlowGraph:
+        """Load a graph within the user's authorized workflow scope.
+
+        Args:
+            id: Graph ID to read.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            Graph accessible to the user.
+
+        Raises:
+            NotFoundException: If the graph does not exist.
+            ForbiddenException: If the user cannot access the graph.
+        """
+        graph = await FlowGraph.get_or_none(id=id)
+        if graph is None:
+            raise NotFoundException
+        if user.role != UserRole.ADMIN and (
+            user.perms is None or id not in user.perms.indexer_ids
+        ):
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        return graph
+
+    @classmethod
+    async def get_details(cls, id: int, user: UserInfo) -> dict[str, Any]:
+        """Read a workflow and expand its saved node schemas.
+
+        Args:
+            id: Graph ID to read.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            Workflow metadata, draft, and published definition.
+
+        Raises:
+            NotFoundException: If the workflow does not exist.
+            ForbiddenException: If the user cannot access the workflow.
+        """
+        graph = await cls.get_accessible(id, user)
+        if isinstance(graph.draft, dict):
+            graph.draft = Node.decompress(graph.draft)
+        if isinstance(graph.definition, dict):
+            graph.definition = Node.decompress(graph.definition)
+        return await cls.dump(graph)
+
+    @classmethod
+    def get_node_schemas(
+        cls, category: GraphCategory | None = None, node_type: str | None = None
+    ) -> dict[str, list[NodeSchema]]:
+        """Group node schemas available to a workflow category.
+
+        Args:
+            category: Workflow category; `None` includes all categories.
+            node_type: Exact node type; `None` includes all node types.
+
+        Returns:
+            Schemas ordered and grouped as in the workflow designer.
+        """
+        schemas = [
+            schema
+            for schema in Node.schemas
+            if (not category or not schema.categories or category in schema.categories)
+            and (node_type is None or schema.node_type == node_type)
+        ]
+        groups = groupby(
+            sorted(schemas, key=lambda s: (s.group.order, s.order)),
+            key=lambda s: s.group,
+        )
+        return {group.name.lower(): list(items) for group, items in groups}
 
     @classmethod
     async def unique_name(cls, name: str) -> str:
@@ -508,6 +622,26 @@ class FlowLogService(BaseService[FlowLog], model=FlowLog):
     """The service class for all flow log related operations."""
 
     @classmethod
+    async def get_accessible_logs(
+        cls, graph_id: int, user: UserInfo
+    ) -> list[list[dict]]:
+        """Read logs after checking workflow access.
+
+        Args:
+            graph_id: Graph ID whose logs should be read.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            Retained execution groups in their existing order.
+
+        Raises:
+            NotFoundException: If the workflow does not exist.
+            ForbiddenException: If the user cannot access the workflow.
+        """
+        await FlowGraphService.get_accessible(graph_id, user)
+        return await cls.get_logs(graph_id)
+
+    @classmethod
     async def get_logs(cls, graph_id: int) -> list[list[dict]]:
         """Get execution logs of the flow graph.
 
@@ -660,6 +794,37 @@ class FlowTriggerService(BaseService[FlowTrigger], model=FlowTrigger):
 
 class FlowJobService(BaseService[FlowJob], model=FlowJob):
     """The service class for all flow job related operations."""
+
+    @classmethod
+    async def list_jobs(cls, query: JobQuery, user: UserInfo) -> dict[str, Any]:
+        """List schedules within the account's workflow permissions.
+
+        Args:
+            query: Pagination, workflow name, state, and trigger filters.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            A schedule page with workflow names and existing schedule settings.
+        """
+        queries = []
+        if user.role != UserRole.ADMIN:
+            queries.append(Q(graph_id__in=user.perms.indexer_ids if user.perms else []))
+        if query.name:
+            queries.append(Q(graph__name__icontains=query.name))
+        if query.state:
+            queries.append(Q(state=query.state))
+        if query.trigger:
+            queries.append(Q(trigger=query.trigger))
+        page = await FlowJob.page(*queries, **query.page_params)
+        result = await cls.dump_page(page)
+        graph_names = dict(
+            await FlowGraph.filter(
+                id__in={job.graph_id for job in page.items}
+            ).values_list("id", "name")
+        )
+        for job in result["items"]:
+            job["graph_name"] = graph_names.get(job["graph_id"])
+        return result
 
     @classmethod
     @atomic()

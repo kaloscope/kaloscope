@@ -34,6 +34,7 @@ from app.core.middleware import SessionHolder, on_request, on_response
 from app.core.monkeypatch import apply_monkey_patches
 from app.core.network import NetworkTransport
 from app.core.transcode.transcoder import shutdown_monitors
+from app.mcp import close_mcp, start_mcp
 from app.utils.crypto import load_key
 from app.utils.importer import register_blueprints
 from app.utils.json import dumps, loads
@@ -91,6 +92,7 @@ async def before_server_start(app: Sanic):
     await start_lib_watcher(app)
     await start_dl_syncer(app)
     await load_sessions(app)
+    await start_mcp(app)
 
 
 @app.before_server_stop
@@ -100,6 +102,7 @@ async def before_server_stop(app: Sanic):
     Args:
         app: Application instance for the current process.
     """
+    await close_mcp(app)
     await shutdown_monitors()
     await save_sessions(app)
     await close_dl_syncer(app)

@@ -34,6 +34,7 @@ dependencies = [
   "charset-normalizer (>=3.5.1,<4.0.0)",
   "cryptography (>=50.0.2,<51.0.0)",
   "jsonschema (>=4.25.1,<5.0.0)",
+  "mcp (>=2.3,<3.0)",
 ]
 
 [tool.poetry]

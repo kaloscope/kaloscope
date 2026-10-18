@@ -41,6 +41,7 @@ from app.models.download import (
     DownloaderUpsert,
     DownloadPlan,
     DownloadPlanUpsert,
+    DownloadQuery,
     DownloadState,
     DownloadStats,
     DownloadTask,
@@ -212,6 +213,31 @@ class DownloadDirService(BaseService[DownloadDir], model=DownloadDir):
 
 class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
     """Manage normalized tasks across all downloader drivers."""
+
+    @classmethod
+    async def list_tasks(
+        cls, query: DownloadQuery, *, include: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        """List persisted download states without polling or controlling a driver.
+
+        Args:
+            query: Pagination, name, state, and downloader filters.
+            include: Serialized fields to include; an empty tuple keeps all fields.
+
+        Returns:
+            A task page using the application's shared download visibility.
+        """
+        queries = []
+        if query.name:
+            queries.append(Q(name__icontains=query.name))
+        if query.state:
+            queries.append(Q(state=query.state))
+        if query.states:
+            queries.append(Q(state__in=query.states))
+        if query.downloader_id:
+            queries.append(Q(downloader_id=query.downloader_id))
+        page = await DownloadTask.page(*queries, **query.page_params)
+        return await cls.dump_page(page, include=include)
 
     @classmethod
     async def dump(cls, obj: DownloadTask, **kwargs) -> dict:
