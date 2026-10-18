@@ -39,6 +39,9 @@ class AINode(Node):
     system_prompt = CodeField(language="jinja2", collapse=True, width="32rem")
     prompt = CodeField(required=True, language="jinja2", width="32rem")
     timeout = NumberField("timeout", required=True, min=1, max=300, default=60, span=50)
+    max_retries = NumberField(
+        min=0, max=3, default=0, tooltip="ai_max_retries", span=50
+    )
     max_tokens = NumberField(
         min=0, max=131072, default=0, tooltip="ai_max_tokens", span=50
     )
@@ -50,6 +53,7 @@ class AINode(Node):
         },
         default="text",
         tooltip="ai_response_format",
+        span=50,
     )
     output_schema = CodeField(
         language="json",

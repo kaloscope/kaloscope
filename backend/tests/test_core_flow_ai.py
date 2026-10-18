@@ -171,7 +171,7 @@ def test_published_dependency(network, change, code):
                 await provider.save()
 
             ctx = context()
-            node_data = copy.deepcopy(saved["nodes"][0]["data"])
+            node_data = {**copy.deepcopy(saved["nodes"][0]["data"]), "max_retries": 3}
             with pytest.raises(KaloscopeException, match=code):
                 await AINode.execute(node_data=node_data, context=ctx)
             assert ctx["ai_result"] == {"old": True}
@@ -222,6 +222,12 @@ def test_reenable_and_reconfigure(network):
         {"timeout": 0},
         {"timeout": True},
         {"max_tokens": -1},
+        {"max_retries": -1},
+        {"max_retries": 4},
+        {"max_retries": True},
+        {"max_retries": 1.5},
+        {"max_retries": "1"},
+        {"max_retries": None},
         {"native_schema": "true"},
         {"prompt": " "},
         {"result_key": "$retval"},
@@ -231,6 +237,14 @@ def test_reenable_and_reconfigure(network):
 def test_invalid_configuration(overrides):
     with pytest.raises(KaloscopeException, match="ai_config_invalid"):
         AINode.configuration(data(**overrides))
+
+
+@pytest.mark.parametrize("max_retries", [0, 1, 2, 3])
+def test_retry_configuration(max_retries):
+    assert AINode.configuration(data()).max_retries == 0
+    assert (
+        AINode.configuration(data(max_retries=max_retries)).max_retries == max_retries
+    )
 
 
 def test_missing_prompt_variable(monkeypatch):
@@ -260,7 +274,10 @@ def test_failed_output_does_not_continue(network):
             task._context = context()
             schema = '{"type":"object","required":["missing"]}'
             node_data = data(
-                provider.id, response_format="json_object", output_schema=schema
+                provider.id,
+                response_format="json_object",
+                output_schema=schema,
+                max_retries=3,
             )
             node = NodeWrapper("ai-node", node_type="ai", node_data=node_data)
 
@@ -279,8 +296,84 @@ def test_failed_output_does_not_continue(network):
             assert logs[0][-1]["type"] == "ai"
             assert logs[0][-1]["error"] == "ai_output_invalid"
             assert "private-key" not in str(logs)
+            assert len(network) == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_retry_context(succeeds, monkeypatch):
+    requests = []
+    ctx = context()
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.core.ai.completion.asyncio.sleep", sleep)
+
+    def handler(request):
+        requests.append(request)
+        assert ctx["ai_result"] == {"old": True}
+        if not succeeds or len(requests) < 3:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"result":"summary"}'},
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(
+        ai_service, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+
+    async def run():
+        async with database():
+            provider = await AIProvider.create(
+                name="Example",
+                base_url="https://example.com/v1",
+                model_ids=["test-model"],
+            )
+            graph = await FlowGraph.create(
+                name="Test", category=GraphCategory.SCHEDULE, state=GraphState.PUBLISHED
+            )
+            task = TransientTask(graph.id, {}, True)
+            task._context = ctx
+            node_data = data(provider.id, response_format="json_object", max_retries=2)
+            node = NodeWrapper("ai-node", node_type="ai", node_data=node_data)
+
+            output = None
+            try:
+                async with task.context(node) as local:
+                    output = await AINode._execute(
+                        graph_id=graph.id,
+                        node_id="ai-node",
+                        node_data=node_data,
+                        context=local,
+                    )
+            except KaloscopeException as error:
+                assert not succeeds
+                assert str(error.message) == "ai_request_failed"
+
+            if succeeds:
+                assert ctx["ai_result"]["json"] == {"result": "summary"}
+                assert "old" not in ctx["ai_result"]
+                assert "$error" not in node_data
+                assert output is not None and output.id == "output"
+            else:
+                assert ctx["ai_result"] == {"old": True}
+                assert node_data["$error"] == "ai_request_failed"
+                assert output is None
+                assert "$output" not in node_data
+                logs = await FlowLogService.get_logs(graph.id)
+                assert logs[0][-1]["error"] == "ai_request_failed"
+
+    asyncio.run(run())
+
+    assert len(requests) == 3
+    assert sleep.await_count == 2
 
 
 def test_schema_registration():
