@@ -40,6 +40,8 @@ from app.utils.disk import is_directory
 
 # -------------------- Enumerations --------------------
 class LibType(StrEnum):
+    """Identify library content: `movie`, `tv_show`, `novel`, or `comic`."""
+
     MOVIE = auto()
     TV_SHOW = auto()
     NOVEL = auto()
@@ -47,6 +49,8 @@ class LibType(StrEnum):
 
 
 class MediaType(StrEnum):
+    """Identify the viewer content kind rather than a file extension."""
+
     VIDEO = auto()
     AUDIO = auto()
     IMAGE = auto()
@@ -54,6 +58,12 @@ class MediaType(StrEnum):
 
 
 class MediaFormat(StrEnum):
+    """Identify reading source containers.
+
+    `txt` and `epub` are text sources; `cbz` and `zip` are comic archives;
+    `dir` is a directory containing comic page images.
+    """
+
     TXT = auto()
     EPUB = auto()
     DIR = auto()
@@ -62,6 +72,15 @@ class MediaFormat(StrEnum):
 
 
 class IndexState(StrEnum):
+    """Describe reading-content index availability.
+
+    `pending`: Index creation or refresh is pending.
+    `ready`: An index is available for reading.
+    `empty`: No readable content was found.
+    `error`: Indexing failed; inspect `index_error` for the cause.
+    This is separate from metadata read status.
+    """
+
     PENDING = auto()
     READY = auto()
     EMPTY = auto()
@@ -75,6 +94,8 @@ class NFOType(StrEnum):
 
 
 class Language(StrEnum):
+    """Select preferred English (`en-US`) or Simplified Chinese (`zh-CN`) content."""
+
     EN_US = "en-US"
     ZH_CN = "zh-CN"
 

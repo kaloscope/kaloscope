@@ -50,6 +50,26 @@ class TransferMethod(StrEnum):
 
 
 class OfflineDownloadErrorKind(StrEnum):
+    """Classify stored OpenList failures and uncertain submissions.
+
+    `submit_unknown`: Submission outcome is unconfirmed; avoid duplicate submissions.
+    `instance_auth`: OpenList instance authentication or authorization failed.
+    `instance_rate_limit`: The instance rejected requests due to rate limits.
+    `instance_transient`: The instance encountered a temporary service failure.
+    `remote_task_missing`: A previously tracked remote task cannot be found.
+    `remote_failed`: The remote offline download failed.
+    `transfer_failed`: A remote storage transfer failed.
+    `manifest_invalid`: The remote file manifest is invalid.
+    `direct_link_unavailable`: A usable direct file URL could not be obtained.
+    `local_path_invalid`: The local destination path is invalid.
+    `local_file_conflict`: An existing local file conflicts with the download.
+    `pull_failed`: Transferring remote files to local storage failed.
+    `verify_failed`: Local files failed final verification.
+    `cleanup_failed`: Remote cleanup failed after local transfer.
+
+    These describe download jobs, not failures to query their status.
+    """
+
     SUBMIT_UNKNOWN = auto()
     INSTANCE_AUTH = auto()
     INSTANCE_RATE_LIMIT = auto()

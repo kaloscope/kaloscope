@@ -30,7 +30,23 @@ class DownloadSource(StrEnum):
 
 
 class DownloadState(StrEnum):
-    """A persisted task state for a download task."""
+    """Describe the persisted phase of a download task.
+
+    `downloading`: An RPC downloader is downloading the content.
+    `submitting`: An OpenList submission is in progress.
+    `submit_unknown`: Submission may have succeeded, but its result is unconfirmed;
+    do not treat this as a confirmed failure or submit a duplicate task.
+    `remote`: The remote offline downloader is processing the task.
+    `settling`: Remote files are being prepared or checked for a stable manifest.
+    `pulling`: Remote files are being transferred to local storage.
+    `verifying`: Local files are being checked against the remote manifest.
+    `paused`: Task processing is paused.
+    `completed`: Download processing has finished successfully.
+    `error`: Task processing failed; inspect the error message and category.
+
+    Progress may describe an intermediate phase. A value of 100 percent alone
+    does not imply `completed`.
+    """
 
     DOWNLOADING = auto()
     SUBMITTING = auto()

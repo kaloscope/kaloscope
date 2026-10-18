@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from jsonschema import Draft202012Validator
 from mcp.client import Client
 from sanic import Request, Sanic
 from sanic.compat import Header
@@ -20,12 +21,31 @@ from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.middleware import on_request, on_response
 from app.mcp import MCP_PATH, close_mcp, create_server, start_mcp
 from app.models.ai import AIProvider
-from app.models.download import Downloader, DownloadTask
-from app.models.flow import FlowGraph, FlowJob, FlowLog, GraphCategory, GraphState
-from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
+from app.models.download import (
+    Downloader,
+    DownloadTask,
+    OfflineDownloadErrorKind,
+    OfflineDownloadJob,
+)
+from app.models.flow import (
+    FlowGraph,
+    FlowJob,
+    FlowLog,
+    FlowRepository,
+    FlowTemplate,
+    FlowTrigger,
+    GraphCategory,
+    GraphQuery,
+    GraphState,
+    JobQuery,
+)
+from app.models.mcp import WorkflowLogs
+from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
 from app.models.user import PermType, User, UserInfo, UserPermission
 from app.routes.mcp import dispatch
-from app.services.flow import FlowGraphService
+from app.services.ai import AIProviderService
+from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
+from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps, loads
 
 
@@ -111,7 +131,7 @@ async def post(
 
 
 async def call(app, name, arguments=None, *, token="reader"):
-    """Call a tool through the HTTP protocol and return its JSON-RPC result.
+    """Call a tool and validate its public schema and both result representations.
 
     Args:
         app: Isolated application.
@@ -128,7 +148,19 @@ async def call(app, name, arguments=None, *, token="reader"):
     assert response.status == 200
     payload = loads(response.body)
     assert "request_id" not in payload and "data" not in payload
-    return payload["result"]
+    result = payload["result"]
+    if not result.get("isError"):
+        assert len(result["content"]) == 1
+        assert loads(result["content"][0]["text"]) == result["structuredContent"]
+        if not hasattr(app.ctx, "output_schemas"):
+            listed = loads((await post(app, "tools/list", token=token)).body)
+            app.ctx.output_schemas = {
+                tool["name"]: tool["outputSchema"] for tool in listed["result"]["tools"]
+            }
+        Draft202012Validator(app.ctx.output_schemas[name]).validate(
+            result["structuredContent"]
+        )
+    return result
 
 
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
@@ -155,9 +187,30 @@ def test_protocol(mode):
                 assert (
                     not {"ctx", "token", "url"} & tool.input_schema["properties"].keys()
                 )
+                for parameter in tool.input_schema["properties"].values():
+                    assert parameter.get("description")
+                for schema in (tool.input_schema, tool.output_schema):
+                    for definition in schema.get("$defs", {}).values():
+                        if "enum" in definition:
+                            assert definition.get("description")
+                schema = tool.output_schema
+                Draft202012Validator.check_schema(schema)
+                assert schema["type"] == "object"
+                assert "result" not in schema.get("properties", {})
+                if tool.name == "list_node_types":
+                    assert schema["additionalProperties"]["type"] == "array"
+                    assert "node_type" in schema["$defs"]["NodeResult"]["required"]
+                else:
+                    assert schema["properties"]
+                if tool.name == "list_ai_providers":
+                    fields = schema["$defs"]["ProviderResult"]["properties"]
+                    assert "api_key" not in fields
+                    assert fields["has_api_key"]["type"] == "boolean"
+                    assert schema["$defs"]["AIProtocol"]["enum"] == ["chat_completions"]
             result = await client.call_tool("list_workflows", {})
             assert result.is_error
             assert "authenticated" in result.content[0].text
+            assert "valid Kaloscope session" in result.content[0].text
 
     asyncio.run(run())
 
@@ -178,6 +231,11 @@ def test_http_protocol():
             data = loads(response.body)
             assert data["jsonrpc"] == "2.0"
             assert data["result"]["serverInfo"]["name"] == "Kaloscope"
+            instructions = data["result"]["instructions"]
+            assert "HTTP 401" in instructions
+            assert "correct the reported fields" in instructions
+            assert "permissions change" in instructions
+            assert "not a failed tool call" in instructions
             assert "mcp-session-id" not in response.headers
             response = await post(app, "notifications/initialized")
             assert response.status == 202
@@ -282,6 +340,7 @@ def test_reads():
             logs = await call(
                 app, "get_workflow_logs", {"workflow_id": graph.id, "limit": 1}
             )
+            assert not logs.get("isError")
             assert logs["structuredContent"]["runs"][0][1]["error"] == "ai_timeout"
             schemas = await call(
                 app, "list_node_types", {"node_type": "ai", "category": "schedule"}
@@ -294,12 +353,14 @@ def test_reads():
                 assert (
                     denied["isError"] and "not allowed" in denied["content"][0]["text"]
                 )
+                assert "permissions change" in denied["content"][0]["text"]
                 for token in ("reader", "admin"):
                     missing = await call(app, tool, {"workflow_id": 9999}, token=token)
                     assert (
                         missing["isError"]
                         and "not found" in missing["content"][0]["text"]
                     )
+                    assert "accessible resource list" in missing["content"][0]["text"]
             await permission.delete()
             denied = await call(app, "get_workflow", {"workflow_id": graph.id})
             assert denied["isError"]
@@ -308,6 +369,225 @@ def test_reads():
             ] == 0
             assert await FlowGraph.all().values() == before
             assert await FlowLog.all().count() == 1
+
+    asyncio.run(run())
+
+
+def test_workflow_results():
+    async def run():
+        async with application() as app:
+            user = app.shared_ctx.sessions["admin"]
+            repository = await FlowRepository.create(
+                repo_name="fixtures", repo_url="https://example.test/workflows"
+            )
+            definition = {
+                "nodes": [
+                    {
+                        "id": "ai",
+                        "data": {
+                            "$schema": "ai",
+                            "prompt": "Summarize",
+                            "extension": {"null": None, "values": [1, True, "text"]},
+                        },
+                    }
+                ],
+                "edges": [],
+            }
+            template = await FlowTemplate.create(
+                repo=repository,
+                path="example.json",
+                name="Template",
+                category=GraphCategory.SCHEDULE,
+                revision=1,
+                definition=definition,
+                newest=False,
+            )
+            await FlowTemplate.create(
+                repo=repository,
+                path=template.path,
+                name=template.name,
+                category=template.category,
+                revision=2,
+                definition=definition,
+            )
+            graph = await FlowGraph.create(
+                tmpl=template,
+                name="Workflow",
+                category=GraphCategory.SCHEDULE,
+                state=GraphState.PUBLISHED,
+                draft=definition,
+                definition=definition,
+            )
+            await FlowGraph.create(name="Draft", category="indexer", state="draft")
+            started = timezone.now()
+            await FlowLog.create(
+                graph=graph,
+                started_at=started,
+                bootparams={"query": [1, False, None]},
+                node_type="ai",
+                node_data={"$error": "ai_timeout", "nested": {"value": 0.5}},
+                exc_info="Connection timed out",
+            )
+            await FlowLog.create(
+                graph=graph,
+                started_at=started - timedelta(minutes=1),
+                ended_at=started,
+                retval=[{"result": True}, None],
+            )
+            await FlowJob.create(
+                graph=graph,
+                state="pending",
+                trigger="interval",
+                interval_num=5,
+                interval_unit="minutes",
+                bootparams={"values": [None, False, 1.5]},
+            )
+            cases = [
+                (
+                    "list_workflows",
+                    {},
+                    await FlowGraphService.list_graphs(GraphQuery(), user),
+                ),
+                (
+                    "get_workflow",
+                    {"workflow_id": graph.id},
+                    await FlowGraphService.get_details(graph.id, user),
+                ),
+                (
+                    "get_workflow_logs",
+                    {"workflow_id": graph.id},
+                    {"runs": await FlowLogService.get_accessible_logs(graph.id, user)},
+                ),
+                ("list_node_types", {}, FlowGraphService.get_node_schemas()),
+                ("list_node_types", {"node_type": "missing"}, {}),
+                (
+                    "list_workflow_jobs",
+                    {},
+                    await FlowJobService.list_jobs(JobQuery(), user),
+                ),
+            ]
+
+            for name, arguments, expected in cases:
+                result = await call(app, name, arguments, token="admin")
+                assert not result.get("isError"), result
+                assert result["structuredContent"] == loads(dumps(expected))
+
+    asyncio.run(run())
+
+
+def test_optional_results():
+    payload = {
+        "runs": [
+            [
+                {
+                    "at": "2026-10-18T08:00:00+00:00",
+                    "type": "start",
+                    "data": None,
+                    "document": None,
+                },
+                {
+                    "at": None,
+                    "type": "ai",
+                    "data": {"nested": [None, 1, False, 0.5]},
+                    "document": "error",
+                    "error": None,
+                    "extension": {"value": "kept"},
+                },
+            ]
+        ],
+    }
+
+    result = WorkflowLogs.model_validate(payload).model_dump(mode="json")
+
+    assert result == payload
+    assert "error" not in result["runs"][0][0]
+    assert result["runs"][0][1]["error"] is None
+
+
+def test_invalid_result(monkeypatch):
+    monkeypatch.setattr(
+        FlowGraphService,
+        "list_graphs",
+        AsyncMock(
+            return_value={"total": 1, "items": [{"name": "private-result-value"}]}
+        ),
+    )
+
+    async def run():
+        async with application() as app:
+            result = await call(app, "list_workflows")
+
+            assert result["isError"]
+            assert "private-result-value" not in str(result)
+            assert "structuredContent" not in result
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lib_type", list(LibType))
+def test_media_results(tmp_path, lib_type):
+    path = tmp_path / "work"
+    path.mkdir()
+    nfo = path / "movie.nfo"
+    nfo.write_text("<movie><title>Current title</title><rating>8.25</rating></movie>")
+
+    async def run():
+        async with application() as app:
+            user = app.shared_ctx.sessions["admin"]
+            lib = await MediaLib.create(
+                name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
+            )
+            graph = await FlowGraph.create(
+                name="Ingest", category="ingest", state="published"
+            )
+            await FlowTrigger.create(
+                category="ingest", rel_id=lib.id, graph=graph, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                name="Stored title",
+                path=str(path),
+                dir=str(tmp_path),
+                nfo_path=str(nfo),
+                rating="7.50",
+                format="dir" if lib_type in (LibType.NOVEL, LibType.COMIC) else None,
+                original={"nested": [None, True, 42]},
+            )
+            await MediaItem.create(
+                lib=lib,
+                parent=item,
+                name="Child",
+                dir=str(path),
+                path=str(path / "child"),
+            )
+            cases = [
+                (
+                    "list_media_libraries",
+                    {},
+                    {
+                        "items": await MediaLibService.list_libraries(
+                            user, app.ctx.lib_watcher
+                        )
+                    },
+                ),
+                (
+                    "list_media_items",
+                    {},
+                    await MediaItemService.list_items(MediaQuery(), user),
+                ),
+                (
+                    "get_media_item",
+                    {"item_id": item.id},
+                    await MediaItemService.get_details(item.id, user),
+                ),
+            ]
+
+            for name, arguments, expected in cases:
+                result = await call(app, name, arguments, token="admin")
+                assert not result.get("isError"), result
+                assert result["structuredContent"] == loads(dumps(expected))
+            listed = await call(app, "list_media_items", token="admin")
+            assert isinstance(listed["structuredContent"]["items"][0]["rating"], str)
 
     asyncio.run(run())
 
@@ -584,6 +864,15 @@ def test_provider_reads(monkeypatch):
             )
             before = await AIProvider.all().values()
             result = await call(app, "list_ai_providers", token="admin")
+            assert result["structuredContent"] == {
+                "items": loads(
+                    dumps(
+                        await AIProviderService.list_providers(
+                            app.shared_ctx.sessions["admin"]
+                        )
+                    )
+                )
+            }
             data = result["structuredContent"]["items"][0]
             assert data["id"] == provider.id and data["enabled"] is False
             assert (
@@ -597,7 +886,8 @@ def test_provider_reads(monkeypatch):
     asyncio.run(run())
 
 
-def test_download_reads(monkeypatch):
+@pytest.mark.parametrize("error_kind", [None, OfflineDownloadErrorKind.REMOTE_FAILED])
+def test_download_reads(monkeypatch, error_kind):
     monkeypatch.setattr(
         KaloscopeConfig, "_config", SimpleNamespace(secret_key_enabled=False)
     )
@@ -632,6 +922,14 @@ methods:
                 magnet_link="https://example.test/?token=private-source-token",
                 files=["private-file"],
             )
+            if error_kind is not None:
+                await OfflineDownloadJob.create(
+                    download=task,
+                    job_uuid="fixture",
+                    source_fingerprint="fixture",
+                    remote_dir="/remote/fixture",
+                    last_error_kind=error_kind,
+                )
             before = await DownloadTask.all().values()
             result = await call(
                 app,
@@ -641,6 +939,7 @@ methods:
             data = result["structuredContent"]["items"][0]
             assert data["id"] == task.id and data["percentage"] == 25
             assert data["error_msg"] == "Connection unavailable"
+            assert data["error_kind"] == error_kind
             assert not {"config", "magnet_link", "files", "dir"} & data.keys()
             assert "private-downloader-password" not in str(result)
             assert "private-source-token" not in str(result)
