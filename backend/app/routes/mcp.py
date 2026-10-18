@@ -1,32 +1,35 @@
-"""Serve the read-only MCP endpoint using existing session authorization."""
+"""Serve MCP with dedicated tokens and manage them through browser sessions."""
 
 from urllib.parse import urlsplit
 
-from sanic import Blueprint, HTTPResponse, Request, raw
+from sanic import Blueprint, HTTPResponse, Request, empty, json, raw
+from sanic_ext import validate
 
 from app.core.decorators import authorize
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.mcp import handle_http
+from app.models.mcp import MCPAccessTokenCreate
+from app.services.mcp import MCPAccessTokenService
 
 mcp = Blueprint("mcp", url_prefix="/mcp")
 
 
-@mcp.route("", methods=["POST", "GET", "DELETE"])
+@mcp.route("", methods=["POST", "GET", "DELETE"], strict_slashes=True)
 @authorize()
 async def dispatch(request: Request) -> HTTPResponse:
     """Accept authenticated MCP requests without creating another server process.
 
     Args:
-        request: Request authenticated by the application's session middleware.
+        request: Request authenticated with a dedicated MCP access token.
 
     Returns:
         SDK JSON response, or `405` for unsupported streaming/session operations.
 
     Raises:
-        UnauthorizedException: If bearer authentication is missing.
+        UnauthorizedException: If dedicated MCP authentication is missing.
         ForbiddenException: If a browser sends a foreign or malformed origin.
     """
-    if not request.token:
+    if not getattr(request.ctx, "mcp_authenticated", False):
         raise UnauthorizedException
     if origin := request.headers.get("origin"):
         try:
@@ -44,3 +47,58 @@ async def dispatch(request: Request) -> HTTPResponse:
     if request.method != "POST":
         return raw(b"", status=405, headers={"Allow": "POST"})
     return await handle_http(request)
+
+
+@mcp.get("/token/list")
+@authorize()
+async def list_tokens(request: Request) -> HTTPResponse:
+    """List the signed-in user's MCP tokens without revealing credentials.
+
+    Args:
+        request: Request authenticated through a browser login session.
+
+    Returns:
+        Public metadata for the user's tokens, including expired and revoked ones.
+    """
+    return json(
+        await MCPAccessTokenService.list_tokens(request.ctx.user.id),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@mcp.post("/token/create")
+@authorize()
+@validate(json=MCPAccessTokenCreate)
+async def create_token(request: Request, body: MCPAccessTokenCreate) -> HTTPResponse:
+    """Issue a read-only MCP credential for the signed-in user.
+
+    Args:
+        request: Request authenticated through a browser login session.
+        body: Validated token name and lifetime.
+
+    Returns:
+        Public metadata and the only response containing the full token.
+    """
+    return json(
+        await MCPAccessTokenService.create(request.ctx.user.id, body),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@mcp.post("/token/<id:int>/revoke")
+@authorize()
+async def revoke_token(request: Request, id: int) -> HTTPResponse:
+    """Revoke a token belonging to the signed-in user.
+
+    Args:
+        request: Request authenticated through a browser login session.
+        id: Token identifier to revoke.
+
+    Returns:
+        Empty response after revocation, including repeated revocation requests.
+
+    Raises:
+        NotFoundException: If the token is missing or belongs to another account.
+    """
+    await MCPAccessTokenService.revoke(id, request.ctx.user.id)
+    return empty()

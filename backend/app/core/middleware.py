@@ -7,9 +7,10 @@ from sanic import HTTPResponse, Request, Sanic, json
 from sanic.response import JSONResponse
 from tortoise import timezone
 
-from app.core.constants import ENCODING, SESSION_ID, URL_PREFIX
+from app.core.constants import ENCODING, MCP_PATH, SESSION_ID, URL_PREFIX
 from app.core.exceptions import ErrorCode, UnauthorizedException
 from app.models.user import UserInfo, UserSession
+from app.services.mcp import MCPAccessTokenService
 
 FRONTEND_NO_CACHE = "no-store, no-cache, must-revalidate, max-age=0"
 FRONTEND_NO_CACHE_PATHS = {
@@ -23,17 +24,25 @@ FRONTEND_NO_CACHE_PATHS = {
 
 
 async def on_request(request: Request):
-    """The middleware for request.
+    """Authenticate MCP credentials separately from browser login sessions.
 
     Args:
-        request: Request object.
+        request: Request whose path determines the accepted credential type.
 
     Raises:
-        UnauthorizedException: If the request is unauthorized.
+        UnauthorizedException: If the required credential is absent or invalid.
     """
     app = request.app
     # check if the request path is in the exclude paths
     if not request.path.startswith(URL_PREFIX):
+        return
+    if request.path == MCP_PATH:
+        request.ctx.user = await MCPAccessTokenService.authenticate(
+            request.token,
+            client_ip=request.client_ip,
+            user_agent=request.headers.get("User-Agent"),
+        )
+        request.ctx.mcp_authenticated = True
         return
     for path in app.config.AUTH_EXCLUDE_PATHS:
         if fnmatch(request.path, URL_PREFIX + path):
@@ -61,21 +70,25 @@ async def on_request(request: Request):
 
 
 async def on_response(request: Request, response) -> HTTPResponse | None:
-    """The middleware for response.
+    """Wrap API responses and refresh cookies only for browser login sessions.
 
     Args:
         request: Request object.
-        response: Response object.
+        response: Response object; MCP responses keep their protocol body.
 
     Returns:
-        Wrapped response object.
+        Wrapped response, or `None` for responses outside this middleware's scope.
     """
     if not isinstance(response, HTTPResponse):
         return None
 
     set_cache_headers(request, response)
 
-    if 200 <= response.status < 300 and hasattr(request.ctx, "user"):
+    if (
+        200 <= response.status < 300
+        and hasattr(request.ctx, "user")
+        and not getattr(request.ctx, "mcp_authenticated", False)
+    ):
         # add the token to the response cookies
         user: UserInfo = request.ctx.user
         if token := request.token or request.cookies.get(SESSION_ID):

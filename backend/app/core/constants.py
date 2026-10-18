@@ -9,6 +9,9 @@ ENCODING = "utf-8"
 URL_PREFIX = "/_api"
 """The URL prefix to be prepended to all routes."""
 
+MCP_PATH = f"{URL_PREFIX}/mcp"
+"""The only endpoint accepting dedicated MCP access tokens."""
+
 SESSION_ID = "KSID"
 """The key for the session ID in the HTTP cookies."""
 
