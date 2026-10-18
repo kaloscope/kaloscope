@@ -131,6 +131,10 @@
     bind:this={dialog}
     class="modal transition-none {_class}"
     transition:fade={{ duration: TRANSITION_DURATION }}
+    oncancel={(event) => {
+      event.preventDefault();
+      close();
+    }}
   >
     <form method="dialog" class="modal-backdrop">
       <button onclick={close} aria-label="Close"></button>

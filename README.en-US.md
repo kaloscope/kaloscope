@@ -149,30 +149,33 @@ The parameters used above are described below.
 
 ## Read-only MCP Access
 
-MCP clients such as Codex can connect directly to Kaloscope over Streamable HTTP to inspect workflows,
+MCP clients can connect directly to Kaloscope over Streamable HTTP to inspect workflows,
 media libraries and metadata, download progress, schedules, and AI provider settings. The `/_api/mcp` endpoint uses Kaloscope's
 existing port; clients do not need Python, a source checkout, or a bridge process. MCP reuses the application's
 business services and user permissions through independent access tokens. It exposes no editing, publishing, or execution tools.
 
-Add the following to your Codex configuration:
+After signing in, create and copy a token under **Personal Settings → Access Tokens**. The page provides
+your instance's MCP URL and authentication instructions, shows token status and last use, and lets you revoke tokens.
+In an MCP client that supports Streamable HTTP and Bearer authentication, add a server with these settings:
 
-```toml
-[mcp_servers.kaloscope]
-url = "http://127.0.0.1:8000/_api/mcp"
-bearer_token_env_var = "KALOSCOPE_TOKEN"
-```
+| Setting              | Value                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| Transport            | `Streamable HTTP`                                                                            |
+| MCP URL              | `http://127.0.0.1:8000/_api/mcp`, replaced with an instance address reachable by your client |
+| Authorization header | `Authorization: Bearer <token>`, replacing `<token>` with the full token                     |
 
-Replace the URL with your Kaloscope instance address. After signing in, use your web login session to call
-`POST /_api/mcp/token/create` with `{"name":"Codex","expires_in_days":90}`. Set the returned `data.token`
-as `KALOSCOPE_TOKEN` in the environment that launches Codex. Token management currently uses these APIs;
-the management page is not yet available. The full credential is returned only once, at creation.
+If your client has a **Bearer Token** field, enter only the full token without the `Bearer` prefix.
+For custom request headers, use `Authorization` as the name and `Bearer <token>` as the value.
+Configuration file formats and field names vary by client; use these connection details according to your client's
+MCP setup instructions. Authentication currently uses access tokens; OAuth sign-in is not available.
+
+The full credential is shown only once, at creation.
 Choose a fixed lifetime of 30, 90, or 365 days; the default is 90 days, and use does not extend it.
 Use `GET /_api/mcp/token/list` to inspect your tokens and `POST /_api/mcp/token/<id>/revoke` to revoke one,
 both authenticated with your web login session. MCP tokens work only at `/_api/mcp`, which does not accept
 web login tokens or cookies. Signing out of the web application does not revoke MCP tokens. After expiration
 or revocation, generate a replacement and update the client configuration.
-Keep tokens out of tool arguments and project files. Use HTTPS for remote connections. Other MCP clients supporting Streamable HTTP
-can use the same URL with an `Authorization: Bearer <token>` header.
+Keep tokens out of tool arguments and project files. Use HTTPS for remote connections.
 
 | Tool                   | Purpose                                                                            |
 | ---------------------- | ---------------------------------------------------------------------------------- |
@@ -191,7 +194,7 @@ Paginated tools return at most 100 items per page. Media and schedules follow th
 permissions. Download tasks retain the download page's shared visibility, but exclude source links, file lists,
 and downloader credentials. Provider results include disabled configurations to help diagnose invalid AI nodes.
 
-After connecting, ask Codex to diagnose workflow failures, compare AI node settings with configured providers,
+After connecting, ask your AI assistant to diagnose workflow failures, compare AI node settings with configured providers,
 find indexed media, or summarize failed downloads. All tools are read-only: none edit, publish, execute,
 download, scan, or run model inference.
 

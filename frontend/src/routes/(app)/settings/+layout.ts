@@ -23,6 +23,11 @@ export const load: LayoutLoad = async () => {
           icon: icons.phoneTablet
         },
         {
+          title: 'nav.settings.personal.tokens',
+          path: '/settings/personal/tokens',
+          icon: icons.key
+        },
+        {
           title: 'nav.settings.personal.preferences',
           path: '/settings/personal/preferences',
           icon: icons.textGrammarSettings

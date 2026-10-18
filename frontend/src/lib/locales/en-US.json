@@ -53,7 +53,8 @@
         "title": "Personal",
         "account": "Account",
         "sessions": "Sessions",
-        "preferences": "Preferences"
+        "preferences": "Preferences",
+        "tokens": "Access Tokens"
       },
       "system": {
         "title": "System",
@@ -300,6 +301,38 @@
       "one": "Kill this session?",
       "others": "Kill other sessions?"
     }
+  },
+  "access_token": {
+    "description": "MCP access is read-only and follows your account permissions",
+    "create": "Create Token",
+    "created": "Token Created",
+    "empty": "No access tokens yet",
+    "lifetime": "Lifetime",
+    "created_at": "Created",
+    "expires_at": "Expires",
+    "last_used_at": "Last Used",
+    "unused": "Never used",
+    "read_only": "Read-only",
+    "status": {
+      "active": "Active",
+      "expired": "Expired",
+      "revoked": "Revoked"
+    },
+    "revoke": "Revoke Token",
+    "revoke_confirm": "Revoking “{0}” will disconnect clients using this token. Continue?",
+    "once_hint": "Copy and save this token now. It cannot be viewed again after closing this dialog.",
+    "connection": "MCP Connection",
+    "connection_hint": "Add a server in an MCP client that supports Streamable HTTP and Bearer authentication using the details below.",
+    "transport": "Transport",
+    "authentication": "Authentication",
+    "endpoint": "MCP URL",
+    "auth_header": "Authorization Header",
+    "auth_hint": "Replace <token> with the full token copied at creation. If your client has a Bearer Token field, enter only the token itself.",
+    "copied": "Copied",
+    "copy_failed": "Unable to copy automatically. Copy the selected text manually.",
+    "load_failed": "Unable to load access tokens",
+    "create_failed": "Unable to create the token. Refresh the list before retrying.",
+    "revoke_failed": "Unable to revoke the token. Try again."
   },
   "duration": {
     "millisecond": "Millisecond",

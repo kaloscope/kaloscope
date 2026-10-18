@@ -18,6 +18,8 @@
     placeholder: string;
     /** The name of the select. */
     name: string;
+    /** The ID of the native select for associating a label. */
+    id: string;
     /** Whether the select is required. */
     required: boolean;
     /** Whether the select is disabled. */
@@ -45,6 +47,7 @@
     label,
     placeholder: _placeholder,
     name,
+    id,
     required = false,
     disabled = false,
     filter = false,
@@ -90,7 +93,7 @@
 
 {#if native}
   <!-- native select element -->
-  <select class="{selectClass} {_class}" bind:value {name} {required} {disabled} {onchange}>
+  <select {id} class="{selectClass} {_class}" bind:value {name} {required} {disabled} {onchange}>
     {#if children}
       {@render children()}
     {:else if options}
