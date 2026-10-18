@@ -204,6 +204,7 @@ class AICompletionConfig(BaseModel):
     timeout: int = Field(default=60, ge=1, le=300, strict=True)
     max_retries: int = Field(default=0, ge=0, le=3, strict=True)
     max_tokens: int = Field(default=0, ge=0, le=131072, strict=True)
+    temperature: float | None = Field(default=None, ge=0, le=2, strict=True)
     result_key: str = Field(
         default="ai_result", pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$"
     )

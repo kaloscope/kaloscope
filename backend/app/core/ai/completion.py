@@ -64,6 +64,7 @@ async def complete(
     Retry at most three times, waiting 1, 2, and 4 seconds between attempts.
     Each attempt has its own timeout. Authentication, configuration, and output
     validation errors are not retried. Cancellation propagates immediately.
+    Omit `temperature` when unset to preserve the model's default behavior.
 
     Args:
         client: Credential-isolated client using the application's network transport.
@@ -103,6 +104,8 @@ async def complete(
             else "max_tokens"
         )
         payload[token_field] = config.max_tokens
+    if config.temperature is not None:
+        payload["temperature"] = config.temperature
     if validator is not None and config.native_schema:
         payload["response_format"] = {
             "type": "json_schema",

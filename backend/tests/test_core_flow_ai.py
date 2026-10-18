@@ -97,7 +97,8 @@ def network(monkeypatch, tmp_path):
     return requests
 
 
-def test_execution(network):
+@pytest.mark.parametrize("temperature", [None, 0, 0.7, 2])
+def test_execution(network, temperature):
     async def run():
         async with database():
             provider = await AIProviderService.upsert(
@@ -112,6 +113,7 @@ def test_execution(network):
                 provider.id,
                 system_prompt="You summarize {{ title }}",
                 response_format="json_object",
+                temperature=temperature,
             )
             ctx = context()
 
@@ -127,7 +129,12 @@ def test_execution(network):
             assert "private-key" not in json.dumps(node_data)
             assert "private-key" not in json.dumps(dict(ctx.storage))
             assert network[0].headers["Authorization"] == "Bearer private-key"
-            messages = json.loads(network[0].content)["messages"]
+            body = json.loads(network[0].content)
+            if temperature is None:
+                assert "temperature" not in body
+            else:
+                assert body["temperature"] == temperature
+            messages = body["messages"]
             assert messages[0]["content"].startswith("You summarize Example")
             assert messages[-1]["content"] == "Summarize Example"
 
@@ -228,6 +235,15 @@ def test_reenable_and_reconfigure(network):
         {"max_retries": 1.5},
         {"max_retries": "1"},
         {"max_retries": None},
+        {"temperature": -0.1},
+        {"temperature": 2.1},
+        {"temperature": True},
+        {"temperature": False},
+        {"temperature": "0.7"},
+        {"temperature": ""},
+        {"temperature": float("nan")},
+        {"temperature": float("inf")},
+        {"temperature": float("-inf")},
         {"native_schema": "true"},
         {"prompt": " "},
         {"result_key": "$retval"},
@@ -244,6 +260,14 @@ def test_retry_configuration(max_retries):
     assert AINode.configuration(data()).max_retries == 0
     assert (
         AINode.configuration(data(max_retries=max_retries)).max_retries == max_retries
+    )
+
+
+@pytest.mark.parametrize("temperature", [None, 0, 0.7, 1, 2])
+def test_temperature_configuration(temperature):
+    assert AINode.configuration(data()).temperature is None
+    assert (
+        AINode.configuration(data(temperature=temperature)).temperature == temperature
     )
 
 

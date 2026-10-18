@@ -4,10 +4,11 @@ from app.core.flow.fields.base import Field
 
 
 @dataclass(kw_only=True)
-class NumberField(Field[float]):
-    """An input element that enables to enter a number."""
+class NumberField(Field[float | None]):
+    """Define a numeric input that can use `None` as its empty default."""
 
-    default: float = 0
+    default: float | None = 0
+    placeholder: str | None = None
     min: float | None = None
     max: float | None = None
     step: float = 1

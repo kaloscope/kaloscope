@@ -87,6 +87,7 @@ def test_output_modes(mode, native_schema):
     body = json.loads(request.content)
     assert body["stream"] is False
     assert "max_tokens" not in body and "max_completion_tokens" not in body
+    assert "temperature" not in body
     if mode == "text":
         assert "response_format" not in body
     else:
@@ -97,6 +98,24 @@ def test_output_modes(mode, native_schema):
     if mode == "json_object" and native_schema:
         assert body["response_format"]["json_schema"]["schema"] == SCHEMA
         assert body["response_format"]["json_schema"]["strict"] is True
+
+
+@pytest.mark.parametrize("temperature", [None, 0, 0.7, 2])
+def test_temperature(temperature):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=response())
+
+    result = asyncio.run(call(handler, config(temperature=temperature)))
+
+    assert result["text"] == "Hello"
+    body = json.loads(requests[0].content)
+    if temperature is None:
+        assert "temperature" not in body
+    else:
+        assert body["temperature"] == temperature
 
 
 @pytest.mark.parametrize("native_schema", [False, True])
@@ -359,9 +378,10 @@ def test_permanent_http_error(status, retry_sleep):
         return httpx.Response(status)
 
     with pytest.raises(KaloscopeException):
-        asyncio.run(call(handler, config(max_retries=3)))
+        asyncio.run(call(handler, config(max_retries=3, temperature=0.7)))
 
     assert len(requests) == 1
+    assert json.loads(requests[0].content)["temperature"] == 0.7
     retry_sleep.assert_not_awaited()
 
 
