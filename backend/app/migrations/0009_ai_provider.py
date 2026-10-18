@@ -1,6 +1,8 @@
 from tortoise import migrations
 from tortoise.migrations import operations as ops
 from app.models.ai import AIProtocol, AIProviderPreset
+from app.models.mcp import MCPTokenScope
+from tortoise.fields.base import OnDelete
 from orjson import loads
 from tortoise.fields.data import JSON_DUMPS
 from tortoise import fields
@@ -26,6 +28,24 @@ class Migration(migrations.Migration):
                 ('enabled', fields.BooleanField(default=True)),
             ],
             options={'table': 'ai_provider', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Store one named connection and its explicitly configured model IDs.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
+            name='MCPAccessToken',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('user', fields.ForeignKeyField('models.User', source_field='user_id', db_index=True, db_constraint=True, to_field='id', related_name=False, on_delete=OnDelete.CASCADE)),
+                ('name', fields.CharField(max_length=64)),
+                ('token_hash', fields.CharField(unique=True, max_length=64)),
+                ('prefix', fields.CharField(max_length=17)),
+                ('scope', fields.CharEnumField(default=MCPTokenScope.READ_ONLY, description='READ_ONLY: read_only', enum_type=MCPTokenScope, max_length=32)),
+                ('expires_at', fields.DatetimeField(auto_now=False, auto_now_add=False)),
+                ('last_used_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
+                ('revoked_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
+            ],
+            options={'table': 'mcp_access_token', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Store a user-owned MCP credential digest and its fixed lifetime.'},
             bases=['TortoiseModel'],
         ),
     ]

@@ -10,16 +10,18 @@ import httpx
 import pytest
 from jsonschema import Draft202012Validator
 from mcp.client import Client
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 from sanic import Request, Sanic
 from sanic.compat import Header
 from sanic.response.types import BaseHTTPResponse
 from tortoise import Tortoise, timezone
 
 from app.core.config import KaloscopeConfig
-from app.core.constants import SESSION_ID
+from app.core.constants import MCP_PATH, SESSION_ID
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.middleware import on_request, on_response
-from app.mcp import MCP_PATH, close_mcp, create_server, start_mcp
+from app.mcp import close_mcp, create_server, start_mcp
 from app.models.ai import AIProvider
 from app.models.download import (
     Downloader,
@@ -39,12 +41,13 @@ from app.models.flow import (
     GraphState,
     JobQuery,
 )
-from app.models.mcp import WorkflowLogs
+from app.models.mcp import MCPAccessToken, MCPAccessTokenCreate, WorkflowLogs
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
 from app.models.user import PermType, User, UserInfo, UserPermission
 from app.routes.mcp import dispatch
 from app.services.ai import AIProviderService
 from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
+from app.services.mcp import MCPAccessTokenService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps, loads
 
@@ -54,12 +57,13 @@ async def application():
     """Open an isolated application with the real MCP transport and database.
 
     Yields:
-        Application containing reader and administrator sessions.
+        Application containing reader and administrator sessions and MCP tokens.
     """
     original_dumps = BaseHTTPResponse._dumps
     app = Sanic("mcp-test", configure_logging=False, dumps=dumps)
     app.config.update(AUTH_EXCLUDE_PATHS=[], TOKEN_EXPIRATION_HOURS=120)
     app.shared_ctx.sessions = {}
+    app.ctx.mcp_tokens = {}
     app.ctx.lib_watcher = SimpleNamespace(is_scanning=lambda _: False)
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
@@ -79,6 +83,10 @@ async def application():
                 last_activity=now,
                 expire_at=now + timedelta(hours=1),
             )
+            issued = await MCPAccessTokenService.create(
+                user.id, MCPAccessTokenCreate(name=name)
+            )
+            app.ctx.mcp_tokens[name] = issued["token"]
         await start_mcp(app)
         yield app
     finally:
@@ -91,13 +99,13 @@ async def application():
 async def post(
     app, method, params=None, *, token="reader", headers=None, http_method="POST"
 ):
-    """Dispatch JSON-RPC through the real session middleware and MCP route.
+    """Dispatch JSON-RPC through the real token middleware and MCP route.
 
     Args:
         app: Isolated application.
         method: JSON-RPC method.
         params: JSON-RPC parameters; `None` sends an empty object.
-        token: Session token; `None` omits bearer authentication.
+        token: Token fixture name or raw credential; `None` omits authentication.
         headers: Optional header overrides.
         http_method: HTTP method used for the request.
 
@@ -111,7 +119,9 @@ async def post(
         "mcp-protocol-version": "2025-11-25",
     }
     if token is not None:
-        request_headers["authorization"] = f"Bearer {token}"
+        request_headers["authorization"] = (
+            f"Bearer {app.ctx.mcp_tokens.get(token, token)}"
+        )
     request_headers.update(headers or {})
     request = Request(
         url_bytes=MCP_PATH.encode(),
@@ -137,7 +147,7 @@ async def call(app, name, arguments=None, *, token="reader"):
         app: Isolated application.
         name: Tool name.
         arguments: Tool arguments; `None` supplies an empty object.
-        token: Account session to use.
+        token: Account token fixture to use.
 
     Returns:
         Tool result, including structured data or a safe error message.
@@ -210,7 +220,7 @@ def test_protocol(mode):
             result = await client.call_tool("list_workflows", {})
             assert result.is_error
             assert "authenticated" in result.content[0].text
-            assert "valid Kaloscope session" in result.content[0].text
+            assert "valid Kaloscope MCP access token" in result.content[0].text
 
     asyncio.run(run())
 
@@ -237,6 +247,7 @@ def test_http_protocol():
             assert "permissions change" in instructions
             assert "not a failed tool call" in instructions
             assert "mcp-session-id" not in response.headers
+            assert "set-cookie" not in response.headers
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
@@ -258,13 +269,12 @@ def test_authentication(token):
     async def run():
         async with application() as app:
             if token == "expired":
-                user = app.shared_ctx.sessions["reader"].model_copy(deep=True)
-                user.expire_at = timezone.now() - timedelta(seconds=1)
-                app.shared_ctx.sessions[token] = user
+                await MCPAccessToken.filter(name="reader").update(
+                    expires_at=timezone.now() - timedelta(seconds=1)
+                )
+                app.ctx.mcp_tokens[token] = app.ctx.mcp_tokens["reader"]
             with pytest.raises(UnauthorizedException):
                 await post(app, "tools/list", token=token)
-            if token == "expired":
-                assert token not in app.shared_ctx.sessions
             with pytest.raises(UnauthorizedException):
                 await post(
                     app,
@@ -272,8 +282,30 @@ def test_authentication(token):
                     token=None,
                     headers={"cookie": f"{SESSION_ID}=reader"},
                 )
+            with pytest.raises(UnauthorizedException):
+                await post(
+                    app,
+                    "tools/list",
+                    token=None,
+                    headers={"cookie": f"{SESSION_ID}={app.ctx.mcp_tokens['reader']}"},
+                )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("annotations", [None, ToolAnnotations(read_only_hint=False)])
+def test_write_tool_denied(annotations):
+    server = create_server()
+    operation = AsyncMock()
+
+    @server.tool(annotations=annotations)
+    async def future_write() -> str:
+        await operation()
+        return "done"
+
+    with pytest.raises(ToolError, match="only permits read-only"):
+        asyncio.run(server.call_tool("future_write", {}))
+    operation.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

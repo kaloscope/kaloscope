@@ -1,6 +1,7 @@
-"""Describe MCP results without changing the shared services' JSON payloads."""
+"""Define MCP access tokens, requests, and public tool results."""
 
-from typing import Any
+from enum import StrEnum, auto
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -11,9 +12,18 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     model_serializer,
 )
+from tortoise import timezone
+from tortoise.fields import (
+    CharEnumField,
+    CharField,
+    DatetimeField,
+    ForeignKeyField,
+    ForeignKeyRelation,
+)
 
 from app.core.dl.driver import DownloadAction, DownloadState
 from app.models.ai import AIProtocol, AIProviderPreset
+from app.models.base import TortoiseModel
 from app.models.download import OfflineDownloadErrorKind
 from app.models.flow import (
     GraphCategory,
@@ -24,7 +34,61 @@ from app.models.flow import (
     JobTrigger,
 )
 from app.models.media import IndexState, Language, LibType, MediaFormat, MediaType
+from app.models.user import User
 from app.utils.json import JSONType
+
+
+class MCPTokenScope(StrEnum):
+    """Identify explicitly granted MCP capabilities."""
+
+    READ_ONLY = auto()
+
+
+class MCPAccessToken(TortoiseModel):
+    """Store a user-owned MCP credential digest and its fixed lifetime."""
+
+    user_id: int
+    user: ForeignKeyRelation[User] = ForeignKeyField(
+        "models.User", related_name=False, db_index=True
+    )
+    name = CharField(max_length=64)
+    token_hash = CharField(max_length=64, unique=True)
+    prefix = CharField(max_length=17)
+    scope = CharEnumField(
+        enum_type=MCPTokenScope, max_length=32, default=MCPTokenScope.READ_ONLY
+    )
+    expires_at = DatetimeField()
+    last_used_at = DatetimeField(null=True)
+    revoked_at = DatetimeField(null=True)
+
+    def status(self) -> str:
+        """Describe the credential's current usability without exposing its digest.
+
+        Returns:
+            `revoked`, `expired`, or `active`, in that precedence order.
+        """
+        if self.revoked_at is not None:
+            return "revoked"
+        return "expired" if self.expires_at <= timezone.now() else "active"
+
+    class Meta:
+        table = "mcp_access_token"
+        ordering = ["-created_at", "-id"]
+
+    class PydanticMeta:
+        exclude = ("user", "user_id", "token_hash")
+        computed = ("status",)
+
+
+class MCPAccessTokenCreate(BaseModel):
+    """Validate a named, read-only token with a bounded lifetime."""
+
+    model_config = ConfigDict(
+        extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
+    )
+
+    name: str = Field(min_length=1, max_length=64)
+    expires_in_days: Literal[30, 90, 365] = 90
 
 
 class Result(BaseModel):

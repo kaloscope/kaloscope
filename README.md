@@ -151,7 +151,7 @@ docker run -d \
 
 Codex 等 MCP 客户端可以通过 Streamable HTTP 直接连接 Kaloscope，查询工作流、媒体库、媒体详情、
 下载进度、定时任务及模型配置。入口为 `/_api/mcp`，使用 Kaloscope 现有端口，不需要客户端安装 Python、
-检出源码或启动桥接进程。MCP 复用现有业务服务、登录会话和工作流权限，不提供编辑、发布或执行工具。
+检出源码或启动桥接进程。MCP 使用独立访问令牌，复用现有业务服务和用户权限，不提供编辑、发布或执行工具。
 
 在 Codex 配置中添加：
 
@@ -161,9 +161,14 @@ url = "http://127.0.0.1:8000/_api/mcp"
 bearer_token_env_var = "KALOSCOPE_TOKEN"
 ```
 
-将地址替换为实际的 Kaloscope 实例地址。通过现有登录接口 `POST /_api/auth/login` 获取响应中的
-`data.token`，在启动 Codex 的环境中设置 `KALOSCOPE_TOKEN`。令牌不放入工具参数或项目文件；
-会话过期或退出登录后，需要重新登录并更新令牌。远程连接建议使用 HTTPS。
+将地址替换为实际的 Kaloscope 实例地址。登录后，使用网页登录会话调用
+`POST /_api/mcp/token/create`，提交 `{"name":"Codex","expires_in_days":90}`，获取响应中的
+`data.token`，在启动 Codex 的环境中设置 `KALOSCOPE_TOKEN`。管理页面尚未接入，当前通过接口操作。
+完整令牌只在创建时返回一次；有效期可选 30、90、365 天，默认 90 天，使用时不自动续期。
+`GET /_api/mcp/token/list` 查看自己的令牌，`POST /_api/mcp/token/<id>/revoke` 撤销指定令牌，
+这两个接口同样需要网页登录会话。MCP 令牌只能访问 `/_api/mcp`，该入口不接受网页登录令牌或 Cookie。
+退出网页登录不影响 MCP 令牌；到期或撤销后，需要生成新令牌并更新客户端配置。
+令牌不放入工具参数或项目文件，远程连接建议使用 HTTPS。
 其它支持 Streamable HTTP 的 MCP 客户端使用相同地址，并通过 `Authorization: Bearer <token>` 认证。
 
 | 工具                   | 用途                                                                 |
