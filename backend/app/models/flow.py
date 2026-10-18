@@ -26,30 +26,63 @@ from app.utils.json import JSONType
 
 # -------------------- Enumerations --------------------
 class GraphCategory(StrEnum):
+    """Identify the workflow's business purpose.
+
+    `indexer`: Search for media resources.
+    `ingest`: Process media as it enters a library.
+    `schedule`: Run general task workflows, including scheduled executions.
+    These are workflow categories, not node palette groups.
+    """
+
     INDEXER = auto()
     INGEST = auto()
     SCHEDULE = auto()
 
 
 class GraphState(StrEnum):
+    """Describe workflow publication state.
+
+    `draft`: No active published definition.
+    `modified`: A published workflow has pending draft changes.
+    `published`: The saved draft and published definition are in sync.
+    Publication state does not indicate whether an execution is running.
+    """
+
     DRAFT = auto()
     MODIFIED = auto()
     PUBLISHED = auto()
 
 
 class JobState(StrEnum):
+    """Describe schedule activation rather than execution progress.
+
+    `pending`: The schedule has not been activated or is awaiting registration.
+    `running`: Scheduling is enabled; this does not mean an execution is active.
+    `paused`: Scheduling is suspended.
+    """
+
     PENDING = auto()
     RUNNING = auto()
     PAUSED = auto()
 
 
 class JobTrigger(StrEnum):
+    """Select which timing fields control a schedule.
+
+    `date`: Run once at `run_date`.
+    `cron`: Use the five-field UTC expression in `cron_expr`.
+    `interval`: Repeat every `interval_num` units of `interval_unit`, optionally
+    bounded by `interval_start` and `interval_end`.
+    """
+
     DATE = "date"
     CRON = "cron"
     INTERVAL = "interval"
 
 
 class IntervalUnit(StrEnum):
+    """Specify the time unit multiplied by a schedule's `interval_num`."""
+
     SECONDS = "seconds"
     MINUTES = "minutes"
     HOURS = "hours"
