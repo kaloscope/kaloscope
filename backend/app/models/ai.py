@@ -202,6 +202,7 @@ class AICompletionConfig(BaseModel):
     native_schema: bool = Field(default=False, strict=True)
     output_schema: str = Field(default="", max_length=32768)
     timeout: int = Field(default=60, ge=1, le=300, strict=True)
+    max_retries: int = Field(default=0, ge=0, le=3, strict=True)
     max_tokens: int = Field(default=0, ge=0, le=131072, strict=True)
     result_key: str = Field(
         default="ai_result", pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$"

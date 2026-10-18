@@ -59,7 +59,11 @@ async def complete(
     api_key: str | None,
     config: AICompletionConfig,
 ) -> dict[str, Any]:
-    """Request one completion without caching, retries, or credential redirects.
+    """Request a completion with bounded retries for transient request failures.
+
+    Retry at most three times, waiting 1, 2, and 4 seconds between attempts.
+    Each attempt has its own timeout. Authentication, configuration, and output
+    validation errors are not retried. Cancellation propagates immediately.
 
     Args:
         client: Credential-isolated client using the application's network transport.
@@ -114,31 +118,39 @@ async def complete(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
-        async with asyncio.timeout(config.timeout):
-            async with client.stream(
-                "POST",
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=config.timeout,
-                follow_redirects=False,
-            ) as response:
-                if not response.is_success:
-                    code = {
-                        401: ErrorCode.AI_AUTH_FAILED,
-                        403: ErrorCode.AI_AUTH_FAILED,
-                        429: ErrorCode.AI_RATE_LIMITED,
-                        400: ErrorCode.AI_REQUEST_REJECTED,
-                        404: ErrorCode.AI_REQUEST_REJECTED,
-                        405: ErrorCode.AI_REQUEST_REJECTED,
-                        422: ErrorCode.AI_REQUEST_REJECTED,
-                    }.get(response.status_code, ErrorCode.AI_REQUEST_FAILED)
-                    raise KaloscopeException(code, status_code=502, quiet=True)
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    body.extend(chunk)
-                    if len(body) > 4 * 1024 * 1024:
-                        raise ValueError
+        for attempt in range(config.max_retries + 1):
+            try:
+                async with asyncio.timeout(config.timeout):
+                    async with client.stream(
+                        "POST",
+                        f"{base_url}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                        timeout=config.timeout,
+                        follow_redirects=False,
+                    ) as response:
+                        response.raise_for_status()
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > 4 * 1024 * 1024:
+                                raise ValueError
+                break
+            except httpx.HTTPStatusError as error:
+                if (
+                    error.response.status_code not in {408, 429, 500, 502, 503, 504}
+                    or attempt == config.max_retries
+                ):
+                    raise
+            except (
+                TimeoutError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ):
+                if attempt == config.max_retries:
+                    raise
+            await asyncio.sleep(2**attempt)
         result = orjson.loads(body)
         choice = result["choices"][0]
         message = choice["message"]
@@ -154,6 +166,17 @@ async def complete(
             or message.get("tool_calls")
         ):
             raise ValueError
+    except httpx.HTTPStatusError as error:
+        code = {
+            401: ErrorCode.AI_AUTH_FAILED,
+            403: ErrorCode.AI_AUTH_FAILED,
+            429: ErrorCode.AI_RATE_LIMITED,
+            400: ErrorCode.AI_REQUEST_REJECTED,
+            404: ErrorCode.AI_REQUEST_REJECTED,
+            405: ErrorCode.AI_REQUEST_REJECTED,
+            422: ErrorCode.AI_REQUEST_REJECTED,
+        }.get(error.response.status_code, ErrorCode.AI_REQUEST_FAILED)
+        raise KaloscopeException(code, status_code=502, quiet=True) from None
     except (TimeoutError, httpx.TimeoutException):
         raise KaloscopeException(ErrorCode.AI_TIMEOUT, status_code=504) from None
     except httpx.RequestError:

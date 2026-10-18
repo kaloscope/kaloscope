@@ -3,6 +3,8 @@
 import asyncio
 import json
 import traceback
+from unittest.mock import AsyncMock
+from unittest.mock import call as mock_call
 
 import httpx
 import pytest
@@ -46,6 +48,13 @@ async def call(handler, options=None, preset=None):
         return await complete(
             client, "https://example.com/v1", preset, API_KEY, options or config()
         )
+
+
+@pytest.fixture
+def retry_sleep(monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.core.ai.completion.asyncio.sleep", sleep)
+    return sleep
 
 
 @pytest.mark.parametrize(
@@ -105,14 +114,27 @@ def test_output_modes(mode, native_schema):
         '{"title":"Example","year":2026,"extra":1}',
     ],
 )
-def test_invalid_structure(content, native_schema):
+def test_invalid_structure(content, native_schema, retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=response(content))
+
     with pytest.raises(KaloscopeException, match="ai_output_invalid"):
         asyncio.run(
             call(
-                lambda _: httpx.Response(200, json=response(content)),
-                config(response_format="json_object", native_schema=native_schema),
+                handler,
+                config(
+                    response_format="json_object",
+                    native_schema=native_schema,
+                    max_retries=3,
+                ),
             )
         )
+
+    assert len(requests) == 1
+    retry_sleep.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -189,9 +211,18 @@ def test_upstream_errors(status, code):
         (response("tool", finish_reason="tool_calls"), "ai_response_invalid"),
     ],
 )
-def test_invalid_response(payload, code):
+def test_invalid_response(payload, code, retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
     with pytest.raises(KaloscopeException, match=code):
-        asyncio.run(call(lambda _: httpx.Response(200, json=payload)))
+        asyncio.run(call(handler, config(max_retries=3)))
+
+    assert len(requests) == 1
+    retry_sleep.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -240,4 +271,182 @@ def test_cancellation():
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(call(handler))
+        asyncio.run(call(handler, config(max_retries=3)))
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+def test_http_retry(status, retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status)
+        return httpx.Response(200, json=response())
+
+    result = asyncio.run(call(handler, config(max_retries=3)))
+
+    assert result["text"] == "Hello"
+    assert len(requests) == 2
+    assert requests[0].content == requests[1].content
+    assert requests[0].headers == requests[1].headers
+    retry_sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+        httpx.ReadTimeout,
+    ],
+)
+def test_connection_retry(exception, retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise exception("private-key")
+        return httpx.Response(200, json=response())
+
+    result = asyncio.run(call(handler, config(max_retries=1)))
+
+    assert result["text"] == "Hello"
+    assert len(requests) == 2
+    retry_sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.parametrize("max_retries", [0, 1, 2, 3])
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (503, "ai_request_failed"),
+        (429, "ai_rate_limited"),
+        (httpx.ReadTimeout, "ai_timeout"),
+        (httpx.ConnectError, "ai_request_failed"),
+    ],
+)
+def test_retry_limit(max_retries, failure, code, retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if isinstance(failure, int):
+            return httpx.Response(failure, text="private-key private-prompt")
+        raise failure("private-key private-prompt")
+
+    with pytest.raises(KaloscopeException, match=code) as error:
+        asyncio.run(call(handler, config(max_retries=max_retries)))
+
+    assert len(requests) == max_retries + 1
+    assert retry_sleep.await_args_list == [
+        mock_call(2**attempt) for attempt in range(max_retries)
+    ]
+    detail = "".join(traceback.format_exception(error.value))
+    assert "private-key" not in detail
+    assert "private-prompt" not in detail
+
+
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 404, 405, 422, 501, 505])
+def test_permanent_http_error(status, retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status)
+
+    with pytest.raises(KaloscopeException):
+        asyncio.run(call(handler, config(max_retries=3)))
+
+    assert len(requests) == 1
+    retry_sleep.assert_not_awaited()
+
+
+def test_auth_failure_after_retry(retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503 if len(requests) == 1 else 401)
+
+    with pytest.raises(KaloscopeException, match="ai_auth_failed"):
+        asyncio.run(call(handler, config(max_retries=3)))
+
+    assert len(requests) == 2
+    retry_sleep.assert_awaited_once_with(1)
+
+
+def test_partial_response_retry(retry_sleep):
+    class FailingStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'{"partial":'
+            raise httpx.ReadError("private-key")
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = FailingStream()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, stream=stream)
+        assert stream.closed
+        return httpx.Response(200, json=response())
+
+    result = asyncio.run(call(handler, config(max_retries=1)))
+
+    assert result["text"] == "Hello"
+    assert len(requests) == 2
+    assert stream.closed
+    retry_sleep.assert_awaited_once_with(1)
+
+
+def test_attempt_timeout(retry_sleep):
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        assert request.extensions["timeout"]["read"] == 1
+        if len(requests) == 1:
+            await asyncio.Future()
+        return httpx.Response(200, json=response())
+
+    result = asyncio.run(call(handler, config(timeout=1, max_retries=1)))
+
+    assert result["text"] == "Hello"
+    assert len(requests) == 2
+    retry_sleep.assert_awaited_once_with(1)
+
+
+def test_backoff_cancellation(retry_sleep):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503)
+
+    async def run():
+        waiting = asyncio.Event()
+
+        async def sleep(_):
+            waiting.set()
+            await asyncio.Future()
+
+        retry_sleep.side_effect = sleep
+        task = asyncio.create_task(call(handler, config(max_retries=3)))
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    assert len(requests) == 1
+    retry_sleep.assert_awaited_once_with(1)
