@@ -19,6 +19,7 @@
   const authHeader = 'Authorization: Bearer <token>';
 
   let tokens: MCPAccessToken[] = $state([]);
+  let initialized = $state(false);
   let loadError = $state(false);
   let name = $state('');
   let expiresInDays: MCPAccessTokenCreate['expires_in_days'] = $state(90);
@@ -47,6 +48,7 @@
       loadError = true;
       if (!isHTTPError(cause)) alert({ level: 'error', message: $_('access_token.load_failed') });
     } finally {
+      initialized = true;
       loading.end();
     }
   }
@@ -147,12 +149,12 @@
   });
 </script>
 
-<Container type="settings" minWidth="0" maxWidth="56rem" rowGap="2rem" loading={$loading}>
+<Container type="settings" minWidth="0" maxWidth="56rem" rowGap="2rem" loading={initialized ? null : $loading}>
   <Setting title={$_('nav.settings.personal.tokens')}>
     <div class="flex flex-wrap items-center justify-between gap-3">
       <p class="text-sm text-base-content/70">{$_('access_token.description')}</p>
       <div class="flex shrink-0 items-center gap-2">
-        <Button icon={icons.arrowRotateClockwise} text={$_('action.reload')} onclick={load} />
+        <Button icon={icons.redo} text={$_('action.reload')} loading={$loading} onclick={load} />
         <button class="btn btn-sm" onclick={showCreator}>
           <iconify-icon icon={icons.addCircle} width="1.25rem" aria-hidden="true"></iconify-icon>
           {$_('access_token.create')}
