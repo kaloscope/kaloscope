@@ -997,7 +997,8 @@
     "ai_response_invalid": "The AI provider returned an empty, invalid, or oversized response.",
     "ai_output_invalid": "The AI output does not match the JSON schema; check the prompt, model, and output schema.",
     "ai_output_truncated": "The AI output was truncated; increase the output token limit or shorten the requested response.",
-    "ai_output_refused": "The model refused the request or filtered its response; review the prompt."
+    "ai_output_refused": "The model refused the request or filtered its response; review the prompt.",
+    "ai_assistant_limit": "The conversation turn limit was reached; narrow the query or start a new conversation."
   },
   "ai": {
     "custom": "Custom provider",

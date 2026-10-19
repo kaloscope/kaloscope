@@ -95,22 +95,37 @@ class AIProviderService(BaseService[AIProvider], model=AIProvider):
                 execution, or output validation fails.
         """
         provider = await cls.resolve_model(config.model)
-        secret = None
-        if provider.api_key:
-            try:
-                secret = await asyncio.to_thread(
-                    fernet_decrypt,
-                    provider.api_key,
-                    KaloscopeConfig.get().secret_key_path,
-                )
-            except (RuntimeError, OSError):
-                raise KaloscopeException(
-                    ErrorCode.AI_KEY_UNAVAILABLE, status_code=409
-                ) from None
+        secret = await cls.decrypt_key(provider)
         async with httpx.AsyncClient(transport=NetworkTransport(http2=True)) as client:
             return await complete(
                 client, provider.base_url, provider.preset, secret, config
             )
+
+    @classmethod
+    async def decrypt_key(cls, provider: AIProvider) -> str | None:
+        """Decrypt a saved credential for an isolated server-side model request.
+
+        Args:
+            provider: Provider resolved from the current configuration.
+
+        Returns:
+            Plaintext credential, or `None` for a keyless connection.
+
+        Raises:
+            KaloscopeException: If the credential cannot be decrypted.
+        """
+        if not provider.api_key:
+            return None
+        try:
+            return await asyncio.to_thread(
+                fernet_decrypt,
+                provider.api_key,
+                KaloscopeConfig.get().secret_key_path,
+            )
+        except (RuntimeError, OSError):
+            raise KaloscopeException(
+                ErrorCode.AI_KEY_UNAVAILABLE, status_code=409
+            ) from None
 
     @classmethod
     async def discover_models(cls, obj: AIProviderConnection) -> list[str]:
