@@ -66,6 +66,7 @@ class ErrorCode(StrEnum):
     AI_OUTPUT_INVALID = auto()
     AI_OUTPUT_TRUNCATED = auto()
     AI_OUTPUT_REFUSED = auto()
+    AI_ASSISTANT_LIMIT = auto()
     EXPORT_ITEMS_FAILED = auto()
     IMPORT_ITEMS_FAILED = auto()
     FILE_NOT_EXISTS = auto()

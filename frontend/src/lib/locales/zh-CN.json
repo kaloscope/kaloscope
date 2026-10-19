@@ -997,7 +997,8 @@
     "ai_response_invalid": "AI 提供商返回内容为空、格式无效或超过大小限制",
     "ai_output_invalid": "AI 输出不符合 JSON 结构，请检查提示词、模型和输出结构",
     "ai_output_truncated": "AI 输出被截断，请增加输出 Token 限制或缩短要求的内容",
-    "ai_output_refused": "模型拒绝回答或返回内容被过滤，请调整提示词"
+    "ai_output_refused": "模型拒绝回答或返回内容被过滤，请调整提示词",
+    "ai_assistant_limit": "已达到单轮对话限制，请缩小查询范围或开始新对话"
   },
   "ai": {
     "custom": "自定义提供商",
