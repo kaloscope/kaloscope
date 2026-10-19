@@ -193,7 +193,7 @@ export interface MCPAccessToken {
   updated_at: string;
   name: string;
   prefix: string;
-  scope: 'read_only';
+  scope: 'read_only' | 'read_write';
   expires_at: string;
   last_used_at: string | null;
   status: 'active' | 'expired';
@@ -203,6 +203,7 @@ export interface MCPAccessToken {
 export interface MCPAccessTokenCreate {
   name: string;
   expires_in_days: 30 | 90 | 365;
+  scope: MCPAccessToken['scope'];
 }
 
 /** A creation response containing the credential shown only once. */
@@ -801,6 +802,7 @@ export type FlowGraph = {
   description: string | null;
   category: keyof typeof GraphCategory;
   revision: number | null;
+  draft_version: number;
   state: keyof typeof GraphState;
   draft: {
     nodes: Node[];

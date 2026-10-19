@@ -10,6 +10,7 @@
   import type { FlowGraph, FlowGraphContext, Resp } from '$lib/types';
   import { debounce } from '$lib/utils/timing';
   import { MiniMap, useStore, type Edge, type Node } from '@xyflow/svelte';
+  import { isHTTPError } from 'ky';
   import { getContext, hasContext, onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
@@ -190,20 +191,38 @@
   let publishable: boolean = $derived(!(saving || (readonly && graph?.state === 'published') || nodes.length === 0));
 
   /**
-   * Save flow graph.
+   * Update metadata without changing the version represented by the current canvas.
+   *
+   * @param result - Workflow returned after saving its metadata.
+   */
+  function updateGraphMetadata(result: FlowGraph) {
+    if (graph) {
+      graph = {
+        ...graph,
+        name: result.name,
+        icon: result.icon,
+        description: result.description,
+        updated_at: result.updated_at
+      };
+    }
+  }
+
+  /**
+   * Save the current draft without overwriting changes from another client.
    */
   function save() {
     if (!graph || saving || !savable) {
       return;
     }
     const id = graph.id;
+    const draftVersion = graph.draft_version;
     const data = $state.snapshot({ nodes, edges } as unknown) as History;
     const submittedHistoryId = historyId;
     const startTime = new Date().getTime();
     saving = true;
     trackGraphWrite(id, (signal) =>
       api
-        .post(`flow/graph/${id}/save`, { json: data, signal })
+        .post(`flow/graph/${id}/save`, { json: { ...data, draft_version: draftVersion }, signal })
         .json<Resp<FlowGraph>>()
         .then(({ data }) => data)
     )
@@ -217,7 +236,10 @@
           saving = false;
         }, timeout);
       })
-      .catch(() => {
+      .catch((error) => {
+        if (isHTTPError(error) && error.response.status === 409) {
+          autoSave(false);
+        }
         autoSaveSignal = false;
         saving = false;
       });
@@ -252,7 +274,7 @@
   }
 
   /**
-   * Publish the flow graph.
+   * Publish the current draft only if its saved version is still current.
    */
   function publish() {
     if (!graph) {
@@ -261,12 +283,13 @@
     }
     // save and publish the flow graph
     const id = graph.id;
+    const draftVersion = graph.draft_version;
     const data = $state.snapshot({ nodes, edges } as unknown) as History;
     const submittedHistoryId = historyId;
     const startTime = new Date().getTime();
     trackGraphWrite(id, (signal) =>
       api
-        .post(`flow/graph/${id}/publish`, { json: data, signal })
+        .post(`flow/graph/${id}/publish`, { json: { ...data, draft_version: draftVersion }, signal })
         .json<Resp<FlowGraph>>()
         .then(({ data }) => data)
     )
@@ -279,7 +302,10 @@
           publishing = false;
         }, timeout);
       })
-      .catch(() => {
+      .catch((error) => {
+        if (isHTTPError(error) && error.response.status === 409) {
+          autoSave(false);
+        }
         publishing = false;
       });
   }
@@ -387,7 +413,7 @@
 </PageHeader>
 
 {#if graph}
-  <GraphEditor bind:this={graphEditor} {...graph} onsave={(result) => (graph = result)} />
+  <GraphEditor bind:this={graphEditor} {...graph} onsave={updateGraphMetadata} />
   <div class="svelte-flow__panel right-0 flex h-8 rounded-field border bg-blur-70 px-2 py-1 shadow-md">
     <div class="flex-center gap-2">
       <Badge dashed>{store.viewport.zoom.toFixed(1)}</Badge>

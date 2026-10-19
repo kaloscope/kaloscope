@@ -23,6 +23,7 @@
   let loadError = $state(false);
   let name = $state('');
   let expiresInDays: MCPAccessTokenCreate['expires_in_days'] = $state(90);
+  let scope: MCPAccessToken['scope'] = $state('read_only');
   let secret = $state('');
   let modal: Modal;
   let secretInput = $state<HTMLTextAreaElement>();
@@ -61,11 +62,12 @@
     creating.end();
   }
 
-  /** Open a new token form with the default lifetime. */
+  /** Open a new token form with read-only access and the default lifetime. */
   function showCreator() {
     reset();
     name = '';
     expiresInDays = 90;
+    scope = 'read_only';
     modal.show();
   }
 
@@ -80,7 +82,7 @@
     createRequest = controller;
     creating.start();
     try {
-      const payload: MCPAccessTokenCreate = { name: name.trim(), expires_in_days: expiresInDays };
+      const payload: MCPAccessTokenCreate = { name: name.trim(), expires_in_days: expiresInDays, scope };
       const { data } = await api
         .post('mcp/token/create', { json: payload, signal: controller.signal, retry: 0 })
         .json<Resp<MCPAccessTokenCreated>>();
@@ -207,7 +209,7 @@
                 ></span>
                 {$_(`access_token.status.${token.status}`)}
               </span>
-              <span class="rounded-field bg-base-200 px-2 py-1">{$_('access_token.read_only')}</span>
+              <span class="rounded-field bg-base-200 px-2 py-1">{$_(`access_token.${token.scope}`)}</span>
             </div>
             <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-3">
               <div>
@@ -327,7 +329,19 @@
           bind:value={expiresInDays}
           class="w-full"
         />
-        <p class="mt-2 text-sm text-base-content/70">{$_('access_token.description')}</p>
+        <Label required preventDefault={false}><label for="{uid}-scope">{$_('access_token.scope')}</label></Label>
+        <Select
+          id="{uid}-scope"
+          name="scope"
+          required
+          options={['read_only', 'read_write'].map((value) => ({
+            value,
+            label: $_(`access_token.${value}`)
+          }))}
+          bind:value={scope}
+          class="w-full"
+        />
+        <p class="mt-2 text-sm text-base-content/70">{$_(`access_token.${scope}_hint`)}</p>
       </fieldset>
       <div class="modal-action">
         <button type="button" class="btn" onclick={() => modal.close()}>{$_('message.cancel')}</button>

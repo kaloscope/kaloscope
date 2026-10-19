@@ -1,4 +1,4 @@
-"""Unit tests for read-only HTTP MCP and workflow permissions."""
+"""Unit tests for scoped HTTP MCP and workflow permissions."""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -39,9 +39,15 @@ from app.models.flow import (
     GraphCategory,
     GraphQuery,
     GraphState,
+    GraphWrite,
     JobQuery,
 )
-from app.models.mcp import MCPAccessToken, MCPAccessTokenCreate, WorkflowLogs
+from app.models.mcp import (
+    MCPAccessToken,
+    MCPAccessTokenCreate,
+    MCPTokenScope,
+    WorkflowLogs,
+)
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
 from app.models.user import PermType, User, UserInfo, UserPermission
 from app.routes.mcp import dispatch
@@ -189,11 +195,25 @@ def test_protocol(mode):
                 "list_download_tasks",
                 "list_workflow_jobs",
                 "list_ai_providers",
+                "validate_workflow",
+                "preview_workflow_draft",
+                "create_workflow_draft",
+                "save_workflow_draft",
+                "list_workflow_drafts",
+                "get_workflow_draft",
+                "restore_workflow_draft",
             }
             for tool in result.tools:
-                assert tool.annotations.read_only_hint is True
-                assert tool.annotations.destructive_hint is False
-                assert tool.annotations.idempotent_hint is True
+                writes = tool.name in {
+                    "create_workflow_draft",
+                    "save_workflow_draft",
+                    "restore_workflow_draft",
+                }
+                assert tool.annotations.read_only_hint is (not writes)
+                assert tool.annotations.destructive_hint is (
+                    tool.name in {"save_workflow_draft", "restore_workflow_draft"}
+                )
+                assert tool.annotations.idempotent_hint is (not writes)
                 assert (
                     not {"ctx", "token", "url"} & tool.input_schema["properties"].keys()
                 )
@@ -251,7 +271,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(loads(response.body)["result"]["tools"]) == 10
+            assert len(loads(response.body)["result"]["tools"]) == 17
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )
@@ -293,7 +313,10 @@ def test_authentication(token):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("annotations", [None, ToolAnnotations(read_only_hint=False)])
+@pytest.mark.parametrize(
+    "annotations",
+    [None, ToolAnnotations(read_only_hint=False), ToolAnnotations(read_only_hint=True)],
+)
 def test_write_tool_denied(annotations):
     server = create_server()
     operation = AsyncMock()
@@ -303,9 +326,189 @@ def test_write_tool_denied(annotations):
         await operation()
         return "done"
 
-    with pytest.raises(ToolError, match="only permits read-only"):
+    with pytest.raises(ToolError, match="no registered access grant"):
         asyncio.run(server.call_tool("future_write", {}))
     operation.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "name", ["create_workflow_draft", "save_workflow_draft", "restore_workflow_draft"]
+)
+def test_readonly_grant(name):
+    async def run():
+        async with application() as app:
+            for token in ("reader", "admin"):
+                result = await call(app, name, {}, token=token)
+                assert result["isError"]
+                assert "only permits read-only" in result["content"][0]["text"]
+            assert not await FlowGraph.all().exists()
+
+    asyncio.run(run())
+
+
+def test_read_write_account():
+    async def run():
+        async with application() as app:
+            identity = app.shared_ctx.sessions["reader"]
+            token = await MCPAccessTokenService.create(
+                identity.id,
+                MCPAccessTokenCreate(name="writer", scope=MCPTokenScope.READ_WRITE),
+            )
+            result = await call(
+                app,
+                "create_workflow_draft",
+                {
+                    "workflow": {
+                        "name": "Denied",
+                        "category": "schedule",
+                        "document": {"nodes": [], "edges": []},
+                    }
+                },
+                token=token["token"],
+            )
+
+            assert result["isError"] and "not allowed" in result["content"][0]["text"]
+            assert not await FlowGraph.all().exists()
+
+    asyncio.run(run())
+
+
+def test_draft_repair():
+    async def run():
+        async with application() as app:
+            identity = app.shared_ctx.sessions["admin"]
+            token = await MCPAccessTokenService.create(
+                identity.id,
+                MCPAccessTokenCreate(name="writer", scope=MCPTokenScope.READ_WRITE),
+            )
+            app.ctx.mcp_tokens["writer"] = token["token"]
+            original = {
+                "nodes": [
+                    {
+                        "id": "http",
+                        "data": {"$schema": "http", "url": "https://old.test"},
+                    }
+                ],
+                "edges": [],
+            }
+            created = await call(
+                app,
+                "create_workflow_draft",
+                {
+                    "workflow": {
+                        "name": "Repair",
+                        "category": "schedule",
+                        "document": original,
+                    }
+                },
+                token="writer",
+            )
+            metadata = created["structuredContent"]
+            graph_id = metadata["workflow_id"]
+            assert metadata["draft_version"] == 1
+            assert metadata["editor_path"] == f"/settings/workflows/graphs/{graph_id}"
+            assert (await FlowGraph.get(id=graph_id)).definition is None
+            published = await FlowGraphService.publish_graph(
+                graph_id, GraphWrite(**original, draft_version=1), identity
+            )
+            await FlowLog.create(
+                graph_id=graph_id,
+                started_at=timezone.now(),
+                node_id="http",
+                node_type="http",
+                node_data={"$error": "http_request_failed"},
+            )
+            logs = await call(
+                app, "get_workflow_logs", {"workflow_id": graph_id}, token="writer"
+            )
+            assert (
+                logs["structuredContent"]["runs"][0][1]["error"]
+                == "http_request_failed"
+            )
+            details = await call(
+                app, "get_workflow", {"workflow_id": graph_id}, token="writer"
+            )
+            proposed = details["structuredContent"]["draft"]
+            proposed["nodes"][0]["data"]["url"] = "https://fixed.test"
+            validated = await call(
+                app,
+                "validate_workflow",
+                {"workflow_id": graph_id, "document": proposed},
+                token="admin",
+            )
+            assert validated["structuredContent"]["valid"]
+            proposed["draft_version"] = details["structuredContent"]["draft_version"]
+            preview = await call(
+                app,
+                "preview_workflow_draft",
+                {"workflow_id": graph_id, "draft": proposed},
+                token="writer",
+            )
+            assert preview["structuredContent"]["validation"]["valid"]
+            assert (
+                preview["structuredContent"]["changes"][0]["before"]["data"]["url"]
+                == "https://old.test"
+            )
+            assert (await FlowGraph.get(id=graph_id)).draft_version == 2
+            saved = await call(
+                app,
+                "save_workflow_draft",
+                {"workflow_id": graph_id, "draft": proposed},
+                token="writer",
+            )
+            assert saved["structuredContent"]["draft_version"] == 3
+            graph = await FlowGraph.get(id=graph_id)
+            assert graph.definition == published.definition
+            assert graph.state == GraphState.MODIFIED
+            assert not await FlowJob.all().exists()
+            assert not await FlowTrigger.all().exists()
+            stale = await call(
+                app,
+                "save_workflow_draft",
+                {"workflow_id": graph_id, "draft": proposed},
+                token="writer",
+            )
+            assert (
+                stale["isError"]
+                and "flow_draft_conflict" in stale["content"][0]["text"]
+            )
+            history = await call(
+                app, "list_workflow_drafts", {"workflow_id": graph_id}, token="writer"
+            )
+            assert [
+                item["version"] for item in history["structuredContent"]["items"]
+            ] == [2, 1, 0]
+            previous = await call(
+                app,
+                "get_workflow_draft",
+                {"workflow_id": graph_id, "version": 2},
+                token="writer",
+            )
+            assert (
+                previous["structuredContent"]["nodes"][0]["data"]["url"]
+                == "https://old.test"
+            )
+            restored = await call(
+                app,
+                "restore_workflow_draft",
+                {"workflow_id": graph_id, "version": 2, "draft_version": 3},
+                token="writer",
+            )
+            assert restored["structuredContent"]["draft_version"] == 4
+            assert (await FlowGraph.get(id=graph_id)).definition == published.definition
+
+            await User.filter(id=identity.id).update(role="user")
+            proposed["draft_version"] = 4
+            denied = await call(
+                app,
+                "save_workflow_draft",
+                {"workflow_id": graph_id, "draft": proposed},
+                token="writer",
+            )
+            assert denied["isError"] and "not allowed" in denied["content"][0]["text"]
+            assert (await FlowGraph.get(id=graph_id)).draft_version == 4
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

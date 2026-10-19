@@ -70,11 +70,11 @@ async def list_tokens(request: Request) -> HTTPResponse:
 @authorize()
 @validate(json=MCPAccessTokenCreate)
 async def create_token(request: Request, body: MCPAccessTokenCreate) -> HTTPResponse:
-    """Issue a read-only MCP credential for the signed-in user.
+    """Issue a scoped MCP credential for the signed-in user.
 
     Args:
         request: Request authenticated through a browser login session.
-        body: Validated token name and lifetime.
+        body: Validated token name, grant, and lifetime.
 
     Returns:
         Public metadata and the only response containing the full token.

@@ -34,7 +34,7 @@ from app.models.flow import (
     JobTrigger,
 )
 from app.models.media import IndexState, Language, LibType, MediaFormat, MediaType
-from app.models.user import User
+from app.models.user import User, UserInfo
 from app.utils.json import JSONType
 
 
@@ -42,6 +42,13 @@ class MCPTokenScope(StrEnum):
     """Identify explicitly granted MCP capabilities."""
 
     READ_ONLY = auto()
+    READ_WRITE = auto()
+
+
+class MCPUserInfo(UserInfo):
+    """Carry a verified token grant alongside its owner's current identity."""
+
+    mcp_scope: MCPTokenScope
 
 
 class MCPAccessToken(TortoiseModel):
@@ -78,7 +85,7 @@ class MCPAccessToken(TortoiseModel):
 
 
 class MCPAccessTokenCreate(BaseModel):
-    """Validate a named, read-only token with a bounded lifetime."""
+    """Validate a named token with an explicit grant and bounded lifetime."""
 
     model_config = ConfigDict(
         extra="forbid", str_strip_whitespace=True, hide_input_in_errors=True
@@ -86,6 +93,7 @@ class MCPAccessTokenCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=64)
     expires_in_days: Literal[30, 90, 365] = 90
+    scope: MCPTokenScope = MCPTokenScope.READ_ONLY
 
 
 class Result(BaseModel):
@@ -191,6 +199,10 @@ class WorkflowResult(RecordResult):
 class WorkflowDetails(WorkflowResult):
     """Include saved definitions with their existing expanded node schemas."""
 
+    draft_version: int = Field(
+        description="Current draft version required for previews and writes."
+    )
+
     draft: dict[str, JSONType] | None = Field(
         description="Saved editor draft with nodes, edges, and expanded node schemas; "
         "may differ from the published definition. Null when no draft is saved."
@@ -203,6 +215,21 @@ class WorkflowDetails(WorkflowResult):
         description="Retained execution summaries; use `get_workflow_logs` for "
         "grouped entries with inputs, errors, and return values."
     )
+
+
+class WorkflowDraftResult(BaseModel):
+    """Identify a saved draft without implying that it has been published."""
+
+    workflow_id: int
+    draft_version: int
+    editor_path: str
+
+
+class WorkflowDraftVersion(BaseModel):
+    """Identify one retained workflow draft."""
+
+    version: int
+    created_at: str | None
 
 
 class NodeResult(Result):
