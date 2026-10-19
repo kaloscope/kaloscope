@@ -2,8 +2,8 @@ from tortoise import migrations
 from tortoise.migrations import operations as ops
 from app.models.ai import AIProtocol, AIProviderPreset
 from app.models.mcp import MCPTokenScope
-from tortoise.fields.base import OnDelete
 from orjson import loads
+from tortoise.fields.base import OnDelete
 from tortoise.fields.data import JSON_DUMPS
 from tortoise import fields
 
@@ -43,7 +43,6 @@ class Migration(migrations.Migration):
                 ('scope', fields.CharEnumField(default=MCPTokenScope.READ_ONLY, description='READ_ONLY: read_only', enum_type=MCPTokenScope, max_length=32)),
                 ('expires_at', fields.DatetimeField(auto_now=False, auto_now_add=False)),
                 ('last_used_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
-                ('revoked_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
             ],
             options={'table': 'mcp_access_token', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Store a user-owned MCP credential digest and its fixed lifetime.'},
             bases=['TortoiseModel'],

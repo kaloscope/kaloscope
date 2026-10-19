@@ -196,8 +196,7 @@ export interface MCPAccessToken {
   scope: 'read_only';
   expires_at: string;
   last_used_at: string | null;
-  revoked_at: string | null;
-  status: 'active' | 'expired' | 'revoked';
+  status: 'active' | 'expired';
 }
 
 /** Settings for creating a token with a fixed lifetime. */

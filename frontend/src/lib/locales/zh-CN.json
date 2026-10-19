@@ -306,7 +306,7 @@
     "description": "用于 MCP 接入，仅可读取当前账号有权访问的数据",
     "create": "创建令牌",
     "created": "令牌已创建",
-    "empty": "尚未创建访问令牌",
+    "empty": "暂无访问令牌",
     "lifetime": "有效期",
     "created_at": "创建时间",
     "expires_at": "到期时间",
@@ -315,11 +315,10 @@
     "read_only": "只读",
     "status": {
       "active": "有效",
-      "expired": "已过期",
-      "revoked": "已撤销"
+      "expired": "已过期"
     },
-    "revoke": "撤销令牌",
-    "revoke_confirm": "撤销“{0}”后，使用该令牌的客户端将无法继续访问，是否撤销？",
+    "delete": "删除令牌",
+    "delete_confirm": "删除“{0}”后，使用该令牌的客户端将无法继续访问，此操作无法恢复，是否删除？",
     "once_hint": "完整令牌仅显示一次，请复制保存，关闭后无法再次查看",
     "connection": "MCP 接入",
     "connection_hint": "在支持 Streamable HTTP 和 Bearer 认证的 MCP 客户端中添加服务器，填写以下连接信息",
@@ -332,7 +331,7 @@
     "copy_failed": "无法自动复制，请手动复制已选中的内容",
     "load_failed": "访问令牌加载失败",
     "create_failed": "令牌创建失败，请刷新列表确认后重试",
-    "revoke_failed": "令牌撤销失败，请重试"
+    "delete_failed": "令牌删除失败，请重试"
   },
   "duration": {
     "millisecond": "毫秒",

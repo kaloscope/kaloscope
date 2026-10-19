@@ -306,7 +306,7 @@
     "description": "MCP access is read-only and follows your account permissions",
     "create": "Create Token",
     "created": "Token Created",
-    "empty": "No access tokens yet",
+    "empty": "No access tokens",
     "lifetime": "Lifetime",
     "created_at": "Created",
     "expires_at": "Expires",
@@ -315,11 +315,10 @@
     "read_only": "Read-only",
     "status": {
       "active": "Active",
-      "expired": "Expired",
-      "revoked": "Revoked"
+      "expired": "Expired"
     },
-    "revoke": "Revoke Token",
-    "revoke_confirm": "Revoking “{0}” will disconnect clients using this token. Continue?",
+    "delete": "Delete Token",
+    "delete_confirm": "Deleting “{0}” will prevent clients from using this token. This cannot be undone. Delete it?",
     "once_hint": "Copy and save this token now. It cannot be viewed again after closing this dialog.",
     "connection": "MCP Connection",
     "connection_hint": "Add a server in an MCP client that supports Streamable HTTP and Bearer authentication using the details below.",
@@ -332,7 +331,7 @@
     "copy_failed": "Unable to copy automatically. Copy the selected text manually.",
     "load_failed": "Unable to load access tokens",
     "create_failed": "Unable to create the token. Refresh the list before retrying.",
-    "revoke_failed": "Unable to revoke the token. Try again."
+    "delete_failed": "Unable to delete the token. Try again."
   },
   "duration": {
     "millisecond": "Millisecond",

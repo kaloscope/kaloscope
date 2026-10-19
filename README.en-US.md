@@ -155,7 +155,7 @@ existing port; clients do not need Python, a source checkout, or a bridge proces
 business services and user permissions through independent access tokens. It exposes no editing, publishing, or execution tools.
 
 After signing in, create and copy a token under **Personal Settings → Access Tokens**. The page provides
-your instance's MCP URL and authentication instructions, shows token status and last use, and lets you revoke tokens.
+your instance's MCP URL and authentication instructions, shows token status and last use, and lets you delete tokens.
 In an MCP client that supports Streamable HTTP and Bearer authentication, add a server with these settings:
 
 | Setting              | Value                                                                                        |
@@ -171,10 +171,12 @@ MCP setup instructions. Authentication currently uses access tokens; OAuth sign-
 
 The full credential is shown only once, at creation.
 Choose a fixed lifetime of 30, 90, or 365 days; the default is 90 days, and use does not extend it.
-Use `GET /_api/mcp/token/list` to inspect your tokens and `POST /_api/mcp/token/<id>/revoke` to revoke one,
+Use `GET /_api/mcp/token/list` to inspect your tokens and `POST /_api/mcp/token/<id>/delete` to delete one,
 both authenticated with your web login session. MCP tokens work only at `/_api/mcp`, which does not accept
-web login tokens or cookies. Signing out of the web application does not revoke MCP tokens. After expiration
-or revocation, generate a replacement and update the client configuration.
+web login tokens or cookies. Both active and expired tokens can be deleted. Deletion removes the record
+from the list and immediately invalidates the token; it cannot be undone.
+Signing out of the web application does not invalidate MCP tokens. After expiration or deletion,
+generate a replacement and update the client configuration.
 Keep tokens out of tool arguments and project files. Use HTTPS for remote connections.
 
 | Tool                   | Purpose                                                                            |

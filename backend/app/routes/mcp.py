@@ -58,7 +58,7 @@ async def list_tokens(request: Request) -> HTTPResponse:
         request: Request authenticated through a browser login session.
 
     Returns:
-        Public metadata for the user's tokens, including expired and revoked ones.
+        Public metadata for the user's active and expired tokens.
     """
     return json(
         await MCPAccessTokenService.list_tokens(request.ctx.user.id),
@@ -85,20 +85,20 @@ async def create_token(request: Request, body: MCPAccessTokenCreate) -> HTTPResp
     )
 
 
-@mcp.post("/token/<id:int>/revoke")
+@mcp.post("/token/<id:int>/delete")
 @authorize()
-async def revoke_token(request: Request, id: int) -> HTTPResponse:
-    """Revoke a token belonging to the signed-in user.
+async def delete_token(request: Request, id: int) -> HTTPResponse:
+    """Delete an active or expired token belonging to the signed-in user.
 
     Args:
         request: Request authenticated through a browser login session.
-        id: Token identifier to revoke.
+        id: Token identifier to delete.
 
     Returns:
-        Empty response after revocation, including repeated revocation requests.
+        Empty response after deletion.
 
     Raises:
         NotFoundException: If the token is missing or belongs to another account.
     """
-    await MCPAccessTokenService.revoke(id, request.ctx.user.id)
+    await MCPAccessTokenService.delete(id, request.ctx.user.id)
     return empty()

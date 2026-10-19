@@ -13,12 +13,12 @@ from app.models.mcp import MCPAccessToken, MCPAccessTokenCreate, MCPTokenScope
 from app.models.user import UserInfo
 from app.services.base import BaseService
 
-_TOKEN_PREFIX = "kalo_mcp_"
-_TOKEN_PATTERN = re.compile(r"kalo_mcp_[A-Za-z0-9_-]{43}")
+_TOKEN_PREFIX = "ks_mcp_"
+_TOKEN_PATTERN = re.compile(_TOKEN_PREFIX + r"[A-Za-z0-9_-]{43}")
 
 
 class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
-    """Create, inspect, revoke, and authenticate MCP-only access tokens."""
+    """Create, inspect, delete, and authenticate MCP-only access tokens."""
 
     @classmethod
     async def create(cls, user_id: int, body: MCPAccessTokenCreate) -> dict[str, Any]:
@@ -47,7 +47,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         """List an account's token metadata without credentials or digests.
 
         Args:
-            user_id: Account whose active, expired, and revoked tokens to list.
+            user_id: Account whose active and expired tokens to list.
 
         Returns:
             Token metadata ordered with the newest first.
@@ -55,20 +55,18 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         return await cls.dump_list(MCPAccessToken.filter(user_id=user_id))
 
     @classmethod
-    async def revoke(cls, id: int, user_id: int) -> None:
-        """Revoke one owned token without affecting other credentials or sessions.
+    async def delete(cls, id: int, user_id: int) -> None:
+        """Delete one owned token regardless of its expiry.
 
         Args:
-            id: Token identifier to revoke.
+            id: Token identifier to delete.
             user_id: Account that must own the token.
 
         Raises:
             NotFoundException: If the token is missing or belongs to another user.
         """
-        tokens = MCPAccessToken.filter(id=id, user_id=user_id)
-        if not await tokens.exists():
+        if not await MCPAccessToken.filter(id=id, user_id=user_id).delete():
             raise NotFoundException
-        await tokens.filter(revoked_at__isnull=True).update(revoked_at=timezone.now())
 
     @classmethod
     async def authenticate(
@@ -88,7 +86,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             Current account identity suitable for existing authorization services.
 
         Raises:
-            UnauthorizedException: If the token is invalid, expired, revoked, or
+            UnauthorizedException: If the token is invalid, expired, deleted, or
                 no longer belongs to an existing account.
         """
         if not token or not _TOKEN_PATTERN.fullmatch(token):
@@ -97,13 +95,12 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         active = MCPAccessToken.filter(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
             scope=MCPTokenScope.READ_ONLY,
-            revoked_at__isnull=True,
             expires_at__gt=now,
         )
         record = await active.select_related("user").first()
         if record is None:
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
-        # recheck revocation when recording usage, without saving stale model fields
+        # recheck existence when recording usage, without restoring deleted records
         if not await active.update(last_used_at=now):
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
         user = record.user
