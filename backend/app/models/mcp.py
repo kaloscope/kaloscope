@@ -59,16 +59,13 @@ class MCPAccessToken(TortoiseModel):
     )
     expires_at = DatetimeField()
     last_used_at = DatetimeField(null=True)
-    revoked_at = DatetimeField(null=True)
 
     def status(self) -> str:
         """Describe the credential's current usability without exposing its digest.
 
         Returns:
-            `revoked`, `expired`, or `active`, in that precedence order.
+            `expired` once the fixed lifetime ends, otherwise `active`.
         """
-        if self.revoked_at is not None:
-            return "revoked"
         return "expired" if self.expires_at <= timezone.now() else "active"
 
     class Meta:

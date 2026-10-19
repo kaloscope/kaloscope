@@ -13,7 +13,7 @@
   const uid = $props.id();
   const loading = createLoading();
   const creating = createLoading();
-  const revoking = new SvelteSet<number>();
+  const deleting = new SvelteSet<number>();
   const schema = createFormSchema(({ text }) => ({ name: text().maxlength(64) }));
   const endpoint = `${window.location.origin}/_api/mcp`;
   const authHeader = 'Authorization: Bearer <token>';
@@ -37,7 +37,7 @@
    * @returns A promise that resolves after loading or showing a retry state.
    */
   async function load(): Promise<void> {
-    if ($loading !== null) return;
+    if ($loading !== null || deleting.size > 0) return;
     loading.start();
     loadError = false;
     try {
@@ -101,24 +101,23 @@
   }
 
   /**
-   * Revoke a confirmed token and refresh its server-derived status.
+   * Delete a confirmed token and remove its metadata from the list.
    *
    * @param token - Token whose credential should stop working.
-   * @returns A promise that resolves after the revocation attempt.
+   * @returns A promise that resolves after the deletion attempt.
    */
-  async function revoke(token: MCPAccessToken): Promise<void> {
-    if (revoking.has(token.id)) return;
-    revoking.add(token.id);
+  async function remove(token: MCPAccessToken): Promise<void> {
+    if ($loading !== null || deleting.has(token.id)) return;
+    deleting.add(token.id);
     try {
-      await api.post(`mcp/token/${token.id}/revoke`, { signal: requests.signal });
-      token.status = 'revoked';
-      await load();
+      await api.post(`mcp/token/${token.id}/delete`, { signal: requests.signal });
+      tokens = tokens.filter((item) => item.id !== token.id);
     } catch (cause) {
       if (!requests.signal.aborted && !isHTTPError(cause)) {
-        alert({ level: 'error', message: $_('access_token.revoke_failed') });
+        alert({ level: 'error', message: $_('access_token.delete_failed') });
       }
     } finally {
-      revoking.delete(token.id);
+      deleting.delete(token.id);
     }
   }
 
@@ -154,7 +153,13 @@
     <div class="flex flex-wrap items-center justify-between gap-3">
       <p class="text-sm text-base-content/70">{$_('access_token.description')}</p>
       <div class="flex shrink-0 items-center gap-2">
-        <Button icon={icons.redo} text={$_('action.reload')} loading={$loading} onclick={load} />
+        <Button
+          icon={icons.redo}
+          text={$_('action.reload')}
+          loading={$loading}
+          disabled={deleting.size > 0}
+          onclick={load}
+        />
         <button class="btn btn-sm" onclick={showCreator}>
           <iconify-icon icon={icons.addCircle} width="1.25rem" aria-hidden="true"></iconify-icon>
           {$_('access_token.create')}
@@ -178,24 +183,21 @@
                 <h3 class="truncate font-medium" title={token.name}>{token.name}</h3>
                 <p class="mt-1 font-mono text-xs text-base-content/70">{token.prefix}…</p>
               </div>
-              {#if token.status === 'active'}
-                <Button
-                  text={$_('access_token.revoke')}
-                  square={false}
-                  border
-                  disabled={revoking.has(token.id)}
-                  loading={revoking.has(token.id)}
-                  onclick={() =>
-                    confirm({
-                      icon: icons.key,
-                      title: $_('access_token.revoke'),
-                      message: $_('access_token.revoke_confirm', token.name),
-                      onconfirm: () => {
-                        revoke(token);
-                      }
-                    })}
-                />
-              {/if}
+              <Button
+                icon={icons.delete}
+                text={$_('access_token.delete')}
+                disabled={$loading !== null || deleting.has(token.id)}
+                loading={deleting.has(token.id)}
+                onclick={() =>
+                  confirm({
+                    icon: icons.delete,
+                    title: $_('access_token.delete'),
+                    message: $_('access_token.delete_confirm', token.name),
+                    onconfirm: () => {
+                      remove(token);
+                    }
+                  })}
+              />
             </div>
             <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-base-content/70">
               <span class="inline-flex items-center gap-1.5 rounded-field bg-base-200 px-2 py-1">

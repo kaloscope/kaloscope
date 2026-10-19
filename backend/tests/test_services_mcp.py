@@ -46,9 +46,8 @@ def test_create(days):
             assert issued["scope"] == MCPTokenScope.READ_ONLY
             assert issued["status"] == "active"
             assert issued["last_used_at"] is None
-            assert issued["revoked_at"] is None
             token = issued.pop("token")
-            assert token.startswith("kalo_mcp_") and len(token) == 52
+            assert token.startswith("ks_mcp_") and len(token) == 50
             assert stored.token_hash == hashlib.sha256(token.encode()).hexdigest()
             assert stored.prefix == token[:17] == issued["prefix"]
             assert before + timedelta(days=days) <= stored.expires_at
@@ -110,7 +109,7 @@ def test_authenticate():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("state", ["expired", "revoked", "deleted", "changed"])
+@pytest.mark.parametrize("state", ["expired", "deleted", "owner_deleted", "changed"])
 def test_unusable(state):
     async def run():
         async with database() as user:
@@ -122,9 +121,9 @@ def test_unusable(state):
                 await MCPAccessToken.filter(id=issued["id"]).update(
                     expires_at=timezone.now() - timedelta(seconds=1)
                 )
-            elif state == "revoked":
-                await MCPAccessTokenService.revoke(issued["id"], user.id)
             elif state == "deleted":
+                await MCPAccessTokenService.delete(issued["id"], user.id)
+            elif state == "owner_deleted":
                 await user.delete()
                 assert not await MCPAccessToken.all().exists()
             else:
@@ -164,7 +163,8 @@ def test_expiry_boundary(monkeypatch):
     asyncio.run(run())
 
 
-def test_owner_and_revoke():
+@pytest.mark.parametrize("expired", [False, True])
+def test_owner_and_delete(expired):
     async def run():
         async with database() as user:
             other = await User.create(username="other", password="unused", role="admin")
@@ -174,19 +174,26 @@ def test_owner_and_revoke():
             second = await MCPAccessTokenService.create(
                 user.id, MCPAccessTokenCreate(name="Codex")
             )
+            if expired:
+                await MCPAccessToken.filter(id=issued["id"]).update(
+                    expires_at=timezone.now() - timedelta(seconds=1)
+                )
+
             assert second["token"] != issued["token"]
             assert await MCPAccessTokenService.list_tokens(other.id) == []
             with pytest.raises(NotFoundException):
-                await MCPAccessTokenService.revoke(issued["id"], other.id)
+                await MCPAccessTokenService.delete(issued["id"], other.id)
             with pytest.raises(NotFoundException):
-                await MCPAccessTokenService.revoke(second["id"] + 1, user.id)
+                await MCPAccessTokenService.delete(second["id"] + 1, user.id)
+            assert await MCPAccessToken.filter(id=issued["id"]).exists()
 
-            await MCPAccessTokenService.revoke(issued["id"], user.id)
-            stored = await MCPAccessToken.get(id=issued["id"])
-            await MCPAccessTokenService.revoke(issued["id"], user.id)
-            await stored.refresh_from_db()
-            assert stored.status() == "revoked"
-            assert stored.last_used_at is None
+            await MCPAccessTokenService.delete(issued["id"], user.id)
+            remaining = await MCPAccessTokenService.list_tokens(user.id)
+
+            assert not await MCPAccessToken.filter(id=issued["id"]).exists()
+            assert [token["id"] for token in remaining] == [second["id"]]
+            with pytest.raises(NotFoundException):
+                await MCPAccessTokenService.delete(issued["id"], user.id)
             assert (await MCPAccessToken.get(id=second["id"])).status() == "active"
 
     asyncio.run(run())

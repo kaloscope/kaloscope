@@ -131,11 +131,16 @@ async def rpc(http, token, method="tools/list", params=None):
     )
 
 
-def test_management(monkeypatch):
+@pytest.mark.parametrize("expired", [False, True])
+def test_management(monkeypatch, expired):
     async def run():
         async with client(monkeypatch) as (http, app):
             issued = await issue(http)
             other = await issue(http, "admin")
+            if expired:
+                await MCPAccessToken.filter(id=issued["id"]).update(
+                    expires_at=timezone.now() - timedelta(seconds=1)
+                )
             listed = await http.get(
                 f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer reader"}
             )
@@ -146,20 +151,34 @@ def test_management(monkeypatch):
             assert "token_hash" not in listed.text
             assert "user_id" not in records[0]
             assert records[0]["scope"] == "read_only"
-            assert records[0]["status"] == "active"
+            assert records[0]["status"] == ("expired" if expired else "active")
 
             for owner, id in (("admin", issued["id"]), ("reader", other["id"])):
                 denied = await http.post(
-                    f"{MCP_PATH}/token/{id}/revoke",
+                    f"{MCP_PATH}/token/{id}/delete",
                     headers={"Authorization": f"Bearer {owner}"},
                 )
                 assert denied.status_code == 404
-            for _ in range(2):
-                revoked = await http.post(
-                    f"{MCP_PATH}/token/{issued['id']}/revoke",
-                    headers={"Authorization": "Bearer reader"},
-                )
-                assert revoked.status_code == 204
+            assert (await rpc(http, issued["token"])).status_code == (
+                401 if expired else 200
+            )
+
+            deleted = await http.post(
+                f"{MCP_PATH}/token/{issued['id']}/delete",
+                headers={"Authorization": "Bearer reader"},
+            )
+
+            assert deleted.status_code == 204
+            assert not await MCPAccessToken.filter(id=issued["id"]).exists()
+            listed = await http.get(
+                f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer reader"}
+            )
+            assert listed.json()["data"] == []
+            missing = await http.post(
+                f"{MCP_PATH}/token/{issued['id']}/delete",
+                headers={"Authorization": "Bearer reader"},
+            )
+            assert missing.status_code == 404
             assert (await rpc(http, issued["token"])).status_code == 401
             assert (await rpc(http, other["token"])).status_code == 200
             assert len(app.shared_ctx.sessions) == 2
@@ -198,7 +217,7 @@ def test_session_independence(monkeypatch):
         ("GET", "/_api/auth/current"),
         ("GET", f"{MCP_PATH}/token/list"),
         ("POST", f"{MCP_PATH}/token/create"),
-        ("POST", f"{MCP_PATH}/token/1/revoke"),
+        ("POST", f"{MCP_PATH}/token/1/delete"),
         ("POST", f"{MCP_PATH}/"),
     ],
 )
@@ -214,7 +233,7 @@ def test_token_boundary(monkeypatch, method, path):
             )
             assert response.status_code == 401
             assert await MCPAccessToken.all().count() == 1
-            assert (await MCPAccessToken.get(id=issued["id"])).revoked_at is None
+            assert (await MCPAccessToken.get(id=issued["id"])).status() == "active"
 
     asyncio.run(run())
 
