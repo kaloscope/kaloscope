@@ -303,7 +303,7 @@
     }
   },
   "access_token": {
-    "description": "MCP access is read-only and follows your account permissions",
+    "description": "MCP access follows your account and token permissions",
     "create": "Create Token",
     "created": "Token Created",
     "empty": "No access tokens",
@@ -313,6 +313,10 @@
     "last_used_at": "Last Used",
     "unused": "Never used",
     "read_only": "Read-only",
+    "scope": "Permissions",
+    "read_write": "Read-write",
+    "read_only_hint": "Read data within your account permissions, without making changes.",
+    "read_write_hint": "Read and write data within your account permissions.",
     "status": {
       "active": "Active",
       "expired": "Expired"
@@ -925,6 +929,9 @@
     "flow_not_found": "Workflow definition not found!",
     "flow_not_published": "Workflow is not published!",
     "flow_already_running": "Workflow task is already running!",
+    "flow_draft_conflict": "Workflow draft changed; copy your edits before reopening it!",
+    "flow_graph_invalid": "Invalid workflow nodes, fields, or connections; check before saving or publishing!",
+    "flow_not_editable": "Workflow is read-only; create an editable copy first!",
     "name_already_exists": "Name already exists!",
     "username_already_exists": "Username already exists!",
     "pattern_already_exists": "Pattern already exists!",

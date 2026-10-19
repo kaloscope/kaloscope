@@ -1,9 +1,16 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field, FutureDatetime, PositiveInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FutureDatetime,
+    PositiveInt,
+    model_validator,
+)
 from sanic.request.form import File
 from tortoise.fields import (
     SET_NULL,
@@ -150,6 +157,7 @@ class FlowGraph(TortoiseModel):
     revision = IntField(null=True)
     state = CharEnumField(max_length=16, enum_type=GraphState)
     draft = JSONField[dict[str, Any] | None](null=True)
+    draft_version = IntField(default=0, db_default=0)
     definition = JSONField[dict[str, Any] | None](null=True)
     editable = BooleanField(default=True)
     # relational fields
@@ -230,6 +238,22 @@ class FlowGraph(TortoiseModel):
             "node_types",
             "only_preview",
         )
+
+
+class FlowDraftRevision(TortoiseModel):
+    """Retain recent saved drafts for review and version-checked restoration."""
+
+    graph_id: int
+    graph: ForeignKeyRelation[FlowGraph] = ForeignKeyField(
+        "models.FlowGraph", related_name=False, db_index=True
+    )
+    version = IntField()
+    draft = JSONField[dict[str, Any]]()
+
+    class Meta:
+        table = "flow_draft_revision"
+        ordering = ["-version"]
+        unique_together = (("graph", "version"),)
 
 
 class FlowLog(TortoiseModel):
@@ -370,6 +394,104 @@ class GraphBasics(BaseModel, RequestFilesMixin):
     icon: str | None = None
     image: File | None = None
     category: GraphCategory | None = None
+
+
+class GraphPosition(BaseModel):
+    """Require finite canvas coordinates."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    x: float = 0
+    y: float = 0
+
+
+class GraphNode(BaseModel):
+    """Accept editor metadata while requiring a stable node identity and data."""
+
+    model_config = ConfigDict(extra="allow", strict=True, hide_input_in_errors=True)
+
+    __pydantic_extra__: dict[str, JSONType] = Field(init=False)
+    id: str = Field(min_length=1, max_length=64)
+    type: Literal["node"] = "node"
+    position: GraphPosition = Field(default_factory=GraphPosition)
+    data: dict[str, JSONType]
+
+
+class GraphEdge(BaseModel):
+    """Require explicit endpoints and registered handles for each connection."""
+
+    model_config = ConfigDict(extra="allow", strict=True, hide_input_in_errors=True)
+
+    __pydantic_extra__: dict[str, JSONType] = Field(init=False)
+    id: str = Field(min_length=1, max_length=256)
+    source: str = Field(min_length=1, max_length=64)
+    target: str = Field(min_length=1, max_length=64)
+    sourceHandle: str = Field(min_length=1, max_length=64)
+    targetHandle: str = Field(min_length=1, max_length=64)
+
+
+class GraphDocument(BaseModel):
+    """Describe a bounded editor graph without publication or execution state."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    nodes: list[GraphNode] = Field(max_length=500)
+    edges: list[GraphEdge] = Field(max_length=2000)
+
+
+class GraphWrite(GraphDocument):
+    """Require the version read by the editor before replacing a draft."""
+
+    draft_version: int = Field(ge=0, strict=True)
+
+
+class GraphIssue(BaseModel):
+    """Locate a validation issue without echoing user content or secrets."""
+
+    code: str
+    severity: Literal["error", "warning"] = "error"
+    node_id: str | None = None
+    field_id: str | None = None
+    edge_id: str | None = None
+
+
+class GraphValidation(BaseModel):
+    """Separate graph integrity from readiness for publication."""
+
+    valid: bool = Field(
+        description="Whether no blocking errors remain; warnings may exist."
+    )
+    issues: list[GraphIssue]
+
+
+class GraphDraftCreate(BaseModel):
+    """Create an editable workflow without publishing or scheduling it."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=512)
+    category: GraphCategory
+    document: GraphDocument
+
+
+class GraphChange(BaseModel):
+    """Describe one reviewable node or edge replacement."""
+
+    kind: Literal["node", "edge"]
+    id: str
+    before: dict[str, JSONType] | None
+    after: dict[str, JSONType] | None
+
+
+class GraphPreview(BaseModel):
+    """Return the saved base version, graph differences, and validation issues."""
+
+    workflow_id: int
+    draft_version: int
+    changes: list[GraphChange]
+    validation: GraphValidation
+    editor_path: str
 
 
 class GraphImport(BaseModel, RequestFilesMixin):

@@ -31,6 +31,19 @@ class Migration(migrations.Migration):
             bases=['TortoiseModel'],
         ),
         ops.CreateModel(
+            name='FlowDraftRevision',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('graph', fields.ForeignKeyField('models.FlowGraph', source_field='graph_id', db_index=True, db_constraint=True, to_field='id', related_name=False, on_delete=OnDelete.CASCADE)),
+                ('version', fields.IntField()),
+                ('draft', fields.JSONField(encoder=JSON_DUMPS, decoder=loads)),
+            ],
+            options={'table': 'flow_draft_revision', 'app': 'models', 'unique_together': (('graph', 'version'),), 'pk_attr': 'id', 'table_description': 'Retain recent saved drafts for review and version-checked restoration.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
             name='MCPAccessToken',
             fields=[
                 ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
@@ -40,11 +53,16 @@ class Migration(migrations.Migration):
                 ('name', fields.CharField(max_length=64)),
                 ('token_hash', fields.CharField(unique=True, max_length=64)),
                 ('prefix', fields.CharField(max_length=17)),
-                ('scope', fields.CharEnumField(default=MCPTokenScope.READ_ONLY, description='READ_ONLY: read_only', enum_type=MCPTokenScope, max_length=32)),
+                ('scope', fields.CharEnumField(default=MCPTokenScope.READ_ONLY, description='READ_ONLY: read_only\nREAD_WRITE: read_write', enum_type=MCPTokenScope, max_length=32)),
                 ('expires_at', fields.DatetimeField(auto_now=False, auto_now_add=False)),
                 ('last_used_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
             ],
             options={'table': 'mcp_access_token', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Store a user-owned MCP credential digest and its fixed lifetime.'},
             bases=['TortoiseModel'],
+        ),
+        ops.AddField(
+            model_name='FlowGraph',
+            name='draft_version',
+            field=fields.IntField(default=0, db_default=0),
         ),
     ]

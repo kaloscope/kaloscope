@@ -18,7 +18,7 @@ from app.core.flow.engine import NodeWrapper, TransientTask
 from app.core.flow.nodes.base import Node
 from app.core.flow.nodes.general.ai import AINode
 from app.models.ai import AIProvider, AIProviderUpsert
-from app.models.flow import FlowGraph, GraphCategory, GraphState
+from app.models.flow import FlowGraph, GraphCategory, GraphState, GraphWrite
 from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.services.flow import FlowGraphService, FlowLogService
@@ -162,7 +162,9 @@ def test_published_dependency(network, change, code):
                 name="Test", category=GraphCategory.SCHEDULE, state=GraphState.DRAFT
             )
             published = await FlowGraphService.publish_graph(
-                graph.id, definition(provider.id)
+                graph.id,
+                GraphWrite(**definition(provider.id), draft_version=0),
+                SimpleNamespace(role="admin"),
             )
             saved = copy.deepcopy(published.definition)
 
@@ -191,7 +193,12 @@ def test_published_dependency(network, change, code):
             if change != "bad_key":
                 with pytest.raises(KaloscopeException, match=code):
                     await FlowGraphService.publish_graph(
-                        graph.id, definition(provider.id)
+                        graph.id,
+                        GraphWrite(
+                            **definition(provider.id),
+                            draft_version=published.draft_version,
+                        ),
+                        SimpleNamespace(role="admin"),
                     )
                 await graph.refresh_from_db()
                 assert graph.definition == saved

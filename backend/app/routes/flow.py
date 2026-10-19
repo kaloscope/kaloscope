@@ -26,9 +26,11 @@ from app.models.flow import (
     FlowVariable,
     GraphBasics,
     GraphCategory,
+    GraphDocument,
     GraphImport,
     GraphQuery,
     GraphState,
+    GraphWrite,
     IndexerResource,
     JobQuery,
     JobUpsert,
@@ -246,34 +248,58 @@ async def get_graph_logs(request: Request, id: int) -> HTTPResponse:
 
 @flow.post("/graph/<id:int>/save")
 @authorize(role=UserRole.ADMIN)
-async def save_graph(request: Request, id: int) -> HTTPResponse:
+@validate(json=GraphWrite)
+async def save_graph(request: Request, id: int, body: GraphWrite) -> HTTPResponse:
     """Save flow graph.
 
     Args:
         request: Incoming request with session and application context.
         id: Graph ID.
+        body: Draft contents and expected version.
 
     Returns:
         Response containing the requested data.
     """
-    graph = await FlowGraphService.save_graph(id, request.json)
+    graph = await FlowGraphService.save_graph(id, body, request.ctx.user)
     return json(await FlowGraphService.dump(graph))
 
 
 @flow.post("/graph/<id:int>/publish")
 @authorize(role=UserRole.ADMIN)
-async def publish_graph(request: Request, id: int) -> HTTPResponse:
+@validate(json=GraphWrite)
+async def publish_graph(request: Request, id: int, body: GraphWrite) -> HTTPResponse:
     """Publish the flow graph.
 
     Args:
         request: Incoming request with session and application context.
         id: Graph ID.
+        body: Editor contents and expected version.
 
     Returns:
         Response containing the requested data.
     """
-    graph = await FlowGraphService.publish_graph(id, request.json)
+    graph = await FlowGraphService.publish_graph(id, body, request.ctx.user)
     return json(await FlowGraphService.dump(graph))
+
+
+@flow.post("/graph/<id:int>/validate")
+@authorize(role=UserRole.ADMIN)
+@validate(json=GraphDocument)
+async def validate_graph(
+    request: Request, id: int, body: GraphDocument
+) -> HTTPResponse:
+    """Validate an editor document without changing stored workflow data.
+
+    Args:
+        request: Request carrying the authenticated account.
+        id: Workflow ID.
+        body: Proposed nodes and edges.
+
+    Returns:
+        Validation issues with node, field, and edge locations.
+    """
+    result = await FlowGraphService.validate_graph(id, body, request.ctx.user)
+    return json(result.model_dump())
 
 
 @flow.post("/graph/<id:int>/upgrade")

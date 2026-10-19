@@ -303,7 +303,7 @@
     }
   },
   "access_token": {
-    "description": "用于 MCP 接入，仅可读取当前账号有权访问的数据",
+    "description": "用于 MCP 接入，访问范围受当前账号和令牌权限限制",
     "create": "创建令牌",
     "created": "令牌已创建",
     "empty": "暂无访问令牌",
@@ -313,6 +313,10 @@
     "last_used_at": "最近使用",
     "unused": "尚未使用",
     "read_only": "只读",
+    "scope": "访问权限",
+    "read_write": "读写",
+    "read_only_hint": "仅可读取当前账号有权访问的数据",
+    "read_write_hint": "允许读写数据，具体操作受当前账号权限限制",
     "status": {
       "active": "有效",
       "expired": "已过期"
@@ -925,6 +929,9 @@
     "flow_not_found": "流程定义不存在",
     "flow_not_published": "流程定义未发布",
     "flow_already_running": "流程任务已在运行",
+    "flow_draft_conflict": "流程草稿已更新，请先复制当前内容，再重新打开最新草稿",
+    "flow_graph_invalid": "流程节点、字段或连线无效，请检查后再保存或发布",
+    "flow_not_editable": "流程为只读，请先创建可编辑副本",
     "name_already_exists": "该名称已存在",
     "username_already_exists": "该用户名已存在",
     "pattern_already_exists": "该匹配模式已存在",

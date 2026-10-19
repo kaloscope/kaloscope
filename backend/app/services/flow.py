@@ -11,7 +11,7 @@ import httpx
 from sanic.log import logger
 from sanic.request.form import File
 from tortoise import Tortoise, timezone
-from tortoise.expressions import Q
+from tortoise.expressions import F, Q
 from tortoise.transactions import atomic
 
 from app.core.config import KaloscopeConfig
@@ -24,8 +24,9 @@ from app.core.exceptions import (
 )
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node, NodeSchema
-from app.core.flow.nodes.general.ai import AINode
+from app.core.flow.validation import compress_document, validate_document
 from app.models.flow import (
+    FlowDraftRevision,
     FlowGraph,
     FlowJob,
     FlowLog,
@@ -34,9 +35,15 @@ from app.models.flow import (
     FlowTrigger,
     GraphBasics,
     GraphCategory,
+    GraphChange,
+    GraphDocument,
+    GraphDraftCreate,
+    GraphPreview,
     GraphQuery,
     GraphRef,
     GraphState,
+    GraphValidation,
+    GraphWrite,
     JobQuery,
     JobState,
     JobUpsert,
@@ -392,71 +399,326 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
         return graph
 
     @classmethod
-    async def save_graph(cls, id: int, draft: dict) -> FlowGraph:
-        """Save flow graph draft.
+    def require_editor(cls, user: UserInfo) -> None:
+        """Enforce workflow editing permissions for every service caller.
 
         Args:
-            id: Flow graph ID.
-            draft: The JSON content of the nodes and edges.
-
-        Returns:
-            Saved flow graph instance.
-        """
-        graph = await FlowGraph.get(id=id)
-        # check if the graph is editable
-        if not graph.editable:
-            return graph
-
-        graph.draft = Node.compress(draft)
-        graph.updated_at = timezone.now()
-        if graph.state != GraphState.DRAFT and draft != graph.definition:
-            graph.state = GraphState.MODIFIED
-        await graph.save()
-        return graph
-
-    @classmethod
-    async def publish_graph(cls, id: int, definition: dict) -> FlowGraph:
-        """Publish the flow graph.
-
-        Args:
-            id: Flow graph ID.
-            definition: The JSON content of the nodes and edges.
-
-        Returns:
-            Published flow graph instance.
+            user: Current authenticated account.
 
         Raises:
-            KaloscopeException: If an AI node has invalid settings or an unavailable
-                provider or model. Existing published definitions remain unchanged.
+            ForbiddenException: If the account cannot edit workflows.
         """
-        graph = await FlowGraph.get(id=id)
-        definition = Node.compress(definition)
-        # check if the graph is editable
-        if not graph.editable:
-            if graph.draft:
-                definition = graph.draft
-            else:
-                return graph
+        if user.role != UserRole.ADMIN:
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
 
-        await AINode.validate_definition(definition)
-        # recheck dependencies even when the definition has not changed
+    @classmethod
+    async def validate_graph(
+        cls, id: int, document: GraphDocument, user: UserInfo
+    ) -> GraphValidation:
+        """Check a proposed draft without saving it or executing any node.
+
+        Args:
+            id: Workflow whose category constrains the graph.
+            document: Proposed editor contents.
+            user: Current authenticated account.
+
+        Returns:
+            Complete validation results with node and field locations.
+
+        Raises:
+            ForbiddenException: If the account cannot edit workflows.
+            NotFoundException: If the workflow does not exist.
+        """
+        cls.require_editor(user)
+        graph = await cls.get_accessible(id, user)
+        return await validate_document(document, graph.category)
+
+    @classmethod
+    async def save_graph(cls, id: int, body: GraphWrite, user: UserInfo) -> FlowGraph:
+        """Save a structurally valid draft with an atomic version check.
+
+        Args:
+            id: Workflow to edit.
+            body: Draft contents and the version the caller read.
+            user: Current authenticated account.
+
+        Returns:
+            Saved workflow, including its new draft version.
+
+        Raises:
+            ForbiddenException: If editing is not permitted.
+            NotFoundException: If the workflow does not exist.
+            KaloscopeException: If the draft is malformed or its version is stale.
+        """
+        cls.require_editor(user)
+        graph = await cls.get_accessible(id, user)
+        if not graph.editable:
+            raise ForbiddenException(ErrorCode.FLOW_NOT_EDITABLE)
+        cls._check_version(graph, body.draft_version)
+        validation = await validate_document(body, graph.category, complete=False)
+        if not validation.valid:
+            raise KaloscopeException(ErrorCode.FLOW_GRAPH_INVALID, status_code=400)
+        draft = compress_document(body)
+        if graph.draft == draft:
+            return graph
+        state = GraphState.DRAFT
+        if graph.state != GraphState.DRAFT:
+            state = (
+                GraphState.PUBLISHED
+                if draft == graph.definition
+                else GraphState.MODIFIED
+            )
+        return await cls._write_draft(graph, draft, state=state)
+
+    @classmethod
+    def _check_version(cls, graph: FlowGraph, expected: int) -> None:
+        """Reject writes based on an outdated editor snapshot.
+
+        Args:
+            graph: Current persisted workflow.
+            expected: Version read by the caller.
+
+        Raises:
+            KaloscopeException: If another write has changed the workflow.
+        """
+        if graph.draft_version != expected:
+            raise KaloscopeException(ErrorCode.FLOW_DRAFT_CONFLICT, status_code=409)
+
+    @classmethod
+    async def preview_draft(
+        cls, id: int, body: GraphWrite, user: UserInfo
+    ) -> GraphPreview:
+        """Compare a proposed graph with the exact saved version being edited.
+
+        Args:
+            id: Workflow to preview.
+            body: Proposed contents and their base version.
+            user: Current authenticated account.
+
+        Returns:
+            Node and edge differences, validation results, and an internal editor path.
+
+        Raises:
+            ForbiddenException: If editing is not permitted.
+            NotFoundException: If the workflow does not exist.
+            KaloscopeException: If the base version is stale.
+        """
+        cls.require_editor(user)
+        graph = await cls.get_accessible(id, user)
+        if not graph.editable:
+            raise ForbiddenException(ErrorCode.FLOW_NOT_EDITABLE)
+        cls._check_version(graph, body.draft_version)
+        proposed = compress_document(body)
+        previous = graph.draft or {"nodes": [], "edges": []}
+        changes = []
+        for collection, kind in (("nodes", "node"), ("edges", "edge")):
+            before = {item["id"]: item for item in previous[collection]}
+            after = {item["id"]: item for item in proposed[collection]}
+            for item_id in sorted(before.keys() | after.keys()):
+                if before.get(item_id) != after.get(item_id):
+                    changes.append(
+                        GraphChange(
+                            kind=kind,
+                            id=item_id,
+                            before=before.get(item_id),
+                            after=after.get(item_id),
+                        )
+                    )
+        return GraphPreview(
+            workflow_id=id,
+            draft_version=graph.draft_version,
+            changes=changes,
+            validation=await validate_document(body, graph.category),
+            editor_path=f"/settings/workflows/graphs/{id}",
+        )
+
+    @classmethod
+    @atomic()
+    async def create_draft(cls, body: GraphDraftCreate, user: UserInfo) -> FlowGraph:
+        """Create a structurally valid workflow without publishing its contents.
+
+        Args:
+            body: New workflow metadata and draft contents.
+            user: Current authenticated account.
+
+        Returns:
+            New editable workflow and its first saved version.
+
+        Raises:
+            ForbiddenException: If the account cannot edit workflows.
+            KaloscopeException: If the name exists or the draft is malformed.
+        """
+        cls.require_editor(user)
+        graph = await cls.upsert(
+            GraphBasics(
+                name=body.name, description=body.description, category=body.category
+            )
+        )
+        return await cls.save_graph(
+            graph.id,
+            GraphWrite(**body.document.model_dump(), draft_version=graph.draft_version),
+            user,
+        )
+
+    @classmethod
+    async def list_drafts(cls, id: int, user: UserInfo) -> list[dict]:
+        """List up to twenty retained draft versions without their graph contents.
+
+        Args:
+            id: Workflow whose saved history to inspect.
+            user: Current authenticated account.
+
+        Returns:
+            Version numbers and retention timestamps, newest first.
+
+        Raises:
+            ForbiddenException: If the account cannot edit workflows.
+            NotFoundException: If the workflow does not exist.
+        """
+        cls.require_editor(user)
+        await cls.get_accessible(id, user)
+        return (
+            await FlowDraftRevision.filter(graph_id=id)
+            .limit(20)
+            .values("version", "created_at")
+        )
+
+    @classmethod
+    async def get_draft(cls, id: int, version: int, user: UserInfo) -> dict:
+        """Read one retained draft without changing the workflow's active state.
+
+        Args:
+            id: Workflow whose history to read.
+            version: Retained version returned by `list_drafts`.
+            user: Current authenticated account.
+
+        Returns:
+            Compressed editor document from the selected historical version.
+
+        Raises:
+            ForbiddenException: If the account cannot edit workflows.
+            NotFoundException: If the workflow or retained version no longer exists.
+        """
+        cls.require_editor(user)
+        await cls.get_accessible(id, user)
+        revision = await FlowDraftRevision.get_or_none(graph_id=id, version=version)
+        if revision is None:
+            raise NotFoundException
+        return revision.draft
+
+    @classmethod
+    async def restore_draft(
+        cls, id: int, version: int, expected: int, user: UserInfo
+    ) -> FlowGraph:
+        """Restore a retained draft as a new version without changing publication.
+
+        Args:
+            id: Workflow to restore.
+            version: Retained historical version to copy.
+            expected: Current draft version read by the caller.
+            user: Current authenticated account.
+
+        Returns:
+            Workflow containing the restored draft and a new version number.
+
+        Raises:
+            ForbiddenException: If editing is not permitted.
+            NotFoundException: If the workflow or historical version is missing.
+            KaloscopeException: If the current version changed or validation fails.
+        """
+        draft = await cls.get_draft(id, version, user)
+        return await cls.save_graph(
+            id, GraphWrite(**draft, draft_version=expected), user
+        )
+
+    @classmethod
+    @atomic()
+    async def _write_draft(
+        cls, graph: FlowGraph, draft: dict, **changes: Any
+    ) -> FlowGraph:
+        """Atomically replace a draft and retain its previous version.
+
+        Start with the conditional update to avoid promoting an older SQLite
+        read snapshot after another connection has already written to the graph.
+
+        Args:
+            graph: Workflow snapshot to compare against the database.
+            draft: Compressed replacement document.
+            **changes: Publication fields changed by the same atomic write.
+
+        Returns:
+            Updated workflow while the transaction still owns the write lock.
+
+        Raises:
+            KaloscopeException: If the persisted version changed before the update.
+        """
+        updated = await FlowGraph.filter(
+            id=graph.id, draft_version=graph.draft_version
+        ).update(
+            draft=draft,
+            draft_version=graph.draft_version + 1,
+            updated_at=timezone.now(),
+            **changes,
+        )
+        if not updated:
+            raise KaloscopeException(ErrorCode.FLOW_DRAFT_CONFLICT, status_code=409)
+        await FlowDraftRevision.create(
+            graph_id=graph.id,
+            version=graph.draft_version,
+            draft=graph.draft or {"nodes": [], "edges": []},
+        )
+        await FlowDraftRevision.filter(
+            graph_id=graph.id, version__lt=graph.draft_version - 19
+        ).delete()
+        return await FlowGraph.get(id=graph.id)
+
+    @classmethod
+    async def publish_graph(
+        cls, id: int, body: GraphWrite, user: UserInfo
+    ) -> FlowGraph:
+        """Publish a fully validated graph without overwriting a newer draft.
+
+        Args:
+            id: Workflow to publish.
+            body: Editor contents and the version the caller read.
+            user: Current authenticated account.
+
+        Returns:
+            Published workflow with an updated draft version.
+
+        Raises:
+            ForbiddenException: If the account cannot edit workflows.
+            NotFoundException: If the workflow does not exist.
+            KaloscopeException: If validation fails or the version is stale.
+        """
+        cls.require_editor(user)
+        graph = await cls.get_accessible(id, user)
+        cls._check_version(graph, body.draft_version)
+        document = (
+            body
+            if graph.editable
+            else GraphDocument.model_validate(graph.draft or {"nodes": [], "edges": []})
+        )
+        validation = await validate_document(document, graph.category)
+        if not validation.valid:
+            code = validation.issues[0].code
+            raise KaloscopeException(
+                code if code.startswith("ai_") else ErrorCode.FLOW_GRAPH_INVALID,
+                status_code=400,
+            )
+        definition = compress_document(document)
         if graph.state == GraphState.PUBLISHED and graph.definition == definition:
             return graph
-
-        # generate the revision number
-        now = timezone.now()
-        if graph.editable or not graph.revision:
-            revision = int(now.timestamp())
-            if graph.revision and graph.revision >= revision:
-                revision = graph.revision + 1
-            graph.revision = revision
-
-        graph.draft = definition
-        graph.definition = definition
-        graph.updated_at = now
-        graph.state = GraphState.PUBLISHED
-        await graph.save()
-        return graph
+        revision = graph.revision
+        if graph.editable or not revision:
+            revision = max(int(timezone.now().timestamp()), (revision or 0) + 1)
+        return await cls._write_draft(
+            graph,
+            definition,
+            definition=definition,
+            revision=revision,
+            state=GraphState.PUBLISHED,
+        )
 
     @classmethod
     @atomic()
@@ -476,14 +738,16 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
             return graph
         # retract the graph first
         await cls.retract_graph(id)
-        # update the graph with the new template
-        graph.tmpl_id = tmpl["id"]
-        graph.category = tmpl["category"]
-        graph.revision = tmpl["revision"]
-        graph.draft = tmpl["definition"]
-        graph.state = GraphState.DRAFT
-        await graph.save()
-        return graph
+        # refresh the version changed by retraction before applying the template
+        await graph.refresh_from_db()
+        return await cls._write_draft(
+            graph,
+            tmpl["definition"],
+            tmpl_id=tmpl["id"],
+            category=tmpl["category"],
+            revision=tmpl["revision"],
+            state=GraphState.DRAFT,
+        )
 
     @classmethod
     @atomic()
@@ -494,7 +758,14 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
             id: Flow graph ID.
         """
         state = GraphState.DRAFT
-        if await FlowGraph.filter(id=id, state__not=state).update(state=state) == 1:
+        if (
+            await FlowGraph.filter(id=id, state__not=state).update(
+                state=state,
+                draft_version=F("draft_version") + 1,
+                updated_at=timezone.now(),
+            )
+            == 1
+        ):
             running_jobs = await FlowJob.filter(graph_id=id, state=JobState.RUNNING)
             if running_jobs:
                 engine = cls.app_ctx().flow_engine

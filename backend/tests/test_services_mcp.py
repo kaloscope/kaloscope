@@ -61,6 +61,21 @@ def test_create(days):
 
 def test_defaults():
     assert MCPAccessTokenCreate(name="Codex").expires_in_days == 90
+    assert MCPAccessTokenCreate(name="Codex").scope == MCPTokenScope.READ_ONLY
+
+
+def test_read_write_grant():
+    async def run():
+        async with database() as user:
+            body = MCPAccessTokenCreate(name="Writer", scope=MCPTokenScope.READ_WRITE)
+            issued = await MCPAccessTokenService.create(user.id, body)
+            identity = await MCPAccessTokenService.authenticate(
+                issued["token"], client_ip="127.0.0.1", user_agent=None
+            )
+            assert identity.mcp_scope == MCPTokenScope.READ_WRITE
+            assert identity.role == "user"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

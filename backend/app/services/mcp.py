@@ -9,8 +9,12 @@ from typing import Any
 from tortoise import timezone
 
 from app.core.exceptions import NotFoundException, UnauthorizedException
-from app.models.mcp import MCPAccessToken, MCPAccessTokenCreate, MCPTokenScope
-from app.models.user import UserInfo
+from app.models.mcp import (
+    MCPAccessToken,
+    MCPAccessTokenCreate,
+    MCPTokenScope,
+    MCPUserInfo,
+)
 from app.services.base import BaseService
 
 _TOKEN_PREFIX = "ks_mcp_"
@@ -22,11 +26,11 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
 
     @classmethod
     async def create(cls, user_id: int, body: MCPAccessTokenCreate) -> dict[str, Any]:
-        """Issue a read-only credential and return its plaintext exactly once.
+        """Issue a scoped credential and return its plaintext exactly once.
 
         Args:
             user_id: Account owning the new credential.
-            body: Validated label and lifetime, defaulting to 90 days.
+            body: Validated label, explicit grant, and fixed lifetime.
 
         Returns:
             Public token metadata plus the one-time `token` value.
@@ -37,7 +41,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             name=body.name,
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
             prefix=token[:17],
-            scope=MCPTokenScope.READ_ONLY,
+            scope=body.scope,
             expires_at=timezone.now() + timedelta(days=body.expires_in_days),
         )
         return {**await cls.dump(record), "token": token}
@@ -71,7 +75,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
     @classmethod
     async def authenticate(
         cls, token: str | None, *, client_ip: str, user_agent: str | None
-    ) -> UserInfo:
+    ) -> MCPUserInfo:
         """Resolve an active credential to its owner's current account identity.
 
         Resource permissions are loaded by the existing `authorize` decorator.
@@ -83,7 +87,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             user_agent: Optional client identification header.
 
         Returns:
-            Current account identity suitable for existing authorization services.
+            Current account identity and the verified token's capability grant.
 
         Raises:
             UnauthorizedException: If the token is invalid, expired, deleted, or
@@ -94,7 +98,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         now = timezone.now()
         active = MCPAccessToken.filter(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
-            scope=MCPTokenScope.READ_ONLY,
+            scope__in=list(MCPTokenScope),
             expires_at__gt=now,
         )
         record = await active.select_related("user").first()
@@ -104,7 +108,8 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         if not await active.update(last_used_at=now):
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
         user = record.user
-        return UserInfo(
+        return MCPUserInfo(
+            mcp_scope=record.scope,
             id=user.id,
             login_id=f"mcp:{record.id}",
             username=user.username,

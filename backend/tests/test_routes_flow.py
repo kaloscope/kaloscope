@@ -1,4 +1,4 @@
-"""Unit tests for workflow read authorization and resource visibility."""
+"""Unit tests for workflow authorization, visibility, and versioned writes."""
 
 import asyncio
 import json
@@ -8,11 +8,13 @@ from types import SimpleNamespace
 import pytest
 from sanic import Request, Sanic
 from sanic.response.types import BaseHTTPResponse
+from sanic_ext.exceptions import ValidationError
 from tortoise import Tortoise
 
 from app.core.exceptions import (
     ErrorCode,
     ForbiddenException,
+    KaloscopeException,
     NotFoundException,
     UnauthorizedException,
 )
@@ -48,24 +50,27 @@ async def database():
         await Tortoise.close_connections()
 
 
-def request(user=None, path="/_api/flow/graph/list"):
+def request(user=None, path="/_api/flow/graph/list", body=None):
     """Create a request carrying a session without starting background services.
 
     Args:
         user: Authenticated account; `None` simulates a missing session.
         path: API path and optional query string.
+        body: Optional JSON payload; when present, send a POST request.
 
     Returns:
         Request suitable for the existing authorization and validation decorators.
     """
     result = Request(
         url_bytes=path.encode(),
-        headers={},
+        headers={"content-type": "application/json"} if body is not None else {},
         version="1.1",
-        method="GET",
+        method="POST" if body is not None else "GET",
         transport=None,
         app=Sanic.get_app("flow-route-test"),
     )
+    if body is not None:
+        result.body = json.dumps(body).encode()
     if user is not None:
         result.ctx.user = SimpleNamespace(id=user.id, role=user.role, perms=None)
     return result
@@ -150,6 +155,51 @@ def test_visibility():
                 "nodes": [],
                 "edges": [],
             }
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("handler", [routes.save_graph, routes.publish_graph])
+def test_version_required(handler):
+    user = SimpleNamespace(id=1, role=UserRole.ADMIN)
+    with pytest.raises(ValidationError):
+        asyncio.run(handler(request(user, body={"nodes": [], "edges": []}), id=1))
+
+
+def test_versioned_write():
+    async def run():
+        async with database():
+            user = await User.create(
+                username="admin", password="unused", role=UserRole.ADMIN
+            )
+            graph = await FlowGraph.create(
+                name="Versioned",
+                category=GraphCategory.SCHEDULE,
+                state=GraphState.DRAFT,
+            )
+            body = {
+                "nodes": [{"id": "http", "data": {"$schema": "http"}}],
+                "edges": [],
+                "draft_version": 0,
+            }
+            saved = json.loads(
+                (await routes.save_graph(request(user, body=body), id=graph.id)).body
+            )
+            assert saved["draft_version"] == 1
+
+            for handler in (routes.save_graph, routes.publish_graph):
+                with pytest.raises(KaloscopeException) as error:
+                    await handler(request(user, body=body), id=graph.id)
+                assert error.value.status_code == 409
+                assert error.value.message == ErrorCode.FLOW_DRAFT_CONFLICT
+
+            validated = await routes.validate_graph(
+                request(user, body={"nodes": body["nodes"], "edges": []}), id=graph.id
+            )
+            assert not json.loads(validated.body)["valid"]
+            latest = await FlowGraph.get(id=graph.id)
+            assert latest.draft_version == 1
+            assert latest.definition is None
 
     asyncio.run(run())
 
