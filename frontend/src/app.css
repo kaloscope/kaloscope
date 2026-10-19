@@ -78,7 +78,6 @@
     50% {
       border-color: color-mix(in oklab, var(--color-primary) 80%, transparent);
     }
-    ,
     100% {
       border-color: color-mix(in oklab, var(--color-base-content) 20%, transparent);
     }
@@ -121,7 +120,10 @@
   .border-r,
   .border-b,
   .border-l {
-    @apply border-border!;
+    /* allow the emphasis animation to control the border color */
+    &:not(.animate-emphasis) {
+      @apply border-border!;
+    }
   }
 
   /* base outline color */

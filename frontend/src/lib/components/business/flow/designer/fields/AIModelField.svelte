@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Label } from '$lib/components';
+  import { Button, Label } from '$lib/components';
+  import { createLoading } from '$lib/helpers';
   import { _, nodeFormatter } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores';
@@ -12,9 +13,11 @@
   const { updateNodeData } = useSvelteFlow();
   const { label } = nodeFormatter;
   let providers = $state<AIProvider[] | null>(null);
-  let loading = $state(false);
+  const loading = createLoading();
   let failed = $state(false);
   let controller: AbortController | undefined;
+  let providerSelect: HTMLSelectElement;
+  let modelSelect: HTMLSelectElement;
   const editable = $derived($user?.role === 'admin');
   const provider = $derived(providers?.find((item) => item.id === data?.provider_id));
   const issue = $derived.by(() => {
@@ -34,9 +37,9 @@
    * @returns A promise resolved when the catalog request settles.
    */
   async function refresh() {
-    if (!editable || loading) return;
+    if (!editable || $loading !== null) return;
     controller = new AbortController();
-    loading = true;
+    loading.start();
     failed = false;
     try {
       const response = await api
@@ -46,7 +49,7 @@
     } catch {
       if (!controller.signal.aborted) failed = true;
     } finally {
-      loading = false;
+      loading.end();
     }
   }
 
@@ -71,9 +74,22 @@
     });
   }
 
+  /**
+   * Report missing selections on the provider and model controls.
+   *
+   * @returns Whether the controls and any required stored selection are valid.
+   */
+  function reportValidity(): boolean {
+    return (
+      providerSelect.reportValidity() &&
+      modelSelect.reportValidity() &&
+      (!field.required || (!!data?.provider_id && !!data?.model_id))
+    );
+  }
+
   if (hasContext('flow/graph')) {
     const context = getContext<FlowGraphContext>('flow/graph');
-    context.addValidator(() => !!data?.provider_id && !!data?.model_id);
+    context.addValidator(reportValidity);
   }
 
   $effect(() => {
@@ -88,19 +104,14 @@
   <div class="flex items-center justify-between gap-2">
     <Label required={field.required}>{$label(field.label)}</Label>
     {#if editable}
-      <button
-        type="button"
-        class="nodrag btn btn-square btn-subtle btn-xs"
-        aria-label={$_('action.reload', $_('entity.provider'))}
-        disabled={loading}
+      <Button
+        class="nodrag"
+        size="xs"
+        icon={icons.redo}
+        text={$_('action.reload', $_('entity.provider'))}
+        loading={$loading}
         onclick={() => void refresh()}
-      >
-        {#if loading}
-          <span class="loading loading-xs loading-spinner"></span>
-        {:else}
-          <iconify-icon icon={icons.arrowSyncCircle} width="1rem"></iconify-icon>
-        {/if}
-      </button>
+      />
     {/if}
   </div>
   <div class="grid grid-cols-2 gap-2">
@@ -109,10 +120,13 @@
       aria-label={$_('entity.provider')}
       required={field.required}
       value={data?.provider_id ?? ''}
-      disabled={!editable || loading}
+      bind:this={providerSelect}
+      disabled={!editable || $loading !== null}
       onchange={selectProvider}
     >
-      <option disabled value="">{$_('action.select', $_('entity.provider'))}</option>
+      <option disabled value="">
+        {providers?.length === 0 ? $_('ai.empty') : $_('action.select', $_('entity.provider'))}
+      </option>
       {#if data?.provider_id && !provider}
         <option value={data.provider_id}>#{data.provider_id}</option>
       {/if}
@@ -127,7 +141,8 @@
       aria-label={$_('ai.models')}
       required={field.required}
       value={data?.model_id ?? ''}
-      disabled={!editable || loading || !provider?.enabled}
+      bind:this={modelSelect}
+      disabled={!editable || $loading !== null || !provider?.enabled}
       onchange={selectModel}
     >
       <option disabled value="">{$_('action.select', $_('ai.models'))}</option>
@@ -143,7 +158,5 @@
     <p class="max-w-lg text-xs text-error" role="status">
       {failed ? $_('ai.load_failed') : $_(`alert.${issue}`)}
     </p>
-  {:else if providers?.length === 0}
-    <p class="text-xs">{$_('ai.empty')}</p>
   {/if}
 </fieldset>
