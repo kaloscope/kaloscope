@@ -54,6 +54,8 @@ tortoise_orm = "app.main.tortoise_config"
 
 [tool.pyright]
 typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
 ignore = ["app/migrations"]
 
 [tool.ruff]
