@@ -1795,5 +1795,15 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     vFlip: false,
     hFlip: false,
     body: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m13 19l3.5-9l3.5 9m-6.125-2h5.25M3 7h7m0 0h2m-2 0c0 1.63-.793 3.926-2.239 5.655M7.5 6.818V5m.261 7.655C6.79 13.82 5.521 14.725 4 15m3.761-2.345L5 10m2.761 2.655L10.2 15"/>'
+  },
+  botSquare: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M6 3H18C19.6569 3 21 4.34315 21 6V18C21 19.6569 19.6569 21 18 21H6C4.34315 21 3 19.6569 3 18V6C3 4.34315 4.34315 3 6 3Z"/><path d="M12 7.6028L12.4521 10.5685M15.9543 7L16.4064 9.9657"/></g>'
   }
 };

@@ -1,8 +1,9 @@
 import type { IconifyIcon } from 'iconify-icon';
 
 /**
- * Fluent UI System Icons by [Microsoft Corporation](https://github.com/microsoft/fluentui-system-icons)
+ * Fluent UI System Icons
  *
+ * {@link https://github.com/microsoft/fluentui-system-icons }
  * {@link https://icon-sets.iconify.design/fluent/ }
  */
 const fluentUISystemIcons = {
@@ -133,8 +134,9 @@ const fluentUISystemIcons = {
 };
 
 /**
- * Mage Icons by [MageIcons](https://github.com/Mage-Icons/mage-icons)
+ * Mage Icons
  *
+ * {@link https://github.com/Mage-Icons/mage-icons }
  * {@link https://icon-sets.iconify.design/mage/ }
  */
 const mageIcons = {
@@ -160,8 +162,9 @@ const mageIcons = {
 };
 
 /**
- * Tabler Icons by [Paweł Kuna](https://github.com/tabler/tabler-icons)
+ * Tabler Icons
  *
+ * {@link https://github.com/tabler/tabler-icons }
  * {@link https://icon-sets.iconify.design/tabler/ }
  */
 const tablerIcons = {
@@ -184,8 +187,9 @@ const tablerIcons = {
 };
 
 /**
- * IconPark by [ByteDance](https://github.com/bytedance/IconPark)
+ * IconPark
  *
+ * {@link https://github.com/bytedance/IconPark }
  * {@link https://icon-sets.iconify.design/icon-park-outline/ }
  * {@link https://icon-sets.iconify.design/icon-park-solid/ }
  */
@@ -206,8 +210,9 @@ const iconPark = {
 };
 
 /**
- * MingCute Icon by [MingCute Design](https://github.com/Richard9394/MingCute)
+ * MingCute Icon
  *
+ * {@link https://github.com/Richard9394/MingCute }
  * {@link https://icon-sets.iconify.design/mingcute/ }
  */
 const mingCuteIcon = {
@@ -220,12 +225,23 @@ const mingCuteIcon = {
 };
 
 /**
- * Flowbite Icons by [Themesberg](https://github.com/themesberg/flowbite-icons)
+ * Flowbite Icons
  *
+ * {@link https://github.com/themesberg/flowbite-icons }
  * {@link https://icon-sets.iconify.design/flowbite/ }
  */
 const flowbiteIcons = {
   language: 'flowbite:language-outline'
+};
+
+/**
+ * Keyline Icons
+ *
+ * {@link https://github.com/keyline-icons/keyline-icons }
+ * {@link https://icon-sets.iconify.design/keyline-icons/ }
+ */
+const keylineIcons = {
+  botSquare: 'keyline-icons:bot-square'
 };
 
 // export all icons as a single object
@@ -235,7 +251,8 @@ export const icons = {
   ...tablerIcons,
   ...iconPark,
   ...mingCuteIcon,
-  ...flowbiteIcons
+  ...flowbiteIcons,
+  ...keylineIcons
 };
 
 /**
