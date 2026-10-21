@@ -7,7 +7,7 @@
   import { icons } from '$lib/icons';
   import type { MCPAccessToken, MCPAccessTokenCreate, MCPAccessTokenCreated, Resp } from '$lib/types';
   import { isHTTPError } from 'ky';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
 
   const uid = $props.id();
@@ -26,6 +26,9 @@
   let scope: MCPAccessToken['scope'] = $state('read_only');
   let secret = $state('');
   let modal: Modal;
+  let modalContent: HTMLDivElement;
+  let modalStage: HTMLDivElement;
+  let animations: Animation[] = [];
   let secretInput = $state<HTMLTextAreaElement>();
   let endpointInput: HTMLInputElement;
   let authHeaderInput: HTMLInputElement;
@@ -54,11 +57,13 @@
     }
   }
 
-  /** Clear the one-time credential and cancel an unfinished creation request. */
+  /** Clear the one-time credential and cancel unfinished creation or transition work. */
   function reset() {
     secret = '';
     createRequest?.abort();
     createRequest = null;
+    animations.forEach((animation) => animation.cancel());
+    animations = [];
     creating.end();
   }
 
@@ -72,7 +77,7 @@
   }
 
   /**
-   * Create a token and keep its full credential only in the open dialog.
+   * Create a token and transition to its one-time credential in the open dialog.
    *
    * @returns A promise that resolves after creation or an error alert.
    */
@@ -89,7 +94,29 @@
       if (createRequest !== controller || !modal.isOpen()) return;
       const { token, ...metadata } = data;
       tokens = [metadata, ...tokens];
+      const previousHeight = modalContent.offsetHeight;
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const fadeOut = modalStage.animate([{ opacity: 1 }, { opacity: 0 }], {
+        duration: reducedMotion ? 60 : 100,
+        fill: 'forwards'
+      });
+      animations.push(fadeOut);
+      await fadeOut.finished.catch(() => {});
+      if (createRequest !== controller || !modal.isOpen()) return;
       secret = token;
+      await tick();
+      if (createRequest !== controller || !modal.isOpen()) return;
+      if (!reducedMotion) {
+        animations.push(
+          modalContent.animate(
+            { height: [`${previousHeight}px`, `${modalContent.offsetHeight}px`], overflow: ['hidden', 'hidden'] },
+            { duration: 220, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }
+          )
+        );
+      }
+      fadeOut.cancel();
+      animations.push(modalStage.animate([{ opacity: 0 }, { opacity: 1 }], { duration: reducedMotion ? 80 : 180 }));
+      secretInput?.focus({ preventScroll: true });
     } catch (cause) {
       if (!controller.signal.aborted && !isHTTPError(cause)) {
         alert({ level: 'error', message: $_('access_token.create_failed') });
@@ -289,67 +316,74 @@
   maxWidth="34rem"
   onclose={reset}
 >
-  {#if secret}
-    <p class="text-sm text-base-content/70">{$_('access_token.once_hint')}</p>
-    <fieldset class="fieldset">
-      <Label preventDefault={false}><label for="{uid}-secret">{$_('nav.settings.personal.tokens')}</label></Label>
-      <textarea
-        id="{uid}-secret"
-        class="textarea w-full font-mono text-sm break-all"
-        rows="3"
-        spellcheck="false"
-        readonly
-        value={secret}
-        bind:this={secretInput}></textarea>
-    </fieldset>
-    <div class="modal-action">
-      <button type="button" class="btn" onclick={() => modal.close()}>{$_('action.close')}</button>
-      <button type="button" class="btn btn-submit" onclick={() => copy(secretInput)}>{$_('action.copy')}</button>
+  <div bind:this={modalContent}>
+    <div bind:this={modalStage} class="flex flex-col gap-4">
+      {#if secret}
+        <p class="text-sm text-base-content/70">{$_('access_token.once_hint')}</p>
+        <fieldset class="fieldset">
+          <Label preventDefault={false}><label for="{uid}-secret">{$_('nav.settings.personal.tokens')}</label></Label>
+          <textarea
+            id="{uid}-secret"
+            class="textarea w-full font-mono text-sm break-all"
+            rows="3"
+            spellcheck="false"
+            readonly
+            value={secret}
+            bind:this={secretInput}></textarea>
+        </fieldset>
+        <div class="modal-action">
+          <button type="button" class="btn" onclick={() => modal.close()}>{$_('action.close')}</button>
+          <button type="button" class="btn btn-submit" onclick={() => copy(secretInput)}>{$_('action.copy')}</button>
+        </div>
+      {:else}
+        <form
+          class="flex flex-col gap-4"
+          method="post"
+          use:enhance={({ cancel }) => {
+            cancel();
+            create();
+          }}
+        >
+          <fieldset class="fieldset">
+            <Label required preventDefault={false}><label for="{uid}-name">{$_('field.name')}</label></Label>
+            <input id="{uid}-name" class="input w-full" {...schema.name} bind:value={name} />
+            <Label required preventDefault={false}
+              ><label for="{uid}-expiry">{$_('access_token.lifetime')}</label></Label
+            >
+            <Select
+              id="{uid}-expiry"
+              name="expires_in_days"
+              required
+              options={[30, 90, 365].map((days) => ({
+                value: days,
+                label: `${days} ${$_('duration.days').toLowerCase()}`
+              }))}
+              bind:value={expiresInDays}
+              class="w-full"
+            />
+            <Label required preventDefault={false}><label for="{uid}-scope">{$_('access_token.scope')}</label></Label>
+            <Select
+              id="{uid}-scope"
+              name="scope"
+              required
+              options={['read_only', 'read_write'].map((value) => ({
+                value,
+                label: $_(`access_token.${value}`)
+              }))}
+              bind:value={scope}
+              class="w-full"
+            />
+            <p class="mt-2 text-sm text-base-content/70">{$_(`access_token.${scope}_hint`)}</p>
+          </fieldset>
+          <div class="modal-action">
+            <button type="button" class="btn" onclick={() => modal.close()}>{$_('message.cancel')}</button>
+            <button type="submit" class="btn btn-submit" disabled={$creating !== null || !name.trim()}>
+              {$_('message.confirm')}
+              {#if $creating}<span class="loading loading-xs loading-dots"></span>{/if}
+            </button>
+          </div>
+        </form>
+      {/if}
     </div>
-  {:else}
-    <form
-      method="post"
-      use:enhance={({ cancel }) => {
-        cancel();
-        create();
-      }}
-    >
-      <fieldset class="fieldset">
-        <Label required preventDefault={false}><label for="{uid}-name">{$_('field.name')}</label></Label>
-        <input id="{uid}-name" class="input w-full" {...schema.name} bind:value={name} />
-        <Label required preventDefault={false}><label for="{uid}-expiry">{$_('access_token.lifetime')}</label></Label>
-        <Select
-          id="{uid}-expiry"
-          name="expires_in_days"
-          required
-          options={[30, 90, 365].map((days) => ({
-            value: days,
-            label: `${days} ${$_('duration.days').toLowerCase()}`
-          }))}
-          bind:value={expiresInDays}
-          class="w-full"
-        />
-        <Label required preventDefault={false}><label for="{uid}-scope">{$_('access_token.scope')}</label></Label>
-        <Select
-          id="{uid}-scope"
-          name="scope"
-          required
-          options={['read_only', 'read_write'].map((value) => ({
-            value,
-            label: $_(`access_token.${value}`)
-          }))}
-          bind:value={scope}
-          class="w-full"
-        />
-        <p class="mt-2 text-sm text-base-content/70">{$_(`access_token.${scope}_hint`)}</p>
-      </fieldset>
-      <div class="modal-action">
-        <button type="button" class="btn" onclick={() => modal.close()}>{$_('message.cancel')}</button>
-        <button type="submit" class="btn btn-submit" disabled={$creating !== null || !name.trim()}>
-          {$_('message.confirm')}
-          {#if $creating}<span class="loading loading-xs loading-dots"></span>{/if}
-        </button>
-      </div>
-    </form>
-  {/if}
+  </div>
 </Modal>
