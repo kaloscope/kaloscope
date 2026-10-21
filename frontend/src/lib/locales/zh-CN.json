@@ -998,7 +998,14 @@
     "ai_output_invalid": "AI 输出不符合 JSON 结构，请检查提示词、模型和输出结构",
     "ai_output_truncated": "AI 输出被截断，请增加输出 Token 限制或缩短要求的内容",
     "ai_output_refused": "模型拒绝回答或返回内容被过滤，请调整提示词",
-    "ai_assistant_limit": "已达到单轮对话限制，请缩小查询范围或开始新对话"
+    "ai_assistant_limit": "已达到单轮对话限制，请缩小查询范围或开始新对话",
+    "assistant_context_limit": "当前页面内容过多，请从工作流列表发起提问",
+    "assistant_context_invalid": "无法获取页面上下文，请等待页面加载完成后重试",
+    "assistant_models_failed": "模型加载失败，重新打开助手可重试",
+    "assistant_model_required": "请选择可用模型",
+    "assistant_history_limit": "对话已达到长度上限，请开始新对话",
+    "assistant_stream_invalid": "回复格式异常，已保留部分内容，请重试",
+    "assistant_stream_interrupted": "连接已中断，回复未完成，请重试"
   },
   "ai": {
     "custom": "自定义提供商",
@@ -1034,5 +1041,75 @@
     "models_no_match": "没有匹配的模型，可手动填写",
     "models_empty": "模型列表为空，可手动填写",
     "models_selected": "已选模型（{0}/100）"
+  },
+  "assistant": {
+    "title": "助手",
+    "open": "打开助手（Alt+A）",
+    "close": "收起助手",
+    "close_shortcut": "收起助手（Alt+A）",
+    "move": "拖动或使用方向键移动，Home 键复位",
+    "reset_position": "复位面板",
+    "new_chat": "新对话",
+    "more": "更多操作",
+    "model": "模型",
+    "context": "当前页面",
+    "no_models": "暂无可用模型",
+    "conversation": "对话记录",
+    "activity": "工具调用",
+    "latest": "回到最新",
+    "turn_actions": "最新回复操作",
+    "welcome": "Kaloscope 助手",
+    "memory_only": "临时对话，刷新页面后清空",
+    "you": "你",
+    "unsaved": "未保存画布",
+    "saved": "已保存画布",
+    "generating": "正在生成...",
+    "incomplete": "回复未完成",
+    "retry": "使用当前页面重试",
+    "request_failed": "请求失败，请重试",
+    "input": "发送给助手的消息",
+    "placeholder": "描述你的问题，或告诉我你想做什么",
+    "keyboard": "Ctrl / ⌘ + Enter 发送 · Esc 收起",
+    "stop": "停止生成",
+    "send": "发送",
+    "send_shortcut": "发送（Ctrl / ⌘ + Enter）",
+    "preview_only": "仅预览草稿差异，尚未保存修改",
+    "tool_failed": "工具执行失败，请重试",
+    "navigation_cancelled": "未完成跳转，已保留当前页面",
+    "errors": {
+      "ai_provider_missing": "AI 提供商已删除或不存在，请重新打开助手并选择可用模型",
+      "ai_provider_disabled": "AI 提供商已禁用，请启用提供商，或重新打开助手并选择可用模型",
+      "ai_model_missing": "所选模型已从提供商配置中移除，请重新打开助手并选择可用模型",
+      "ai_timeout": "AI 请求超时，请检查连接后重试，或缩小本次请求范围",
+      "ai_request_rejected": "AI 提供商拒绝请求，请检查 API 地址和模型，或调整问题后重试",
+      "ai_output_truncated": "AI 回复达到输出长度上限，请缩短要求的内容，或拆分问题后重试"
+    },
+    "pages": {
+      "workflows": "工作流列表",
+      "workflow_designer": "工作流设计器",
+      "other": "无页面上下文"
+    },
+    "tools": {
+      "list_workflows": "查找工作流",
+      "get_workflow": "读取工作流",
+      "list_node_types": "读取节点定义",
+      "get_workflow_logs": "读取运行日志",
+      "validate_workflow": "校验工作流",
+      "preview_workflow_draft": "预览草稿差异",
+      "navigate": "相关页面"
+    },
+    "tool_status": {
+      "running": "执行中",
+      "complete": "已完成",
+      "error": "失败",
+      "interrupted": "已中断"
+    },
+    "status": {
+      "streaming": "正在生成",
+      "complete": "回复已完成",
+      "stopped": "已停止",
+      "interrupted": "连接中断",
+      "error": "请求失败"
+    }
   }
 }

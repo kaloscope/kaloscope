@@ -2,11 +2,12 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.exceptions import ErrorCode, KaloscopeException
+from app.models.assistant import WORKFLOW_PATH, ResourceID, WorkflowOrdering
 from app.models.flow import (
     GraphCategory,
     GraphDocument,
@@ -27,7 +28,6 @@ from app.utils.json import dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 256 * 1024
 TOOL_TIMEOUT = 15
-type ResourceID = Annotated[int, Field(gt=0, strict=True)]
 
 
 class ToolArguments(BaseModel):
@@ -42,6 +42,7 @@ class WorkflowList(ToolArguments):
     name: str | None = Field(default=None, max_length=255)
     category: GraphCategory | None = None
     state: GraphState | None = None
+    ordering: WorkflowOrdering = ""
     page_num: int = Field(default=1, ge=1, strict=True)
     page_size: int = Field(default=10, ge=1, le=100, strict=True)
 
@@ -77,6 +78,34 @@ class WorkflowPreview(WorkflowID):
     document: GraphWrite
 
 
+class NavigationTarget(ToolArguments):
+    """Select a registered application destination without accepting URLs."""
+
+    page: Literal["workflows", "workflow_designer"]
+    resource_id: ResourceID | None = None
+
+    @model_validator(mode="after")
+    def validate_target(self) -> Self:
+        """Require a resource only for workflow-specific destinations.
+
+        Returns:
+            A complete registered navigation target.
+
+        Raises:
+            ValueError: If the resource does not match the destination type.
+        """
+        if (self.page == "workflows") != (self.resource_id is None):
+            raise ValueError("Resource does not match the destination")
+        return self
+
+
+class NavigationResult(BaseModel):
+    """Return a checked destination for an explicit user navigation action."""
+
+    target: NavigationTarget
+    path: str
+
+
 @dataclass(frozen=True)
 class AssistantTool:
     """Define a server-owned tool grant and its JSON argument schema."""
@@ -108,8 +137,9 @@ TOOLS = (
     ),
     AssistantTool(
         "get_workflow_logs",
-        "Read recent retained execution groups for an accessible workflow. Logged "
-        "failures describe the workflow, not a failure of this tool.",
+        "Read recent retained execution groups for an accessible workflow directly "
+        "by workflow ID; no page navigation is needed. Logged failures describe "
+        "the workflow, not a failure of this tool.",
         WorkflowLogQuery,
     ),
     AssistantTool(
@@ -126,6 +156,14 @@ TOOLS = (
         "on a version conflict, read the latest workflow and review again.",
         WorkflowPreview,
         admin=True,
+    ),
+    AssistantTool(
+        "navigate",
+        "Offer a button to open an existing internal page: workflows or "
+        "workflow_designer. The designer requires an accessible "
+        "workflow ID from page context or tools. The user decides whether to open "
+        "the page and confirms leaving unsaved edits. This does not modify data.",
+        NavigationTarget,
     ),
 )
 
@@ -205,6 +243,15 @@ async def execute_tool(name: str, arguments: str, user: UserInfo) -> dict[str, A
     try:
         async with asyncio.timeout(TOOL_TIMEOUT):
             match args:
+                case NavigationTarget():
+                    path = WORKFLOW_PATH
+                    if args.resource_id is not None:
+                        graph = await FlowGraphService.get_accessible(
+                            args.resource_id, user
+                        )
+                        readonly = user.role != UserRole.ADMIN or not graph.editable
+                        path += f"/{'r/' if readonly else ''}{graph.id}"
+                    result = NavigationResult(target=args, path=path)
                 case WorkflowList():
                     result = PageResult[WorkflowResult].model_validate(
                         loads(

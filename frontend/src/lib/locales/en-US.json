@@ -998,7 +998,14 @@
     "ai_output_invalid": "The AI output does not match the JSON schema; check the prompt, model, and output schema.",
     "ai_output_truncated": "The AI output was truncated; increase the output token limit or shorten the requested response.",
     "ai_output_refused": "The model refused the request or filtered its response; review the prompt.",
-    "ai_assistant_limit": "The conversation turn limit was reached; narrow the query or start a new conversation."
+    "ai_assistant_limit": "The conversation turn limit was reached; narrow the query or start a new conversation.",
+    "assistant_context_limit": "The current page contains too much data. Ask from the workflow list.",
+    "assistant_context_invalid": "Page context is unavailable. Wait for the page to load and try again.",
+    "assistant_models_failed": "Couldn't load models. Reopen the assistant to retry.",
+    "assistant_model_required": "Select an available model.",
+    "assistant_history_limit": "This conversation has reached its size limit. Start a new chat.",
+    "assistant_stream_invalid": "The reply format is invalid. Partial content has been retained. Try again.",
+    "assistant_stream_interrupted": "The connection was interrupted before the reply completed. Try again."
   },
   "ai": {
     "custom": "Custom provider",
@@ -1034,5 +1041,75 @@
     "models_no_match": "No matching models. Enter model IDs manually.",
     "models_empty": "No models returned. Enter model IDs manually.",
     "models_selected": "Selected models ({0}/100)"
+  },
+  "assistant": {
+    "title": "Assistant",
+    "open": "Open Assistant (Alt+A)",
+    "close": "Collapse Assistant",
+    "close_shortcut": "Collapse Assistant (Alt+A)",
+    "move": "Drag or use arrow keys to move; Home resets position",
+    "reset_position": "Reset Position",
+    "new_chat": "New Chat",
+    "more": "More Actions",
+    "model": "Model",
+    "context": "Current Page",
+    "no_models": "No models available",
+    "conversation": "Conversation",
+    "activity": "Tool Activity",
+    "latest": "Jump to Latest",
+    "turn_actions": "Latest Reply Actions",
+    "welcome": "Kaloscope Assistant",
+    "memory_only": "Temporary chat · cleared on reload",
+    "you": "You",
+    "unsaved": "Unsaved Canvas",
+    "saved": "Saved Canvas",
+    "generating": "Generating...",
+    "incomplete": "Incomplete reply",
+    "retry": "Retry with Current Page",
+    "request_failed": "The request failed. Try again.",
+    "input": "Message to Assistant",
+    "placeholder": "Ask a question or describe what you'd like to do",
+    "keyboard": "Ctrl / ⌘ + Enter to send · Esc to collapse",
+    "stop": "Stop Generating",
+    "send": "Send",
+    "send_shortcut": "Send (Ctrl / ⌘ + Enter)",
+    "preview_only": "Draft preview only. No changes have been saved.",
+    "tool_failed": "The tool failed. Try again.",
+    "navigation_cancelled": "Navigation did not complete. Your current page is retained.",
+    "errors": {
+      "ai_provider_missing": "The AI provider was deleted or is unavailable. Reopen the assistant and select an available model.",
+      "ai_provider_disabled": "The AI provider is disabled. Enable it, or reopen the assistant and select an available model.",
+      "ai_model_missing": "The selected model is no longer configured. Reopen the assistant and select an available model.",
+      "ai_timeout": "The AI request timed out. Check the connection and retry, or narrow the request.",
+      "ai_request_rejected": "The AI provider rejected the request. Check the API address and model, or rephrase the question and retry.",
+      "ai_output_truncated": "The AI reply reached its output length limit. Request a shorter response, or split the question and retry."
+    },
+    "pages": {
+      "workflows": "Workflows",
+      "workflow_designer": "Workflow Designer",
+      "other": "No Page Context"
+    },
+    "tools": {
+      "list_workflows": "Find Workflows",
+      "get_workflow": "Read Workflow",
+      "list_node_types": "Read Node Definitions",
+      "get_workflow_logs": "Read Run Logs",
+      "validate_workflow": "Validate Workflow",
+      "preview_workflow_draft": "Preview Draft Changes",
+      "navigate": "Related Page"
+    },
+    "tool_status": {
+      "running": "Running",
+      "complete": "Completed",
+      "error": "Failed",
+      "interrupted": "Interrupted"
+    },
+    "status": {
+      "streaming": "Generating",
+      "complete": "Reply Complete",
+      "stopped": "Stopped",
+      "interrupted": "Connection Interrupted",
+      "error": "Request Failed"
+    }
   }
 }

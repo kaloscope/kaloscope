@@ -2,7 +2,7 @@
   import { afterNavigate, beforeNavigate } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import { Dock, Navbar } from '$lib/components';
+  import { AssistantPanel, Dock, Navbar } from '$lib/components';
   import { headTitle } from '$lib/i18n';
   import { freeze, histories, positions, subroutes, urlparams, user } from '$lib/stores';
   import type { Resp, User } from '$lib/types';
@@ -224,3 +224,4 @@
 
 <!-- the bottom navigation dock -->
 <Dock navs={data.navs} />
+<AssistantPanel />

@@ -37,6 +37,7 @@ def test_grants():
         "get_workflow",
         "get_workflow_logs",
         "list_node_types",
+        "navigate",
     }
     assert admin_names - read_names == {"validate_workflow", "preview_workflow_draft"}
     assert all("save" not in name and "create" not in name for name in admin_names)
@@ -48,6 +49,12 @@ def test_grants():
         ("save_workflow_draft", "{}", UserRole.ADMIN, ErrorCode.FORBIDDEN),
         ("preview_workflow_draft", "{}", UserRole.USER, ErrorCode.FORBIDDEN),
         ("list_workflows", '{"page_size":101}', UserRole.ADMIN, ErrorCode.BAD_REQUEST),
+        (
+            "list_workflows",
+            '{"ordering":"draft"}',
+            UserRole.ADMIN,
+            ErrorCode.BAD_REQUEST,
+        ),
         ("get_workflow", '{"workflow_id":true}', UserRole.ADMIN, ErrorCode.BAD_REQUEST),
         ("get_workflow", '{"workflow_id":"1"}', UserRole.ADMIN, ErrorCode.BAD_REQUEST),
         (
@@ -103,6 +110,85 @@ def test_account_scope():
             assert denied["error"]["code"] == ErrorCode.PERMISSION_DENIED
             assert logs["error"]["code"] == ErrorCode.PERMISSION_DENIED
             assert "Private" not in json.dumps(denied)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("ordering", "expected"),
+    [("name", ["Alpha", "Zulu"]), ("-name", ["Zulu", "Alpha"])],
+)
+def test_list_ordering(ordering, expected):
+    async def run():
+        async with database():
+            for name in ["Zulu", "Alpha"]:
+                await FlowGraph.create(
+                    name=name, category=GraphCategory.SCHEDULE, state=GraphState.DRAFT
+                )
+
+            names = []
+            for page in [1, 2]:
+                result = await tools.execute_tool(
+                    "list_workflows",
+                    json.dumps(
+                        {
+                            "ordering": ordering,
+                            "page_num": page,
+                            "page_size": 1,
+                        }
+                    ),
+                    ADMIN,
+                )
+                assert result["ok"] is True
+                names.extend(item["name"] for item in result["data"]["items"])
+
+            assert names == expected
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"page": "https://example.test"},
+        {"page": "workflows", "url": "//example.test"},
+        {"page": "workflow_designer"},
+        {"page": "workflows", "resource_id": 1},
+        {"page": "workflow_designer", "resource_id": True},
+        {"page": "workflow_designer", "resource_id": 2**53},
+        {"page": "workflow_logs", "resource_id": 1},
+    ],
+)
+def test_invalid_navigation(arguments):
+    result = asyncio.run(tools.execute_tool("navigate", json.dumps(arguments), ADMIN))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "bad_request"
+
+
+def test_navigation_scope():
+    async def run():
+        async with database():
+            graph = await FlowGraph.create(
+                name="Visible", category=GraphCategory.INDEXER, state=GraphState.DRAFT
+            )
+            reader = SimpleNamespace(
+                role=UserRole.USER, perms=Permissions(indexer_ids=[graph.id])
+            )
+            denied = SimpleNamespace(role=UserRole.USER, perms=Permissions())
+            args = json.dumps({"page": "workflow_designer", "resource_id": graph.id})
+
+            edit = await tools.execute_tool("navigate", args, ADMIN)
+            view = await tools.execute_tool("navigate", args, reader)
+            failure = await tools.execute_tool("navigate", args, denied)
+            listing = await tools.execute_tool(
+                "navigate", '{"page":"workflows"}', reader
+            )
+
+            assert edit["data"]["path"] == f"/settings/workflows/graphs/{graph.id}"
+            assert view["data"]["path"] == f"/settings/workflows/graphs/r/{graph.id}"
+            assert listing["data"]["path"] == "/settings/workflows/graphs"
+            assert failure["error"]["code"] == "permission_denied"
 
     asyncio.run(run())
 

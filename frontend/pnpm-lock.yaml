@@ -67,6 +67,9 @@ importers:
       ky:
         specifier: ^2.1.0
         version: 2.1.0
+      marked:
+        specifier: ^18.1.1
+        version: 18.1.1
       svelte-i18n:
         specifier: ^4.0.1
         version: 4.0.1(svelte@5.57.1(@typescript-eslint/types@8.70.1))
@@ -2934,6 +2937,11 @@ packages:
 
   magic-string@1.2.3:
     resolution: {integrity: sha512-Bpb0W2TbLKOZ7vJnOUnVRGq3WL2p+ISV29M6hYPL1AFCpyKZpdr5ytiXoTSSxRVhg8YW7f65+6gbG8WG6PCa/g==}
+
+  marked@18.1.1:
+    resolution: {integrity: sha512-zEGgrtUG8crk+TrMacJSVABU4DYDDkS8uqgU3ohrn/2fW9C2AEfUrO3m6IhpIpQpl7YcVpiXXC9cSMWDANT3dg==}
+    engines: {node: '>= 20'}
+    hasBin: true
 
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
@@ -6722,6 +6730,8 @@ snapshots:
   magic-string@1.2.3:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  marked@18.1.1: {}
 
   math-intrinsics@1.1.0: {}
 
