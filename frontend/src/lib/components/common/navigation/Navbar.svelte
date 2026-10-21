@@ -156,7 +156,6 @@
         type="button"
         class="btn h-10 min-h-10 btn-subtle px-3"
         aria-label={$_($assistant.open ? 'assistant.close' : 'assistant.open')}
-        use:tooltip={{ content: $_($assistant.open ? 'assistant.close' : 'assistant.open'), zIndex: 10000 }}
         aria-haspopup="dialog"
         aria-expanded={$assistant.open}
         aria-controls="assistant-panel"
