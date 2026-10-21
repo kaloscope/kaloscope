@@ -9,7 +9,6 @@
     newAssistantConversation,
     sendAssistant,
     stopAssistant,
-    toggleAssistant,
     type AssistantTool as Tool,
     type AssistantTurn
   } from '$lib/assistant/session';
@@ -108,27 +107,6 @@
   }
 
   /**
-   * Provide arrow-key positioning for users who cannot drag a pointer.
-   *
-   * @param event - Key press on the move handle.
-   */
-  function moveWithKeyboard(event: KeyboardEvent): void {
-    if (!panel || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.key === 'Home') {
-      position = null;
-      return;
-    }
-    const rect = panel.getBoundingClientRect();
-    const step = event.shiftKey ? 40 : 10;
-    move(
-      rect.left + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0),
-      rect.top + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
-    );
-  }
-
-  /**
    * Handle panel shortcuts without sending keystrokes to the workflow canvas.
    *
    * @param event - Key press within the nonmodal conversation.
@@ -141,30 +119,12 @@
       event.preventDefault();
       menu.open = false;
       menu.querySelector('summary')?.focus();
-    } else if (event.key === 'Escape' || (event.altKey && event.code === 'KeyA')) {
+    } else if (event.key === 'Escape') {
       event.preventDefault();
       closeAssistant();
     } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
       event.preventDefault();
       void sendAssistant(page.url.pathname);
-    }
-  }
-
-  /**
-   * Toggle the global assistant with its documented keyboard shortcut.
-   *
-   * @param event - Application-wide key press.
-   */
-  function globalKeydown(event: KeyboardEvent): void {
-    if (
-      event.altKey &&
-      event.code === 'KeyA' &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !document.querySelector('dialog[open]')
-    ) {
-      event.preventDefault();
-      toggleAssistant();
     }
   }
 
@@ -390,7 +350,7 @@
   });
 </script>
 
-<svelte:window onkeydown={globalKeydown} onresize={resize} />
+<svelte:window onresize={resize} />
 
 {#if $assistant.open}
   <div
@@ -401,7 +361,7 @@
     aria-describedby="assistant-help"
     tabindex="-1"
     bind:this={panel}
-    class="assistant-panel @container fixed layer-1 flex flex-col rounded-box bg-blur-90 text-base-content shadow-2xl ring-1 ring-border"
+    class="assistant-panel @container fixed layer-1 flex flex-col rounded-box bg-blur-90 text-base-content shadow-[var(--assistant-panel-shadow)] ring-1 ring-border"
     class:compact
     style:max-height={viewportHeight ? `${Math.max(0, viewportHeight - 16)}px` : undefined}
     style:left={position ? `${position.x}px` : undefined}
@@ -420,13 +380,11 @@
         type="button"
         class="group flex h-7 min-w-0 flex-1 cursor-move touch-none items-center justify-center rounded-field pl-6 focus-visible:outline-2 focus-visible:outline-primary"
         aria-label={$_('assistant.move')}
-        aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home"
         onpointerdown={startDrag}
         onpointermove={dragPanel}
         onpointerup={() => (drag = null)}
         onpointercancel={() => (drag = null)}
         onlostpointercapture={() => (drag = null)}
-        onkeydown={moveWithKeyboard}
       >
         <span
           class="h-1 w-9 rounded-full bg-base-content/20 transition-colors group-hover:bg-base-content/40 group-focus-visible:bg-primary/70"
@@ -462,7 +420,7 @@
           <div class="flex flex-col items-end gap-1 pl-8">
             <p class="sr-only">{$_('assistant.you')}</p>
             <p
-              class="max-w-full rounded-box bg-base-content/8 px-3 py-2 text-sm leading-6 break-words whitespace-pre-wrap"
+              class="max-w-full rounded-box bg-base-content/8 px-3 py-2 text-sm leading-6 break-words whitespace-pre-wrap shadow-[var(--assistant-message-shadow)] ring-1 ring-base-content/10"
             >
               {turn.prompt}
             </p>
@@ -559,7 +517,9 @@
         </section>
       {/if}
 
-      <div class="rounded-box bg-base-100 ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80">
+      <div
+        class="rounded-box bg-base-100 shadow-[var(--assistant-composer-shadow)] ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80"
+      >
         <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
         <textarea
           id="assistant-input"
@@ -705,6 +665,13 @@
 
 <style>
   .assistant-panel {
+    --assistant-panel-shadow:
+      0 8px 24px -6px light-dark(oklch(0% 0 0 / 16%), oklch(0% 0 0 / 36%)),
+      0 24px 64px -12px light-dark(oklch(0% 0 0 / 28%), oklch(0% 0 0 / 56%));
+    --assistant-message-shadow: 0 1px 2px light-dark(oklch(0% 0 0 / 6%), oklch(0% 0 0 / 18%));
+    --assistant-composer-shadow:
+      0 2px 6px -2px light-dark(oklch(0% 0 0 / 12%), oklch(0% 0 0 / 26%)),
+      0 6px 16px -6px light-dark(oklch(0% 0 0 / 12%), oklch(0% 0 0 / 32%));
     right: 1rem;
     bottom: 1rem;
     width: min(28rem, calc(100vw - 1rem));
