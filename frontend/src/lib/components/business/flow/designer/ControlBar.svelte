@@ -1,7 +1,9 @@
 <script lang="ts">
   import { beforeNavigate, goto } from '$app/navigation';
+  import { page } from '$app/state';
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
+  import { registerAssistantContext, snapshotAssistantCanvas } from '$lib/assistant/context';
   import { Badge, Button, GraphEditor, Image, PageHeader, alert, confirm } from '$lib/components';
   import { GraphState } from '$lib/enums';
   import { _, time } from '$lib/i18n';
@@ -68,6 +70,23 @@
   let savedHistoryId: string = $state('');
   let firstHistoryId: string = $state('');
   let lastHistoryId: string = $state('');
+
+  onMount(() => {
+    const route = page.url.pathname.replace(/\/$/, '');
+    return registerAssistantContext(() => {
+      if (!graph || jsonGraph === null) return null;
+      const canvas = snapshotAssistantCanvas({ nodes, edges });
+      return {
+        page_type: 'workflow_designer',
+        route,
+        resource_id: graph.id,
+        draft_version: graph.draft_version,
+        unsaved: JSON.stringify(canvas) !== JSON.stringify(snapshotAssistantCanvas(JSON.parse(jsonGraph))),
+        canvas,
+        selected_node_ids: _nodes.filter((node) => node.selected).map((node) => node.id)
+      };
+    });
+  });
 
   /**
    * Undo the previous operation.

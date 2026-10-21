@@ -85,6 +85,75 @@ export interface AIModelSelection {
 }
 
 /**
+ * A validated snapshot of a page supported by the assistant.
+ */
+export type AssistantPageContext =
+  | {
+      page_type: 'workflows';
+      route: string;
+      selected_ids: number[];
+      filters: {
+        name: string;
+        category: keyof typeof GraphCategory | null;
+        state: keyof typeof GraphState | null;
+        ordering: string;
+        page_num: number;
+        page_size: number;
+      };
+    }
+  | {
+      page_type: 'workflow_designer';
+      route: string;
+      resource_id: number;
+      draft_version: number;
+      unsaved: boolean;
+      canvas: NonNullable<FlowGraph['draft']>;
+      selected_node_ids: string[];
+    };
+
+/**
+ * A provider's public model choices for the assistant.
+ */
+export type AssistantModelProvider = Pick<AIProvider, 'id' | 'name' | 'model_ids'>;
+
+/**
+ * A registered internal page offered by the navigation tool.
+ */
+export type AssistantDestination = {
+  page: 'workflows' | 'workflow_designer';
+  resource_id?: number | null;
+};
+
+/**
+ * A tool outcome shown in the conversation and retained as untrusted history.
+ */
+export type AssistantToolResult = {
+  id: string;
+  name: string;
+  ok: boolean;
+  data?: Record<string, unknown>;
+  error?: { code: string; guidance?: string };
+};
+
+/**
+ * Completed turn history; attachments remain untrusted data on the server.
+ */
+export type AssistantMessage =
+  | { role: 'user'; content: string; context?: AssistantPageContext | null }
+  | { role: 'assistant'; content: string; tool_results?: AssistantToolResult[] };
+
+/**
+ * A validated event from the assistant's streaming response.
+ */
+export type AssistantStreamEvent =
+  | { event: 'start'; data: { turn_id: string } }
+  | { event: 'text_delta'; data: { text: string } }
+  | { event: 'tool_start'; data: { id: string; name: string } }
+  | { event: 'tool_result'; data: AssistantToolResult }
+  | { event: 'done'; data: { model?: string; tool_calls: number; usage: Record<string, number> | null } }
+  | { event: 'error'; data: { code: string } };
+
+/**
  * A paginated list wrapper.
  */
 export interface Page<T> {

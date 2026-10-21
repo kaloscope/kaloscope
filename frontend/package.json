@@ -34,6 +34,7 @@
     "cropperjs": "^2.2.0",
     "iconify-icon": "^3.0.3",
     "ky": "^2.1.0",
+    "marked": "^18.1.1",
     "svelte-i18n": "^4.0.1",
     "sveltekit-search-params": "^4.0.0",
     "tippy.js": "^6.3.7",

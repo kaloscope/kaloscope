@@ -60,6 +60,8 @@
   import { beforeNavigate, goto, replaceState } from '$app/navigation';
   import { navigating, page } from '$app/state';
   import { api } from '$lib/api';
+  import { registerAssistantContext } from '$lib/assistant/context';
+  import { workflowPath } from '$lib/assistant/navigation';
   import {
     Badge,
     Button,
@@ -379,6 +381,22 @@
       disposed = true;
     };
   });
+
+  onMount(() =>
+    registerAssistantContext(() => ({
+      page_type: 'workflows',
+      route: workflowPath,
+      selected_ids: (headerCheckbox?.getSelectedKeys() ?? []).map(Number),
+      filters: {
+        name: graphName,
+        category: graphCategory as keyof typeof GraphCategory | null,
+        state: graphState as keyof typeof GraphState | null,
+        ordering: $ordering,
+        page_num: list.requestedPage,
+        page_size: pagination.size
+      }
+    }))
+  );
 
   $effect(() => {
     if (list.reload) {

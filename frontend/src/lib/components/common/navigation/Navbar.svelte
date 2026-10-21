@@ -19,6 +19,7 @@
   import { afterNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { tooltip } from '$lib/actions';
+  import { assistant, toggleAssistant } from '$lib/assistant/session';
   import { Languages, Logo, Notifications, PageHeader, Signposts, Themes, UserCenter } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -149,6 +150,27 @@
       onrefresh={(unread) => (unreadNotifications = unread)}
       bind:this={notifications}
     />
+    {#if appMode}
+      <button
+        id="assistant-trigger"
+        type="button"
+        class="btn h-10 min-h-10 btn-subtle px-3"
+        aria-label={$_($assistant.open ? 'assistant.close_shortcut' : 'assistant.open')}
+        use:tooltip={{ content: $_($assistant.open ? 'assistant.close_shortcut' : 'assistant.open'), zIndex: 10000 }}
+        aria-haspopup="dialog"
+        aria-expanded={$assistant.open}
+        aria-controls="assistant-panel"
+        aria-keyshortcuts="Alt+A"
+        onclick={toggleAssistant}
+      >
+        {#if $assistant.busy}
+          <span class="loading size-6 loading-spinner opacity-90" aria-hidden="true"></span>
+        {:else}
+          <iconify-icon icon={icons.botSquare} width="1.5rem" class="size-6 opacity-90" aria-hidden="true"
+          ></iconify-icon>
+        {/if}
+      </button>
+    {/if}
     <UserCenter
       {navs}
       switchTheme={() => themeSwitcher.showModal()}
