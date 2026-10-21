@@ -15,7 +15,7 @@
 </script>
 
 {#snippet row()}
-  <span class="flex size-4 shrink-0 items-center justify-center text-base-content/60" aria-hidden="true">
+  <span class="flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
     {#if tool.status === 'running'}
       <span class="loading loading-xs loading-spinner"></span>
     {:else}
@@ -30,10 +30,10 @@
       ></iconify-icon>
     {/if}
   </span>
-  <span class="min-w-0 truncate font-medium text-base-content/80">
+  <span class="min-w-0 truncate font-medium">
     {$_(`assistant.tools.${tool.name}`, { default: tool.name })}
   </span>
-  <span class="shrink-0 text-base-content/60" class:sr-only={tool.status === 'complete' || tool.status === 'running'}>
+  <span class="shrink-0" class:sr-only={tool.status === 'complete' || tool.status === 'running'}>
     {$_(`assistant.tool_status.${tool.status}`)}
   </span>
 {/snippet}
@@ -41,13 +41,13 @@
 {#if detail || error}
   <details class="group">
     <summary
-      class="flex min-h-7 cursor-pointer list-none items-center gap-2 rounded-field px-2 text-xs transition-colors hover:bg-base-content/5 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
+      class="flex min-h-7 cursor-pointer list-none items-center gap-2 rounded-field px-2 text-xs text-base-content/60 transition-colors hover:text-base-content focus-visible:text-base-content focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
     >
       {@render row()}
       <iconify-icon
         icon={icons.chevronRight}
         width="0.75rem"
-        class="ml-auto size-3 shrink-0 text-base-content/40 transition-transform group-open:rotate-90"
+        class="ml-auto size-3 shrink-0 transition-transform group-open:rotate-90"
         aria-hidden="true"
       ></iconify-icon>
     </summary>
@@ -62,7 +62,7 @@
     </div>
   </details>
 {:else}
-  <div class="flex min-h-7 items-center gap-2 px-2 text-xs">{@render row()}</div>
+  <div class="flex min-h-7 items-center gap-2 px-2 text-xs text-base-content/60">{@render row()}</div>
 {/if}
 {#if tool.name === 'preview_workflow_draft' && tool.result?.ok}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{$_('assistant.preview_only')}</p>
