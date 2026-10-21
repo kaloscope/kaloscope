@@ -1,4 +1,8 @@
 [app]
+# assistant budgets use conservative local estimates; override individual models when needed
+assistant_input_tokens = 32000
+assistant_output_tokens = 4096
+assistant_model_budgets = {}
 # authentication
 token_expiration_hours = 120
 auth_exclude_paths = [

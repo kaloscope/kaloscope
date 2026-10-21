@@ -46,6 +46,7 @@ export function registerAssistantContext(read: () => AssistantPageContext | null
  *
  * @param route - Current internal pathname, without arbitrary query parameters.
  * @returns An independent context snapshot or null for an unsupported page.
+ * @throws If page metadata or its separate canvas attachment exceeds its budget.
  */
 export function captureAssistantContext(route: string): AssistantPageContext | null {
   const pathname = route.replace(/\/$/, '');
@@ -53,7 +54,16 @@ export function captureAssistantContext(route: string): AssistantPageContext | n
     const context = read();
     if (context?.route !== pathname) continue;
     const json = JSON.stringify(context);
-    if (new TextEncoder().encode(json).length > 128 * 1024) throw new Error('assistant_context_limit');
+    const encoder = new TextEncoder();
+    let metadata = json;
+    if (context.page_type === 'workflow_designer') {
+      const { canvas, ...reference } = context;
+      if (encoder.encode(JSON.stringify(canvas)).length > 512 * 1024) {
+        throw new Error('assistant_context_limit');
+      }
+      metadata = JSON.stringify(reference);
+    }
+    if (encoder.encode(metadata).length > 128 * 1024) throw new Error('assistant_context_limit');
     return JSON.parse(json) as AssistantPageContext;
   }
   if (/^\/settings\/workflows\/graphs(?:\/(?:r\/)?[1-9]\d*)?\/?$/.test(route)) {

@@ -35,6 +35,24 @@ def compress_document(document: GraphDocument) -> dict[str, Any]:
     return deepcopy(result)
 
 
+def comparison_document(document: dict[str, Any]) -> dict[str, Any]:
+    """Copy a graph without transient editor state for meaningful comparisons.
+
+    Args:
+        document: Saved or proposed compressed graph.
+
+    Returns:
+        An independent graph preserving authored fields and layout.
+    """
+    result = compress_document(GraphDocument.model_validate(deepcopy(document)))
+    for node in result["nodes"]:
+        for key in ("selected", "measured", "dragging"):
+            node.pop(key, None)
+    for edge in result["edges"]:
+        edge.pop("selected", None)
+    return result
+
+
 def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
     """Check a visible field's type, bounds, and optional publication constraints.
 

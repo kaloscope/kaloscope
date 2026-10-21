@@ -6,19 +6,21 @@
   import {
     assistant,
     closeAssistant,
-    newAssistantConversation,
+    loadAssistantModels,
+    loadAssistantConversation,
     sendAssistant,
     stopAssistant,
     type AssistantTool as Tool,
     type AssistantTurn
   } from '$lib/assistant/session';
-  import { Dropdown, Select } from '$lib/components';
+  import { Button, Dropdown, Select } from '$lib/components';
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { AssistantDestination, AssistantPageContext } from '$lib/types';
+  import type { AssistantDestination, AssistantStoredContext } from '$lib/types';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
+  import AssistantHistory from './AssistantHistory.svelte';
   import AssistantMarkdown from './AssistantMarkdown.svelte';
   import AssistantTool from './AssistantTool.svelte';
 
@@ -43,7 +45,9 @@
   const compact = $derived(viewportHeight !== undefined && viewportHeight < 540);
   const rows = $derived(compact ? 1 : 2);
   const modelsBusy = $derived($assistant.modelsLoading !== null);
-  const canSend = $derived(!modelsBusy && !!input.trim() && !!$assistant.model);
+  const canSend = $derived(
+    !modelsBusy && !$assistant.historyLoading && !$assistant.conversation?.busy && !!input.trim() && !!$assistant.model
+  );
   const modelValue = $derived($assistant.model ? JSON.stringify($assistant.model) : null);
   const currentPage = $derived(
     /\/graphs\/(r\/)?\d+\/?$/.test(page.url.pathname)
@@ -265,7 +269,7 @@
    * @param context - Snapshot captured when the turn was sent.
    * @returns A short localized label with the resource and draft state.
    */
-  function contextLabel(context: AssistantPageContext): string {
+  function contextLabel(context: AssistantStoredContext): string {
     const parts = [$_(`assistant.pages.${context.page_type}`)];
     if (context.page_type === 'workflow_designer') {
       parts.push(
@@ -393,7 +397,7 @@
       </button>
       <button
         type="button"
-        class="btn btn-square btn-subtle opacity-80 btn-xs"
+        class="btn btn-circle btn-subtle opacity-80 btn-xs"
         aria-label={$_('assistant.close')}
         onclick={closeAssistant}
       >
@@ -401,18 +405,33 @@
       </button>
     </div>
 
+    <AssistantHistory />
+
     <ol
       bind:this={transcript}
       class="transcript min-h-0 flex-1 [scrollbar-gutter:stable] space-y-6 overflow-y-auto overscroll-contain px-4 pt-2 pb-3"
       aria-label={$_('assistant.conversation')}
       onscroll={trackScroll}
     >
-      {#if !turns.length}
+      {#if $assistant.turnsBefore && $assistant.conversation}
+        <li class="text-center">
+          <button
+            type="button"
+            class="btn btn-subtle btn-xs"
+            disabled={$assistant.busy || $assistant.historyLoading}
+            onclick={() => {
+              following = false;
+              void loadAssistantConversation($assistant.conversation!.id, true);
+            }}>{$_('assistant.load_older')}</button
+          >
+        </li>
+      {/if}
+      {#if !turns.length && !$assistant.historyLoading}
         <li class="flex min-h-full flex-col justify-center gap-2 pb-4">
           <iconify-icon icon={icons.botSquare} width="2rem" class="mb-1 size-8 text-base-content/60" aria-hidden="true"
           ></iconify-icon>
           <h3 class="text-base font-semibold">{$_('assistant.welcome')}</h3>
-          <p class="text-xs leading-5 text-base-content/60">{$_('assistant.memory_only')}</p>
+          <p class="text-xs leading-5 text-base-content/60">{$_('assistant.saved_history')}</p>
         </li>
       {/if}
       {#each turns as turn (turn.id)}
@@ -447,7 +466,7 @@
             {#if turn.status === 'streaming'}
               <p class="flex h-6 items-center gap-2 text-xs text-base-content/60">
                 <span class="loading loading-xs loading-dots" aria-hidden="true"></span>
-                {$_('assistant.generating')}
+                {$_($assistant.compacting ? 'assistant.compacting' : 'assistant.generating')}
               </p>
             {:else if turn.status !== 'complete'}
               <div class="flex items-start gap-2 text-xs leading-5 text-base-content/60">
@@ -493,7 +512,7 @@
             <button
               type="button"
               class="btn gap-1 btn-subtle font-normal btn-xs"
-              disabled={$assistant.busy}
+              disabled={$assistant.busy || $assistant.historyLoading || $assistant.conversation?.busy}
               onclick={() => retry(lastTurn)}
             >
               <iconify-icon icon={icons.arrowClockwise} width="0.875rem" class="size-3.5" aria-hidden="true"
@@ -557,7 +576,17 @@
               <span class="truncate @max-xs:sr-only">{$_(`assistant.pages.${currentPage}`)}</span>
             </span>
           {/if}
-          <div class="relative flex min-w-0 shrink-[2] items-center" aria-busy={modelsBusy}>
+          {#if $assistant.modelsLoaded && !$assistant.models.length}
+            <Button
+              icon={icons.redo}
+              size="xs"
+              class="size-7! min-h-7! shrink-0"
+              loading={$assistant.modelsLoading}
+              disabled={$assistant.busy || modelsBusy}
+              onclick={loadAssistantModels}
+            />
+          {/if}
+          <div class="flex min-w-0 shrink-[2] items-center" aria-busy={modelsBusy}>
             <label class="sr-only" for="assistant-model">{$_('assistant.model')}</label>
             <Select
               id="assistant-model"
@@ -579,15 +608,9 @@
                 </optgroup>
               {/each}
             </Select>
-            {#if $assistant.modelsLoading}
-              <span
-                class="loading pointer-events-none absolute top-1/2 right-2 loading-xs -translate-y-1/2 loading-spinner text-base-content/60"
-                aria-hidden="true"
-              ></span>
-            {/if}
           </div>
           <span class="flex-1"></span>
-          {#if turns.length || $assistant.error || position}
+          {#if position}
             <Dropdown
               class="assistant-menu dropdown-end dropdown-top"
               triggerClass="rounded-field focus-visible:outline-2 focus-visible:outline-primary"
@@ -604,36 +627,19 @@
                 </span>
               {/snippet}
               <ul class="menu w-full gap-0.5 menu-sm p-1.5">
-                {#if turns.length || $assistant.error}
-                  <li class:menu-disabled={$assistant.busy}>
-                    <button
-                      type="button"
-                      disabled={$assistant.busy}
-                      onclick={() => {
-                        newAssistantConversation();
-                        closeMenu(composer);
-                      }}
-                    >
-                      <iconify-icon icon={icons.chatAdd} width="1rem" class="size-4" aria-hidden="true"></iconify-icon>
-                      {$_('assistant.new_chat')}
-                    </button>
-                  </li>
-                {/if}
-                {#if position}
-                  <li>
-                    <button
-                      type="button"
-                      onclick={() => {
-                        position = null;
-                        closeMenu(mover);
-                      }}
-                    >
-                      <iconify-icon icon={icons.arrowReset} width="1rem" class="size-4" aria-hidden="true"
-                      ></iconify-icon>
-                      {$_('assistant.restore_position')}
-                    </button>
-                  </li>
-                {/if}
+                <li>
+                  <button
+                    type="button"
+                    onclick={() => {
+                      position = null;
+                      closeMenu(mover);
+                    }}
+                  >
+                    <iconify-icon icon={icons.focusCentered} width="1rem" class="size-4" aria-hidden="true"
+                    ></iconify-icon>
+                    {$_('assistant.restore_position')}
+                  </button>
+                </li>
               </ul>
             </Dropdown>
           {/if}

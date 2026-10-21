@@ -3,7 +3,8 @@ import { createLoading } from '$lib/helpers';
 import { token, user } from '$lib/stores';
 import type {
   AIModelSelection,
-  AssistantMessage,
+  AssistantConversation,
+  AssistantStoredContext,
   AssistantModelProvider,
   AssistantPageContext,
   AssistantStreamEvent,
@@ -26,8 +27,9 @@ export type AssistantTool = {
 };
 export type AssistantTurn = {
   id: string;
+  serverId?: number;
   prompt: string;
-  context: AssistantPageContext | null;
+  context: AssistantStoredContext | null;
   content: string;
   status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error';
   error?: string;
@@ -42,12 +44,20 @@ type AssistantState = {
   modelsLoaded: boolean;
   modelsError: string | null;
   turns: AssistantTurn[];
+  conversation: AssistantConversation | null;
+  conversations: AssistantConversation[];
+  conversationsBefore: number | null;
+  turnsBefore: number | null;
+  historyLoaded: boolean;
+  historyLoading: boolean;
+  conversationsLoading: boolean;
+  compacting: boolean;
   error: string | null;
   busy: boolean;
 };
 
 /**
- * Create an empty in-memory account session.
+ * Create an empty account view before loading persisted conversations.
  *
  * @returns Independent initial state with no retained conversation data.
  */
@@ -61,6 +71,14 @@ function initialState(): AssistantState {
     modelsLoaded: false,
     modelsError: null,
     turns: [],
+    conversation: null,
+    conversations: [],
+    conversationsBefore: null,
+    turnsBefore: null,
+    historyLoaded: false,
+    historyLoading: false,
+    conversationsLoading: false,
+    compacting: false,
     error: null,
     busy: false
   };
@@ -69,25 +87,38 @@ function initialState(): AssistantState {
 export const assistant = writable<AssistantState>(initialState());
 let active: AbortController | null = null;
 let modelRequest: AbortController | null = null;
+let historyRequest: AbortController | null = null;
+let listRequest: AbortController | null = null;
+let accountGeneration = 0;
+let conversationRevision = 0;
 
 /**
  * Clear account data and invalidate all late network callbacks.
  */
 function resetSession(): void {
+  accountGeneration += 1;
+  conversationRevision += 1;
   active?.abort();
   modelRequest?.abort();
+  historyRequest?.abort();
+  listRequest?.abort();
+  historyRequest = null;
+  listRequest = null;
   active = null;
   modelRequest = null;
   assistant.set(initialState());
 }
 
-token.subscribe(resetSession);
 let accountId = get(user)?.id;
+token.subscribe(() => {
+  accountId = undefined;
+  resetSession();
+});
 user.subscribe((value) => {
-  // a missing profile can mean a refresh; token changes already clear signed-out sessions
-  if (value && accountId !== value.id) {
+  // the token already clears a new login; its first profile must not close a just-opened panel
+  if (value) {
+    if (accountId !== undefined && accountId !== value.id) resetSession();
     accountId = value.id;
-    resetSession();
   }
 });
 
@@ -172,7 +203,10 @@ export async function loadAssistantModels(): Promise<void> {
  */
 export function openAssistant(): void {
   assistant.update((state) => ({ ...state, open: true }));
-  if (!get(assistant).busy) void loadAssistantModels();
+  if (!get(assistant).busy) {
+    void loadAssistantModels();
+    void loadAssistantConversations(false, !get(assistant).historyLoaded);
+  }
 }
 
 /**
@@ -214,59 +248,180 @@ export function stopAssistant(): void {
  * Start a fresh conversation while retaining the chosen model and composed input.
  */
 export function newAssistantConversation(): void {
-  if (get(assistant).busy) return;
-  assistant.update((state) => ({ ...state, turns: [], error: null }));
+  if (get(assistant).busy || get(assistant).historyLoading) return;
+  conversationRevision += 1;
+  assistant.update((state) => ({ ...state, conversation: null, turns: [], turnsBefore: null, error: null }));
 }
 
 /**
- * Send completed turns with their original snapshots and historical tool results.
+ * Load account-owned conversation metadata and optionally restore the latest chat.
  *
- * Ignore new submissions while a reply is streaming or the model catalog is loading.
+ * @param older - Whether to append the next page instead of refreshing.
+ * @param restore - Whether an empty account session should reopen its latest chat.
+ * @returns A promise that resolves after updating metadata or reporting an error.
+ */
+export async function loadAssistantConversations(older = false, restore = false): Promise<void> {
+  const state = get(assistant);
+  if (listRequest || (older && !state.conversationsBefore)) return;
+  const controller = new AbortController();
+  listRequest = controller;
+  const revision = conversationRevision;
+  assistant.update((value) => ({ ...value, conversationsLoading: true }));
+  try {
+    const { data } = await api
+      .get('assistant/conversations', {
+        searchParams: older ? { before: state.conversationsBefore! } : {},
+        signal: controller.signal,
+        context: { silentErrors: true }
+      })
+      .json<Resp<{ items: AssistantConversation[]; next_before: number | null }>>();
+    if (listRequest !== controller) return;
+    assistant.update((value) => ({
+      ...value,
+      conversations: older ? [...value.conversations, ...data.items] : data.items,
+      conversationsBefore: data.next_before,
+      historyLoaded: true,
+      conversation: value.conversation
+        ? (data.items.find((item) => item.id === value.conversation!.id) ?? value.conversation)
+        : null
+    }));
+    if (
+      restore &&
+      revision === conversationRevision &&
+      !get(assistant).conversation &&
+      !get(assistant).turns.length &&
+      data.items[0]
+    ) {
+      await loadAssistantConversation(data.items[0].id);
+    }
+  } catch (error) {
+    if (listRequest === controller)
+      assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_history_failed') }));
+  } finally {
+    if (listRequest === controller) {
+      listRequest = null;
+      assistant.update((value) => ({ ...value, conversationsLoading: false }));
+    }
+  }
+}
+
+/**
+ * Restore a conversation or prepend an older page without resending its history.
  *
- * @param route - Current pathname used to select the active context reader.
- * @param retryId - Incomplete turn to replace with a new attempt and fresh context.
- * @returns A promise that resolves after the attempt completes, stops, or reports an error.
+ * @param id - Owned conversation identifier.
+ * @param older - Whether to load earlier turns in the current conversation.
+ * @returns A promise that resolves after loading the page or reporting an error.
+ */
+export async function loadAssistantConversation(id: number, older = false): Promise<void> {
+  const state = get(assistant);
+  if (state.busy || historyRequest || (older && (!state.turnsBefore || state.conversation?.id !== id))) return;
+  const controller = new AbortController();
+  historyRequest = controller;
+  if (!older) conversationRevision += 1;
+  assistant.update((value) => ({ ...value, historyLoading: true, error: null }));
+  try {
+    const { data } = await api
+      .get(`assistant/conversations/${id}/turns`, {
+        searchParams: older ? { before: state.turnsBefore! } : {},
+        signal: controller.signal,
+        context: { silentErrors: true }
+      })
+      .json<Resp<{ conversation: AssistantConversation; items: AssistantTurn[]; next_before: number | null }>>();
+    if (historyRequest !== controller) return;
+    const items = data.items.map((turn) => ({ ...turn, serverId: Number(turn.id) }));
+    assistant.update((value) => ({
+      ...value,
+      conversation: data.conversation,
+      turns: older ? [...items, ...value.turns] : items,
+      turnsBefore: data.next_before,
+      model: older
+        ? value.model
+        : !value.modelsLoaded || isModelAvailable(data.conversation.model, value.models)
+          ? data.conversation.model
+          : value.model
+    }));
+  } catch (error) {
+    if (historyRequest === controller)
+      assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_history_failed') }));
+  } finally {
+    if (historyRequest === controller) {
+      historyRequest = null;
+      assistant.update((value) => ({ ...value, historyLoading: false }));
+    }
+  }
+}
+
+/**
+ * Rename or delete an idle owned conversation while preserving the composed input.
+ *
+ * @param id - Conversation whose metadata or history is being changed.
+ * @param title - New title; omission requests deletion.
+ * @returns A promise that resolves after the operation or a localized error.
+ */
+export async function changeAssistantConversation(id: number, title?: string): Promise<void> {
+  if (get(assistant).busy || historyRequest) return;
+  const controller = new AbortController();
+  historyRequest = controller;
+  const generation = accountGeneration;
+  assistant.update((value) => ({ ...value, historyLoading: true, error: null }));
+  try {
+    const path = `assistant/conversations/${id}`;
+    if (title === undefined) {
+      await api.delete(path, { signal: controller.signal, retry: 0, context: { silentErrors: true } });
+      if (generation !== accountGeneration) return;
+      assistant.update((value) =>
+        value.conversation?.id === id ? { ...value, conversation: null, turns: [], turnsBefore: null } : value
+      );
+    } else {
+      if (!title.trim() || title.trim().length > 120) throw new Error('assistant_title_invalid');
+      const { data } = await api
+        .patch(path, {
+          json: { title: title.trim() },
+          signal: controller.signal,
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<Resp<AssistantConversation>>();
+      if (generation !== accountGeneration) return;
+      assistant.update((value) => (value.conversation?.id === id ? { ...value, conversation: data } : value));
+    }
+    await loadAssistantConversations();
+  } catch (error) {
+    if (generation === accountGeneration)
+      assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_history_failed') }));
+  } finally {
+    if (historyRequest === controller) {
+      historyRequest = null;
+      assistant.update((value) => ({ ...value, historyLoading: false }));
+    }
+  }
+}
+
+/**
+ * Submit only the new prompt and page snapshot to an owned persistent conversation.
+ *
+ * @param route - Current pathname used to capture the active page.
+ * @param retryId - Incomplete turn linked to a new attempt with fresh context.
+ * @returns A promise that resolves after completion, cancellation, or error.
  */
 export async function sendAssistant(route: string, retryId?: string): Promise<void> {
   const state = get(assistant);
-  if (state.busy || state.modelsLoading !== null) return;
+  if (state.busy || state.historyLoading || state.conversation?.busy || state.modelsLoading !== null) return;
   const retry = retryId ? state.turns.find((turn) => turn.id === retryId && turn.status !== 'complete') : null;
   const prompt = (retry?.prompt ?? state.input).trim();
   if (!prompt) return;
   let context: AssistantPageContext | null;
-  const history = state.turns
-    .filter((turn) => turn.status === 'complete')
-    .flatMap<AssistantMessage>((turn) => [
-      { role: 'user', content: turn.prompt, context: turn.context },
-      {
-        role: 'assistant',
-        content: turn.content,
-        tool_results: turn.tools.flatMap((tool) => (tool.result ? [tool.result] : []))
-      }
-    ]);
-  const messages: AssistantMessage[] = [...history, { role: 'user', content: prompt }];
   try {
     if (!isModelAvailable(state.model, state.models)) throw new Error('assistant_model_required');
-    if (
-      messages.length > 32 ||
-      messages.some((message) => message.content.length > 32768) ||
-      messages.reduce((size, message) => size + new TextEncoder().encode(message.content).length, 0) > 128 * 1024 ||
-      new TextEncoder().encode(
-        JSON.stringify(
-          history.map((message) =>
-            message.role === 'user' ? { context: message.context } : { tool_results: message.tool_results }
-          )
-        )
-      ).length >
-        256 * 1024
-    ) {
-      throw new Error('assistant_history_limit');
+    if (prompt.length > 32768 || new TextEncoder().encode(prompt).length > 128 * 1024) {
+      throw new Error('assistant_context_limit');
     }
     context = captureAssistantContext(route);
   } catch (error) {
     assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_context_invalid') }));
     return;
   }
+  conversationRevision += 1;
   const turn: AssistantTurn = {
     id: uuidv4(),
     prompt,
@@ -282,7 +437,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     input: retry ? value.input : '',
     error: null,
     busy: true,
-    turns: [...value.turns.filter((item) => item.id !== retry?.id), turn]
+    turns: [...value.turns, turn]
   }));
   let timedOut = false;
   let idle: ReturnType<typeof setTimeout>;
@@ -326,9 +481,22 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     if (event.event === 'start') {
       if (started) throw new Error('assistant_stream_invalid');
       started = true;
+      update((value) => {
+        value.serverId = Number(event.data.turn_id);
+      });
       return;
     }
-    if (!started) throw new Error('assistant_stream_invalid');
+    if (!started && event.event !== 'error') throw new Error('assistant_stream_invalid');
+    if (event.event === 'compacting') {
+      if (active === controller)
+        assistant.update((value) => ({
+          ...value,
+          compacting: event.data.active,
+          conversation:
+            value.conversation && event.data.compacted ? { ...value.conversation, compacted: true } : value.conversation
+        }));
+      return;
+    }
     update((value) => {
       switch (event.event) {
         case 'text_delta':
@@ -360,8 +528,46 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
   }
 
   try {
-    const response = await api.post('assistant/chat', {
-      json: { model: state.model, messages, context },
+    let conversation = state.conversation;
+    if (!conversation) {
+      const { data } = await api
+        .post('assistant/conversations', {
+          json: { model: state.model },
+          signal: controller.signal,
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<Resp<AssistantConversation>>();
+      if (active !== controller) return;
+      conversation = data;
+      assistant.update((value) => ({ ...value, conversation: data }));
+    }
+    let submittedContext: AssistantStoredContext | null = context;
+    if (context?.page_type === 'workflow_designer') {
+      const { canvas, ...metadata } = context;
+      const { data } = await api
+        .post(`assistant/conversations/${conversation.id}/snapshots`, {
+          json: { workflow_id: context.resource_id, draft_version: context.draft_version, canvas },
+          signal: controller.signal,
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<Resp<{ snapshot_id: number }>>();
+      if (active !== controller) return;
+      submittedContext = { ...metadata, snapshot_id: data.snapshot_id };
+      update((value) => {
+        value.context = submittedContext;
+      });
+      activity();
+    }
+    const response = await api.post(`assistant/conversations/${conversation.id}/chat`, {
+      json: {
+        model: state.model,
+        prompt,
+        request_id: turn.id,
+        context: submittedContext,
+        ...(retry?.serverId ? { retry_of: retry.serverId } : {})
+      },
       signal: controller.signal,
       timeout: false,
       retry: 0,
@@ -388,7 +594,8 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     });
     if (active === controller) {
       active = null;
-      assistant.update((value) => ({ ...value, busy: false }));
+      assistant.update((value) => ({ ...value, busy: false, compacting: false }));
+      void loadAssistantConversations();
     }
   }
 }

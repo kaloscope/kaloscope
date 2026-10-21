@@ -17,7 +17,8 @@ from app.core.exceptions import UnauthorizedException
 from app.core.middleware import on_request, on_response
 from app.models.ai import AIProvider
 from app.models.assistant import AssistantEvent
-from app.models.user import UserRole
+from app.models.flow import FlowGraph
+from app.models.user import User, UserRole
 from app.routes import assistant as routes
 from app.utils.json import dumps
 
@@ -148,10 +149,12 @@ def test_http_contract(application, monkeypatch):
     app.shared_ctx.sessions = {"browser-session": user}
     users = []
 
-    async def stream(body, user):
+    async def stream(body, user, *, turn=None):
         users.append(user)
         assert body.messages[0].content == "hello"
-        yield AssistantEvent(event="start", data={"turn_id": "one"})
+        yield AssistantEvent(
+            event="start", data={"turn_id": str(turn.id) if turn else "one"}
+        )
         yield AssistantEvent(event="text_delta", data={"text": "你好\n世界"})
         yield AssistantEvent(event="done", data={"usage": None, "tool_calls": 0})
 
@@ -163,6 +166,8 @@ def test_http_contract(application, monkeypatch):
         )
         try:
             await Tortoise.generate_schemas()
+            await User.create(id=1, username="owner", password="unused", role="user")
+            await User.create(id=2, username="other", password="unused", role="admin")
             provider = await AIProvider.create(
                 name="Enabled",
                 base_url="https://private.example",
@@ -211,6 +216,115 @@ def test_http_contract(application, monkeypatch):
                 )
                 assert users[0].id == 1
                 assert users[0].perms.indexer_ids == []
+                created = await client.post(
+                    "/_api/assistant/conversations",
+                    json={"model": BODY["model"]},
+                    headers=headers,
+                )
+                conversation_id = created.json()["data"]["id"]
+                path = f"/_api/assistant/conversations/{conversation_id}"
+                reply = await client.post(
+                    path + "/chat",
+                    json={
+                        "model": BODY["model"],
+                        "prompt": "hello",
+                        "request_id": "first",
+                    },
+                    headers=headers,
+                )
+                assert "event: done" in reply.text
+                history = await client.get(path + "/turns", headers=headers)
+                assert history.headers["cache-control"] == "no-store"
+                assert history.json()["data"]["items"][0]["content"] == "你好\n世界"
+                renamed = await client.patch(
+                    path, json={"title": "Restored chat"}, headers=headers
+                )
+                assert renamed.json()["data"]["title"] == "Restored chat"
+                app.shared_ctx.sessions["other-session"] = SimpleNamespace(
+                    id=2,
+                    role=UserRole.ADMIN,
+                    expire_at=timezone.now() + timedelta(hours=1),
+                )
+                other_headers = {"authorization": "Bearer other-session"}
+                other = await client.get(path + "/turns", headers=other_headers)
+                assert other.status_code == 404
+                app.shared_ctx.sessions["browser-session"].role = UserRole.ADMIN
+                graph = await FlowGraph.create(
+                    name="Upload fixture", category="indexer", state="draft"
+                )
+                canvas = {
+                    "nodes": [
+                        {
+                            "id": "script",
+                            "data": {
+                                "$schema": "script",
+                                "script": {
+                                    "language": "python",
+                                    "code": "# Original\n" * 16000,
+                                },
+                            },
+                        }
+                    ],
+                    "edges": [],
+                }
+                upload = {"workflow_id": graph.id, "draft_version": 0, "canvas": canvas}
+                assert len(dumps(upload)) > 128 * 1024
+                for auth, status in (
+                    ({"authorization": "Bearer invalid"}, 401),
+                    (other_headers, 404),
+                ):
+                    denied = await client.post(
+                        path + "/snapshots", json=upload, headers=auth
+                    )
+                    assert denied.status_code == status
+                attached = await client.post(
+                    path + "/snapshots", json=upload, headers=headers
+                )
+                assert attached.status_code == 200
+                assert attached.headers["cache-control"] == "no-store"
+                reference = attached.json()["data"]
+                app.shared_ctx.sessions["browser-session"].role = UserRole.USER
+                denied = await client.post(
+                    path + "/snapshots", json=upload, headers=headers
+                )
+                assert denied.status_code == 403
+                app.shared_ctx.sessions["browser-session"].role = UserRole.ADMIN
+                repeated = await client.post(
+                    path + "/snapshots", json=upload, headers=headers
+                )
+                assert repeated.json()["data"] == reference
+                reply = await client.post(
+                    path + "/chat",
+                    json={
+                        "model": BODY["model"],
+                        "prompt": "hello",
+                        "request_id": "attached",
+                        "context": {
+                            "page_type": "workflow_designer",
+                            "route": f"/settings/workflows/graphs/{graph.id}",
+                            "resource_id": graph.id,
+                            "draft_version": 0,
+                            "snapshot_id": reference["snapshot_id"],
+                            "unsaved": True,
+                            "selected_node_ids": ["script"],
+                        },
+                    },
+                    headers=headers,
+                )
+                assert "event: done" in reply.text
+                history = await client.get(path + "/turns", headers=headers)
+                stored = history.json()["data"]["items"][-1]["context"]
+                assert "canvas" not in stored
+                assert stored["snapshot_id"] == reference["snapshot_id"]
+                await graph.refresh_from_db()
+                assert graph.draft is None
+                listing = await client.get(
+                    "/_api/assistant/conversations", headers=other_headers
+                )
+                assert listing.json()["data"]["items"] == []
+                await client.delete(path, headers=headers)
+                missing = await client.get(path + "/turns", headers=headers)
+                assert missing.status_code == 404
         finally:
             await Tortoise.close_connections()
 

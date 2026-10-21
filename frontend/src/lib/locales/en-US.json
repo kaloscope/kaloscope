@@ -999,13 +999,19 @@
     "ai_output_truncated": "The AI output was truncated; increase the output token limit or shorten the requested response.",
     "ai_output_refused": "The model refused the request or filtered its response; review the prompt.",
     "ai_assistant_limit": "This request exceeded a processing limit. Narrow the scope or split the task.",
-    "assistant_context_limit": "The current page contains too much data. Ask from the workflow list.",
+    "assistant_context_limit": "The current input is too large. Narrow the question or page snapshot. Your history is saved.",
     "assistant_context_invalid": "Couldn't read page details. Wait for the page to load and try again.",
     "assistant_models_failed": "Couldn't load models. Reopen the assistant to retry.",
     "assistant_model_required": "Select an available model.",
     "assistant_history_limit": "Conversation limit reached. Start a new chat.",
     "assistant_stream_invalid": "The reply format is invalid. Try again.",
-    "assistant_stream_interrupted": "Try again to generate the reply."
+    "assistant_stream_interrupted": "Try again to generate the reply.",
+    "assistant_busy": "This conversation is generating a reply. Refresh shortly.",
+    "assistant_request_exists": "This request was already submitted. Refresh the conversation to see its result.",
+    "assistant_result_limit": "The tool result is too large. Narrow the query or request a smaller page.",
+    "assistant_compaction_failed": "Context summarization did not complete. Original history is preserved. Retry or select another model.",
+    "assistant_history_failed": "Could not load or update the conversation. Please retry.",
+    "assistant_title_invalid": "Use a conversation title of 1–120 characters."
   },
   "ai": {
     "custom": "Custom provider",
@@ -1058,7 +1064,6 @@
     "latest": "Jump to Latest",
     "turn_actions": "Latest Reply Actions",
     "welcome": "Kaloscope Assistant",
-    "memory_only": "Chat history isn't saved and clears on reload.",
     "you": "You",
     "unsaved": "Unsaved",
     "saved": "Saved",
@@ -1081,7 +1086,8 @@
       "ai_model_missing": "Model no longer configured. Reopen the assistant and select a model.",
       "ai_timeout": "Request timed out. Try again or split the task.",
       "ai_request_rejected": "The provider rejected the request. Check the API URL, model, or message.",
-      "ai_output_truncated": "Output limit reached. Ask for less detail or split the task."
+      "ai_output_truncated": "Output limit reached. Ask for less detail or split the task.",
+      "flow_draft_conflict": "The preview base version does not match the saved draft. Read the current version and review the changes again."
     },
     "pages": {
       "workflows": "Workflows",
@@ -1095,7 +1101,10 @@
       "get_workflow_logs": "Read Run Logs",
       "validate_workflow": "Validate Workflow",
       "preview_workflow_draft": "Preview Draft Changes",
-      "navigate": "Suggest Page"
+      "navigate": "Suggest Page",
+      "read_workflow_log": "Read log details",
+      "read_workflow_snapshot": "Read graph snapshot",
+      "read_conversation_history": "Read original conversation"
     },
     "tool_status": {
       "running": "Running",
@@ -1109,6 +1118,16 @@
       "stopped": "Stopped",
       "interrupted": "Connection Interrupted",
       "error": "Request Failed"
-    }
+    },
+    "saved_history": "Conversations are saved to your account. Long conversations are summarized automatically while original records stay available.",
+    "history": "Conversation history",
+    "rename_chat": "Rename conversation",
+    "delete_chat": "Delete conversation",
+    "delete_chat_confirm": "Delete this conversation, its messages, tool records, and snapshots? This cannot be undone.",
+    "no_history": "No saved conversations yet",
+    "load_older": "Load older records",
+    "compacting": "Preparing conversation context…",
+    "remote_busy": "This conversation is generating a reply in another page",
+    "refresh_chat": "Refresh conversation"
   }
 }
