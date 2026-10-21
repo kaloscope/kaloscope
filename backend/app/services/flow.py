@@ -24,7 +24,11 @@ from app.core.exceptions import (
 )
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node, NodeSchema
-from app.core.flow.validation import compress_document, validate_document
+from app.core.flow.validation import (
+    comparison_document,
+    compress_document,
+    validate_document,
+)
 from app.models.flow import (
     FlowDraftRevision,
     FlowGraph,
@@ -508,8 +512,8 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
         if not graph.editable:
             raise ForbiddenException(ErrorCode.FLOW_NOT_EDITABLE)
         cls._check_version(graph, body.draft_version)
-        proposed = compress_document(body)
-        previous = graph.draft or {"nodes": [], "edges": []}
+        proposed = comparison_document(compress_document(body))
+        previous = comparison_document(graph.draft or {"nodes": [], "edges": []})
         changes = []
         for collection, kind in (("nodes", "node"), ("edges", "edge")):
             before = {item["id"]: item for item in previous[collection]}

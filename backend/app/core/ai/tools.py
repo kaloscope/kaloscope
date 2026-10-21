@@ -6,7 +6,20 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.ai.documents import (
+    GraphProposal,
+    GraphReference,
+    apply_changes,
+    value_summary,
+)
+from app.core.ai.queries import (
+    log_detail,
+    value_page,
+    workflow_details,
+    workflow_list,
+    workflow_logs,
+)
+from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.models.assistant import WORKFLOW_PATH, ResourceID, WorkflowOrdering
 from app.models.flow import (
     GraphCategory,
@@ -15,18 +28,12 @@ from app.models.flow import (
     GraphState,
     GraphWrite,
 )
-from app.models.mcp import (
-    NodeTypesResult,
-    PageResult,
-    WorkflowDetails,
-    WorkflowLogs,
-    WorkflowResult,
-)
+from app.models.mcp import NodeTypesResult
 from app.models.user import UserInfo, UserRole
-from app.services.flow import FlowGraphService, FlowLogService
+from app.services.flow import FlowGraphService
 from app.utils.json import dumps, loads
 
-MAX_TOOL_RESULT_BYTES = 256 * 1024
+MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
 
 
@@ -66,16 +73,44 @@ class NodeQuery(ToolArguments):
     node_type: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class WorkflowValidation(WorkflowID):
-    """Validate proposed editor contents without executing nodes."""
-
-    document: GraphDocument
+class WorkflowValidation(GraphReference):
+    """Validate an exact saved version or immutable captured canvas."""
 
 
-class WorkflowPreview(WorkflowID):
-    """Preview changes against the version originally read by the caller."""
+class WorkflowPreview(GraphProposal):
+    """Apply bounded edits and preview them against the original saved version."""
 
-    document: GraphWrite
+
+class LogDetailQuery(WorkflowID):
+    """Read a bounded page from one retained log record."""
+
+    log_id: ResourceID
+    field: Literal["retval", "bootparams", "node_data", "exc_info"] = "retval"
+    path: list[str | int] = Field(default_factory=list, max_length=10)
+    offset: int = Field(default=0, ge=0, strict=True)
+    limit: int = Field(default=10, ge=1, le=2000, strict=True)
+
+
+class SnapshotQuery(GraphReference):
+    """Read original node fields or paginated structure from an exact graph."""
+
+    collection: Literal["nodes", "edges"] = "nodes"
+    node_id: str | None = Field(default=None, max_length=64)
+    field_id: str | None = Field(default=None, max_length=128)
+    path: list[str | int] = Field(default_factory=list, max_length=10)
+    offset: int = Field(default=0, ge=0, strict=True)
+    limit: int = Field(default=10, ge=1, le=2000, strict=True)
+
+
+class HistoryQuery(ToolArguments):
+    """Retrieve exact earlier turn text or an actual tool result from this
+    conversation."""
+
+    turn_id: ResourceID | None = None
+    before: ResourceID | None = None
+    tool_call_id: str | None = Field(default=None, max_length=64)
+    offset: int = Field(default=0, ge=0, strict=True)
+    limit: int = Field(default=2000, ge=1, le=8000, strict=True)
 
 
 class NavigationTarget(ToolArguments):
@@ -112,7 +147,7 @@ class AssistantTool:
 
     name: str
     description: str
-    arguments: type[ToolArguments]
+    arguments: type[BaseModel]
     admin: bool = False
 
 
@@ -125,37 +160,65 @@ TOOLS = (
     ),
     AssistantTool(
         "get_workflow",
-        "Read an accessible workflow, its saved draft_version, draft, and published "
-        "definition. These do not include unsaved browser edits.",
+        "Read compact saved workflow facts and an exact graph base reference. "
+        "Use read_workflow_snapshot for original fields. Unsaved "
+        "edits belong to page snapshots.",
         WorkflowID,
     ),
     AssistantTool(
         "list_node_types",
-        "Read registered node fields, defaults and connection handles. Read these "
-        "before composing graphs. Filter by exact node_type to narrow results.",
+        "List a compact node catalog, or read fields and handles "
+        "for an exact node_type."
+        "Read exact schemas before editing fields or constructing nodes.",
         NodeQuery,
     ),
     AssistantTool(
         "get_workflow_logs",
-        "Read recent retained execution groups for an accessible workflow directly "
-        "by workflow ID; no page navigation is needed. Logged failures describe "
-        "the workflow, not a failure of this tool.",
+        "Read compact execution facts, exact output counts, errors and small samples. "
+        "Use read_workflow_log for paginated output or full exception text. "
+        "Logged failures describe the workflow, not this tool.",
         WorkflowLogQuery,
     ),
     AssistantTool(
         "validate_workflow",
-        "Check proposed workflow nodes and edges without saving or executing them. "
-        "Return issues located by node, field and edge.",
+        "Validate the full graph by workflow_id, draft_version and "
+        "optional snapshot_id."
+        "Use the captured page snapshot for unsaved edits. Never "
+        "regenerate the document."
+        "This checks structure and fields without executing the workflow.",
         WorkflowValidation,
         admin=True,
     ),
     AssistantTool(
         "preview_workflow_draft",
-        "Compare a proposed graph with its saved draft_version and validate it. "
-        "Return changes and an internal editor path. This does not save changes; "
-        "on a version conflict, read the latest workflow and review again.",
+        "Apply bounded changes to an exact base and preview "
+        "against its saved draft_version."
+        "Use snapshot_id for captured unsaved edits; changes=[] "
+        "previews the unchanged base."
+        "Never regenerate unchanged nodes or scripts. No saving. "
+        "Conflicts require review.",
         WorkflowPreview,
         admin=True,
+    ),
+    AssistantTool(
+        "read_workflow_log",
+        "Read an exact log field or nested path with explicit "
+        "pagination; IDs come from get_workflow_logs.",
+        LogDetailQuery,
+    ),
+    AssistantTool(
+        "read_workflow_snapshot",
+        "Read original graph fields or structure by an exact base. "
+        "Use node_id, field_id and path to inspect scripts; "
+        "paginate long text.",
+        SnapshotQuery,
+    ),
+    AssistantTool(
+        "read_conversation_history",
+        "Read exact turn text or completed tool arguments/results from this "
+        "conversation after context compaction. Omit turn_id to list "
+        "older turn IDs; use before to page the index.",
+        HistoryQuery,
     ),
     AssistantTool(
         "navigate",
@@ -219,13 +282,16 @@ def tool_error(code: ErrorCode, guidance: str) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "guidance": guidance}}
 
 
-async def execute_tool(name: str, arguments: str, user: UserInfo) -> dict[str, Any]:
+async def execute_tool(
+    name: str, arguments: str, user: UserInfo, *, conversation_id: int | None = None
+) -> dict[str, Any]:
     """Validate and invoke a registered tool using the current account's services.
 
     Args:
         name: Model-selected function name, checked against the server catalog.
         arguments: Complete JSON arguments assembled by the SDK.
         user: Authenticated caller; identity never comes from model arguments.
+        conversation_id: Server-owned conversation scope for immutable references.
 
     Returns:
         Bounded JSON data or a sanitized recoverable tool error.
@@ -253,52 +319,138 @@ async def execute_tool(name: str, arguments: str, user: UserInfo) -> dict[str, A
                         path += f"/{'r/' if readonly else ''}{graph.id}"
                     result = NavigationResult(target=args, path=path)
                 case WorkflowList():
-                    result = PageResult[WorkflowResult].model_validate(
-                        loads(
-                            dumps(
-                                await FlowGraphService.list_graphs(
-                                    GraphQuery(**args.model_dump()), user
-                                )
-                            )
-                        )
-                    )
+                    result = await workflow_list(GraphQuery(**args.model_dump()), user)
+                case LogDetailQuery():
+                    result = await log_detail(**args.model_dump(), user=user)
                 case WorkflowLogQuery():
-                    logs = await FlowLogService.get_accessible_logs(
-                        args.workflow_id, user
-                    )
-                    result = WorkflowLogs(runs=loads(dumps(logs[: args.limit])))
-                case WorkflowValidation():
-                    result = await FlowGraphService.validate_graph(
-                        args.workflow_id, args.document, user
-                    )
-                case WorkflowPreview():
-                    result = await FlowGraphService.preview_draft(
-                        args.workflow_id, args.document, user
-                    )
-                case WorkflowID():
-                    result = WorkflowDetails.model_validate(
-                        loads(
-                            dumps(
-                                await FlowGraphService.get_details(
-                                    args.workflow_id, user
-                                )
+                    result = await workflow_logs(args.workflow_id, args.limit, user)
+                case WorkflowValidation() | WorkflowPreview() | SnapshotQuery():
+                    document = await resolve_document(args, conversation_id, user)
+                    if isinstance(args, SnapshotQuery):
+                        value = document[args.collection]
+                        if args.node_id is not None:
+                            value = next(
+                                (
+                                    node
+                                    for node in document["nodes"]
+                                    if node["id"] == args.node_id
+                                ),
+                                None,
                             )
+                            if value is None:
+                                raise NotFoundException
+                            if args.field_id is not None:
+                                value = value["data"][args.field_id]
+                        for key in args.path:
+                            value = value[key]
+                        result = {
+                            "base": {
+                                "workflow_id": args.workflow_id,
+                                "draft_version": args.draft_version,
+                                "snapshot_id": args.snapshot_id,
+                            },
+                            **value_page(value, args.offset, args.limit),
+                        }
+                    elif isinstance(args, WorkflowValidation):
+                        result = (
+                            await FlowGraphService.validate_graph(
+                                args.workflow_id,
+                                GraphDocument.model_validate(document),
+                                user,
+                            )
+                        ).model_dump(mode="json")
+                        result.update(
+                            scope="structure_and_fields",
+                            executed=False,
+                            base=args.model_dump(),
                         )
+                    else:
+                        proposal = apply_changes(document, args.changes)
+                        preview = await FlowGraphService.preview_draft(
+                            args.workflow_id,
+                            GraphWrite(
+                                **proposal.model_dump(),
+                                draft_version=args.draft_version,
+                            ),
+                            user,
+                        )
+                        result = preview.model_dump(mode="json")
+                        result["change_count"] = len(preview.changes)
+                        result["changes"] = [
+                            {
+                                "kind": change.kind,
+                                "id": change.id,
+                                "before": value_summary(change.before),
+                                "after": value_summary(change.after),
+                            }
+                            for change in preview.changes[:30]
+                        ]
+                        result["omitted_changes"] = max(0, len(preview.changes) - 30)
+                        result["base"] = {
+                            "workflow_id": args.workflow_id,
+                            "draft_version": args.draft_version,
+                            "snapshot_id": args.snapshot_id,
+                        }
+                        result["requested_change_count"] = len(args.changes)
+                        result["comparison"] = "saved_draft"
+                        baseline = await FlowGraphService.preview_draft(
+                            args.workflow_id,
+                            GraphWrite(**document, draft_version=args.draft_version),
+                            user,
+                        )
+                        result["pre_existing_change_count"] = len(baseline.changes)
+                        result["base_kind"] = (
+                            "snapshot" if args.snapshot_id else "saved_draft"
+                        )
+                        if conversation_id is not None:
+                            from app.services.assistant_sessions import (
+                                AssistantSessionService,
+                            )
+
+                            snapshot = await AssistantSessionService.snapshot(
+                                conversation_id,
+                                args.workflow_id,
+                                args.draft_version,
+                                proposal,
+                                "proposal",
+                                user,
+                            )
+                            result["proposal_snapshot_id"] = snapshot.id
+                case WorkflowID():
+                    result = await workflow_details(
+                        args.workflow_id, user, conversation_id
                     )
                 case NodeQuery():
-                    result = NodeTypesResult.model_validate(
-                        loads(
-                            dumps(
-                                FlowGraphService.get_node_schemas(
-                                    args.category, args.node_type
-                                )
-                            )
-                        )
+                    schemas = FlowGraphService.get_node_schemas(
+                        args.category, args.node_type
                     )
-        data = result.model_dump(mode="json")
+                    result = NodeTypesResult.model_validate(
+                        loads(dumps(schemas))
+                    ).model_dump(mode="json")
+                    if args.node_type is None:
+                        result = {
+                            group: [
+                                {
+                                    "node_type": node["node_type"],
+                                    "name": node["name"],
+                                    "categories": node["categories"],
+                                }
+                                for node in nodes
+                            ]
+                            for group, nodes in result.items()
+                        }
+                case HistoryQuery():
+                    result = await read_history(args, conversation_id, user)
+        data = loads(
+            dumps(
+                result.model_dump(mode="json")
+                if isinstance(result, BaseModel)
+                else result
+            )
+        )
         if len(dumps(data)) > MAX_TOOL_RESULT_BYTES:
             return tool_error(
-                ErrorCode.AI_ASSISTANT_LIMIT,
+                ErrorCode.ASSISTANT_RESULT_LIMIT,
                 "The result is too large. Narrow the query or reduce the page size.",
             )
         return {"ok": True, "data": data}
@@ -314,6 +466,12 @@ async def execute_tool(name: str, arguments: str, user: UserInfo) -> dict[str, A
             "For a missing resource or version conflict, read the latest accessible "
             "list or workflow before retrying. Do not guess IDs or versions.",
         )
+    except (ValueError, KeyError, IndexError, TypeError):
+        return tool_error(
+            ErrorCode.BAD_REQUEST,
+            "Check the referenced IDs, paths, and ordered changes. "
+            "Do not alter the base version.",
+        )
     except TimeoutError:
         return tool_error(
             ErrorCode.AI_TIMEOUT, "The tool timed out; report the failure."
@@ -322,3 +480,118 @@ async def execute_tool(name: str, arguments: str, user: UserInfo) -> dict[str, A
         return tool_error(
             ErrorCode.INTERNAL_SERVER_ERROR, "The tool failed; report the failure."
         )
+
+
+async def resolve_document(
+    reference: GraphReference, conversation_id: int | None, user: UserInfo
+) -> dict:
+    """Resolve the full authorized base without model-generated graph content.
+
+    Args:
+        reference: Exact resource, version, and optional immutable snapshot.
+        conversation_id: Server-owned scope for snapshot lookup.
+        user: Account whose business permissions to recheck.
+
+    Returns:
+        Complete compressed graph retaining original script text.
+
+    Raises:
+        NotFoundException: If the snapshot belongs elsewhere or does not match.
+        KaloscopeException: If the saved version has changed.
+    """
+    graph = await FlowGraphService.get_accessible(reference.workflow_id, user)
+    if reference.snapshot_id is not None:
+        if conversation_id is None:
+            raise NotFoundException
+        from app.services.assistant_sessions import AssistantSessionService
+
+        snapshot = await AssistantSessionService.read_snapshot(
+            conversation_id, reference.snapshot_id, user
+        )
+        if (
+            snapshot.workflow_id != reference.workflow_id
+            or snapshot.draft_version != reference.draft_version
+        ):
+            raise NotFoundException
+        return snapshot.document
+    FlowGraphService._check_version(graph, reference.draft_version)
+    return graph.draft or {"nodes": [], "edges": []}
+
+
+async def read_history(
+    args: HistoryQuery, conversation_id: int | None, user: UserInfo
+) -> dict:
+    """Read a bounded historical value after account and resource checks.
+
+    Args:
+        args: Exact turn or tool record and pagination.
+        conversation_id: Current server-owned conversation.
+        user: Authenticated owner.
+
+    Returns:
+        Paginated source text or tool arguments/results with their turn identity.
+
+    Raises:
+        NotFoundException: If a reference is missing or belongs elsewhere.
+        KaloscopeException: If source resource permissions have changed.
+    """
+    from app.models.assistant import AssistantToolCall, AssistantTurn
+    from app.services.assistant_sessions import AssistantSessionService
+
+    if conversation_id is None:
+        raise NotFoundException
+    await AssistantSessionService.owned(conversation_id, user)
+    if args.turn_id is None:
+        query = AssistantTurn.filter(conversation_id=conversation_id).exclude(
+            status="streaming"
+        )
+        if args.before is not None:
+            query = query.filter(id__lt=args.before)
+        turns = await query.order_by("-id").limit(6)
+        items = []
+        for record in turns[:5]:
+            if await AssistantSessionService.allowed(record.resource_ids, user):
+                items.append(
+                    {
+                        "turn_id": record.id,
+                        "prompt": value_summary(record.prompt),
+                        "status": record.status,
+                        "tool_calls": await AssistantToolCall.filter(
+                            turn_id=record.id
+                        ).values("call_id", "name", "status"),
+                    }
+                )
+        return {
+            "items": items,
+            "next_before": turns[4].id if len(turns) > 5 else None,
+            "historical": True,
+        }
+    turn = await AssistantTurn.get_or_none(
+        id=args.turn_id, conversation_id=conversation_id
+    )
+    if turn is None:
+        raise NotFoundException
+    if not await AssistantSessionService.allowed(turn.resource_ids, user):
+        raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
+    value = dumps(
+        {
+            "prompt": turn.prompt,
+            "reply": turn.content,
+            "status": turn.status,
+            "context": turn.context,
+        }
+    ).decode()
+    if args.tool_call_id is not None:
+        call = await AssistantToolCall.get_or_none(
+            turn_id=turn.id, call_id=args.tool_call_id
+        )
+        if call is None:
+            raise NotFoundException
+        value = dumps(
+            {"name": call.name, "arguments": call.arguments, "result": call.result}
+        ).decode()
+    return {
+        "turn_id": turn.id,
+        "historical": True,
+        **value_page(value, args.offset, args.limit),
+    }

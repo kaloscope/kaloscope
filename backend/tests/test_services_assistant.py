@@ -319,12 +319,15 @@ def test_logs_without_navigation(monkeypatch, with_context):
     configure(monkeypatch, handler)
     monkeypatch.setattr(service.FlowGraphService, "get_accessible", AsyncMock())
     read_logs = AsyncMock(
-        return_value=[
-            [{"at": at, "type": "start", "data": None, "document": None}]
-            for at in [newest_at, previous_at]
-        ]
+        return_value={
+            "workflow_id": 5,
+            "runs": [
+                {"started_at": at, "status": "incomplete"}
+                for at in [newest_at, previous_at]
+            ],
+        }
     )
-    monkeypatch.setattr(tools.FlowLogService, "get_accessible_logs", read_logs)
+    monkeypatch.setattr(tools, "workflow_logs", read_logs)
     body = AssistantChat.model_validate(
         {
             **chat("读取工作流 5 的最近运行日志").model_dump(),
@@ -343,8 +346,10 @@ def test_logs_without_navigation(monkeypatch, with_context):
     events = asyncio.run(collect(body))
 
     second = requests[1]["messages"]
-    read_logs.assert_awaited_once_with(5, ADMIN)
-    assert json.loads(second[-1]["content"])["data"]["runs"][0][0]["at"] == newest_at
+    read_logs.assert_awaited_once_with(5, 5, ADMIN)
+    assert (
+        json.loads(second[-1]["content"])["data"]["runs"][0]["started_at"] == newest_at
+    )
     assert [event.data["name"] for event in events if event.event == "tool_start"] == [
         "get_workflow_logs"
     ]

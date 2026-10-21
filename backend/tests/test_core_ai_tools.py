@@ -36,6 +36,9 @@ def test_grants():
         "list_workflows",
         "get_workflow",
         "get_workflow_logs",
+        "read_workflow_log",
+        "read_workflow_snapshot",
+        "read_conversation_history",
         "list_node_types",
         "navigate",
     }
@@ -208,7 +211,7 @@ def test_preview_does_not_write():
             }
             validation = await tools.execute_tool(
                 "validate_workflow",
-                json.dumps({"workflow_id": graph.id, "document": document}),
+                json.dumps({"workflow_id": graph.id, "draft_version": 0}),
                 ADMIN,
             )
             preview = await tools.execute_tool(
@@ -216,7 +219,8 @@ def test_preview_does_not_write():
                 json.dumps(
                     {
                         "workflow_id": graph.id,
-                        "document": {**document, "draft_version": 0},
+                        "draft_version": 0,
+                        "changes": [{"op": "add_node", "node": document["nodes"][0]}],
                     }
                 ),
                 ADMIN,
@@ -226,7 +230,8 @@ def test_preview_does_not_write():
                 json.dumps(
                     {
                         "workflow_id": graph.id,
-                        "document": {**document, "draft_version": 1},
+                        "draft_version": 1,
+                        "changes": [],
                     }
                 ),
                 ADMIN,
@@ -258,12 +263,12 @@ def test_result_limit(monkeypatch):
     monkeypatch.setattr(tools, "MAX_TOOL_RESULT_BYTES", 1)
     result = asyncio.run(tools.execute_tool("list_node_types", "{}", ADMIN))
 
-    assert result["error"]["code"] == ErrorCode.AI_ASSISTANT_LIMIT
+    assert result["error"]["code"] == ErrorCode.ASSISTANT_RESULT_LIMIT
 
 
 def test_timeout(monkeypatch):
     monkeypatch.setattr(
-        tools.FlowGraphService, "get_details", AsyncMock(side_effect=TimeoutError)
+        tools.FlowGraphService, "get_accessible", AsyncMock(side_effect=TimeoutError)
     )
     result = asyncio.run(tools.execute_tool("get_workflow", '{"workflow_id":1}', ADMIN))
 
@@ -273,7 +278,7 @@ def test_timeout(monkeypatch):
 def test_error_redaction(monkeypatch):
     monkeypatch.setattr(
         tools.FlowGraphService,
-        "get_details",
+        "get_accessible",
         AsyncMock(side_effect=RuntimeError("private-password")),
     )
     result = asyncio.run(tools.execute_tool("get_workflow", '{"workflow_id":1}', ADMIN))

@@ -8,7 +8,7 @@ import type { AssistantStreamEvent } from '$lib/types';
  * @returns A typed event, or null for an unknown extension event.
  */
 function parseEvent(event: string, source: string): AssistantStreamEvent | null {
-  if (!['start', 'text_delta', 'tool_start', 'tool_result', 'done', 'error'].includes(event)) return null;
+  if (!['start', 'compacting', 'text_delta', 'tool_start', 'tool_result', 'done', 'error'].includes(event)) return null;
   let value: unknown;
   try {
     value = JSON.parse(source);
@@ -20,6 +20,7 @@ function parseEvent(event: string, source: string): AssistantStreamEvent | null 
   const hasTool = typeof data.id === 'string' && typeof data.name === 'string';
   const valid =
     (event === 'start' && typeof data.turn_id === 'string') ||
+    (event === 'compacting' && typeof data.active === 'boolean') ||
     (event === 'text_delta' && typeof data.text === 'string') ||
     (event === 'tool_start' && hasTool) ||
     (event === 'tool_result' &&

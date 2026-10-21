@@ -999,13 +999,19 @@
     "ai_output_truncated": "AI 输出被截断，请增加输出 Token 限制或缩短要求的内容",
     "ai_output_refused": "模型拒绝回答或返回内容被过滤，请调整提示词",
     "ai_assistant_limit": "本次请求超出处理限制，请缩小范围或拆分任务",
-    "assistant_context_limit": "当前页面内容过多，请从工作流列表发起提问",
+    "assistant_context_limit": "本次请求内容过多，请缩短问题或从工作流列表提问",
     "assistant_context_invalid": "无法读取页面信息，请等待页面加载后重试",
     "assistant_models_failed": "模型加载失败，请重新打开助手重试",
     "assistant_model_required": "请选择可用模型",
     "assistant_history_limit": "对话已达上限，请开始新对话",
     "assistant_stream_invalid": "回复格式异常，请重试",
-    "assistant_stream_interrupted": "请重试以重新获取回复"
+    "assistant_stream_interrupted": "请重试以重新获取回复",
+    "assistant_busy": "当前对话正在生成回复，请稍后刷新",
+    "assistant_request_exists": "请求已提交，请刷新对话查看结果",
+    "assistant_result_limit": "工具返回内容过多，请缩小查询范围或减少每页条数",
+    "assistant_compaction_failed": "上下文整理失败，原始对话已保留，请重试或选择其他模型",
+    "assistant_history_failed": "对话加载或更新失败，请重试",
+    "assistant_title_invalid": "对话名称不能为空，且不能超过 120 个字符"
   },
   "ai": {
     "custom": "自定义提供商",
@@ -1058,7 +1064,6 @@
     "latest": "回到最新",
     "turn_actions": "最新回复操作",
     "welcome": "Kaloscope 助手",
-    "memory_only": "对话不会保存，刷新后清空",
     "you": "你",
     "unsaved": "未保存",
     "saved": "已保存",
@@ -1081,7 +1086,8 @@
       "ai_model_missing": "模型已移除，请重新打开助手并重新选择",
       "ai_timeout": "请求超时，请重试或拆分任务",
       "ai_request_rejected": "请求被提供商拒绝，请检查 API 地址、模型或问题内容",
-      "ai_output_truncated": "已达输出上限，请简化要求或拆分任务"
+      "ai_output_truncated": "已达输出上限，请简化要求或拆分任务",
+      "flow_draft_conflict": "预览版本与已保存版本不一致，请读取最新草稿后重新预览"
     },
     "pages": {
       "workflows": "工作流列表",
@@ -1095,7 +1101,10 @@
       "get_workflow_logs": "读取运行日志",
       "validate_workflow": "校验工作流",
       "preview_workflow_draft": "预览草稿差异",
-      "navigate": "提供页面入口"
+      "navigate": "提供页面入口",
+      "read_workflow_log": "读取日志详情",
+      "read_workflow_snapshot": "读取画布快照",
+      "read_conversation_history": "读取对话记录"
     },
     "tool_status": {
       "running": "执行中",
@@ -1109,6 +1118,16 @@
       "stopped": "已停止",
       "interrupted": "连接中断",
       "error": "请求失败"
-    }
+    },
+    "saved_history": "对话按账号保存，长对话会自动整理上下文，并保留原始记录",
+    "history": "历史对话",
+    "rename_chat": "重命名对话",
+    "delete_chat": "删除对话",
+    "delete_chat_confirm": "删除此对话及全部记录后无法恢复，是否删除？",
+    "no_history": "暂无历史对话",
+    "load_older": "加载更早的记录",
+    "compacting": "正在整理上下文...",
+    "remote_busy": "当前对话正在其他页面生成回复",
+    "refresh_chat": "刷新对话"
   }
 }

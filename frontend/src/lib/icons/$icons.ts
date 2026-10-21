@@ -296,6 +296,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     hFlip: false,
     body: '<path fill="currentColor" d="M12.75 7.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5zM22 12c0-5.523-4.477-10-10-10S2 6.477 2 12a9.96 9.96 0 0 0 1.115 4.592l-1.068 3.823a1.25 1.25 0 0 0 1.54 1.54l3.826-1.067A9.96 9.96 0 0 0 12 22c5.523 0 10-4.477 10-10M3.5 12a8.5 8.5 0 1 1 4.367 7.43l-.27-.15l-3.986 1.111l1.113-3.984l-.151-.27A8.46 8.46 0 0 1 3.5 12"/>'
   },
+  chatMultiple: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="currentColor" d="M9.562 3a7.5 7.5 0 0 0-6.798 10.673l-.724 2.842a1.25 1.25 0 0 0 1.504 1.524c.75-.18 1.903-.457 2.93-.702A7.5 7.5 0 1 0 9.561 3m-6 7.5a6 6 0 1 1 3.33 5.375l-.244-.121l-.264.063c-.923.22-1.99.475-2.788.667l.69-2.708l.07-.276l-.13-.253a6 6 0 0 1-.664-2.747m11 10.5a7.48 7.48 0 0 1-5.1-2h.1c.718 0 1.415-.089 2.08-.257c.865.482 1.86.757 2.92.757c.96 0 1.866-.225 2.67-.625l.243-.121l.264.063c.922.22 1.966.445 2.74.61c-.175-.751-.414-1.756-.642-2.651l-.07-.276l.13-.253a6 6 0 0 0 .665-2.747a6 6 0 0 0-2.747-5.042a8.4 8.4 0 0 0-.8-2.047a7.503 7.503 0 0 1 4.344 10.263c.253 1.008.509 2.1.671 2.803a1.244 1.244 0 0 1-1.467 1.5a133 133 0 0 1-2.913-.64a7.5 7.5 0 0 1-3.088.663"/>'
+  },
   chatWarning: {
     left: 0,
     top: 0,
@@ -1585,6 +1595,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     vFlip: false,
     hFlip: false,
     body: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zm13-6l-4 4l-4-4m7 4v13m3-5v.01M18 12v.01"/>'
+  },
+  focusCentered: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0M4 8V6a2 2 0 0 1 2-2h2M4 16v2a2 2 0 0 0 2 2h2m8-16h2a2 2 0 0 1 2 2v2m-4 12h2a2 2 0 0 0 2-2v-2"/>'
   },
   link: {
     left: 0,

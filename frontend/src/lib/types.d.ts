@@ -116,6 +116,21 @@ export type AssistantPageContext =
  */
 export type AssistantModelProvider = Pick<AIProvider, 'id' | 'name' | 'model_ids'>;
 
+/** Account-owned conversation metadata without model context or snapshots. */
+export type AssistantConversation = {
+  id: number;
+  title: string;
+  model: AIModelSelection;
+  updated_at: string;
+  compacted: boolean;
+  busy: boolean;
+};
+
+/** Persisted page metadata; full canvases remain behind server-owned references. */
+export type AssistantStoredContext =
+  | Extract<AssistantPageContext, { page_type: 'workflows' }>
+  | (Omit<Extract<AssistantPageContext, { page_type: 'workflow_designer' }>, 'canvas'> & { snapshot_id?: number });
+
 /**
  * A registered internal page offered by the navigation tool.
  */
@@ -146,7 +161,8 @@ export type AssistantMessage =
  * A validated event from the assistant's streaming response.
  */
 export type AssistantStreamEvent =
-  | { event: 'start'; data: { turn_id: string } }
+  | { event: 'start'; data: { turn_id: string; conversation_id?: number } }
+  | { event: 'compacting'; data: { active: boolean; compacted?: boolean } }
   | { event: 'text_delta'; data: { text: string } }
   | { event: 'tool_start'; data: { id: string; name: string } }
   | { event: 'tool_result'; data: AssistantToolResult }

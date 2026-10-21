@@ -3,7 +3,11 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models.assistant import AssistantChat
+from app.models.assistant import (
+    AssistantChat,
+    AssistantSnapshotRequest,
+    AssistantTurnRequest,
+)
 
 
 def body(messages):
@@ -80,6 +84,29 @@ def designer_context():
         "canvas": {"nodes": [{"id": "one", "data": {"$schema": "start"}}], "edges": []},
         "selected_node_ids": ["one"],
     }
+
+
+@pytest.mark.parametrize("case", ["missing", "ambiguous", "oversized"])
+def test_snapshot_boundaries(case):
+    context = designer_context()
+    if case == "oversized":
+        context["canvas"]["nodes"][0]["data"]["script"] = "x" * (512 * 1024)
+        with pytest.raises(ValidationError, match="snapshot limit"):
+            AssistantSnapshotRequest(
+                workflow_id=3, draft_version=4, canvas=context["canvas"]
+            )
+        return
+    if case == "missing":
+        context.pop("canvas")
+    else:
+        context["snapshot_id"] = 1
+    with pytest.raises(ValidationError):
+        AssistantTurnRequest(
+            model={"provider_id": 1, "model_id": "test"},
+            request_id="test",
+            prompt="Inspect",
+            context=context,
+        )
 
 
 def history_body():
