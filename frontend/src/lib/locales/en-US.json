@@ -1048,7 +1048,7 @@
     "close": "Collapse Assistant",
     "close_shortcut": "Collapse Assistant (Alt+A)",
     "move": "Drag or use arrow keys to move; Home resets position",
-    "reset_position": "Reset Position",
+    "restore_position": "Restore Default Position",
     "new_chat": "New Chat",
     "more": "More Actions",
     "model": "Model",
