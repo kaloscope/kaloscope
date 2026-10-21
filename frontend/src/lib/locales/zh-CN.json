@@ -1048,7 +1048,7 @@
     "close": "收起助手",
     "close_shortcut": "收起助手（Alt+A）",
     "move": "拖动或使用方向键移动，Home 键复位",
-    "reset_position": "复位面板",
+    "restore_position": "恢复默认位置",
     "new_chat": "新对话",
     "more": "更多操作",
     "model": "模型",

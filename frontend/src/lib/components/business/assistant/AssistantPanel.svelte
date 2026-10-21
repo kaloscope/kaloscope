@@ -468,8 +468,7 @@
             </p>
             {#if turn.context}
               <p class="flex items-center gap-1 text-[0.6875rem] leading-4 text-base-content/50">
-                <iconify-icon icon={icons.documentFlowchart} width="0.75rem" class="size-3" aria-hidden="true"
-                ></iconify-icon>
+                <iconify-icon icon={icons.contentView} width="0.75rem" class="size-3" aria-hidden="true"></iconify-icon>
                 {contextLabel(turn.context)}
               </p>
             {/if}
@@ -539,7 +538,7 @@
               disabled={$assistant.busy}
               onclick={() => retry(lastTurn)}
             >
-              <iconify-icon icon={icons.arrowRotateClockwise} width="0.875rem" class="size-3.5" aria-hidden="true"
+              <iconify-icon icon={icons.arrowClockwise} width="0.875rem" class="size-3.5" aria-hidden="true"
               ></iconify-icon>
               {$_('assistant.retry')}
             </button>
@@ -550,8 +549,7 @@
               class="btn gap-1 btn-subtle font-normal btn-xs"
               onclick={() => navigate(destination.path, lastTurn.id)}
             >
-              <iconify-icon icon={icons.arrowNextFilled} width="0.875rem" class="size-3.5" aria-hidden="true"
-              ></iconify-icon>
+              <iconify-icon icon={icons.arrowRight} width="0.875rem" class="size-3.5" aria-hidden="true"></iconify-icon>
               {destination.label}
             </button>
           {/each}
@@ -593,7 +591,7 @@
             <span
               class="flex h-7 min-w-0 shrink items-center gap-1 rounded-full bg-base-content/5 px-2 text-xs text-base-content/70"
             >
-              <iconify-icon icon={icons.documentFlowchart} width="0.875rem" class="size-3.5 shrink-0" aria-hidden="true"
+              <iconify-icon icon={icons.contentView} width="0.875rem" class="size-3.5 shrink-0" aria-hidden="true"
               ></iconify-icon>
               <span class="sr-only">{$_('assistant.context')}:</span>
               <span class="truncate @max-xs:sr-only">{$_(`assistant.pages.${currentPage}`)}</span>
@@ -672,7 +670,7 @@
                     >
                       <iconify-icon icon={icons.arrowReset} width="1rem" class="size-4" aria-hidden="true"
                       ></iconify-icon>
-                      {$_('assistant.reset_position')}
+                      {$_('assistant.restore_position')}
                     </button>
                   </li>
                 {/if}
