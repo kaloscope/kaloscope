@@ -11,10 +11,16 @@ from jinja2 import TemplateError
 from app.core.exceptions import KaloscopeException
 from app.core.flow.context import LOOP_KEY
 from app.core.flow.fields import Field
-from app.core.flow.nodes.base import Node
+from app.core.flow.nodes.base import Node, NodeGroup
 from app.core.flow.nodes.general.ai import AINode
 from app.core.renderer import ENV
-from app.models.flow import GraphCategory, GraphDocument, GraphIssue, GraphValidation
+from app.models.flow import (
+    GraphCategory,
+    GraphDocument,
+    GraphIssue,
+    GraphReadiness,
+    GraphValidation,
+)
 from app.services.ai import AIProviderService
 
 
@@ -168,7 +174,7 @@ def _has_cycle(nodes: set[str], adjacency: dict[str, list[str]]) -> bool:
 async def validate_document(
     document: GraphDocument, category: GraphCategory, *, complete: bool = True
 ) -> GraphValidation:
-    """Check graph structure and optionally readiness for publication.
+    """Check graph structure, fields, and potential category-specific entry paths.
 
     Args:
         document: Graph with typed node and edge envelopes.
@@ -185,6 +191,7 @@ async def validate_document(
     if complete and not graph["nodes"]:
         issues.append(GraphIssue(code="empty_graph"))
     nodes = {}
+    groups = {}
     handles = {}
     for node in graph["nodes"]:
         node_id, data = node["id"], node["data"]
@@ -198,6 +205,7 @@ async def validate_document(
             continue
         if schema.categories and category not in schema.categories:
             issues.append(GraphIssue(code="node_category", node_id=node_id))
+        groups[node_id] = schema.group
         handles[node_id] = {handle.id: handle for handle in schema.handles}
         fields = {field.id: field for field in schema.fields}
         for key, value in data.items():
@@ -232,6 +240,7 @@ async def validate_document(
     connections = set()
     counts = Counter()
     adjacency = defaultdict(list)
+    execution_paths = defaultdict(list)
     undirected = defaultdict(set)
     connected = defaultdict(set)
     tags = defaultdict(set)
@@ -280,6 +289,7 @@ async def validate_document(
             issues.append(GraphIssue(code="invalid_loop", edge_id=edge_id))
         connected[source].add(target)
         connected[target].add(source)
+        execution_paths[source].append(target)
         if source_handle.tag != LOOP_KEY and target_handle.tag != LOOP_KEY:
             adjacency[source].append(target)
             undirected[source].add(target)
@@ -329,6 +339,97 @@ async def validate_document(
             issues.append(GraphIssue(code="conflicting_loops", node_id=component))
     if _has_cycle(set(components.values()), nesting):
         issues.append(GraphIssue(code="invalid_loop"))
+    valid = not any(issue.severity == "error" for issue in issues)
     return GraphValidation(
-        valid=not any(issue.severity == "error" for issue in issues), issues=issues
+        valid=valid,
+        issues=issues,
+        readiness=_readiness(
+            category,
+            groups,
+            execution_paths,
+            empty=not nodes,
+            valid=valid,
+            complete=complete,
+        ),
+    )
+
+
+def _readiness(
+    category: GraphCategory,
+    groups: dict[str, NodeGroup],
+    adjacency: dict[str, list[str]],
+    *,
+    empty: bool,
+    valid: bool,
+    complete: bool,
+) -> GraphReadiness:
+    """Find possible entry-to-result paths without evaluating runtime behavior.
+
+    Indexers and ingestion need a reachable end/result node. Scheduled tasks may
+    finish naturally after general work without an explicit end node. Conditions
+    and loop handles are possible paths, not guarantees of traversal or success.
+    Incomplete field checks never certify readiness. Warnings do not block saving.
+
+    Args:
+        category: Category already checked against the registered node schemas.
+        groups: Registered groups indexed by node identity.
+        adjacency: Directed connections including explicit loop boundaries.
+        empty: Whether the document contains no nodes.
+        valid: Whether structure and field checks have no blocking issues.
+        complete: Whether all required fields and dependencies were checked.
+
+    Returns:
+        Static status and at most 30 located warnings with exact omission counts.
+    """
+    warnings = []
+    if empty:
+        status = "empty"
+    elif not valid:
+        status = "invalid"
+    elif not complete:
+        status = "not_checked"
+    else:
+        starts = sorted(
+            key for key, group in groups.items() if group == NodeGroup.START
+        )
+        ends = {key for key, group in groups.items() if group == NodeGroup.END}
+        outcomes = ends.copy()
+        if category == GraphCategory.SCHEDULE:
+            outcomes.update(
+                key for key, group in groups.items() if group == NodeGroup.GENERAL
+            )
+        if not starts:
+            warnings.append(GraphIssue(code="missing_entry", severity="warning"))
+        reached = set()
+        for start in starts:
+            visited = set()
+            pending = [start]
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                pending.extend(adjacency.get(current, []))
+            reached.update(visited)
+            if not visited & outcomes:
+                warnings.append(
+                    GraphIssue(
+                        code="no_reachable_task"
+                        if category == GraphCategory.SCHEDULE
+                        else "no_reachable_output",
+                        severity="warning",
+                        node_id=start,
+                    )
+                )
+        warnings.extend(
+            GraphIssue(code="unreachable_output", severity="warning", node_id=node_id)
+            for node_id in sorted(ends - reached)
+        )
+        status = "incomplete" if warnings else "ready"
+    return GraphReadiness(
+        status=status,
+        category=category,
+        warnings=warnings[:30],
+        warning_count=len(warnings),
+        omitted_warnings=max(0, len(warnings) - 30),
     )

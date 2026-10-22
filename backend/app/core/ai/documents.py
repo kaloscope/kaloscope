@@ -214,14 +214,21 @@ def tool_facts(result: dict) -> dict:
         result: Original persisted tool outcome, including its call identifier.
 
     Returns:
-        A bounded projection with exact counts, versions, and failure codes.
+        A bounded projection with exact counts, paths, readiness, and source IDs.
+        Saved workflow reads retain explicit draft provenance, including records
+        written before `graph_source` was introduced.
     """
     data = result.get("data", {})
     if not isinstance(data, dict):
         data = {}
     facts = {}
+    if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
+        facts["graph_source"] = "saved_draft"
     for key, value in data.items():
-        if key == "runs":
+        if key == "source_facts":
+            # history reads already project and flatten the original tool facts
+            facts[key] = value
+        elif key == "runs":
             facts[key] = [
                 {k: v for k, v in run.items() if k not in {"output", "errors"}}
                 | {"errors": value_summary(run.get("errors", []), limit=700)}
@@ -229,12 +236,59 @@ def tool_facts(result: dict) -> dict:
             ]
         elif key == "graph":
             facts[key] = {k: v for k, v in value.items() if k.endswith("_count")}
+        elif key == "changes":
+            facts[key] = []
+            for change in value[:5]:
+                item = {k: v for k, v in change.items() if k not in {"before", "after"}}
+                if "before" in change or "after" in change:
+                    item["before_after_in_original"] = True
+                if "changed_paths" in item:
+                    paths = item["changed_paths"][:4]
+                    while len(dumps(paths)) > 300:
+                        paths.pop()
+                    item["changed_paths"] = paths
+                    item["omitted_changed_paths"] = item["changed_path_count"] - len(
+                        paths
+                    )
+                if len(dumps([*facts[key], item])) > 1200:
+                    break
+                facts[key].append(item)
+        elif key == "readiness":
+            facts[key] = _readiness_facts(value)
+        elif key == "validation":
+            facts[key] = {
+                k: _readiness_facts(v)
+                if k == "readiness"
+                else value_summary(v, limit=400)
+                for k, v in value.items()
+            }
         elif isinstance(value, (str, list, dict)):
             facts[key] = value_summary(value, limit=600)
         else:
             facts[key] = value
+    if "changes" in facts:
+        facts["omitted_changes"] = data.get(
+            "change_count", len(data["changes"]) + data.get("omitted_changes", 0)
+        ) - len(facts["changes"])
     return {
         **{key: result[key] for key in ("id", "name", "ok", "error") if key in result},
         "data": facts,
         "historical": True,
+    }
+
+
+def _readiness_facts(value: dict) -> dict:
+    """Preserve static readiness and located warning samples after compaction.
+
+    Args:
+        value: Readiness record returned by shared validation.
+
+    Returns:
+        Original status and counts with at most three located warnings.
+    """
+    warnings = value["warnings"][:3]
+    return {
+        **value,
+        "warnings": warnings,
+        "omitted_warnings": value["warning_count"] - len(warnings),
     }

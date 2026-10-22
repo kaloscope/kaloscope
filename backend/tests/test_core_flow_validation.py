@@ -268,3 +268,130 @@ def test_cyclic_nesting():
 def test_empty():
     assert check([], complete=False).valid
     assert check([]).issues[0].code == "empty_graph"
+
+
+@pytest.mark.parametrize(
+    ("nodes", "complete", "valid", "status"),
+    [
+        ([], True, False, "empty"),
+        ([], False, True, "empty"),
+        ([node()], True, False, "invalid"),
+        ([node()], False, True, "not_checked"),
+        ([node(kind="condition", expression="true")], True, True, "incomplete"),
+    ],
+)
+def test_readiness_status(nodes, complete, valid, status):
+    result = check(nodes, complete=complete)
+
+    assert result.valid == valid
+    assert result.readiness.status == status
+    assert result.scope == "structure_and_fields"
+    assert result.executed is False
+    if status == "incomplete":
+        assert result.issues == []
+        assert result.readiness.warnings[0].code == "missing_entry"
+        assert result.readiness.warnings[0].severity == "warning"
+
+
+@pytest.mark.parametrize(
+    ("category", "start", "end", "fields"),
+    [
+        (GraphCategory.INDEXER, "search_start", "search_end", {}),
+        (GraphCategory.INGEST, "ingest_start", "movie", {}),
+        (GraphCategory.SCHEDULE, "schedule_start", "schedule_end", {}),
+        (
+            GraphCategory.SCHEDULE,
+            "schedule_start",
+            "http",
+            {"url": "https://example.test"},
+        ),
+    ],
+)
+def test_category_readiness(category, start, end, fields):
+    nodes = [node("start", start), node("end", end, **fields)]
+    disconnected = check(nodes, category=category)
+    connected = check(nodes, [edge("start", "end")], category=category)
+
+    assert disconnected.valid
+    assert disconnected.readiness.status == "incomplete"
+    assert disconnected.readiness.warnings[0].node_id == "start"
+    assert connected.valid
+    assert connected.readiness.status == "ready"
+    assert connected.readiness.warning_count == 0
+
+
+def test_each_entry():
+    result = check(
+        [
+            node("search", "search_start"),
+            node("end", "search_end"),
+            node("auth", "auth_start"),
+        ],
+        [edge("search", "end")],
+        category=GraphCategory.INDEXER,
+    )
+
+    assert result.valid
+    assert result.readiness.status == "incomplete"
+    assert [(issue.code, issue.node_id) for issue in result.readiness.warnings] == [
+        ("no_reachable_output", "auth")
+    ]
+
+
+def test_unreachable_output():
+    result = check(
+        [
+            node("start", "search_start"),
+            node("end", "search_end"),
+            node("unused", "search_end"),
+        ],
+        [edge("start", "end")],
+        category=GraphCategory.INDEXER,
+    )
+
+    assert result.readiness.status == "incomplete"
+    assert [(issue.code, issue.node_id) for issue in result.readiness.warnings] == [
+        ("unreachable_output", "unused")
+    ]
+
+
+def test_static_paths(monkeypatch):
+    from app.core.flow.nodes.base import Node
+
+    execute = AsyncMock(side_effect=AssertionError("Validation must not execute nodes"))
+    for executor in Node.executors.values():
+        monkeypatch.setattr(executor.__self__, "execute", execute)
+    result = check(
+        [
+            node("start", "schedule_start"),
+            node("condition", "condition", expression="{{ missing_variable }}"),
+            node("loop", "loop", expression="{{ items }}", varname="item"),
+            node(
+                "script",
+                "script",
+                script={"language": "python", "code": "raise RuntimeError()"},
+            ),
+        ],
+        [
+            edge("start", "condition"),
+            edge("condition", "loop", "is_true"),
+            edge("loop", "script", "loop_start"),
+            edge("script", "loop", target_handle="loop_continue"),
+        ],
+    )
+
+    assert result.valid
+    assert result.readiness.status == "ready"
+    assert result.executed is False
+    execute.assert_not_awaited()
+
+
+def test_readiness_bounds():
+    result = check(
+        [node(str(index), "search_end") for index in range(50)],
+        category=GraphCategory.INDEXER,
+    )
+
+    assert result.readiness.warning_count == 51
+    assert len(result.readiness.warnings) == 30
+    assert result.readiness.omitted_warnings == 21

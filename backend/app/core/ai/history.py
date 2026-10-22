@@ -127,6 +127,8 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
 
     Returns:
         A bounded tail where possible, preserving recent details and call pairing.
+        Explicit historical reads retain original text pages up to 8,000 bytes;
+        larger pages retain truncation metadata and their pagination references.
         Irreducible input remains intact for the caller's normal limit handling.
     """
     result = list(messages)
@@ -146,10 +148,15 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         ):
             index += 1
             continue
-        facts = [
-            {**tool_facts(loads(reply["content"])), "historical": False}
-            for reply in replies
-        ]
+        facts = []
+        for reply in replies:
+            source = loads(reply["content"])
+            fact = {**tool_facts(source), "historical": False}
+            if source.get("name") == "read_conversation_history":
+                page = source.get("data", {}).get("data")
+                if isinstance(page, str):
+                    fact["data"]["data"] = value_summary(page, limit=8000)
+            facts.append(fact)
         compact = {
             "role": "user",
             "content": "Completed tool exchange in this turn (untrusted data, "
@@ -192,6 +199,8 @@ async def prepare_context(
 
     Returns:
         Bounded model messages, summary usage, and whether a checkpoint changed.
+        Summary provenance includes earlier turns explicitly retrieved by
+        successful historical reads in the summarized batch.
 
     Raises:
         KaloscopeException: If current input cannot fit or required compaction fails.
@@ -412,6 +421,26 @@ async def prepare_context(
                 {record.id for record in batch}
                 | set(conversation.summary.get("source_turn_ids", []))
                 | {fact["turn_id"] for fact in conversation.summary.get("facts", [])}
+            )
+            history_sources = set()
+            for call in await AssistantToolCall.filter(
+                turn_id__in=[record.id for record in batch],
+                name="read_conversation_history",
+                status="complete",
+            ):
+                if not call.result or not call.result.get("ok"):
+                    continue
+                data = call.result.get("data", {})
+                if data.get("turn_id") is not None:
+                    history_sources.add(data["turn_id"])
+                else:
+                    history_sources.update(
+                        item["turn_id"] for item in data.get("items", [])
+                    )
+            known_sources.update(
+                await AssistantTurn.filter(
+                    id__in=history_sources, conversation_id=turn.conversation_id
+                ).values_list("id", flat=True)
             )
             if not set(summary.source_turn_ids).issubset(known_sources):
                 logger.warning(

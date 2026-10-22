@@ -68,14 +68,14 @@
 >
   <Dropdown
     class="min-w-0 flex-1"
-    triggerClass="block min-w-0 cursor-pointer rounded-field transition-none active:scale-100! focus-visible:outline-2 focus-visible:outline-primary"
+    triggerClass="block min-w-0 cursor-pointer rounded-field text-base-content/60 transition-colors hover:text-base-content active:scale-100! focus-visible:text-base-content focus-visible:outline-2 focus-visible:outline-primary"
     contentWidth="min(20rem, calc(100vw - 3rem))"
     contentMaxHeight="14rem"
     contentClass="scale-100! animate-none transition-none shadow-lg!"
     onclick={() => void loadAssistantConversations()}
   >
     {#snippet trigger()}
-      <span class="flex min-h-8 min-w-0 items-center gap-1.5 px-1 text-xs">
+      <span class="flex min-h-8 min-w-0 items-center gap-1.5 px-1 text-sm font-medium">
         <iconify-icon icon={icons.chatMultiple} width="1rem" class="size-4 shrink-0" aria-hidden="true"></iconify-icon>
         <span class="sr-only">{$_('assistant.history')}:</span>
         <span class="min-w-0 flex-1 truncate text-left"

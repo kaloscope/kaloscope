@@ -10,6 +10,7 @@ from app.core.ai.documents import (
     GraphProposal,
     GraphReference,
     apply_changes,
+    tool_facts,
     value_summary,
 )
 from app.core.ai.queries import (
@@ -175,6 +176,8 @@ TOOLS = (
     AssistantTool(
         "get_workflow_logs",
         "Read compact execution facts, exact output counts, errors and small samples. "
+        "output_count_path identifies the counted array (root or items); "
+        "null counts are unknown, not zero. "
         "Use read_workflow_log for paginated output or full exception text. "
         "Logged failures describe the workflow, not this tool.",
         WorkflowLogQuery,
@@ -185,7 +188,8 @@ TOOLS = (
         "optional snapshot_id."
         "Use the captured page snapshot for unsaved edits. Never "
         "regenerate the document."
-        "This checks structure and fields without executing the workflow.",
+        "This checks structure and fields plus separate static entry-path readiness; "
+        "neither valid nor ready proves successful execution.",
         WorkflowValidation,
         admin=True,
     ),
@@ -196,7 +200,8 @@ TOOLS = (
         "Use snapshot_id for captured unsaved edits; changes=[] "
         "previews the unchanged base."
         "Never regenerate unchanged nodes or scripts. No saving. "
-        "Conflicts require review.",
+        "Conflicts require review. changed_paths are exact element-relative JSON "
+        "Pointers with omission counts; validation includes static readiness only.",
         WorkflowPreview,
         admin=True,
     ),
@@ -215,9 +220,10 @@ TOOLS = (
     ),
     AssistantTool(
         "read_conversation_history",
-        "Read exact turn text or completed tool arguments/results from this "
-        "conversation after context compaction. Omit turn_id to list "
-        "older turn IDs; use before to page the index.",
+        "Read a turn's text and original tool records with turn_id, or one tool "
+        "with tool_call_id (turn_id optional). Omit both for the index (page with "
+        "before). Paginate originals with offset/limit; source_facts are summaries, "
+        "not the original field values.",
         HistoryQuery,
     ),
     AssistantTool(
@@ -359,11 +365,7 @@ async def execute_tool(
                                 user,
                             )
                         ).model_dump(mode="json")
-                        result.update(
-                            scope="structure_and_fields",
-                            executed=False,
-                            base=args.model_dump(),
-                        )
+                        result["base"] = args.model_dump()
                     else:
                         proposal = apply_changes(document, args.changes)
                         preview = await FlowGraphService.preview_draft(
@@ -378,8 +380,7 @@ async def execute_tool(
                         result["change_count"] = len(preview.changes)
                         result["changes"] = [
                             {
-                                "kind": change.kind,
-                                "id": change.id,
+                                **change.model_dump(exclude={"before", "after"}),
                                 "before": value_summary(change.before),
                                 "after": value_summary(change.after),
                             }
@@ -416,6 +417,12 @@ async def execute_tool(
                                 user,
                             )
                             result["proposal_snapshot_id"] = snapshot.id
+                        while (
+                            result["changes"]
+                            and len(dumps(result)) > MAX_TOOL_RESULT_BYTES
+                        ):
+                            result["changes"].pop()
+                            result["omitted_changes"] += 1
                 case WorkflowID():
                     result = await workflow_details(
                         args.workflow_id, user, conversation_id
@@ -524,12 +531,14 @@ async def read_history(
     """Read a bounded historical value after account and resource checks.
 
     Args:
-        args: Exact turn or tool record and pagination.
+        args: Exact turn or tool record and pagination. A tool identifier alone
+            resolves its owning turn inside the current conversation.
         conversation_id: Current server-owned conversation.
         user: Authenticated owner.
 
     Returns:
-        Paginated source text or tool arguments/results with their turn identity.
+        Paginated turn text and original tool records, or an exact tool record,
+        with their turn identity and compact facts retained across compaction.
 
     Raises:
         NotFoundException: If a reference is missing or belongs elsewhere.
@@ -541,7 +550,15 @@ async def read_history(
     if conversation_id is None:
         raise NotFoundException
     await AssistantSessionService.owned(conversation_id, user)
-    if args.turn_id is None:
+    turn_id = args.turn_id
+    if turn_id is None and args.tool_call_id is not None:
+        call = await AssistantToolCall.get_or_none(
+            call_id=args.tool_call_id, turn__conversation_id=conversation_id
+        )
+        if call is None:
+            raise NotFoundException
+        turn_id = call.turn_id
+    if turn_id is None:
         query = AssistantTurn.filter(conversation_id=conversation_id).exclude(
             status="streaming"
         )
@@ -566,21 +583,12 @@ async def read_history(
             "next_before": turns[4].id if len(turns) > 5 else None,
             "historical": True,
         }
-    turn = await AssistantTurn.get_or_none(
-        id=args.turn_id, conversation_id=conversation_id
-    )
+    turn = await AssistantTurn.get_or_none(id=turn_id, conversation_id=conversation_id)
     if turn is None:
         raise NotFoundException
     if not await AssistantSessionService.allowed(turn.resource_ids, user):
         raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
-    value = dumps(
-        {
-            "prompt": turn.prompt,
-            "reply": turn.content,
-            "status": turn.status,
-            "context": turn.context,
-        }
-    ).decode()
+    source_facts = None
     if args.tool_call_id is not None:
         call = await AssistantToolCall.get_or_none(
             turn_id=turn.id, call_id=args.tool_call_id
@@ -590,8 +598,49 @@ async def read_history(
         value = dumps(
             {"name": call.name, "arguments": call.arguments, "result": call.result}
         ).decode()
+        if call.result:
+            source_facts = (
+                call.result.get("data", {}).get("source_facts")
+                if call.name == "read_conversation_history"
+                else tool_facts(call.result)
+            )
+    else:
+        calls = await AssistantToolCall.filter(turn_id=turn.id).exclude(
+            status="running"
+        )
+        value = dumps(
+            {
+                "prompt": turn.prompt,
+                "tools": [
+                    {
+                        "id": call.call_id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "result": call.result,
+                    }
+                    for call in calls
+                ],
+                "reply": turn.content,
+                "status": turn.status,
+                "context": turn.context,
+            }
+        ).decode()
+        facts = [
+            tool_facts(call.result)
+            for call in calls
+            if call.result and call.name != "read_conversation_history"
+        ]
+        count = len(facts)
+        while len(facts) > 8 or len(dumps(facts)) > 6000:
+            facts.pop()
+        source_facts = {
+            "tools": facts,
+            "tool_count": count,
+            "omitted_tools": count - len(facts),
+        }
     return {
         "turn_id": turn.id,
         "historical": True,
+        **({"source_facts": source_facts} if source_facts is not None else {}),
         **value_page(value, args.offset, args.limit),
     }

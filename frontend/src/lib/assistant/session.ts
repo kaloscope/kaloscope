@@ -1,6 +1,6 @@
 import { api } from '$lib/api';
 import { createLoading } from '$lib/helpers';
-import { token, user } from '$lib/stores';
+import { persisted, token, user } from '$lib/stores';
 import type {
   AIModelSelection,
   AssistantConversation,
@@ -85,6 +85,7 @@ function initialState(): AssistantState {
 }
 
 export const assistant = writable<AssistantState>(initialState());
+const selectedConversations = persisted<Record<number, number | null>>('assistant-conversations');
 let active: AbortController | null = null;
 let modelRequest: AbortController | null = null;
 let historyRequest: AbortController | null = null;
@@ -121,6 +122,17 @@ user.subscribe((value) => {
     accountId = value.id;
   }
 });
+
+/**
+ * Remember the selected conversation for this account without storing its content.
+ *
+ * @param id - Conversation identifier, or `null` for an explicitly blank conversation.
+ */
+function rememberConversation(id: number | null): void {
+  const ownerId = accountId;
+  if (ownerId === undefined) return;
+  selectedConversations.update((value) => ({ ...value, [ownerId]: id }));
+}
 
 /**
  * Convert request failures to existing translated application error codes.
@@ -250,14 +262,15 @@ export function stopAssistant(): void {
 export function newAssistantConversation(): void {
   if (get(assistant).busy || get(assistant).historyLoading) return;
   conversationRevision += 1;
+  rememberConversation(null);
   assistant.update((state) => ({ ...state, conversation: null, turns: [], turnsBefore: null, error: null }));
 }
 
 /**
- * Load account-owned conversation metadata and optionally restore the latest chat.
+ * Load account-owned metadata and optionally restore the last selected conversation.
  *
  * @param older - Whether to append the next page instead of refreshing.
- * @param restore - Whether an empty account session should reopen its latest chat.
+ * @param restore - Whether to restore the account's selection, falling back to the latest chat when none was recorded.
  * @returns A promise that resolves after updating metadata or reporting an error.
  */
 export async function loadAssistantConversations(older = false, restore = false): Promise<void> {
@@ -285,14 +298,11 @@ export async function loadAssistantConversations(older = false, restore = false)
         ? (data.items.find((item) => item.id === value.conversation!.id) ?? value.conversation)
         : null
     }));
-    if (
-      restore &&
-      revision === conversationRevision &&
-      !get(assistant).conversation &&
-      !get(assistant).turns.length &&
-      data.items[0]
-    ) {
-      await loadAssistantConversation(data.items[0].id);
+    if (restore && revision === conversationRevision && !get(assistant).conversation && !get(assistant).turns.length) {
+      const selected = accountId === undefined ? undefined : get(selectedConversations)?.[accountId];
+      const id =
+        typeof selected === 'number' && Number.isSafeInteger(selected) && selected > 0 ? selected : data.items[0]?.id;
+      if (selected !== null && id !== undefined) await loadAssistantConversation(id);
     }
   } catch (error) {
     if (listRequest === controller)
@@ -340,9 +350,13 @@ export async function loadAssistantConversation(id: number, older = false): Prom
           ? data.conversation.model
           : value.model
     }));
+    if (!older) rememberConversation(data.conversation.id);
   } catch (error) {
-    if (historyRequest === controller)
-      assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_history_failed') }));
+    if (historyRequest === controller) {
+      const code = errorCode(error, 'assistant_history_failed');
+      if (!older && code === 'not_found') rememberConversation(null);
+      assistant.update((value) => ({ ...value, error: code }));
+    }
   } finally {
     if (historyRequest === controller) {
       historyRequest = null;
@@ -369,6 +383,7 @@ export async function changeAssistantConversation(id: number, title?: string): P
     if (title === undefined) {
       await api.delete(path, { signal: controller.signal, retry: 0, context: { silentErrors: true } });
       if (generation !== accountGeneration) return;
+      if (get(assistant).conversation?.id === id) rememberConversation(null);
       assistant.update((value) =>
         value.conversation?.id === id ? { ...value, conversation: null, turns: [], turnsBefore: null } : value
       );
@@ -540,6 +555,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
         .json<Resp<AssistantConversation>>();
       if (active !== controller) return;
       conversation = data;
+      rememberConversation(data.id);
       assistant.update((value) => ({ ...value, conversation: data }));
     }
     let submittedContext: AssistantStoredContext | null = context;
