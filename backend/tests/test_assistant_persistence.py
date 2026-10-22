@@ -379,6 +379,7 @@ def test_active_tool_overflow(monkeypatch):
         )
         facts = loads(projected["content"].split("\n", 1)[1])["tools"]
         assert facts[0]["data"]["graph"]["node_count"] == 51
+        assert facts[0]["data"]["graph_source"] == "saved_draft"
         assert all(run["output_count"] == 710 for run in facts[1]["data"]["runs"])
         return response(
             [
@@ -486,6 +487,122 @@ def test_workflow_page_counts():
             assert last["page_counts"] == {"returned": 1, "editable": 1, "read_only": 0}
 
     asyncio.run(run())
+
+
+def test_diff_facts():
+    change = {
+        "kind": "node",
+        "id": "script",
+        "operation": "modify",
+        "before": {"script": "old" * 5000},
+        "after": {"script": "new" * 5000},
+        "changed_paths": ["/data/script/code", "/position/x"],
+        "changed_path_count": 2,
+        "omitted_changed_paths": 0,
+    }
+    source = {
+        "id": "preview",
+        "name": "preview_workflow_draft",
+        "ok": True,
+        "data": {
+            "changes": [change],
+            "change_count": 1,
+            "omitted_changes": 0,
+            "comparison": "saved_draft",
+            "pre_existing_change_count": 1,
+            "base": {"workflow_id": 1, "draft_version": 2, "snapshot_id": 3},
+            "validation": {
+                "valid": True,
+                "scope": "structure_and_fields",
+                "executed": False,
+                "issues": [],
+                "readiness": {
+                    "status": "incomplete",
+                    "category": "schedule",
+                    "scope": "static_entry_paths",
+                    "warning_count": 1,
+                    "omitted_warnings": 0,
+                    "warnings": [{"code": "missing_entry", "severity": "warning"}],
+                },
+            },
+        },
+    }
+    original = [
+        {"role": "assistant", "tool_calls": [{"id": "preview"}]},
+        {"role": "tool", "tool_call_id": "preview", "content": dumps(source).decode()},
+    ]
+
+    compact = history.compact_exchanges(original, 9, 3000)
+    facts = loads(compact[0]["content"].split("\n", 1)[1])["tools"][0]
+
+    assert len(dumps(compact)) < 3000
+    assert facts["data"]["changes"][0]["changed_paths"] == change["changed_paths"]
+    assert "before" not in facts["data"]["changes"][0]
+    assert facts["data"]["changes"][0]["before_after_in_original"] is True
+    assert tool_facts(facts)["data"]["changes"][0]["before_after_in_original"] is True
+    assert facts["data"]["validation"] == source["data"]["validation"]
+    assert facts["data"]["base"]["snapshot_id"] == 3
+    assert facts["data"]["omitted_changes"] == 0
+
+    source["data"]["changes"] = [dict(change, id=str(index)) for index in range(30)]
+    source["data"]["changes"][0]["changed_paths"] = [
+        f"/data/{index}" for index in range(20)
+    ]
+    source["data"]["changes"][0]["changed_path_count"] = 20
+    source["data"]["change_count"] = 40
+    source["data"]["omitted_changes"] = 10
+    bounded = tool_facts(source)["data"]
+
+    assert len(dumps(bounded["changes"])) <= 1200
+    assert bounded["omitted_changes"] == 40 - len(bounded["changes"])
+    assert bounded["changes"][0]["omitted_changed_paths"] == 16
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_history_page_compaction(oversized):
+    page = dumps(
+        {
+            "padding": "x" * (9000 if oversized else 2000),
+            "before": "original",
+            "after": "edited",
+        }
+    ).decode()
+    result = {
+        "id": "history-page",
+        "name": "read_conversation_history",
+        "ok": True,
+        "data": {
+            "turn_id": 6,
+            "historical": True,
+            "data": page,
+            "offset": 100,
+            "total": 20000,
+            "next_offset": 100 + len(page),
+        },
+    }
+    exchange = [
+        {
+            "role": "assistant",
+            "content": "Inspect the original page. " * 1000,
+            "tool_calls": [{"id": "page"}],
+        },
+        {"role": "tool", "tool_call_id": "page", "content": dumps(result).decode()},
+    ]
+
+    compact = history.compact_exchanges(exchange, 7, 4000)
+    facts = loads(compact[0]["content"].split("\n", 1)[1])["tools"][0]["data"]
+
+    assert len(dumps(compact)) < 4000
+    assert facts["turn_id"] == 6
+    assert facts["offset"] == 100
+    assert facts["next_offset"] == result["data"]["next_offset"]
+    if oversized:
+        assert facts["data"]["truncated"] is True
+        assert facts["data"]["characters"] == len(page)
+    else:
+        assert facts["data"] == page
+        assert loads(facts["data"])["before"] == "original"
+        assert loads(facts["data"])["after"] == "edited"
 
 
 def test_compact_exchange_pairing():
@@ -624,7 +741,8 @@ def test_checkpoint_with_tool_tail():
     asyncio.run(run())
 
 
-def test_large_log_summary():
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_large_log_summary(wrapped):
     async def run():
         async with database() as (owner, _):
             graph = await FlowGraph.create(
@@ -632,11 +750,12 @@ def test_large_log_summary():
             )
             for index in range(2):
                 at = timezone.now() - timedelta(minutes=index + 1)
+                items = [{"id": i, "title": "sample" * 30} for i in range(710)]
                 await FlowLog.create(
                     graph_id=graph.id,
                     started_at=at,
                     ended_at=at + timedelta(seconds=2),
-                    retval=[{"id": i, "title": "sample" * 30} for i in range(710)],
+                    retval={"items": items, "totalPages": 42} if wrapped else items,
                 )
 
             result = await tools.execute_tool(
@@ -644,6 +763,11 @@ def test_large_log_summary():
             )
             assert result["ok"] is True
             assert [run["output_count"] for run in result["data"]["runs"]] == [710, 710]
+            path = ["items"] if wrapped else []
+            assert all(
+                run["output_count_path"] == path
+                for run in tool_facts(result)["data"]["runs"]
+            )
             assert len(dumps(result)) < 5000
             log_id = result["data"]["runs"][0]["output_log_id"]
             detail = await tools.execute_tool(
@@ -652,6 +776,7 @@ def test_large_log_summary():
                     {
                         "workflow_id": graph.id,
                         "log_id": log_id,
+                        "path": path,
                         "offset": 700,
                         "limit": 10,
                     }
@@ -661,6 +786,46 @@ def test_large_log_summary():
             assert detail["data"]["total"] == 710
             assert detail["data"]["next_offset"] is None
             assert len(detail["data"]["data"]) == 10
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("output", "count", "path"),
+    [
+        ([], 0, []),
+        ([1, 2], 2, []),
+        ({"items": [], "total": 999}, 0, ["items"]),
+        ({"items": [1, 2], "totalPages": 99}, 2, ["items"]),
+        ({"items": "unknown"}, None, None),
+        ({"chapters": [1, 2]}, None, None),
+        ({}, None, None),
+        (None, None, None),
+        (0, None, None),
+    ],
+)
+def test_output_counts(output, count, path):
+    async def run():
+        async with database() as (owner, _):
+            graph = await FlowGraph.create(
+                name="Output shapes", category="indexer", state="draft"
+            )
+            at = timezone.now()
+            await FlowLog.create(
+                graph_id=graph.id,
+                started_at=at,
+                ended_at=at + timedelta(seconds=1),
+                retval=output,
+            )
+
+            result = await tools.execute_tool(
+                "get_workflow_logs", dumps({"workflow_id": graph.id}).decode(), owner
+            )
+
+            run = result["data"]["runs"][0]
+            assert run["output_count"] == count
+            assert run["output_count_path"] == path
+            assert tool_facts(result)["data"]["runs"][0]["output_count"] == count
 
     asyncio.run(run())
 
@@ -908,6 +1073,93 @@ def test_rolling_summary_sources(monkeypatch, source_ids):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "reference", ["owned", "index", "other", "missing", "unreferenced"]
+)
+def test_summary_history_sources(monkeypatch, reference):
+    monkeypatch.setattr(history, "budgets", lambda _: (12000, 1000))
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            for prompt in ["original", "checkpoint"]:
+                _, previous = await Sessions.begin(
+                    conversation["id"], request(prompt), owner
+                )
+                await Sessions.finish(previous, content=prompt, status="complete")
+            other = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            _, foreign = await Sessions.begin(other["id"], request("foreign"), owner)
+            await Sessions.finish(foreign, content="foreign", status="complete")
+            source_id = (
+                foreign.id
+                if reference == "other"
+                else 999999
+                if reference == "missing"
+                else 1
+            )
+            _, latest = await Sessions.begin(
+                conversation["id"], request("read-history"), owner
+            )
+            await AssistantToolCall.create(
+                turn_id=latest.id,
+                call_id="history-source",
+                name="get_workflow"
+                if reference == "unreferenced"
+                else "read_conversation_history",
+                arguments="{}",
+                result={
+                    "ok": True,
+                    "data": {"items": [{"turn_id": source_id}]}
+                    if reference == "index"
+                    else {"turn_id": source_id},
+                },
+                status="complete",
+            )
+            await Sessions.finish(latest, content="Original. " * 500, status="complete")
+            await AssistantConversation.filter(id=conversation["id"]).update(
+                summary={
+                    "constraints": ["Keep scripts"],
+                    "source_turn_ids": [previous.id],
+                },
+                summary_through=previous.id,
+            )
+            create = AsyncMock(
+                return_value=SimpleNamespace(
+                    usage=None,
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            message=SimpleNamespace(
+                                content=dumps(
+                                    {
+                                        "constraints": ["Keep scripts"],
+                                        "source_turn_ids": [latest.id, source_id],
+                                    }
+                                ).decode()
+                            ),
+                        )
+                    ],
+                )
+            )
+            client = SimpleNamespace(
+                chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+            )
+            _, current = await Sessions.begin(
+                conversation["id"], request("active"), owner
+            )
+
+            _, _, compacted = await history.prepare_context(
+                client, current, owner, "system", [], None
+            )
+
+            assert compacted is (reference in {"owned", "index"})
+            saved = await Sessions.owned(conversation["id"], owner)
+            assert saved.summary_through == (latest.id if compacted else previous.id)
+            create.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("deleted", [False, True])
 def test_permission_revocation(deleted):
     async def run():
@@ -1025,6 +1277,289 @@ def test_summary_fallback_and_cancel(monkeypatch):
             assert saved.summary == {}
             assert saved.summary_through == 0
             assert await AssistantTurn.filter(status="complete").count() == 3
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("with_turn", [False, True])
+def test_tool_history(with_turn):
+    async def run():
+        async with database() as (owner, other):
+            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            other_conversation = await Sessions.create(
+                ConversationCreate(model=MODEL), owner
+            )
+            _, turn = await Sessions.begin(conversation["id"], request(), owner)
+            call = await AssistantToolCall.create(
+                turn_id=turn.id,
+                call_id="original-call",
+                name="list_workflows",
+                arguments="{}",
+                result={"ok": True, "data": {"total": 5}},
+                status="complete",
+            )
+            await Sessions.finish(turn, content="Five workflows", status="complete")
+            arguments = {"tool_call_id": call.call_id, "offset": 10, "limit": 30}
+            if with_turn:
+                arguments["turn_id"] = turn.id
+
+            result = await tools.execute_tool(
+                "read_conversation_history",
+                dumps(arguments).decode(),
+                owner,
+                conversation_id=conversation["id"],
+            )
+
+            original = dumps(
+                {"name": call.name, "arguments": call.arguments, "result": call.result}
+            ).decode()
+            assert result["ok"]
+            assert result["data"]["turn_id"] == turn.id
+            assert result["data"]["data"] == original[10:40]
+            assert result["data"]["total"] == len(original)
+            assert result["data"]["next_offset"] == 40
+            assert result["data"]["source_facts"]["data"]["total"] == 5
+            assert tool_facts(result)["data"]["source_facts"]["data"]["total"] == 5
+            await AssistantToolCall.create(
+                turn_id=turn.id,
+                call_id="history-read",
+                name="read_conversation_history",
+                arguments=dumps(arguments).decode(),
+                result=result,
+                status="complete",
+            )
+            nested = await tools.execute_tool(
+                "read_conversation_history",
+                '{"tool_call_id":"history-read"}',
+                owner,
+                conversation_id=conversation["id"],
+            )
+            assert nested["data"]["source_facts"] == result["data"]["source_facts"]
+            whole_turn = await tools.execute_tool(
+                "read_conversation_history",
+                dumps({"turn_id": turn.id, "limit": 10}).decode(),
+                owner,
+                conversation_id=conversation["id"],
+            )
+            facts = tool_facts(whole_turn)["data"]["source_facts"]
+            assert facts["tool_count"] == 1
+            assert facts["omitted_tools"] == 0
+            assert facts["tools"][0]["data"]["total"] == 5
+            original_turn = await tools.execute_tool(
+                "read_conversation_history",
+                dumps({"turn_id": turn.id, "limit": 8000}).decode(),
+                owner,
+                conversation_id=conversation["id"],
+            )
+            original_tools = loads(original_turn["data"]["data"])["tools"]
+            assert original_turn["data"]["next_offset"] is None
+            assert len(original_tools) == 2
+            assert original_tools[0] == {
+                "id": call.call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "result": call.result,
+            }
+            assert original_tools[1]["id"] == "history-read"
+            for account, scope in [
+                (owner, other_conversation["id"]),
+                (other, conversation["id"]),
+            ]:
+                denied = await tools.execute_tool(
+                    "read_conversation_history",
+                    dumps(arguments).decode(),
+                    account,
+                    conversation_id=scope,
+                )
+                assert not denied["ok"]
+                assert denied["error"]["code"] == "not_found"
+            for invalid in [
+                {**arguments, "turn_id": turn.id + 100},
+                {**arguments, "tool_call_id": "missing"},
+            ]:
+                missing = await tools.execute_tool(
+                    "read_conversation_history",
+                    dumps(invalid).decode(),
+                    owner,
+                    conversation_id=conversation["id"],
+                )
+                assert not missing["ok"]
+                assert missing["error"]["code"] == "not_found"
+
+    asyncio.run(run())
+
+
+def test_historical_graph_source():
+    result = {
+        "name": "get_workflow",
+        "ok": True,
+        "data": {
+            "graph": {"node_count": 17, "edge_count": 18},
+            "published_node_count": 16,
+        },
+    }
+
+    facts = tool_facts(result)["data"]
+
+    assert facts["graph_source"] == "saved_draft"
+    assert facts["graph"]["node_count"] == 17
+    assert facts["published_node_count"] == 16
+    result["name"] = "validate_workflow"
+    assert "graph_source" not in tool_facts(result)["data"]
+
+
+def test_final_answer_context(monkeypatch):
+    from app.services import assistant as service
+
+    requests = []
+    source_facts = {
+        "tools": [
+            {
+                "id": f"source-{i}",
+                "data": {
+                    "runs": [
+                        {"run_id": j, "output_count": 17, "duration_ms": 1000}
+                        for j in range(10)
+                    ]
+                },
+            }
+            for i in range(8)
+        ],
+        "tool_count": 8,
+        "omitted_tools": 0,
+    }
+    monkeypatch.setattr(
+        service,
+        "execute_tool",
+        AsyncMock(return_value={"ok": True, "data": {"source_facts": source_facts}}),
+    )
+
+    def handler(upstream):
+        body = loads(upstream.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                call_delta(
+                                    "read_conversation_history", id=f"read-{i}", index=i
+                                )
+                                for i in range(2)
+                            ],
+                        }
+                    ),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        assert "tools" not in body
+        assert body["tool_choice"] == "none"
+        assert '"output_count":17' in dumps(body["messages"]).decode().replace(
+            '\\"', '"'
+        )
+        assert history.context_size(body["messages"], []) <= 32000 - 4096
+        return response(
+            [
+                chunk(
+                    {"role": "assistant", "content": "Each run had 17 outputs."}, "stop"
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request(), owner
+                )
+            ]
+
+            assert events[-1].event == "done"
+            assert events[-1].data["tool_calls"] == 2
+            assert len(requests) == 2
+
+    asyncio.run(run())
+
+
+def test_tool_history_resources(monkeypatch):
+    calls = []
+
+    def handler(upstream):
+        calls.append(loads(upstream.content))
+        if len(calls) == 1:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                call_delta(
+                                    "read_conversation_history",
+                                    '{"tool_call_id":"original-call"}',
+                                )
+                            ],
+                        }
+                    ),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        return response(
+            [chunk({"role": "assistant", "content": "710 outputs"}, "stop")]
+        )
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await FlowGraph.create(
+                name="Private graph", category="indexer", state="draft"
+            )
+            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            _, source = await Sessions.begin(conversation["id"], request(), owner)
+            await Sessions.record_resources(source, [graph.id])
+            await AssistantToolCall.create(
+                turn_id=source.id,
+                call_id="original-call",
+                name="get_workflow_logs",
+                arguments=dumps({"workflow_id": graph.id}).decode(),
+                result={"ok": True, "data": {"runs": [{"output_count": 710}]}},
+                status="complete",
+            )
+            await Sessions.finish(source, content="Previous results", status="complete")
+
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request("follow-up"), owner
+                )
+            ]
+
+            assert events[-1].event == "done"
+            tool = next(event.data for event in events if event.event == "tool_result")
+            assert tool["ok"]
+            assert tool["data"]["turn_id"] == source.id
+            current = await AssistantTurn.get(request_id="follow-up")
+            assert current.resource_ids == [graph.id]
+
+            owner.role = UserRole.USER
+            owner.perms = None
+            for arguments in [
+                {"tool_call_id": "original-call"},
+                {"turn_id": current.id},
+            ]:
+                denied = await tools.execute_tool(
+                    "read_conversation_history",
+                    dumps(arguments).decode(),
+                    owner,
+                    conversation_id=conversation["id"],
+                )
+                assert denied["error"]["code"] == "permission_denied"
 
     asyncio.run(run())
 

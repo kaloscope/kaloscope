@@ -109,6 +109,7 @@ def test_account_scope():
             assert [item["id"] for item in listing["data"]["items"]] == [visible.id]
             assert details["ok"] is True
             assert details["data"]["id"] == visible.id
+            assert details["data"]["graph_source"] == "saved_draft"
             assert isinstance(details["data"]["created_at"], str)
             assert denied["error"]["code"] == ErrorCode.PERMISSION_DENIED
             assert logs["error"]["code"] == ErrorCode.PERMISSION_DENIED
@@ -239,8 +240,13 @@ def test_preview_does_not_write():
 
             assert validation["ok"] is True
             assert validation["data"]["valid"] is False
+            assert validation["data"]["readiness"]["status"] == "empty"
             assert preview["ok"] is True
             assert preview["data"]["changes"][0]["kind"] == "node"
+            assert preview["data"]["changes"][0]["changed_paths"] == [""]
+            assert preview["data"]["changes"][0]["changed_path_count"] == 1
+            assert preview["data"]["validation"]["executed"] is False
+            assert preview["data"]["validation"]["readiness"]["status"] == "invalid"
             assert conflict["error"]["code"] == ErrorCode.FLOW_DRAFT_CONFLICT
             await graph.refresh_from_db()
             assert graph.draft == {"nodes": [], "edges": []}
@@ -257,6 +263,62 @@ def test_node_schema():
 
     assert result["ok"] is True
     assert "ai" in json.dumps(result["data"])
+
+
+def test_preview_budget():
+    async def run():
+        async with database():
+            graph = await FlowGraph.create(
+                name="Many changes",
+                category=GraphCategory.SCHEDULE,
+                state=GraphState.DRAFT,
+                draft={
+                    "nodes": [
+                        {
+                            "id": str(index),
+                            "data": {
+                                "$schema": "http",
+                                "url": "https://old.test/" + "x" * 700,
+                            },
+                        }
+                        for index in range(40)
+                    ],
+                    "edges": [],
+                },
+            )
+            result = await tools.execute_tool(
+                "preview_workflow_draft",
+                json.dumps(
+                    {
+                        "workflow_id": graph.id,
+                        "draft_version": 0,
+                        "changes": [
+                            {
+                                "op": "set_field",
+                                "node_id": str(index),
+                                "field_id": "url",
+                                "value": "https://new.test/" + "x" * 700,
+                            }
+                            for index in range(40)
+                        ],
+                    }
+                ),
+                ADMIN,
+            )
+
+            assert result["ok"]
+            data = result["data"]
+            assert data["change_count"] == 40
+            assert 0 < len(data["changes"]) < 30
+            assert data["omitted_changes"] == 40 - len(data["changes"])
+            assert all(
+                change["changed_paths"] == ["/data/url"] for change in data["changes"]
+            )
+            assert len(tools.dumps(data)) <= tools.MAX_TOOL_RESULT_BYTES
+            await graph.refresh_from_db()
+            assert graph.draft_version == 0
+
+    asyncio.run(run())
 
 
 def test_result_limit(monkeypatch):

@@ -455,13 +455,27 @@ class GraphIssue(BaseModel):
     edge_id: str | None = None
 
 
+class GraphReadiness(BaseModel):
+    """Describe potential entry paths, without predicting runtime success."""
+
+    status: Literal["not_checked", "empty", "invalid", "incomplete", "ready"]
+    category: GraphCategory
+    scope: Literal["static_entry_paths"] = "static_entry_paths"
+    warnings: list[GraphIssue]
+    warning_count: int = Field(ge=0)
+    omitted_warnings: int = Field(ge=0)
+
+
 class GraphValidation(BaseModel):
-    """Separate graph integrity from readiness for publication."""
+    """Separate structure and field validity from static execution readiness."""
 
     valid: bool = Field(
         description="Whether no blocking errors remain; warnings may exist."
     )
     issues: list[GraphIssue]
+    scope: Literal["structure_and_fields"] = "structure_and_fields"
+    executed: Literal[False] = False
+    readiness: GraphReadiness
 
 
 class GraphDraftCreate(BaseModel):
@@ -482,6 +496,15 @@ class GraphChange(BaseModel):
     id: str
     before: dict[str, JSONType] | None
     after: dict[str, JSONType] | None
+    operation: Literal["add", "remove", "modify"]
+    changed_paths: list[str] = Field(
+        max_length=32,
+        description="Exact JSON Pointers relative to this element; an empty pointer "
+        "denotes a whole-element addition or removal. "
+        "Transient editor state is ignored.",
+    )
+    changed_path_count: int = Field(ge=1)
+    omitted_changed_paths: int = Field(ge=0)
 
 
 class GraphPreview(BaseModel):

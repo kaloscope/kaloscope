@@ -62,7 +62,8 @@ async def workflow_details(
         conversation_id: Owning conversation, when persistence is active.
 
     Returns:
-        Metadata, exact counts, a bounded graph overview, and its base reference.
+        Metadata, exact counts, a bounded saved-draft overview, and its base
+        reference. `graph_source` identifies what the graph counts describe.
     """
     from app.services.assistant_sessions import AssistantSessionService
 
@@ -76,6 +77,7 @@ async def workflow_details(
         "state": graph.state,
         "editable": graph.editable,
         "draft_version": graph.draft_version,
+        "graph_source": "saved_draft",
         "graph": graph_summary(document),
         "published_node_count": len((graph.definition or {}).get("nodes", [])),
         "base": {"workflow_id": graph.id, "draft_version": graph.draft_version},
@@ -103,6 +105,8 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
 
     Returns:
         Run summaries with stable detail identifiers and omission metadata.
+        Output counts cover a root array or an object's `items` array, with its
+        exact path; other output shapes have an unknown count and path.
     """
     await FlowGraphService.get_accessible(workflow_id, user)
     query = FlowLog.filter(graph_id=workflow_id)
@@ -120,7 +124,13 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
         errors = await run.filter(ended_at=None).order_by("id").limit(5)
         last = await run.exclude(ended_at=None).order_by("-ended_at", "-id").first()
         output = last.retval if last else None
-        count = len(output) if isinstance(output, list) else None
+        items = output.get("items") if isinstance(output, dict) else output
+        count = len(items) if isinstance(items, list) else None
+        count_path = (
+            (["items"] if isinstance(output, dict) else [])
+            if count is not None
+            else None
+        )
         runs.append(
             {
                 "run_id": first.id,
@@ -149,6 +159,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
                 "omitted_errors": max(0, error_count - 5),
                 "output_log_id": last.id if last else None,
                 "output_count": count,
+                "output_count_path": count_path,
                 "output": value_summary(output),
             }
         )

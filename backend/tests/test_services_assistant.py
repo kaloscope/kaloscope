@@ -586,8 +586,60 @@ def test_call_limits(monkeypatch, limit):
     events = asyncio.run(collect())
 
     assert events[-1].data == {"code": "ai_assistant_limit"}
-    assert sum(event.event == "tool_result" for event in events) == 1
+    assert sum(event.event == "tool_result" for event in events) == (
+        0 if limit == "MAX_MODEL_TURNS" else 1
+    )
     assert len(requests) == (1 if limit == "MAX_MODEL_TURNS" else 2)
+    assert json.loads(requests[-1].content)["tool_choice"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("limit", "value", "call_count"),
+    [("MAX_MODEL_TURNS", 2, 1), ("MAX_TOOL_CALLS", 1, 1), ("MAX_TOOL_CALLS", 8, 8)],
+)
+def test_final_answer_at_limit(monkeypatch, limit, value, call_count):
+    requests = []
+    monkeypatch.setattr(service, limit, value)
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                call_delta(id=f"call-{i}", index=i)
+                                for i in range(call_count)
+                            ],
+                        }
+                    ),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        assert body["tool_choice"] == "none"
+        assert "tools" not in body
+        assert body["messages"][-2]["role"] == "tool"
+        assert body["messages"][-1]["role"] == "system"
+        assert "remaining unknowns" in body["messages"][-1]["content"]
+        return response(
+            [
+                chunk(
+                    {"role": "assistant", "content": "Here are the known facts."},
+                    "stop",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert events[-1].data["tool_calls"] == call_count
+    assert len(requests) == 2
+    assert sum(event.event == "tool_result" for event in events) == call_count
 
 
 @pytest.mark.parametrize("limit", ["MAX_CONTEXT_BYTES", "MAX_RESPONSE_BYTES"])
@@ -621,6 +673,52 @@ def test_batch_limit(monkeypatch):
 
     assert events[-1].data == {"code": "ai_assistant_limit"}
     execute.assert_not_awaited()
+
+
+def test_remaining_tool_budget(monkeypatch):
+    requests = []
+    monkeypatch.setattr(service, "MAX_TOOL_CALLS", 3)
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) <= 2:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                call_delta(id=f"batch-{len(requests)}-{i}", index=i)
+                                for i in range(2)
+                            ],
+                        }
+                    ),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        assert body["tool_choice"] == "none"
+        assert "tools" not in body
+        assert [
+            item["tool_call_id"] for item in body["messages"] if item["role"] == "tool"
+        ] == [
+            "batch-1-0",
+            "batch-1-1",
+        ]
+        assert "batch-2" not in json.dumps(body["messages"])
+        return response(
+            [chunk({"role": "assistant", "content": "Known facts only"}, "stop")]
+        )
+
+    configure(monkeypatch, handler)
+    execute = AsyncMock(return_value={"ok": True, "data": {"count": 17}})
+    monkeypatch.setattr(service, "execute_tool", execute)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert events[-1].data["tool_calls"] == 2
+    assert execute.await_count == 2
+    assert len(requests) == 3
 
 
 def test_duplicate_call_ids(monkeypatch):

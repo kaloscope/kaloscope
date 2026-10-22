@@ -33,8 +33,8 @@
       .post('auth/login', { body: data })
       .json<Resp<Token>>()
       .then(({ data }) => {
-        user.set(data.user);
         token.set(data.token);
+        user.set(data.user);
         goto('/');
       })
       .finally(() => {

@@ -22,6 +22,7 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
+from app.core.flow.diff import changed_paths
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node, NodeSchema
 from app.core.flow.validation import (
@@ -519,13 +520,26 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
             before = {item["id"]: item for item in previous[collection]}
             after = {item["id"]: item for item in proposed[collection]}
             for item_id in sorted(before.keys() | after.keys()):
-                if before.get(item_id) != after.get(item_id):
+                paths, path_count = changed_paths(
+                    before.get(item_id), after.get(item_id)
+                )
+                if path_count:
                     changes.append(
                         GraphChange(
                             kind=kind,
                             id=item_id,
                             before=before.get(item_id),
                             after=after.get(item_id),
+                            operation=(
+                                "add"
+                                if item_id not in before
+                                else "remove"
+                                if item_id not in after
+                                else "modify"
+                            ),
+                            changed_paths=paths,
+                            changed_path_count=path_count,
+                            omitted_changed_paths=path_count - len(paths),
                         )
                     )
         return GraphPreview(

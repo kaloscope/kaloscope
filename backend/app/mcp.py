@@ -261,8 +261,8 @@ def create_server() -> MCPServer:
             document: Proposed editor contents with stable IDs and explicit handles.
 
         Returns:
-            Validation issues located by node, field, or edge; requires an
-            administrator.
+            Located structure/field issues and separate static readiness warnings;
+            neither proves runtime success. Requires an administrator.
         """
         return GraphValidation.model_validate(
             await _read(
@@ -292,7 +292,8 @@ def create_server() -> MCPServer:
             draft: Proposed contents and their saved base version.
 
         Returns:
-            Reviewable differences, validation results, and the designer path.
+            Exact changed paths, structure/field validity, static readiness warnings,
+            and the designer path. Nothing is executed or saved.
         """
         return GraphPreview.model_validate(
             await _read(FlowGraphService.preview_draft(workflow_id, draft, _user(ctx)))

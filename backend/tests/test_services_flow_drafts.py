@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -154,6 +155,105 @@ def test_preview():
             await graph.refresh_from_db()
             assert graph.draft_version == 0
             assert await FlowDraftRevision.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_preview_paths():
+    async def run():
+        async with database() as graph:
+            original = draft().model_dump(exclude={"draft_version"})
+            original["nodes"][0]["selected"] = True
+            original["nodes"][0]["position"] = {"x": 1, "y": 0}
+            graph.draft = original
+            await graph.save()
+            proposed = deepcopy(original)
+            proposed["nodes"][0].update(
+                selected=False, measured={"width": 100}, dragging=True
+            )
+            proposed["nodes"][0]["position"]["x"] = 1.0
+            unchanged = await FlowGraphService.preview_draft(
+                graph.id,
+                GraphWrite(**proposed, draft_version=0),
+                ADMIN,
+            )
+            assert unchanged.changes == []
+
+            proposed["nodes"][0]["position"]["x"] = 2
+            proposed["nodes"][0]["data"]["url"] = "https://new.test"
+            proposed["nodes"][0]["width"] = 300
+            preview = await FlowGraphService.preview_draft(
+                graph.id,
+                GraphWrite(**proposed, draft_version=0),
+                ADMIN,
+            )
+            change = preview.changes[0]
+            assert change.operation == "modify"
+            assert change.changed_paths == ["/data/url", "/position/x", "/width"]
+            assert change.changed_path_count == 3
+            assert change.omitted_changed_paths == 0
+            assert preview.validation.valid
+            assert preview.validation.readiness.status == "incomplete"
+            assert preview.validation.executed is False
+
+            saved = await FlowGraphService.save_graph(
+                graph.id, GraphWrite(**proposed, draft_version=0), ADMIN
+            )
+            assert saved.draft_version == 1
+            assert saved.definition is None
+
+    asyncio.run(run())
+
+
+def test_edge_paths():
+    async def run():
+        async with database() as graph:
+            original = {
+                "nodes": [
+                    {
+                        "id": "start",
+                        "data": {"$schema": "condition", "expression": "true"},
+                    },
+                    *[
+                        {
+                            "id": id,
+                            "data": {"$schema": "http", "url": "https://example.test"},
+                        }
+                        for id in ("one", "two")
+                    ],
+                ],
+                "edges": [
+                    {
+                        "id": "link",
+                        "source": "start",
+                        "sourceHandle": "is_true",
+                        "target": "one",
+                        "targetHandle": "input",
+                        "selected": True,
+                    }
+                ],
+            }
+            graph.draft = original
+            await graph.save()
+            proposed = deepcopy(original)
+            proposed["edges"][0]["selected"] = False
+            unchanged = await FlowGraphService.preview_draft(
+                graph.id, GraphWrite(**proposed, draft_version=0), ADMIN
+            )
+            assert unchanged.changes == []
+
+            proposed["edges"][0].update(sourceHandle="is_false", target="two")
+            preview = await FlowGraphService.preview_draft(
+                graph.id, GraphWrite(**proposed, draft_version=0), ADMIN
+            )
+
+            assert preview.validation.valid
+            assert len(preview.changes) == 1
+            change = preview.changes[0]
+            assert change.kind == "edge"
+            assert change.changed_paths == ["/sourceHandle", "/target"]
+            assert change.changed_path_count == 2
+            assert change.omitted_changed_paths == 0
 
     asyncio.run(run())
 
