@@ -331,6 +331,32 @@ def test_http_contract(application, monkeypatch):
                     path + "/snapshots", json=upload, headers=headers
                 )
                 assert repeated.json()["data"] == reference
+                for attachment in (
+                    {},
+                    {"canvas": {"nodes": [], "edges": []}},
+                    {
+                        "snapshot_id": reference["snapshot_id"],
+                        "canvas": {"nodes": [], "edges": []},
+                    },
+                ):
+                    rejected = await client.post(
+                        path + "/chat",
+                        json={
+                            "model": BODY["model"],
+                            "prompt": "Inspect",
+                            "request_id": "rejected",
+                            "context": {
+                                "page_type": "workflow_designer",
+                                "route": f"/settings/workflows/graphs/{graph.id}",
+                                "resource_id": graph.id,
+                                "draft_version": 0,
+                                "unsaved": True,
+                                **attachment,
+                            },
+                        },
+                        headers=headers,
+                    )
+                    assert rejected.status_code == 400
                 reply = await client.post(
                     path + "/chat",
                     json={
@@ -414,7 +440,7 @@ def test_canvas_edit_routes(application):
             conversation = await Sessions.create(
                 ConversationCreate(model=BODY["model"]), user
             )
-            _, turn = await Sessions.begin(
+            turn = await Sessions.begin(
                 conversation["id"],
                 AssistantTurnRequest(
                     model=BODY["model"], request_id="turn", prompt="Repair"

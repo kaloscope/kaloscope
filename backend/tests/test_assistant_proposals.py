@@ -150,7 +150,7 @@ async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):
         "snapshot_id": snapshot_id,
         "changes": changes,
     }
-    _, turn = await Sessions.begin(
+    turn = await Sessions.begin(
         env.conversation,
         AssistantTurnRequest.model_validate(
             {"model": MODEL, "request_id": key, "prompt": "Repair it"}
@@ -457,15 +457,19 @@ async def revisions(env):
     return await FlowDraftRevision.filter(graph_id=env.graph.id).count()
 
 
-def test_save():
+@pytest.mark.parametrize("version", [0, 7])
+def test_save(version):
     async def run():
         async with database() as env:
-            data = await preview(env, [set_url()])
+            await FlowGraph.filter(id=env.graph.id).update(draft_version=version)
+            data = await preview(env, [set_url()], version=version)
             view = await Proposals.canvas(
                 env.conversation, data["proposal_id"], env.owner
             )
 
             assert view["proposal"]["status"] == "pending"
+            assert view["proposal"]["workflow_id"] == env.graph.id
+            assert view["proposal"]["base_version"] == version
             assert view["change_count"] == 1
             assert view["canvas"]["nodes"][0]["data"]["url"] == "https://new.test"
 
@@ -474,8 +478,8 @@ def test_save():
             await env.graph.refresh_from_db()
 
             assert outcome["status"] == repeated["status"] == "saved"
-            assert outcome["saved_version"] == repeated["saved_version"] == 1
-            assert env.graph.draft_version == 1
+            assert outcome["saved_version"] == repeated["saved_version"] == version + 1
+            assert env.graph.draft_version == version + 1
             assert await revisions(env) == 1
             assert env.graph.state == GraphState.MODIFIED
             assert env.graph.definition == document()
@@ -488,12 +492,12 @@ def test_save():
             turns = await Sessions.turns(env.conversation, env.owner)
             tool = turns["items"][-1]["tools"][0]
             assert tool["proposal"]["status"] == "saved"
-            assert tool["proposal"]["saved_version"] == 1
+            assert tool["proposal"]["saved_version"] == version + 1
             recovered = await Proposals.outcome(
                 env.conversation, data["proposal_id"], env.reader
             )
             assert recovered["proposal"] == outcome
-            assert recovered["workflow"]["draft_version"] == 1
+            assert recovered["workflow"]["draft_version"] == version + 1
             assert recovered["workflow"]["state"] == GraphState.MODIFIED
             assert recovered["workflow"]["updated_at"] == env.graph.updated_at
 

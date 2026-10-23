@@ -43,20 +43,12 @@ export const api = ky.create({
       async ({ error, options }) => {
         if (isHTTPError(error)) {
           const data = error.data;
-          const resp =
-            data &&
-            typeof data === 'object' &&
-            'status' in data &&
-            typeof data.status === 'number' &&
-            Number.isInteger(data.status) &&
-            data.status >= 400 &&
-            data.status <= 599 &&
-            'message' in data &&
-            typeof data.message === 'string'
-              ? { status: data.status, message: data.message }
+          const message =
+            data && typeof data === 'object' && 'message' in data && typeof data.message === 'string'
+              ? data.message
               : undefined;
-          const status = resp?.status ?? error.response.status;
-          const unauthorized = status === 401 || error.response.status === 401;
+          const status = error.response.status;
+          const unauthorized = status === 401;
 
           // goto login page if unauthorized
           if (unauthorized) {
@@ -64,16 +56,16 @@ export const api = ky.create({
             goto('/login');
           }
 
-          if (resp?.message) error.message = resp.message;
+          if (message) error.message = message;
           // allow callers to display errors in place while preserving login handling
           if (options.context.silentErrors && !unauthorized) {
             return error;
           }
           // alert error message
-          if (resp?.message || status >= 500) {
+          if (message || status >= 500) {
             alert({
               level: 'error',
-              message: resp?.message || 'internal_server_error',
+              message: message || 'internal_server_error',
               unique: unauthorized
             });
             return error;

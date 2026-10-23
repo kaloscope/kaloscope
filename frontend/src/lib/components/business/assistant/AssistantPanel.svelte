@@ -19,7 +19,7 @@
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { AssistantDestination, AssistantStoredContext } from '$lib/types';
+  import type { AssistantDestination } from '$lib/types';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
   import AssistantHistory from './AssistantHistory.svelte';
@@ -274,12 +274,12 @@
   }
 
   /**
-   * Describe the page snapshot submitted with a turn.
+   * Describe the captured page before or after its snapshot upload.
    *
    * @param context - Snapshot captured when the turn was sent.
    * @returns A short localized label with the resource and draft state.
    */
-  function contextLabel(context: AssistantStoredContext): string {
+  function contextLabel(context: NonNullable<AssistantTurn['context']>): string {
     const parts = [$_(`assistant.pages.${context.page_type}`)];
     if (context.page_type === 'workflow_designer') {
       parts.push(`#${context.resource_id}`, $_(context.unsaved ? 'assistant.unsaved' : 'assistant.saved'));

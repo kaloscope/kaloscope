@@ -62,7 +62,7 @@ class WorkflowListContext(ContextModel):
 
 
 class WorkflowDesignerContext(ContextModel):
-    """Capture the visible canvas independently of the saved workflow draft."""
+    """Reference the visible canvas independently of the saved workflow draft."""
 
     page_type: Literal["workflow_designer"]
     route: str = Field(max_length=160)
@@ -72,34 +72,27 @@ class WorkflowDesignerContext(ContextModel):
     # the visible designer accepts direct canvas edits; the server narrows it to
     # actual editor rights and workflow editability before storing the turn
     editable: bool = False
-    canvas: GraphDocument | None = None
-    snapshot_id: ResourceID | None = None
+    snapshot_id: ResourceID
     selected_node_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
         default_factory=list, max_length=500
     )
 
     @model_validator(mode="after")
-    def validate_selection(self) -> Self:
-        """Require the route, mode and selected nodes to identify this canvas.
+    def validate_route(self) -> Self:
+        """Require the route and editing mode to identify this workflow.
 
         Returns:
             Consistent designer context.
 
         Raises:
-            ValueError: If the source is ambiguous, the route/selection is invalid,
-                or a read-only route claims direct editing.
+            ValueError: If the route is invalid or a read-only route claims editing.
         """
         editor_route = f"{WORKFLOW_PATH}/{self.resource_id}"
-        if (
-            self.route not in {editor_route, f"{WORKFLOW_PATH}/r/{self.resource_id}"}
-            or (self.editable and self.route != editor_route)
-            or (self.canvas is None) == (self.snapshot_id is None)
-        ):
+        if self.route not in {
+            editor_route,
+            f"{WORKFLOW_PATH}/r/{self.resource_id}",
+        } or (self.editable and self.route != editor_route):
             raise ValueError("Context does not match the visible workflow")
-        if self.canvas is not None and not set(self.selected_node_ids).issubset(
-            {node.id for node in self.canvas.nodes}
-        ):
-            raise ValueError("Selection does not match the visible workflow")
         return self
 
 

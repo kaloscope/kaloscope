@@ -347,7 +347,7 @@ class AssistantSessionService:
     @classmethod
     async def begin(
         cls, conversation_id: int, body: AssistantTurnRequest, user: UserInfo
-    ) -> tuple[AssistantConversation, AssistantTurn]:
+    ) -> AssistantTurn:
         """Claim a conversation and persist the request before generation.
 
         Args:
@@ -356,7 +356,7 @@ class AssistantSessionService:
             user: Authenticated account.
 
         Returns:
-            The leased conversation and its persisted turn.
+            The persisted turn in the claimed conversation.
 
         Raises:
             KaloscopeException: If the request is active or duplicated.
@@ -403,21 +403,9 @@ class AssistantSessionService:
             if isinstance(body.context, WorkflowDesignerContext):
                 if context is None:
                     raise BadRequestException
-                if body.context.canvas is not None:
-                    snapshot = await cls.snapshot(
-                        conversation_id,
-                        body.context.resource_id,
-                        body.context.draft_version,
-                        body.context.canvas,
-                        "canvas",
-                        user,
-                    )
-                elif body.context.snapshot_id is not None:
-                    snapshot = await cls.read_snapshot(
-                        conversation_id, body.context.snapshot_id, user
-                    )
-                else:
-                    raise BadRequestException
+                snapshot = await cls.read_snapshot(
+                    conversation_id, body.context.snapshot_id, user
+                )
                 if (
                     snapshot.workflow_id != body.context.resource_id
                     or snapshot.draft_version != body.context.draft_version
@@ -426,10 +414,8 @@ class AssistantSessionService:
                     )
                 ):
                     raise BadRequestException
-                context.pop("canvas", None)
                 context.update(
                     editable=await cls.direct_edit(body.context, user),
-                    snapshot_id=snapshot.id,
                     graph={
                         "node_count": len(snapshot.document["nodes"]),
                         "edge_count": len(snapshot.document["edges"]),
@@ -448,7 +434,7 @@ class AssistantSessionService:
                 await AssistantConversation.filter(id=conversation_id).update(
                     title=body.prompt.strip()[:120]
                 )
-        return await cls.owned(conversation_id, user), turn
+        return turn
 
     @staticmethod
     async def direct_edit(context: WorkflowDesignerContext, user: UserInfo) -> bool:

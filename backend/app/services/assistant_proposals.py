@@ -63,33 +63,28 @@ class AssistantProposalService:
     @classmethod
     async def create(
         cls,
-        conversation_id: int,
         call_id: str,
-        workflow_id: int,
-        base_version: int,
         snapshot: AssistantSnapshot,
         base_snapshot_id: int,
     ) -> AssistantProposal:
         """Record a pending edit for a previewed immutable document.
 
         Args:
-            conversation_id: Server-owned conversation of the preview.
             call_id: Server-generated identifier of the preview tool call.
-            workflow_id: Workflow whose draft the edit would replace.
-            base_version: Saved draft version that must still be current to save.
-            snapshot: Stored proposed document.
+            snapshot: Stored proposed document with its conversation, workflow,
+                and base draft version.
             base_snapshot_id: Original canvas captured before the edit.
 
         Returns:
             The pending edit.
         """
         return await AssistantProposal.create(
-            conversation_id=conversation_id,
+            conversation_id=snapshot.conversation_id,
             call_id=call_id,
             snapshot_id=snapshot.id,
             base_snapshot_id=base_snapshot_id,
-            workflow_id=workflow_id,
-            base_version=base_version,
+            workflow_id=snapshot.workflow_id,
+            base_version=snapshot.draft_version,
             digest=snapshot.digest,
         )
 

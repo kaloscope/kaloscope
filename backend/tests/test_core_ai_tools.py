@@ -12,17 +12,31 @@ from tortoise import Tortoise
 
 from app.core.ai import tools
 from app.core.exceptions import ErrorCode
+from app.models.assistant import (
+    AssistantConversation,
+    AssistantProposal,
+    AssistantSnapshot,
+)
 from app.models.flow import FlowDraftRevision, FlowGraph, GraphCategory, GraphState
-from app.models.user import Permissions, UserInfo, UserRole
+from app.models.user import Permissions, User, UserInfo, UserRole
 
-ADMIN = cast(UserInfo, SimpleNamespace(role=UserRole.ADMIN))
+ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN))
 
 
 @asynccontextmanager
 async def database():
+    """Create an isolated database with an owned tool conversation.
+
+    Yields:
+        Control while the account and conversation fixtures are available.
+    """
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
+        await User.create(
+            id=ADMIN.id, username="owner", password="unused", role="admin"
+        )
+        await AssistantConversation.create(id=1, user_id=ADMIN.id, title="Tool fixture")
         yield
     finally:
         await Tortoise.close_connections()
@@ -74,7 +88,13 @@ def test_rejected(monkeypatch, name, arguments, role, code):
     read = AsyncMock()
     monkeypatch.setattr(tools.FlowGraphService, "get_details", read)
     result = asyncio.run(
-        tools.execute_tool(name, arguments, cast(UserInfo, SimpleNamespace(role=role)))
+        tools.execute_tool(
+            name,
+            arguments,
+            cast(UserInfo, SimpleNamespace(role=role)),
+            conversation_id=1,
+            call_id="test",
+        )
     )
 
     assert result["ok"] is False
@@ -94,19 +114,35 @@ def test_account_scope():
             reader = cast(
                 UserInfo,
                 SimpleNamespace(
-                    role=UserRole.USER, perms=Permissions(indexer_ids=[visible.id])
+                    id=ADMIN.id,
+                    role=UserRole.USER,
+                    perms=Permissions(indexer_ids=[visible.id]),
                 ),
             )
 
-            listing = await tools.execute_tool("list_workflows", "{}", reader)
+            listing = await tools.execute_tool(
+                "list_workflows", "{}", reader, conversation_id=1, call_id="test"
+            )
             details = await tools.execute_tool(
-                "get_workflow", json.dumps({"workflow_id": visible.id}), reader
+                "get_workflow",
+                json.dumps({"workflow_id": visible.id}),
+                reader,
+                conversation_id=1,
+                call_id="test",
             )
             denied = await tools.execute_tool(
-                "get_workflow", json.dumps({"workflow_id": private.id}), reader
+                "get_workflow",
+                json.dumps({"workflow_id": private.id}),
+                reader,
+                conversation_id=1,
+                call_id="test",
             )
             logs = await tools.execute_tool(
-                "get_workflow_logs", json.dumps({"workflow_id": private.id}), reader
+                "get_workflow_logs",
+                json.dumps({"workflow_id": private.id}),
+                reader,
+                conversation_id=1,
+                call_id="test",
             )
 
             assert listing["ok"] is True
@@ -115,6 +151,12 @@ def test_account_scope():
             assert details["data"]["id"] == visible.id
             assert details["data"]["graph_source"] == "saved_draft"
             assert isinstance(details["data"]["created_at"], str)
+            snapshot = await AssistantSnapshot.get(
+                id=details["data"]["base"]["snapshot_id"]
+            )
+            assert snapshot.conversation_id == 1
+            assert snapshot.workflow_id == visible.id
+            assert snapshot.document == {"nodes": [], "edges": []}
             assert denied["error"]["code"] == ErrorCode.PERMISSION_DENIED
             assert logs["error"]["code"] == ErrorCode.PERMISSION_DENIED
             assert "Private" not in json.dumps(denied)
@@ -146,6 +188,8 @@ def test_list_ordering(ordering, expected):
                         }
                     ),
                     ADMIN,
+                    conversation_id=1,
+                    call_id="test",
                 )
                 assert result["ok"] is True
                 names.extend(item["name"] for item in result["data"]["items"])
@@ -168,7 +212,11 @@ def test_list_ordering(ordering, expected):
     ],
 )
 def test_invalid_navigation(arguments):
-    result = asyncio.run(tools.execute_tool("navigate", json.dumps(arguments), ADMIN))
+    result = asyncio.run(
+        tools.execute_tool(
+            "navigate", json.dumps(arguments), ADMIN, conversation_id=1, call_id="test"
+        )
+    )
 
     assert result["ok"] is False
     assert result["error"]["code"] == "bad_request"
@@ -191,11 +239,21 @@ def test_navigation_scope():
             )
             args = json.dumps({"page": "workflow_designer", "resource_id": graph.id})
 
-            edit = await tools.execute_tool("navigate", args, ADMIN)
-            view = await tools.execute_tool("navigate", args, reader)
-            failure = await tools.execute_tool("navigate", args, denied)
+            edit = await tools.execute_tool(
+                "navigate", args, ADMIN, conversation_id=1, call_id="test"
+            )
+            view = await tools.execute_tool(
+                "navigate", args, reader, conversation_id=1, call_id="test"
+            )
+            failure = await tools.execute_tool(
+                "navigate", args, denied, conversation_id=1, call_id="test"
+            )
             listing = await tools.execute_tool(
-                "navigate", '{"page":"workflows"}', reader
+                "navigate",
+                '{"page":"workflows"}',
+                reader,
+                conversation_id=1,
+                call_id="test",
             )
 
             assert edit["data"]["path"] == f"/settings/workflows/graphs/{graph.id}"
@@ -223,6 +281,8 @@ def test_preview_does_not_write():
                 "validate_workflow",
                 json.dumps({"workflow_id": graph.id, "draft_version": 0}),
                 ADMIN,
+                conversation_id=1,
+                call_id="test",
             )
             preview = await tools.execute_tool(
                 "preview_workflow_draft",
@@ -234,6 +294,8 @@ def test_preview_does_not_write():
                     }
                 ),
                 ADMIN,
+                conversation_id=1,
+                call_id="test",
             )
             conflict = await tools.execute_tool(
                 "preview_workflow_draft",
@@ -245,6 +307,8 @@ def test_preview_does_not_write():
                     }
                 ),
                 ADMIN,
+                conversation_id=1,
+                call_id="test",
             )
 
             assert validation["ok"] is True
@@ -258,6 +322,12 @@ def test_preview_does_not_write():
             assert preview["data"]["validation"]["readiness"]["status"] == "invalid"
             assert preview["data"]["pre_existing_change_count"] == 0
             assert preview["data"]["change_count"] == 1
+            assert "proposal_id" not in preview["data"]
+            snapshot = await AssistantSnapshot.get(
+                id=preview["data"]["proposal_snapshot_id"]
+            )
+            assert snapshot.document["nodes"][0]["id"] == "http"
+            assert await AssistantProposal.all().count() == 0
             assert conflict["error"]["code"] == ErrorCode.FLOW_DRAFT_CONFLICT
             await graph.refresh_from_db()
             assert graph.draft == {"nodes": [], "edges": []}
@@ -269,7 +339,13 @@ def test_preview_does_not_write():
 
 def test_node_schema():
     result = asyncio.run(
-        tools.execute_tool("list_node_types", '{"node_type":"ai"}', ADMIN)
+        tools.execute_tool(
+            "list_node_types",
+            '{"node_type":"ai"}',
+            ADMIN,
+            conversation_id=1,
+            call_id="test",
+        )
     )
 
     assert result["ok"] is True
@@ -315,6 +391,8 @@ def test_preview_budget():
                     }
                 ),
                 ADMIN,
+                conversation_id=1,
+                call_id="test",
             )
 
             assert result["ok"]
@@ -334,16 +412,48 @@ def test_preview_budget():
 
 def test_result_limit(monkeypatch):
     monkeypatch.setattr(tools, "MAX_TOOL_RESULT_BYTES", 1)
-    result = asyncio.run(tools.execute_tool("list_node_types", "{}", ADMIN))
+    result = asyncio.run(
+        tools.execute_tool(
+            "list_node_types", "{}", ADMIN, conversation_id=1, call_id="test"
+        )
+    )
 
     assert result["error"]["code"] == ErrorCode.ASSISTANT_RESULT_LIMIT
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_result_byte_boundary(monkeypatch, extra_bytes):
+    payload = {"label": "工作流", "values": (1, 2)}
+    monkeypatch.setattr(tools, "workflow_list", AsyncMock(return_value=payload))
+    monkeypatch.setattr(
+        tools, "MAX_TOOL_RESULT_BYTES", len(tools.dumps(payload)) - extra_bytes
+    )
+
+    result = asyncio.run(
+        tools.execute_tool(
+            "list_workflows", "{}", ADMIN, conversation_id=1, call_id="test"
+        )
+    )
+
+    if extra_bytes:
+        assert result["error"]["code"] == ErrorCode.ASSISTANT_RESULT_LIMIT
+    else:
+        assert result == {"ok": True, "data": {"label": "工作流", "values": [1, 2]}}
 
 
 def test_timeout(monkeypatch):
     monkeypatch.setattr(
         tools.FlowGraphService, "get_accessible", AsyncMock(side_effect=TimeoutError)
     )
-    result = asyncio.run(tools.execute_tool("get_workflow", '{"workflow_id":1}', ADMIN))
+    result = asyncio.run(
+        tools.execute_tool(
+            "get_workflow",
+            '{"workflow_id":1}',
+            ADMIN,
+            conversation_id=1,
+            call_id="test",
+        )
+    )
 
     assert result["error"]["code"] == ErrorCode.AI_TIMEOUT
 
@@ -354,7 +464,15 @@ def test_error_redaction(monkeypatch):
         "get_accessible",
         AsyncMock(side_effect=RuntimeError("private-password")),
     )
-    result = asyncio.run(tools.execute_tool("get_workflow", '{"workflow_id":1}', ADMIN))
+    result = asyncio.run(
+        tools.execute_tool(
+            "get_workflow",
+            '{"workflow_id":1}',
+            ADMIN,
+            conversation_id=1,
+            call_id="test",
+        )
+    )
 
     assert result["error"]["code"] == ErrorCode.INTERNAL_SERVER_ERROR
     assert "private-password" not in json.dumps(result)

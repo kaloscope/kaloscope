@@ -123,7 +123,13 @@ def test_owned_history():
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, turn = await Sessions.begin(conversation["id"], request(), owner)
+            turn = await Sessions.begin(conversation["id"], request(), owner)
+            claimed = await Sessions.owned(conversation["id"], owner)
+
+            assert turn.conversation_id == conversation["id"]
+            assert claimed.active_request == turn.request_id == "request"
+            assert claimed.title == turn.prompt == "Continue"
+
             await Sessions.finish(turn, content="Original reply", status="complete")
 
             restored = await Sessions.turns(conversation["id"], owner)
@@ -160,7 +166,20 @@ def test_cross_page_context(monkeypatch):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, original = await Sessions.begin(
+            snapshot = await Sessions.snapshot(
+                conversation["id"],
+                graph.id,
+                0,
+                GraphDocument.model_validate(
+                    {
+                        "nodes": [{"id": "one", "data": {"script": "original script"}}],
+                        "edges": [],
+                    }
+                ),
+                "canvas",
+                owner,
+            )
+            original = await Sessions.begin(
                 conversation["id"],
                 request(
                     "original",
@@ -170,12 +189,7 @@ def test_cross_page_context(monkeypatch):
                         "resource_id": graph.id,
                         "draft_version": 0,
                         "unsaved": True,
-                        "canvas": {
-                            "nodes": [
-                                {"id": "one", "data": {"script": "original script"}}
-                            ],
-                            "edges": [],
-                        },
+                        "snapshot_id": snapshot.id,
                     },
                 ),
                 owner,
@@ -344,11 +358,13 @@ def test_concurrent_and_expired():
             assert (
                 sum(isinstance(result, KaloscopeException) for result in results) == 1
             )
-            first = next(result[1] for result in results if isinstance(result, tuple))
+            first = next(
+                result for result in results if isinstance(result, AssistantTurn)
+            )
             await AssistantConversation.filter(id=conversation["id"]).update(
                 lease_until=timezone.now() - timedelta(seconds=1)
             )
-            _, replacement = await Sessions.begin(
+            replacement = await Sessions.begin(
                 conversation["id"], request("replacement"), owner
             )
             await first.refresh_from_db()
@@ -412,7 +428,7 @@ def test_script_reference():
                 workflow_id=graph.id, draft_version=0, canvas=document
             )
             assert len(dumps(upload.model_dump())) > 128 * 1024
-            _, turn = await Sessions.begin(
+            turn = await Sessions.begin(
                 conversation["id"],
                 request(
                     context={
@@ -441,12 +457,14 @@ def test_script_reference():
                 dumps(base).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             preview = await tools.execute_tool(
                 "preview_workflow_draft",
                 dumps({**base, "changes": []}).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             assert validation["data"]["valid"] is True
             assert preview["data"]["change_count"] == 0
@@ -512,6 +530,7 @@ def test_script_reference():
                 ).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             assert removed["data"]["change_count"] == 24
             await FlowGraph.filter(id=graph.id).update(draft_version=1)
@@ -520,6 +539,7 @@ def test_script_reference():
                 dumps(base).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             assert conflict["error"]["code"] == "flow_draft_conflict"
             await Sessions.delete(conversation["id"], owner)
@@ -690,7 +710,7 @@ def test_active_tool_overflow(monkeypatch):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, original = await Sessions.begin(
+            original = await Sessions.begin(
                 conversation["id"], request("original"), owner
             )
             await Sessions.finish(
@@ -917,7 +937,7 @@ def test_checkpoint_with_tool_tail():
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, previous = await Sessions.begin(
+            previous = await Sessions.begin(
                 conversation["id"], request("previous"), owner
             )
             await Sessions.finish(previous, content="Original", status="complete")
@@ -929,9 +949,7 @@ def test_checkpoint_with_tool_tail():
                 summary=summary,
                 summary_through=previous.id,
             )
-            _, active = await Sessions.begin(
-                conversation["id"], request("active"), owner
-            )
+            active = await Sessions.begin(conversation["id"], request("active"), owner)
             tail = []
             for index in range(5):
                 tail.extend(
@@ -1008,6 +1026,9 @@ def test_checkpoint_with_tool_tail():
 def test_large_log_summary(wrapped):
     async def run():
         async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             graph = await FlowGraph.create(
                 name="Logs", category="indexer", state="draft"
             )
@@ -1022,7 +1043,11 @@ def test_large_log_summary(wrapped):
                 )
 
             result = await tools.execute_tool(
-                "get_workflow_logs", dumps({"workflow_id": graph.id}).decode(), owner
+                "get_workflow_logs",
+                dumps({"workflow_id": graph.id}).decode(),
+                owner,
+                conversation_id=conversation["id"],
+                call_id="test",
             )
             assert result["ok"] is True
             assert [run["output_count"] for run in result["data"]["runs"]] == [710, 710]
@@ -1045,6 +1070,8 @@ def test_large_log_summary(wrapped):
                     }
                 ).decode(),
                 owner,
+                conversation_id=conversation["id"],
+                call_id="test",
             )
             assert detail["data"]["total"] == 710
             assert detail["data"]["next_offset"] is None
@@ -1070,6 +1097,9 @@ def test_large_log_summary(wrapped):
 def test_output_counts(output, count, path):
     async def run():
         async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             graph = await FlowGraph.create(
                 name="Output shapes", category="indexer", state="draft"
             )
@@ -1082,7 +1112,11 @@ def test_output_counts(output, count, path):
             )
 
             result = await tools.execute_tool(
-                "get_workflow_logs", dumps({"workflow_id": graph.id}).decode(), owner
+                "get_workflow_logs",
+                dumps({"workflow_id": graph.id}).decode(),
+                owner,
+                conversation_id=conversation["id"],
+                call_id="test",
             )
 
             run = result["data"]["runs"][0]
@@ -1250,16 +1284,14 @@ def test_summary_failure_preserves_history(monkeypatch, malformed):
             )
             originals = []
             for index in range(4):
-                _, turn = await Sessions.begin(
+                turn = await Sessions.begin(
                     conversation["id"], request(str(index)), owner
                 )
                 await Sessions.finish(
                     turn, content="Original text. " * 180, status="complete"
                 )
                 originals.append(turn.id)
-            _, current = await Sessions.begin(
-                conversation["id"], request("active"), owner
-            )
+            current = await Sessions.begin(conversation["id"], request("active"), owner)
             with pytest.raises(KaloscopeException, match="assistant_compaction_failed"):
                 await history.prepare_context(
                     client, current, owner, "system", [], None
@@ -1306,7 +1338,7 @@ def test_rolling_summary_sources(monkeypatch, source_ids):
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
             for index in range(2):
-                _, previous = await Sessions.begin(
+                previous = await Sessions.begin(
                     conversation["id"], request(str(index)), owner
                 )
                 await Sessions.finish(
@@ -1319,7 +1351,7 @@ def test_rolling_summary_sources(monkeypatch, source_ids):
                 },
                 summary_through=1,
             )
-            _, turn = await Sessions.begin(conversation["id"], request("active"), owner)
+            turn = await Sessions.begin(conversation["id"], request("active"), owner)
             turn.usage = usage
             messages, used, compacted = await history.prepare_context(
                 client, turn, owner, "system", [], None
@@ -1350,14 +1382,14 @@ def test_summary_history_sources(monkeypatch, reference):
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
             for prompt in ["original", "checkpoint"]:
-                _, previous = await Sessions.begin(
+                previous = await Sessions.begin(
                     conversation["id"], request(prompt), owner
                 )
                 await Sessions.finish(previous, content=prompt, status="complete")
             other = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, foreign = await Sessions.begin(other["id"], request("foreign"), owner)
+            foreign = await Sessions.begin(other["id"], request("foreign"), owner)
             await Sessions.finish(foreign, content="foreign", status="complete")
             source_id = (
                 foreign.id
@@ -1366,7 +1398,7 @@ def test_summary_history_sources(monkeypatch, reference):
                 if reference == "missing"
                 else 1
             )
-            _, latest = await Sessions.begin(
+            latest = await Sessions.begin(
                 conversation["id"], request("read-history"), owner
             )
             await AssistantToolCall.create(
@@ -1411,9 +1443,7 @@ def test_summary_history_sources(monkeypatch, reference):
                 )
             )
             client = completion_client(create)
-            _, current = await Sessions.begin(
-                conversation["id"], request("active"), owner
-            )
+            current = await Sessions.begin(conversation["id"], request("active"), owner)
 
             _, _, compacted = await history.prepare_context(
                 client, current, owner, "system", [], None
@@ -1437,7 +1467,7 @@ def test_permission_revocation(deleted):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, original = await Sessions.begin(
+            original = await Sessions.begin(
                 conversation["id"], request("original"), owner
             )
             await Sessions.record_resources(original, [graph.id])
@@ -1454,7 +1484,7 @@ def test_permission_revocation(deleted):
             else:
                 owner.role = UserRole.USER
                 owner.perms = None
-            _, current = await Sessions.begin(conversation["id"], request("new"), owner)
+            current = await Sessions.begin(conversation["id"], request("new"), owner)
             create = AsyncMock()
             client = completion_client(create)
             messages, _, _ = await history.prepare_context(
@@ -1470,6 +1500,7 @@ def test_permission_revocation(deleted):
                 dumps({"turn_id": original.id}).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             assert denied["error"]["code"] == "permission_denied"
 
@@ -1514,11 +1545,11 @@ def test_summary_fallback_and_cancel(monkeypatch):
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
             for index in range(3):
-                _, turn = await Sessions.begin(
+                turn = await Sessions.begin(
                     conversation["id"], request(str(index)), owner
                 )
                 await Sessions.finish(turn, content="a" * 1750, status="complete")
-            _, current = await Sessions.begin(
+            current = await Sessions.begin(
                 conversation["id"], request("current"), owner
             )
             create = AsyncMock(side_effect=RuntimeError("Unavailable"))
@@ -1562,7 +1593,7 @@ def test_tool_history(with_turn):
             other_conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, turn = await Sessions.begin(conversation["id"], request(), owner)
+            turn = await Sessions.begin(conversation["id"], request(), owner)
             call = await AssistantToolCall.create(
                 turn_id=turn.id,
                 call_id="original-call",
@@ -1581,6 +1612,7 @@ def test_tool_history(with_turn):
                 dumps(arguments).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
 
             original = dumps(
@@ -1606,6 +1638,7 @@ def test_tool_history(with_turn):
                 '{"tool_call_id":"history-read"}',
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             assert nested["data"]["source_facts"] == result["data"]["source_facts"]
             whole_turn = await tools.execute_tool(
@@ -1613,6 +1646,7 @@ def test_tool_history(with_turn):
                 dumps({"turn_id": turn.id, "limit": 10}).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             facts = tool_facts(whole_turn)["data"]["source_facts"]
             assert facts["tool_count"] == 1
@@ -1623,6 +1657,7 @@ def test_tool_history(with_turn):
                 dumps({"turn_id": turn.id, "limit": 8000}).decode(),
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             original_tools = loads(original_turn["data"]["data"])["tools"]
             assert original_turn["data"]["next_offset"] is None
@@ -1643,6 +1678,7 @@ def test_tool_history(with_turn):
                     dumps(arguments).decode(),
                     account,
                     conversation_id=scope,
+                    call_id="test",
                 )
                 assert not denied["ok"]
                 assert denied["error"]["code"] == "not_found"
@@ -1655,6 +1691,7 @@ def test_tool_history(with_turn):
                     dumps(invalid).decode(),
                     owner,
                     conversation_id=conversation["id"],
+                    call_id="test",
                 )
                 assert not missing["ok"]
                 assert missing["error"]["code"] == "not_found"
@@ -1798,7 +1835,7 @@ def test_tool_history_resources(monkeypatch):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
-            _, source = await Sessions.begin(conversation["id"], request(), owner)
+            source = await Sessions.begin(conversation["id"], request(), owner)
             await Sessions.record_resources(source, [graph.id])
             await AssistantToolCall.create(
                 turn_id=source.id,
@@ -1835,6 +1872,7 @@ def test_tool_history_resources(monkeypatch):
                     dumps(arguments).decode(),
                     owner,
                     conversation_id=conversation["id"],
+                    call_id="test",
                 )
                 assert denied["error"]["code"] == "permission_denied"
 
@@ -1867,6 +1905,7 @@ def test_history_pagination():
                 "{}",
                 owner,
                 conversation_id=conversation["id"],
+                call_id="test",
             )
             assert len(index["data"]["items"]) == 5
             assert index["data"]["next_before"] is not None
@@ -1913,7 +1952,7 @@ def test_long_history_pages(revoked):
                 )
             if revoked:
                 owner.role, owner.perms = UserRole.USER, None
-            _, current = await Sessions.begin(
+            current = await Sessions.begin(
                 conversation["id"], request("current"), owner
             )
 

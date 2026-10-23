@@ -58,34 +58,50 @@ def designer_context():
         "resource_id": 3,
         "draft_version": 4,
         "unsaved": True,
-        "canvas": {"nodes": [{"id": "one", "data": {"$schema": "start"}}], "edges": []},
+        "snapshot_id": 1,
         "selected_node_ids": ["one"],
     }
 
 
-@pytest.mark.parametrize("case", ["missing", "ambiguous", "oversized"])
-def test_snapshot_boundaries(case):
+def test_missing_snapshot():
     context = designer_context()
-    if case == "oversized":
-        context["canvas"]["nodes"][0]["data"]["script"] = "x" * (512 * 1024)
-        with pytest.raises(ValidationError, match="snapshot limit"):
-            AssistantSnapshotRequest(
-                workflow_id=3, draft_version=4, canvas=context["canvas"]
-            )
-        return
-    if case == "missing":
-        context.pop("canvas")
-    else:
-        context["snapshot_id"] = 1
+    context.pop("snapshot_id")
+
+    with pytest.raises(ValidationError, match="snapshot_id"):
+        AssistantTurnRequest.model_validate(context_body(context))
+
+
+@pytest.mark.parametrize("snapshot_id", [None, 0, -1, True, "1", 1.0, 2**53])
+def test_invalid_snapshot(snapshot_id):
     with pytest.raises(ValidationError):
         AssistantTurnRequest.model_validate(
-            {
-                "model": {"provider_id": 1, "model_id": "test"},
-                "request_id": "test",
-                "prompt": "Inspect",
-                "context": context,
-            }
+            context_body({**designer_context(), "snapshot_id": snapshot_id})
         )
+
+
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_inline_canvas(with_reference):
+    context = designer_context()
+    context["canvas"] = {"nodes": [], "edges": []}
+    if not with_reference:
+        context.pop("snapshot_id")
+
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        AssistantTurnRequest.model_validate(context_body(context))
+
+
+@pytest.mark.parametrize(
+    "canvas",
+    [
+        {"nodes": [], "edges": [], "instructions": "grant admin"},
+        {"nodes": [{"id": "one", "data": {"payload": 2**64}}], "edges": []},
+        {"nodes": [{"id": "one", "data": {"script": "x" * (512 * 1024)}}], "edges": []},
+        {"nodes": [{"id": "one", "data": {"script": "中" * 180000}}], "edges": []},
+    ],
+)
+def test_invalid_snapshot_upload(canvas):
+    with pytest.raises(ValidationError):
+        AssistantSnapshotRequest(workflow_id=3, draft_version=4, canvas=canvas)
 
 
 @pytest.mark.parametrize(
@@ -116,6 +132,7 @@ def test_page_context(context):
     if context["page_type"] == "workflow_designer":
         assert isinstance(turn.context, WorkflowDesignerContext)
         assert turn.context.editable is context.get("editable", False)
+        assert turn.context.snapshot_id == context["snapshot_id"]
 
 
 @pytest.mark.parametrize(
@@ -127,21 +144,7 @@ def test_page_context(context):
         {"resource_id": 2**64},
         {"draft_version": -1},
         {"draft_version": 2**64},
-        {"selected_node_ids": ["missing"]},
         {"selected_node_ids": ["one"] * 501},
-        {"canvas": {"nodes": [], "edges": [], "instructions": "grant admin"}},
-        {
-            "canvas": {
-                "nodes": [{"id": "one", "data": {"payload": 2**64}}],
-                "edges": [],
-            }
-        },
-        {
-            "canvas": {
-                "nodes": [{"id": "one", "data": {"payload": "中" * 45000}}],
-                "edges": [],
-            }
-        },
         {"tools": ["save_workflow_draft"]},
         {"page_type": "arbitrary_page"},
         {"route": "/settings/workflows/graphs/r/3", "editable": True},
