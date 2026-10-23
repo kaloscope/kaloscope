@@ -12,7 +12,7 @@ import type {
   AssistantToolResult,
   Resp
 } from '$lib/types';
-import { get, writable } from 'svelte/store';
+import { derived, get, writable } from 'svelte/store';
 import { v4 as uuidv4 } from 'uuid';
 import { captureAssistantContext } from './context';
 import {
@@ -68,6 +68,7 @@ type AssistantState = {
   compacting: boolean;
   error: string | null;
   busy: boolean;
+  stopping: boolean;
 };
 
 /**
@@ -94,16 +95,26 @@ function initialState(): AssistantState {
     conversationsLoading: false,
     compacting: false,
     error: null,
-    busy: false
+    busy: false,
+    stopping: false
   };
 }
 
 export const assistant = writable<AssistantState>(initialState());
+export const assistantRestoring = derived(
+  assistant,
+  (state) =>
+    !state.conversation &&
+    !state.turns.length &&
+    ((!state.historyLoaded && state.conversationsLoading) || state.historyLoading)
+);
 const selectedConversations = persisted<Record<number, number | null>>('assistant-conversations');
 let active: AbortController | null = null;
 let modelRequest: AbortController | null = null;
 let historyRequest: AbortController | null = null;
 let listRequest: AbortController | null = null;
+let stopRequest: AbortController | null = null;
+let stopTimer: ReturnType<typeof setTimeout> | undefined;
 let accountGeneration = 0;
 let conversationRevision = 0;
 
@@ -112,6 +123,7 @@ let conversationRevision = 0;
  */
 function resetSession(): void {
   resetAssistantCanvas();
+  cancelStopRecovery();
   accountGeneration += 1;
   conversationRevision += 1;
   active?.abort();
@@ -123,6 +135,78 @@ function resetSession(): void {
   active = null;
   modelRequest = null;
   assistant.set(initialState());
+}
+
+/**
+ * Cancel status checks when their selected conversation or account is replaced.
+ */
+function cancelStopRecovery(): void {
+  clearTimeout(stopTimer);
+  stopTimer = undefined;
+  stopRequest?.abort();
+  stopRequest = null;
+  assistant.update((state) => ({ ...state, stopping: false }));
+}
+
+/**
+ * Recheck an explicitly stopped request until its server lease is released.
+ *
+ * Ten checks tolerate delayed disconnect cleanup without polling indefinitely.
+ * Exhaustion preserves the last authoritative busy state for manual refresh.
+ *
+ * @param conversationId - Selected conversation receiving the stopped request.
+ * @param requestId - Client request identity whose completion resolves this stop.
+ */
+function recoverStoppedConversation(conversationId: number, requestId: string): void {
+  cancelStopRecovery();
+  // a late list response must not overwrite a newer authoritative status
+  listRequest?.abort();
+  listRequest = null;
+  const controller = new AbortController();
+  stopRequest = controller;
+  assistant.update((state) => ({ ...state, stopping: true, conversationsLoading: false }));
+  let attempts = 0;
+
+  /**
+   * Read the selected conversation without replacing its local stopped transcript.
+   *
+   * @returns A promise resolving after this check or scheduling the next one.
+   */
+  async function check(): Promise<void> {
+    attempts += 1;
+    try {
+      const { data } = await api
+        .get(`assistant/conversations/${conversationId}/turns`, {
+          signal: controller.signal,
+          timeout: 5000,
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<
+          Resp<{
+            conversation: AssistantConversation;
+            items: { request_id: string; status: AssistantTurn['status'] }[];
+          }>
+        >();
+      if (stopRequest !== controller || get(assistant).conversation?.id !== conversationId) return;
+      assistant.update((state) => ({
+        ...state,
+        conversation: data.conversation,
+        conversations: state.conversations.map((item) => (item.id === conversationId ? data.conversation : item))
+      }));
+      const stopped = data.items.find((item) => item.request_id === requestId);
+      if (!data.conversation.busy || (stopped && stopped.status !== 'streaming')) cancelStopRecovery();
+    } catch {
+      // a failed status read never proves that the server stopped generating
+    } finally {
+      if (stopRequest === controller) {
+        if (attempts < 10) stopTimer = setTimeout(() => void check(), 2000);
+        else cancelStopRecovery();
+      }
+    }
+  }
+
+  stopTimer = setTimeout(() => void check(), 500);
 }
 
 let accountId = get(user)?.id;
@@ -273,6 +357,7 @@ export function openAssistant(): void {
  */
 export function closeAssistant(): void {
   if (get(assistantCanvas)) return;
+  cancelStopRecovery();
   assistant.update((state) => ({ ...state, open: false }));
 }
 
@@ -291,6 +376,7 @@ export function stopAssistant(): void {
   if (!active) return;
   assistant.update((state) => ({
     ...state,
+    stopping: state.turns.some((turn) => turn.status === 'streaming'),
     turns: state.turns.map((turn) => {
       if (turn.status !== 'streaming') return turn;
       const tools = turn.tools.map((tool) => {
@@ -308,6 +394,7 @@ export function stopAssistant(): void {
  */
 export function newAssistantConversation(): void {
   if (get(assistantCanvas) || get(assistant).busy || get(assistant).historyLoading) return;
+  cancelStopRecovery();
   conversationRevision += 1;
   rememberConversation(null);
   assistant.update((state) => ({
@@ -328,7 +415,7 @@ export function newAssistantConversation(): void {
  */
 export async function loadAssistantConversations(older = false, restore = false): Promise<void> {
   const state = get(assistant);
-  if (listRequest || (older && !state.conversationsBefore)) return;
+  if (stopRequest || listRequest || (older && !state.conversationsBefore)) return;
   const controller = new AbortController();
   listRequest = controller;
   const revision = conversationRevision;
@@ -381,9 +468,10 @@ export async function loadAssistantConversation(id: number, older = false): Prom
     get(assistantCanvas) ||
     state.busy ||
     historyRequest ||
-    (older && (!state.turnsBefore || state.conversation?.id !== id))
+    (older && (state.stopping || !state.turnsBefore || state.conversation?.id !== id))
   )
     return;
+  if (!older) cancelStopRecovery();
   const controller = new AbortController();
   historyRequest = controller;
   if (!older) conversationRevision += 1;
@@ -435,6 +523,7 @@ export async function loadAssistantConversation(id: number, older = false): Prom
  */
 export async function changeAssistantConversation(id: number, title?: string): Promise<void> {
   if (get(assistantCanvas) || get(assistant).busy || historyRequest) return;
+  cancelStopRecovery();
   const controller = new AbortController();
   historyRequest = controller;
   const generation = accountGeneration;
@@ -482,7 +571,15 @@ export async function changeAssistantConversation(id: number, title?: string): P
  */
 export async function sendAssistant(route: string, retryId?: string): Promise<void> {
   const state = get(assistant);
-  if (state.busy || state.historyLoading || state.conversation?.busy || state.modelsLoading !== null) return;
+  if (
+    state.busy ||
+    state.stopping ||
+    state.historyLoading ||
+    get(assistantRestoring) ||
+    state.conversation?.busy ||
+    state.modelsLoading !== null
+  )
+    return;
   if (get(assistantCanvas)) return;
   const retry = retryId
     ? state.turns.find((turn) => turn.id === retryId && (turn.status !== 'complete' || turn.canvasError))
@@ -540,6 +637,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
   };
   activity();
   let started = false;
+  let submittedConversationId: number | null = null;
 
   /**
    * Publish a turn update only while its original account and request are current.
@@ -655,6 +753,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
       });
       activity();
     }
+    submittedConversationId = conversation.id;
     const response = await api.post(`assistant/conversations/${conversation.id}/chat`, {
       json: {
         model: state.model,
@@ -709,8 +808,19 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     });
     if (active === controller) {
       active = null;
+      const current = get(assistant);
       assistant.update((value) => ({ ...value, busy: false, compacting: false }));
-      void loadAssistantConversations();
+      if (
+        current.open &&
+        current.stopping &&
+        submittedConversationId !== null &&
+        current.conversation?.id === submittedConversationId
+      ) {
+        recoverStoppedConversation(submittedConversationId, turn.id);
+      } else {
+        cancelStopRecovery();
+        void loadAssistantConversations();
+      }
     }
   }
 }

@@ -247,6 +247,8 @@ def test_preview_does_not_write():
             assert preview["data"]["changes"][0]["changed_path_count"] == 1
             assert preview["data"]["validation"]["executed"] is False
             assert preview["data"]["validation"]["readiness"]["status"] == "invalid"
+            assert preview["data"]["pre_existing_change_count"] == 0
+            assert preview["data"]["change_count"] == 1
             assert conflict["error"]["code"] == ErrorCode.FLOW_DRAFT_CONFLICT
             await graph.refresh_from_db()
             assert graph.draft == {"nodes": [], "edges": []}

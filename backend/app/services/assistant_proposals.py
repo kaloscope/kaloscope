@@ -15,7 +15,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.flow.nodes.base import Node
-from app.core.flow.validation import compress_document, validate_document
+from app.core.flow.validation import validate_document
 from app.models.assistant import (
     AssistantProposal,
     AssistantSnapshot,
@@ -165,10 +165,16 @@ class AssistantProposalService:
 
         Returns:
             The edited document and captured base. Historical records without a
-            captured canvas remain readable in history but cannot be saved again.
+            matching captured canvas remain readable in history but cannot be
+            saved again.
         """
         document = (await AssistantSnapshot.get(id=proposal.snapshot_id)).document
-        base = await AssistantSnapshot.get_or_none(id=proposal.base_snapshot_id)
+        base = await AssistantSnapshot.get_or_none(
+            id=proposal.base_snapshot_id,
+            conversation_id=proposal.conversation_id,
+            workflow_id=proposal.workflow_id,
+            draft_version=proposal.base_version,
+        )
         return document, base.document if base else None
 
     @classmethod
@@ -283,7 +289,7 @@ class AssistantProposalService:
             user: Authenticated owner with current editor permissions.
 
         Returns:
-            Expanded canvas, validation, original capture identity, and save metadata.
+            Expanded canvas, validation, original capture identity, and edit state.
             Structurally invalid documents and records without a captured base
             have no renderable canvas.
 
@@ -309,7 +315,6 @@ class AssistantProposalService:
             "change_count": len(
                 FlowGraphService.compare_documents(base or EMPTY_GRAPH, document)
             ),
-            "workflow": cls._workflow(proposal, graph),
         }
 
     @classmethod
@@ -322,14 +327,15 @@ class AssistantProposalService:
     ) -> dict[str, Any]:
         """Save a canvas edit once and record the actual outcome.
 
-        The claim, version-checked draft write, and outcome commit together, so a
-        lost connection or crash leaves the edit pending without a write.
-        Duplicate or concurrent requests return the single recorded outcome.
+        The claim, version-checked draft write, and outcome commit together.
+        A rollback leaves the edit pending without a write; a disconnected client
+        must recover the recorded outcome. Duplicate or concurrent requests
+        return the single recorded outcome.
 
         Args:
             conversation_id: Owned conversation.
             proposal_id: Canvas edit accepted by the user.
-            body: Displayed identity and the original designer canvas.
+            body: Displayed identity and the original captured snapshot identifier.
             user: Authenticated owner with current editor rights.
 
         Returns:
@@ -337,10 +343,14 @@ class AssistantProposalService:
 
         Raises:
             ForbiddenException: If the account can no longer edit workflows.
-            KaloscopeException: If the canvas edit or canvas has changed.
+            KaloscopeException: If the edit identity or captured snapshot differs.
         """
         proposal = await cls.owned(conversation_id, proposal_id, user)
         cls.check_decision(proposal, body)
+        if body.base_snapshot_id != proposal.base_snapshot_id:
+            raise KaloscopeException(
+                ErrorCode.ASSISTANT_CANVAS_CHANGED, status_code=409
+            )
         FlowGraphService.require_editor(user)
         try:
             async with in_transaction():
@@ -348,7 +358,7 @@ class AssistantProposalService:
                     id=proposal.id, status="pending"
                 ).update(attempts=F("attempts") + 1, updated_at=timezone.now())
                 if claimed:
-                    outcome = await cls._save(proposal, body, user)
+                    outcome = await cls._save(proposal, user)
                     await AssistantProposal.filter(id=proposal.id).update(
                         **outcome, resolved_at=timezone.now(), updated_at=timezone.now()
                     )
@@ -366,22 +376,19 @@ class AssistantProposalService:
         return await cls._report(await AssistantProposal.get(id=proposal.id), user)
 
     @classmethod
-    async def _save(
-        cls, proposal: AssistantProposal, body: ProposalConfirm, user: UserInfo
-    ) -> dict[str, Any]:
+    async def _save(cls, proposal: AssistantProposal, user: UserInfo) -> dict[str, Any]:
         """Write the edit through the shared draft path inside a claimed save.
 
         Args:
             proposal: Claimed pending edit.
-            body: Confirmation with the original designer canvas.
             user: Authenticated editor.
 
         Returns:
             Outcome fields to record.
 
         Raises:
-            KaloscopeException: If the visible canvas no longer matches the base or
-                permissions changed; the claim then rolls back.
+            KaloscopeException: If the captured base is unavailable or permissions
+                changed; the claim then rolls back.
         """
         try:
             graph = await FlowGraphService.get_accessible(proposal.workflow_id, user)
@@ -392,9 +399,7 @@ class AssistantProposalService:
         if graph.draft_version != proposal.base_version:
             return {"status": "conflict", "error": ErrorCode.FLOW_DRAFT_CONFLICT}
         proposed, base = await cls._documents(proposal)
-        if base is None or FlowGraphService.compare_documents(
-            base, compress_document(body.canvas)
-        ):
+        if base is None:
             raise KaloscopeException(
                 ErrorCode.ASSISTANT_CANVAS_CHANGED, status_code=409
             )

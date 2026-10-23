@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.models.assistant import (
     AssistantSnapshotRequest,
     AssistantTurnRequest,
+    ProposalConfirm,
 )
 
 
@@ -186,3 +187,40 @@ def test_invalid_context(patch):
 def test_invalid_page_selection(context):
     with pytest.raises(ValidationError):
         AssistantTurnRequest.model_validate(context_body(context))
+
+
+def test_confirm_snapshot():
+    data = {
+        "workflow_id": 3,
+        "base_version": 4,
+        "digest": "a" * 64,
+        "base_snapshot_id": 5,
+    }
+
+    assert ProposalConfirm.model_validate(data).model_dump() == data
+
+
+@pytest.mark.parametrize("snapshot_id", [None, 0, -1, True, "5", 5.0, 2**53])
+def test_invalid_confirm_snapshot(snapshot_id):
+    with pytest.raises(ValidationError):
+        ProposalConfirm(
+            workflow_id=3,
+            base_version=4,
+            digest="a" * 64,
+            base_snapshot_id=snapshot_id,
+        )
+
+
+@pytest.mark.parametrize("size", [0, 512 * 1024])
+def test_confirm_rejects_canvas(size):
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ProposalConfirm(
+            workflow_id=3,
+            base_version=4,
+            digest="a" * 64,
+            base_snapshot_id=5,
+            canvas={
+                "nodes": [{"id": "one", "data": {"script": "x" * size}}],
+                "edges": [],
+            },
+        )

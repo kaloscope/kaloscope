@@ -508,20 +508,54 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
             NotFoundException: If the workflow does not exist.
             KaloscopeException: If the base version is stale.
         """
+        preview, _ = await cls.preview_draft_with_baseline(id, body, user)
+        return preview
+
+    @classmethod
+    async def preview_draft_with_baseline(
+        cls,
+        id: int,
+        body: GraphWrite,
+        user: UserInfo,
+        baseline: GraphDocument | None = None,
+    ) -> tuple[GraphPreview, int]:
+        """Compare proposed and captured graphs with the same saved draft.
+
+        Args:
+            id: Workflow to preview.
+            body: Proposed contents and their base version.
+            user: Current authenticated account.
+            baseline: Captured contents before the proposed changes, if available.
+                Only the proposed graph receives complete validation.
+
+        Returns:
+            Proposed preview and the number of pre-existing node or edge changes.
+            The count is zero when no captured baseline is supplied.
+
+        Raises:
+            ForbiddenException: If editing is not permitted.
+            NotFoundException: If the workflow does not exist.
+            KaloscopeException: If the base version is stale.
+        """
         cls.require_editor(user)
         graph = await cls.get_accessible(id, user)
         if not graph.editable:
             raise ForbiddenException(ErrorCode.FLOW_NOT_EDITABLE)
         cls._check_version(graph, body.draft_version)
-        return GraphPreview(
+        saved = graph.draft or {"nodes": [], "edges": []}
+        preview = GraphPreview(
             workflow_id=id,
             draft_version=graph.draft_version,
-            changes=cls.compare_documents(
-                graph.draft or {"nodes": [], "edges": []}, compress_document(body)
-            ),
+            changes=cls.compare_documents(saved, compress_document(body)),
             validation=await validate_document(body, graph.category),
             editor_path=f"/settings/workflows/graphs/{id}",
         )
+        baseline_changes = (
+            len(cls.compare_documents(saved, compress_document(baseline)))
+            if baseline is not None
+            else 0
+        )
+        return preview, baseline_changes
 
     @staticmethod
     def compare_documents(previous: dict, proposed: dict) -> list[GraphChange]:

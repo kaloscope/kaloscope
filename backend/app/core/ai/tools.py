@@ -407,13 +407,17 @@ async def execute_tool(
                                 "base.",
                             )
                         proposal = apply_changes(document, args.changes)
-                        preview = await FlowGraphService.preview_draft(
+                        (
+                            preview,
+                            baseline_changes,
+                        ) = await FlowGraphService.preview_draft_with_baseline(
                             args.workflow_id,
                             GraphWrite(
                                 **proposal.model_dump(),
                                 draft_version=args.draft_version,
                             ),
                             user,
+                            GraphDocument.model_validate(document),
                         )
                         result = preview.model_dump(mode="json")
                         result["change_count"] = len(preview.changes)
@@ -433,12 +437,7 @@ async def execute_tool(
                         }
                         result["requested_change_count"] = len(args.changes)
                         result["comparison"] = "saved_draft"
-                        baseline = await FlowGraphService.preview_draft(
-                            args.workflow_id,
-                            GraphWrite(**document, draft_version=args.draft_version),
-                            user,
-                        )
-                        result["pre_existing_change_count"] = len(baseline.changes)
+                        result["pre_existing_change_count"] = baseline_changes
                         result["base_kind"] = (
                             "snapshot" if args.snapshot_id else "saved_draft"
                         )

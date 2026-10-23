@@ -324,7 +324,7 @@ async def confirm_proposal(
         request: Authenticated request from the edit owner.
         conversation_id: Conversation owning the edit.
         proposal_id: Canvas edit to save.
-        body: Displayed identity and the original designer canvas.
+        body: Displayed identity and the original captured snapshot identifier.
 
     Returns:
         The single recorded outcome.

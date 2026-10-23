@@ -6,6 +6,7 @@
   import { assistantDestination } from '$lib/assistant/navigation';
   import {
     assistant,
+    assistantRestoring,
     closeAssistant,
     loadAssistantModels,
     loadAssistantConversation,
@@ -50,7 +51,9 @@
   const canSend = $derived(
     !$assistantCanvas &&
       !modelsBusy &&
+      !$assistantRestoring &&
       !$assistant.historyLoading &&
+      !$assistant.stopping &&
       !$assistant.conversation?.busy &&
       !!input.trim() &&
       !!$assistant.model
@@ -425,7 +428,7 @@
           <button
             type="button"
             class="btn btn-subtle btn-xs"
-            disabled={$assistant.busy || $assistant.historyLoading}
+            disabled={$assistant.busy || $assistant.stopping || $assistant.historyLoading}
             onclick={() => {
               following = false;
               void loadAssistantConversation($assistant.conversation!.id, true);
@@ -433,7 +436,7 @@
           >
         </li>
       {/if}
-      {#if !turns.length && !$assistant.historyLoading}
+      {#if !turns.length && !$assistant.historyLoading && !$assistantRestoring}
         <li class="flex min-h-full flex-col justify-center gap-2 pb-4">
           <iconify-icon icon={icons.botSquare} width="2rem" class="mb-1 size-8 text-base-content/60" aria-hidden="true"
           ></iconify-icon>
@@ -532,6 +535,7 @@
               class="btn gap-1 btn-subtle font-normal btn-xs"
               disabled={$assistant.busy ||
                 $assistant.historyLoading ||
+                $assistant.stopping ||
                 $assistant.conversation?.busy ||
                 !!$assistantCanvas}
               onclick={() => retry(lastTurn)}
@@ -569,11 +573,12 @@
             bind:this={composer}
             bind:value={$assistant.input}
             {rows}
+            readonly={$assistantRestoring}
             maxlength="32768"
             class="block w-full resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-1 text-sm leading-6 outline-none placeholder:text-base-content/60"
             class:max-h-40={!compact}
             class:max-h-20={compact}
-            placeholder={$_('assistant.placeholder')}
+            placeholder={$_($assistantRestoring ? 'assistant.loading_history' : 'assistant.placeholder')}
             aria-describedby="assistant-help"></textarea>
 
           {#if $assistant.modelsError || $assistant.error}
@@ -615,7 +620,7 @@
               <Select
                 id="assistant-model"
                 class="[field-sizing:content] h-7 min-h-7 w-auto max-w-full min-w-0 select-ghost pr-7 pl-2 text-xs select-sm disabled:border-transparent disabled:bg-transparent disabled:text-base-content/60"
-                disabled={$assistant.busy || modelsBusy || !$assistant.models.length}
+                disabled={$assistant.busy || modelsBusy || $assistantRestoring || !$assistant.models.length}
                 value={modelValue}
                 onchange={(event) => ($assistant.model = JSON.parse((event.currentTarget as HTMLSelectElement).value))}
               >

@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from tortoise import Tortoise
@@ -23,6 +24,7 @@ from app.models.flow import (
     GraphState,
     GraphWrite,
 )
+from app.services import flow
 from app.services.flow import FlowGraphService
 
 ADMIN = SimpleNamespace(role="admin")
@@ -152,9 +154,63 @@ def test_preview():
             assert preview.changes[0].before is None
             assert preview.changes[0].after["data"]["url"] == ""
             assert preview.editor_path == f"/settings/workflows/graphs/{graph.id}"
+            assert set(preview.model_dump()) == {
+                "workflow_id",
+                "draft_version",
+                "changes",
+                "validation",
+                "editor_path",
+            }
             await graph.refresh_from_db()
             assert graph.draft_version == 0
             assert await FlowDraftRevision.all().count() == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("concurrent_write", [False, True])
+def test_preview_baseline(monkeypatch, concurrent_write):
+    validate_document = flow.validate_document
+
+    async def run():
+        async with database() as graph:
+            graph.draft = draft().model_dump(exclude={"draft_version"})
+            await graph.save()
+            baseline = GraphDocument(
+                **draft(url="https://manual.test").model_dump(exclude={"draft_version"})
+            )
+            document = baseline.model_dump()
+            document["nodes"].append(
+                {"id": "added", "data": {"$schema": "http", "url": ""}}
+            )
+            proposed = GraphWrite(**document, draft_version=0)
+
+            async def validate(document, category):
+                result = await validate_document(document, category)
+                if concurrent_write:
+                    await FlowGraph.filter(id=graph.id).update(
+                        draft=baseline.model_dump(), draft_version=1
+                    )
+                return result
+
+            validation = AsyncMock(side_effect=validate)
+            monkeypatch.setattr(flow, "validate_document", validation)
+
+            preview, count = await FlowGraphService.preview_draft_with_baseline(
+                graph.id, proposed, ADMIN, baseline
+            )
+
+            assert count == 1
+            assert preview.draft_version == 0
+            assert {change.id for change in preview.changes} == {"http", "added"}
+            assert not preview.validation.valid
+            validation.assert_awaited_once_with(proposed, graph.category)
+            assert await FlowDraftRevision.all().count() == 0
+            if concurrent_write:
+                with pytest.raises(KaloscopeException, match="flow_draft_conflict"):
+                    await FlowGraphService.preview_draft_with_baseline(
+                        graph.id, proposed, ADMIN, baseline
+                    )
 
     asyncio.run(run())
 

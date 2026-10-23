@@ -435,7 +435,7 @@ def test_canvas_edit_routes(application):
                 "workflow_id": graph.id,
                 "base_version": 0,
                 "digest": record.digest,
-                "canvas": document(),
+                "base_snapshot_id": capture.id,
             }
             await app._startup()
             async with httpx.AsyncClient(
@@ -449,6 +449,7 @@ def test_canvas_edit_routes(application):
                 view = await client.get(path + "/canvas", headers=owner)
                 assert view.headers["cache-control"] == "no-store"
                 assert view.json()["data"]["change_count"] == 1
+                assert "workflow" not in view.json()["data"]
                 assert (
                     view.json()["data"]["canvas"]["nodes"][0]["data"]["url"]
                     == "https://new.test"
@@ -460,14 +461,22 @@ def test_canvas_edit_routes(application):
                 assert (
                     await client.post(path + "/refresh", json=decision, headers=owner)
                 ).status_code == 404
-                missing_canvas = {
-                    key: value for key, value in decision.items() if key != "canvas"
+                missing_base = {
+                    key: value
+                    for key, value in decision.items()
+                    if key != "base_snapshot_id"
                 }
                 assert (
                     await client.post(
-                        path + "/confirm", json=missing_canvas, headers=owner
+                        path + "/confirm", json=missing_base, headers=owner
                     )
                 ).status_code == 400
+                legacy = await client.post(
+                    path + "/confirm",
+                    json={**decision, "canvas": document()},
+                    headers=owner,
+                )
+                assert legacy.status_code == 400
                 extra = await client.post(
                     path + "/confirm", json={**decision, "user_id": 2}, headers=owner
                 )
@@ -500,7 +509,7 @@ def test_canvas_edit_routes(application):
                     assert saved.json()["data"]["proposal"]["saved_version"] == 1
                     assert saved.json()["data"]["workflow"]["draft_version"] == 1
                 cancelled = await client.post(
-                    path + "/cancel", json=missing_canvas, headers=owner
+                    path + "/cancel", json=missing_base, headers=owner
                 )
                 assert cancelled.json()["data"]["proposal"]["status"] == "saved"
                 await graph.refresh_from_db()

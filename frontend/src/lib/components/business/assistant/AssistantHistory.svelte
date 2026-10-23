@@ -2,6 +2,7 @@
   import { assistantCanvas } from '$lib/assistant/canvas';
   import {
     assistant,
+    assistantRestoring,
     changeAssistantConversation,
     loadAssistantConversation,
     loadAssistantConversations,
@@ -12,7 +13,7 @@
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
-  const locked = $derived(!!$assistantCanvas || $assistant.busy || $assistant.historyLoading);
+  const locked = $derived(!!$assistantCanvas || $assistant.busy || $assistant.historyLoading || $assistantRestoring);
 
   /**
    * Start a new conversation and move focus to the composer before the button disappears.
@@ -77,10 +78,17 @@
   >
     {#snippet trigger()}
       <span class="flex min-h-8 min-w-0 items-center gap-1.5 px-1 text-sm font-medium">
-        <iconify-icon icon={icons.chatMultiple} width="1rem" class="size-4 shrink-0" aria-hidden="true"></iconify-icon>
+        {#if $assistantRestoring}
+          <span class="loading loading-xs loading-spinner" aria-hidden="true"></span>
+        {:else}
+          <iconify-icon icon={icons.chatMultiple} width="1rem" class="size-4 shrink-0" aria-hidden="true"
+          ></iconify-icon>
+        {/if}
         <span class="sr-only">{$_('assistant.history')}:</span>
         <span class="min-w-0 flex-1 truncate text-left"
-          >{$assistant.conversation?.title || $_('assistant.new_chat')}</span
+          >{$assistantRestoring
+            ? $_('assistant.loading_history')
+            : $assistant.conversation?.title || $_('assistant.new_chat')}</span
         >
       </span>
     {/snippet}
@@ -155,13 +163,13 @@
     </button>
   {/if}
 </div>
-{#if $assistant.conversation?.busy && !$assistant.busy}
+{#if !$assistant.busy && ($assistant.stopping || $assistant.conversation?.busy)}
   <div class="flex items-center justify-between gap-2 px-4 pb-2 text-xs text-base-content/60" role="status">
-    <span>{$_('assistant.remote_busy')}</span>
+    <span>{$_($assistant.stopping ? 'assistant.stopping' : 'assistant.remote_busy')}</span>
     <button
       type="button"
       class="btn btn-subtle btn-xs"
-      disabled={locked}
+      disabled={locked || $assistant.stopping}
       onclick={() => void loadAssistantConversation($assistant.conversation!.id)}>{$_('assistant.refresh_chat')}</button
     >
   </div>
