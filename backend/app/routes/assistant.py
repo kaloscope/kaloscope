@@ -290,6 +290,28 @@ async def get_proposal_canvas(
     )
 
 
+@assistant.get(f"{PROPOSAL}/outcome")
+@authorize()
+async def get_proposal_outcome(
+    request: Request, conversation_id: int, proposal_id: int
+) -> HTTPResponse:
+    """Recover an owned edit's save outcome without reading workflow contents.
+
+    Args:
+        request: Authenticated request from the edit owner.
+        conversation_id: Conversation owning the edit.
+        proposal_id: Edit whose recorded outcome to read.
+
+    Returns:
+        The recorded outcome, even after the workflow or editing rights are gone.
+    """
+    return private_json(
+        await AssistantProposalService.outcome(
+            conversation_id, proposal_id, request.ctx.user
+        )
+    )
+
+
 @assistant.post(f"{PROPOSAL}/confirm")
 @authorize()
 @validate(json=ProposalConfirm)

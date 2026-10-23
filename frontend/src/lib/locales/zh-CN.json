@@ -1013,7 +1013,9 @@
     "assistant_title_invalid": "对话名称不能为空，且不能超过 120 个字符",
     "assistant_proposal_changed": "画布修改记录已变化，请重新生成修改",
     "assistant_canvas_changed": "画布已变化，请基于当前画布重新发送请求",
-    "assistant_canvas_wait_save": "请确认保存结果后再离开画布"
+    "assistant_canvas_wait_save": "请确认保存结果后再离开画布",
+    "assistant_canvas_already_saved": "草稿已保存，修改已保留",
+    "assistant_canvas_already_reverted": "修改此前已撤回，未保存"
   },
   "ai": {
     "custom": "自定义提供商",
@@ -1092,8 +1094,14 @@
       "assistant_canvas_changed": "画布已变化，请基于当前画布重新发送请求",
       "assistant_canvas_readonly": "该工作流已不可编辑，原画布已保留",
       "assistant_canvas_invalid": "工作流存在结构错误，未应用修改，请让助手修正后重试",
-      "assistant_canvas_conflict": "修改已无法保存，请撤回并重新加载草稿",
-      "assistant_canvas_uncertain": "保存结果尚未确认，请查询结果后再撤回",
+      "assistant_canvas_conflict": "草稿已在别处更新，修改未保存，请撤回并重新加载草稿",
+      "assistant_canvas_not_editable": "工作流已不可编辑，修改未保存，请撤回",
+      "assistant_canvas_missing": "工作流已不存在，修改未保存，请撤回",
+      "assistant_canvas_save_invalid": "工作流存在结构错误，修改未保存，请撤回",
+      "assistant_canvas_uncertain": "未能确认保存结果，可查询结果，或撤回以取消未完成的保存",
+      "assistant_canvas_revert_failed": "未能确认撤回，保存仍可能完成，请重试或查询结果",
+      "assistant_canvas_load_failed": "回复已完成，但修改未能加载，可重新加载或撤回",
+      "assistant_canvas_not_applied": "回复已完成，但修改未应用，已保留原画布",
       "assistant_canvas_save_failed": "草稿保存失败，可以重试或撤回修改"
     },
     "pages": {
@@ -1141,6 +1149,8 @@
       "editing": "正在修改当前画布...",
       "review": "修改完成，请在画布查看",
       "saving": "正在保存草稿...",
+      "reverting": "正在撤回修改...",
+      "failed": "修改未能加载",
       "locked": "编辑与自动保存已暂停，可平移、缩放和查看代码",
       "readonly": "只读预览",
       "changes": "{0} 项调整",
@@ -1149,6 +1159,8 @@
       "revert": "撤回",
       "keep": "保留并保存草稿",
       "check_save": "查询保存结果",
+      "uncertain": "保存结果待确认",
+      "retry": "重新加载",
       "saved": "已保留并保存为草稿",
       "reverted": "已撤回助手修改",
       "record": "画布修改记录，不会自动重新应用",

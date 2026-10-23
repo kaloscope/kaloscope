@@ -390,7 +390,11 @@
     if (canvasLocked) {
       cancel();
       if (type === 'leave' || confirming) return;
-      if ($assistantCanvas?.phase === 'saving' || $assistantCanvas?.uncertain) {
+      if (
+        $assistantCanvas?.phase === 'saving' ||
+        $assistantCanvas?.phase === 'reverting' ||
+        $assistantCanvas?.uncertain
+      ) {
         alert({ level: 'warning', message: 'assistant_canvas_wait_save' });
         return;
       }
@@ -404,7 +408,8 @@
           confirming = false;
         },
         onconfirm: () => {
-          discardAssistantCanvas();
+          // an unsubmitted or rejected edit is restored before any request is awaited
+          void discardAssistantCanvas();
           confirming = false;
           // let the normal unsaved-edit guard protect the restored manual baseline
           if (to) void goto(to.url);

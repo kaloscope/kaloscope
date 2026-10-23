@@ -10,6 +10,7 @@ from tortoise.transactions import in_transaction
 
 from app.core.exceptions import (
     ErrorCode,
+    ForbiddenException,
     KaloscopeException,
     NotFoundException,
 )
@@ -32,6 +33,7 @@ from app.services.assistant_sessions import AssistantSessionService
 from app.services.flow import FlowGraphService
 
 OPEN_STATUSES = ("pending", "conflict")
+SAVED_STATUSES = ("saved", "unchanged")
 EMPTY_GRAPH = {"nodes": [], "edges": []}
 
 
@@ -188,6 +190,89 @@ class AssistantProposalService:
         FlowGraphService.require_editor(user)
         return await FlowGraphService.get_accessible(proposal.workflow_id, user)
 
+    @staticmethod
+    def _workflow(
+        proposal: AssistantProposal, graph: FlowGraph, document: dict
+    ) -> dict[str, Any]:
+        """Describe the draft represented by an edit's recorded outcome.
+
+        Args:
+            proposal: Owned edit.
+            graph: Current workflow already authorized for the account.
+            document: Immutable edited document.
+
+        Returns:
+            Workflow metadata for the saved version, or for the captured base
+            version while the edit is unsaved.
+        """
+        state = GraphState.DRAFT
+        if graph.state != GraphState.DRAFT:
+            state = (
+                GraphState.PUBLISHED
+                if document == graph.definition
+                else GraphState.MODIFIED
+            )
+        return {
+            "id": graph.id,
+            "state": state,
+            "draft_version": proposal.saved_version
+            if proposal.saved_version is not None
+            else proposal.base_version,
+            "updated_at": proposal.resolved_at or graph.updated_at,
+        }
+
+    @classmethod
+    async def _report(
+        cls, proposal: AssistantProposal, user: UserInfo
+    ) -> dict[str, Any]:
+        """Describe a recorded outcome independently of current workflow access.
+
+        Args:
+            proposal: Edit whose conversation ownership was already checked.
+            user: Authenticated owner with current permissions.
+
+        Returns:
+            The public lifecycle state and, for a saved draft that the account
+            can still read, its workflow metadata. A deleted workflow or revoked
+            access omits only the metadata, never the recorded outcome.
+        """
+        workflow = None
+        if proposal.status in SAVED_STATUSES:
+            with suppress(ForbiddenException, NotFoundException):
+                graph = await FlowGraphService.get_accessible(
+                    proposal.workflow_id, user
+                )
+                document = (
+                    await AssistantSnapshot.get(id=proposal.snapshot_id)
+                ).document
+                workflow = cls._workflow(proposal, graph, document)
+        return {"proposal": describe_proposal(proposal), "workflow": workflow}
+
+    @classmethod
+    async def outcome(
+        cls, conversation_id: int, proposal_id: int, user: UserInfo
+    ) -> dict[str, Any]:
+        """Recover an edit's recorded save outcome without loading its canvas.
+
+        Only conversation and record ownership are required, so the owner can
+        resolve an interrupted save after the workflow is deleted or editing
+        rights are revoked. A pending outcome only means that no save has
+        committed yet; a delayed confirmation may still claim the edit.
+
+        Args:
+            conversation_id: Owned conversation containing the edit.
+            proposal_id: Edit whose outcome to read.
+            user: Authenticated owner.
+
+        Returns:
+            The recorded lifecycle state and any readable saved-draft metadata.
+
+        Raises:
+            NotFoundException: If the conversation or edit belongs elsewhere.
+        """
+        proposal = await cls.owned(conversation_id, proposal_id, user)
+        return await cls._report(proposal, user)
+
     @classmethod
     async def canvas(
         cls, conversation_id: int, proposal_id: int, user: UserInfo
@@ -196,7 +281,7 @@ class AssistantProposalService:
 
         Args:
             conversation_id: Owned conversation containing the edit.
-            proposal_id: Immutable edit to display or whose save outcome to recover.
+            proposal_id: Immutable edit to display.
             user: Authenticated owner with current editor permissions.
 
         Returns:
@@ -214,13 +299,6 @@ class AssistantProposalService:
         parsed = GraphDocument.model_validate(document)
         structure = await validate_document(parsed, graph.category, complete=False)
         validation = await validate_document(parsed, graph.category)
-        state = GraphState.DRAFT
-        if graph.state != GraphState.DRAFT:
-            state = (
-                GraphState.PUBLISHED
-                if document == graph.definition
-                else GraphState.MODIFIED
-            )
         return {
             "proposal": describe_proposal(proposal),
             "base_snapshot_id": proposal.base_snapshot_id,
@@ -233,14 +311,7 @@ class AssistantProposalService:
             "change_count": len(
                 FlowGraphService.compare_documents(base or EMPTY_GRAPH, document)
             ),
-            "workflow": {
-                "id": graph.id,
-                "state": state,
-                "draft_version": proposal.saved_version
-                if proposal.saved_version is not None
-                else proposal.base_version,
-                "updated_at": proposal.resolved_at or graph.updated_at,
-            },
+            "workflow": cls._workflow(proposal, graph, document),
         }
 
     @classmethod
@@ -264,7 +335,7 @@ class AssistantProposalService:
             user: Authenticated owner with current editor rights.
 
         Returns:
-            The recorded lifecycle state.
+            The recorded outcome with any readable saved-draft metadata.
 
         Raises:
             ForbiddenException: If the account can no longer edit workflows.
@@ -294,7 +365,7 @@ class AssistantProposalService:
                     updated_at=timezone.now(),
                 )
             raise
-        return describe_proposal(await AssistantProposal.get(id=proposal.id))
+        return await cls._report(await AssistantProposal.get(id=proposal.id), user)
 
     @classmethod
     async def _save(
@@ -360,6 +431,11 @@ class AssistantProposalService:
     ) -> dict[str, Any]:
         """Close an open edit without writing the workflow.
 
+        The conditional update serializes with a claimed save, so a cancelled
+        edit can never be saved later and a save that committed first is
+        reported instead. Workflow access is not required because no workflow
+        data is read or written.
+
         Args:
             conversation_id: Owned conversation.
             proposal_id: Canvas edit the user reverted.
@@ -367,11 +443,12 @@ class AssistantProposalService:
             user: Authenticated owner.
 
         Returns:
-            The recorded lifecycle state; resolved edits are unchanged.
+            The recorded outcome; resolved edits, including saved ones, are
+            unchanged.
         """
         proposal = await cls.owned(conversation_id, proposal_id, user)
         cls.check_decision(proposal, body)
         await AssistantProposal.filter(id=proposal.id, status__in=OPEN_STATUSES).update(
             status="cancelled", resolved_at=timezone.now(), updated_at=timezone.now()
         )
-        return describe_proposal(await AssistantProposal.get(id=proposal.id))
+        return await cls._report(await AssistantProposal.get(id=proposal.id), user)

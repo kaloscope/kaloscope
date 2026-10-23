@@ -479,18 +479,39 @@ def test_canvas_edit_routes(application):
                 )
                 assert changed.status_code == 409
                 assert changed.json()["message"] == "assistant_proposal_changed"
+                # earlier owner responses set a session cookie
+                client.cookies.clear()
+                assert (await client.get(path + "/outcome")).status_code == 401
+                assert (
+                    await client.get(
+                        path + "/outcome", headers={"authorization": "Bearer other"}
+                    )
+                ).status_code == 404
+                pending = await client.get(path + "/outcome", headers=owner)
+                assert pending.headers["cache-control"] == "no-store"
+                assert pending.json()["data"]["proposal"]["status"] == "pending"
+                assert pending.json()["data"]["workflow"] is None
+                assert "canvas" not in pending.json()["data"]
                 for _ in range(2):
                     saved = await client.post(
                         path + "/confirm", json=decision, headers=owner
                     )
-                    assert saved.json()["data"]["status"] == "saved"
-                    assert saved.json()["data"]["saved_version"] == 1
+                    assert saved.json()["data"]["proposal"]["status"] == "saved"
+                    assert saved.json()["data"]["proposal"]["saved_version"] == 1
+                    assert saved.json()["data"]["workflow"]["draft_version"] == 1
                 cancelled = await client.post(
                     path + "/cancel", json=missing_canvas, headers=owner
                 )
-                assert cancelled.json()["data"]["status"] == "saved"
+                assert cancelled.json()["data"]["proposal"]["status"] == "saved"
                 await graph.refresh_from_db()
                 assert graph.draft_version == 1
+                await graph.delete()
+                assert (
+                    await client.get(path + "/canvas", headers=owner)
+                ).status_code == 404
+                recovered = await client.get(path + "/outcome", headers=owner)
+                assert recovered.json()["data"]["proposal"]["status"] == "saved"
+                assert recovered.json()["data"]["workflow"] is None
         finally:
             await Tortoise.close_connections()
 
