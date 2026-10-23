@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -18,7 +19,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.models.ai import AIProvider, AIProviderConnection, AIProviderUpsert
-from app.models.user import UserRole
+from app.models.user import UserInfo, UserRole
 from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.utils.crypto import fernet_decrypt
@@ -69,7 +70,7 @@ def settings(**overrides):
 
 
 def test_list_forbidden():
-    user = SimpleNamespace(role=UserRole.USER)
+    user = cast(UserInfo, SimpleNamespace(role=UserRole.USER))
 
     with pytest.raises(ForbiddenException) as exc_info:
         asyncio.run(AIProviderService.list_providers(user))

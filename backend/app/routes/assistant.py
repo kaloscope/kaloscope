@@ -1,11 +1,12 @@
 """Expose authenticated in-app assistant model choices and SSE conversations."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
 from typing import Any
 
 from sanic import Blueprint, HTTPResponse, Request, json
+from sanic.exceptions import ServerError
 from sanic_ext import validate
 
 from app.core.decorators import authorize
@@ -53,17 +54,24 @@ async def list_models(_: Request) -> HTTPResponse:
     return private_json(await AssistantService.list_models())
 
 
-async def serve_events(request: Request, events: AsyncIterator[AssistantEvent]) -> None:
+async def serve_events(
+    request: Request, events: AsyncGenerator[AssistantEvent]
+) -> None:
     """Deliver assistant events with heartbeat and cancellation propagation.
 
     Args:
         request: Authenticated streaming HTTP request.
-        events: Request-owned asynchronous event iterator.
+        events: Request-owned asynchronous event generator that is closed on exit.
+
+    Raises:
+        ServerError: If response middleware prevents streaming a response.
     """
     response = await request.respond(
         content_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+    if response is None:
+        raise ServerError("Assistant stream response is unavailable")
     queue: asyncio.Queue[AssistantEvent | None] = asyncio.Queue(maxsize=16)
 
     async def produce() -> None:

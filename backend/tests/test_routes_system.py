@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
+from sanic import HTTPResponse, Request
 
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.routes import system as system_routes
@@ -34,7 +37,11 @@ async def _get_version(handler, check_update=True):
             app=SimpleNamespace(ctx=SimpleNamespace(httpx=client)),
             args={"check_update": "true"} if check_update else {},
         )
-        response = await system_routes.get_app_version(request)
+        handler = cast(
+            Callable[[Request], Awaitable[HTTPResponse]], system_routes.get_app_version
+        )
+        response = await handler(cast(Request, request))
+        assert response.body is not None
         return json.loads(response.body)
 
 

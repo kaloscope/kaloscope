@@ -1,6 +1,6 @@
 """Define owned assistant conversations, immutable snapshots, and requests."""
 
-from typing import Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tortoise.fields import (
@@ -152,6 +152,9 @@ class AssistantEvent(BaseModel):
 class AssistantConversation(TortoiseModel):
     """Store one account's conversation and its replaceable context checkpoint."""
 
+    if TYPE_CHECKING:
+        user_id: int
+
     user = ForeignKeyField("models.User", related_name=False, db_index=True)
     title = CharField(max_length=120)
     model = JSONField(default=dict)
@@ -168,6 +171,9 @@ class AssistantConversation(TortoiseModel):
 
 class AssistantTurn(TortoiseModel):
     """Retain the original request and response, including interrupted attempts."""
+
+    if TYPE_CHECKING:
+        conversation_id: int
 
     conversation = ForeignKeyField("models.AssistantConversation", related_name=False)
     request_id = CharField(max_length=64)
@@ -190,6 +196,9 @@ class AssistantTurn(TortoiseModel):
 class AssistantToolCall(TortoiseModel):
     """Record actual tool execution independently of generated explanations."""
 
+    if TYPE_CHECKING:
+        turn_id: int
+
     turn = ForeignKeyField("models.AssistantTurn", related_name=False, db_index=True)
     call_id = CharField(max_length=64, unique=True)
     name = CharField(max_length=255)
@@ -206,6 +215,9 @@ class AssistantToolCall(TortoiseModel):
 class AssistantSnapshot(TortoiseModel):
     """Retain an immutable graph independently of rotating workflow revisions."""
 
+    if TYPE_CHECKING:
+        conversation_id: int
+
     conversation = ForeignKeyField("models.AssistantConversation", related_name=False)
     workflow_id = IntField()
     draft_version = IntField()
@@ -220,6 +232,11 @@ class AssistantSnapshot(TortoiseModel):
 
 class AssistantProposal(TortoiseModel):
     """Record the durable save outcome of one immutable assistant canvas edit."""
+
+    if TYPE_CHECKING:
+        conversation_id: int
+        snapshot_id: int
+        base_snapshot_id: int | None
 
     conversation = ForeignKeyField("models.AssistantConversation", related_name=False)
     call_id = CharField(max_length=64, db_index=True)

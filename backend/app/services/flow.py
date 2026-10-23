@@ -4,7 +4,7 @@ import zipfile
 from collections.abc import Mapping
 from itertools import groupby
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiofiles
 import httpx
@@ -572,7 +572,11 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
         before_document = comparison_document(previous)
         after_document = comparison_document(proposed)
         changes = []
-        for collection, kind in (("nodes", "node"), ("edges", "edge")):
+        collections: tuple[tuple[str, Literal["node", "edge"]], ...] = (
+            ("nodes", "node"),
+            ("edges", "edge"),
+        )
+        for collection, kind in collections:
             before = {item["id"]: item for item in before_document[collection]}
             after = {item["id"]: item for item in after_document[collection]}
             for item_id in sorted(before.keys() | after.keys()):

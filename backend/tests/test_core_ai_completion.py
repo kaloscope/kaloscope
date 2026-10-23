@@ -34,7 +34,16 @@ def config(**overrides):
     )
 
 
-def response(content="Hello", **choice):
+def response(content: str | None = "Hello", **choice):
+    """Build an upstream response, including intentionally empty message content.
+
+    Args:
+        content: Message content, or `None` to exercise missing-content handling.
+        **choice: Values overriding the completion choice.
+
+    Returns:
+        Upstream completion payload with usage information.
+    """
     return {
         "choices": [
             {"finish_reason": "stop", "message": {"content": content}, **choice}

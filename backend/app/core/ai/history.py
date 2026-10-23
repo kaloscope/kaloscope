@@ -1,6 +1,8 @@
 """Assemble bounded context and checkpoint summaries without deleting source turns."""
 
-from openai import AsyncOpenAI
+from collections.abc import Mapping, Sequence
+
+from openai import AsyncOpenAI, omit
 from sanic import Sanic
 from sanic.log import logger
 
@@ -59,7 +61,7 @@ def budgets(model_id: str) -> tuple[int, int]:
     )
 
 
-def context_size(messages: list[dict], schemas: list[dict]) -> int:
+def context_size(messages: list[dict], schemas: Sequence[Mapping[str, object]]) -> int:
     """Estimate tokens conservatively using serialized UTF-8 bytes as the upper proxy.
 
     Args:
@@ -181,7 +183,7 @@ async def prepare_context(
     turn: AssistantTurn,
     user: UserInfo,
     system: str,
-    schemas: list[dict],
+    schemas: Sequence[Mapping[str, object]],
     preset: AIProviderPreset | None,
     continuation: list[dict] | None = None,
 ) -> tuple[list[dict], dict[str, int], bool]:
@@ -381,11 +383,6 @@ async def prepare_context(
                 "messages": source_messages,
             }
         ).decode()
-        token_field = (
-            "max_completion_tokens"
-            if preset == AIProviderPreset.OPENAI
-            else "max_tokens"
-        )
         try:
             completion = await client.chat.completions.create(
                 model=turn.model["model_id"],
@@ -393,7 +390,10 @@ async def prepare_context(
                     {"role": "system", "content": summary_instruction},
                     {"role": "user", "content": prompt},
                 ],
-                **{token_field: output_budget},
+                max_completion_tokens=output_budget
+                if preset == AIProviderPreset.OPENAI
+                else omit,
+                max_tokens=omit if preset == AIProviderPreset.OPENAI else output_budget,
             )
             if completion.usage:
                 for key in usage:

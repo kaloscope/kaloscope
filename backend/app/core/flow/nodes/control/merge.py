@@ -34,7 +34,6 @@ class MergeNode(Node):
         sources: list[Source] | None = None,
         **kwargs,
     ) -> OutputHandle | None:
-        # discard this input if already done
         """Emit once enough inputs arrive or the configured wait expires.
 
         Args:
@@ -46,13 +45,19 @@ class MergeNode(Node):
 
         Returns:
             Output handle for the first completed merge; `STOP` for other inputs.
+
+        Raises:
+            ValueError: If either required numeric field is empty.
         """
+        # discard this input if already done
         if node_data.get(_DONE):
             return STOP
 
         # determine the maximum number of inputs to wait for
         maximum = cls.maximum.extract(node_data)
         timeout = cls.timeout.extract(node_data)
+        if maximum is None or timeout is None:
+            raise ValueError("Merge input limit and timeout must not be empty")
         if sources:
             maximum = min(maximum, len(sources))
 

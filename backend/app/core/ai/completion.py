@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.ai import AICompletionConfig, AIProviderPreset
+from app.utils.json import JSONType
 
 
 def output_validator(config: AICompletionConfig) -> Draft202012Validator | None:
@@ -30,7 +31,7 @@ def output_validator(config: AICompletionConfig) -> Draft202012Validator | None:
         schema = orjson.loads(config.output_schema)
         if not isinstance(schema, dict) or schema.get("type") != "object":
             raise ValueError
-        pending = [(schema, 0)]
+        pending: list[tuple[JSONType, int]] = [(schema, 0)]
         while pending:
             item, depth = pending.pop()
             if depth > 64:

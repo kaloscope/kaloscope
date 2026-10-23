@@ -4,6 +4,7 @@ import asyncio
 import json
 from itertools import count
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -12,22 +13,49 @@ import pytest
 from app.core.ai import tools
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.ai import AIProviderPreset
-from app.models.user import UserRole
+from app.models.assistant import AssistantTurn
+from app.models.user import UserInfo, UserRole
 from app.services import assistant as service
 
-ADMIN = SimpleNamespace(id=1, role=UserRole.ADMIN)
 TURN_IDS = count(1)
 
 
-def make_turn(text="查看 AI 节点", *, context=None):
-    return SimpleNamespace(
-        id=next(TURN_IDS),
-        conversation_id=1,
-        model={"provider_id": 1, "model_id": "test-model"},
-        prompt=text,
-        context=context,
-        resource_ids=[],
-        usage={},
+def make_user(id: int = 1) -> UserInfo:
+    """Build an administrator substitute for streaming tests.
+
+    Args:
+        id: Account identifier used to isolate concurrent conversations.
+
+    Returns:
+        Account substitute exposing the fields used by the streaming service.
+    """
+    return cast(UserInfo, SimpleNamespace(id=id, role=UserRole.ADMIN))
+
+
+ADMIN = make_user()
+
+
+def make_turn(text="查看 AI 节点", *, context=None) -> AssistantTurn:
+    """Build a persisted-turn substitute without starting a database.
+
+    Args:
+        text: User prompt sent to the provider.
+        context: Optional saved page context for permission checks.
+
+    Returns:
+        Turn substitute exposing the fields used by the streaming service.
+    """
+    return cast(
+        AssistantTurn,
+        SimpleNamespace(
+            id=next(TURN_IDS),
+            conversation_id=1,
+            model={"provider_id": 1, "model_id": "test-model"},
+            prompt=text,
+            context=context,
+            resource_ids=[],
+            usage={},
+        ),
     )
 
 
@@ -112,7 +140,18 @@ def response(events, *, wait=False):
     )
 
 
-def configure(monkeypatch, handler, *, secret="private-key", preset=None):
+def configure(monkeypatch, handler, *, secret: str | None = "private-key", preset=None):
+    """Bind the provider and upstream transport to isolated test doubles.
+
+    Args:
+        monkeypatch: Fixture replacing provider lookups and the HTTP transport.
+        handler: Mock upstream request handler.
+        secret: Decrypted credential, or `None` for a keyless provider.
+        preset: Optional provider preset controlling SDK request fields.
+
+    Returns:
+        Provider substitute returned by model resolution.
+    """
     provider = SimpleNamespace(
         base_url="https://example.test/v1", preset=preset, api_key="ciphertext"
     )
@@ -128,7 +167,16 @@ def configure(monkeypatch, handler, *, secret="private-key", preset=None):
     return provider
 
 
-async def collect(turn=None, user=ADMIN):
+async def collect(turn: AssistantTurn | None = None, user: UserInfo = ADMIN):
+    """Collect the full event sequence from one isolated turn.
+
+    Args:
+        turn: Turn to execute; `None` builds a default turn.
+        user: Account authorizing the turn and its tools.
+
+    Returns:
+        Events emitted before completion, failure, or cancellation.
+    """
     return [
         event
         async for event in service.AssistantService.stream(turn or make_turn(), user)
@@ -667,8 +715,10 @@ def test_cancel_model(monkeypatch):
             [chunk({"role": "assistant", "content": "partial"})], wait=True
         )
         configure(monkeypatch, lambda _: upstream)
+        stream = upstream.stream
+        assert isinstance(stream, EventStream)
         task = asyncio.create_task(collect())
-        await asyncio.wait_for(upstream.stream.waiting.wait(), 5)
+        await asyncio.wait_for(stream.waiting.wait(), 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -759,12 +809,8 @@ def test_concurrent_accounts(monkeypatch):
 
     async def run():
         return await asyncio.gather(
-            collect(
-                make_turn("conversation A"), SimpleNamespace(id=1, role=UserRole.ADMIN)
-            ),
-            collect(
-                make_turn("conversation B"), SimpleNamespace(id=2, role=UserRole.ADMIN)
-            ),
+            collect(make_turn("conversation A"), make_user(1)),
+            collect(make_turn("conversation B"), make_user(2)),
         )
 
     first, second = asyncio.run(run())

@@ -2,12 +2,16 @@
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from sanic import Request, Sanic
+from sanic import HTTPResponse, Request, Sanic
+from sanic.compat import Header
+from sanic.models.protocol_types import TransportProtocol
 from sanic.response.types import BaseHTTPResponse
 from sanic_ext.exceptions import ValidationError
 from tortoise import Tortoise
@@ -32,6 +36,36 @@ def application():
         BaseHTTPResponse._dumps = original_dumps
 
 
+async def call_route(
+    handler: object, request: Request, **arguments: object
+) -> HTTPResponse:
+    """Call a decorated route using its runtime asynchronous handler contract.
+
+    Args:
+        handler: Route callable whose signature is obscured by Sanic decorators.
+        request: Request passed through authorization and validation.
+        **arguments: URL parameters supplied by the router.
+
+    Returns:
+        Response produced by the decorated route.
+    """
+    callback = cast(Callable[..., Awaitable[HTTPResponse]], handler)
+    return await callback(request, **arguments)
+
+
+def response_json(response: HTTPResponse):
+    """Decode a route response after verifying that it contains a body.
+
+    Args:
+        response: Response returned by the decorated route.
+
+    Returns:
+        Decoded JSON payload.
+    """
+    assert response.body is not None
+    return json.loads(response.body)
+
+
 def request(body=None, role=UserRole.ADMIN):
     """Create a real Sanic request without starting application services.
 
@@ -44,10 +78,10 @@ def request(body=None, role=UserRole.ADMIN):
     """
     result = Request(
         url_bytes=b"/_api/ai/provider/upsert",
-        headers={"content-type": "application/json"},
+        headers=Header({"content-type": "application/json"}),
         version="1.1",
         method="POST",
-        transport=None,
+        transport=cast(TransportProtocol, None),
         app=Sanic.get_app("ai-route-test"),
     )
     result.body = json.dumps(body).encode()
@@ -80,8 +114,8 @@ def test_authorization(handler, arguments, role, error, code):
 
 
 def test_presets():
-    response = asyncio.run(routes.provider_presets(request()))
-    result = json.loads(response.body)
+    response = asyncio.run(call_route(routes.provider_presets, request()))
+    result = response_json(response)
 
     assert len(result) == 8
     assert result[0]["id"] == "openai"
@@ -99,20 +133,23 @@ def test_upsert(monkeypatch):
     monkeypatch.setattr(routes.AIProviderService, "dump", dump)
 
     response = asyncio.run(
-        routes.upsert_provider(
+        call_route(
+            routes.upsert_provider,
             request(
                 {
                     "name": "Custom",
                     "base_url": "https://example.com/v1",
                     "api_key": "key",
                 }
-            )
+            ),
         )
     )
 
-    assert json.loads(response.body) == saved
+    assert response_json(response) == saved
+    assert upsert.await_args is not None
     body = upsert.await_args.args[0]
     assert isinstance(body, AIProviderUpsert)
+    assert body.api_key is not None
     assert body.api_key.get_secret_value() == "key"
     dump.assert_awaited_once_with(provider)
 
@@ -123,14 +160,15 @@ def test_invalid_payload(monkeypatch):
 
     with pytest.raises(ValidationError) as error:
         asyncio.run(
-            routes.upsert_provider(
+            call_route(
+                routes.upsert_provider,
                 request(
                     {
                         "name": "Custom",
                         "base_url": "file:///tmp/invalid",
                         "api_key": "private-secret\nheader",
                     }
-                )
+                ),
             )
         )
 
@@ -143,7 +181,7 @@ def test_delete(monkeypatch):
     delete = AsyncMock()
     monkeypatch.setattr(routes.AIProviderService, "delete", delete)
 
-    response = asyncio.run(routes.delete_provider(request(), id=2))
+    response = asyncio.run(call_route(routes.delete_provider, request(), id=2))
 
     assert response.status == 204
     delete.assert_awaited_once_with(2)
@@ -154,11 +192,14 @@ def test_discover(monkeypatch):
     monkeypatch.setattr(routes.AIProviderService, "discover_models", discover)
 
     response = asyncio.run(
-        routes.discover_models(request({"base_url": "https://example.com/v1"}))
+        call_route(
+            routes.discover_models, request({"base_url": "https://example.com/v1"})
+        )
     )
 
-    assert json.loads(response.body) == ["model-one"]
+    assert response_json(response) == ["model-one"]
     assert response.headers["Cache-Control"] == "no-store"
+    assert discover.await_args is not None
     assert isinstance(discover.await_args.args[0], AIProviderConnection)
 
 
@@ -168,13 +209,14 @@ def test_invalid_discovery(monkeypatch):
 
     with pytest.raises(ValidationError) as error:
         asyncio.run(
-            routes.discover_models(
+            call_route(
+                routes.discover_models,
                 request(
                     {
                         "base_url": "https://example.com",
                         "api_key": "private-key\nheader",
                     }
-                )
+                ),
             )
         )
 

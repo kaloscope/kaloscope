@@ -1,13 +1,14 @@
 """Stream bounded assistant turns through the configured provider and SDK."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing, suppress
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
+import httpx2
 from openai import (
     APIError,
     APIStatusError,
@@ -15,6 +16,7 @@ from openai import (
     AsyncOpenAI,
     ContentFilterFinishReasonError,
     LengthFinishReasonError,
+    omit,
 )
 
 from app.core.ai.history import budgets, context_size, prepare_context
@@ -142,8 +144,14 @@ async def _bound_response(response: httpx.Response) -> None:
 
     Args:
         response: Streaming HTTPX response owned by the current SDK client.
+
+    Raises:
+        TypeError: If the asynchronous client's response lacks an async stream.
     """
-    response.stream = _BoundedStream(response.stream)
+    stream = response.stream
+    if not isinstance(stream, httpx.AsyncByteStream):
+        raise TypeError("Expected an asynchronous provider response stream")
+    response.stream = _BoundedStream(stream)
 
 
 def _error_code(error: Exception) -> ErrorCode:
@@ -194,7 +202,7 @@ class AssistantService:
     @classmethod
     async def stream(
         cls, turn: AssistantTurn, user: UserInfo
-    ) -> AsyncIterator[AssistantEvent]:
+    ) -> AsyncGenerator[AssistantEvent]:
         """Stream one assistant turn and close every upstream resource on exit.
 
         Consume this iterator in a single task so the total deadline includes
@@ -254,7 +262,8 @@ class AssistantService:
                         admin_api_key="",
                         organization="",
                         project="",
-                        http_client=http,
+                        # the OpenAI 3.x SDK accepts legacy HTTPX clients at runtime
+                        http_client=cast(httpx2.AsyncClient, http),
                         timeout=MODEL_TIMEOUT,
                         max_retries=0,
                     ) as client,
@@ -268,7 +277,7 @@ class AssistantService:
     @classmethod
     async def persistent_stream(
         cls, conversation_id: int, body: AssistantTurnRequest, user: UserInfo
-    ) -> AsyncIterator[AssistantEvent]:
+    ) -> AsyncGenerator[AssistantEvent]:
         """Persist one isolated request and retain partial output on cancellation.
 
         Args:
@@ -326,7 +335,7 @@ class AssistantService:
         turn: AssistantTurn,
         user: UserInfo,
         provider: AIProvider,
-    ) -> AsyncIterator[AssistantEvent]:
+    ) -> AsyncGenerator[AssistantEvent]:
         """Alternate SDK streams and authorized tool calls within fixed limits.
 
         Args:
@@ -367,13 +376,7 @@ class AssistantService:
         yield AssistantEvent(
             event="compacting", data={"active": False, "compacted": compacted}
         )
-        options = {
-            "max_completion_tokens"
-            if provider.preset == AIProviderPreset.OPENAI
-            else "max_tokens": output_budget
-        }
-        if provider.preset == AIProviderPreset.OPENAI:
-            options["stream_options"] = {"include_usage": True}
+        openai_options = provider.preset == AIProviderPreset.OPENAI
 
         for model_turn in range(MAX_MODEL_TURNS):
             finish_only = (
@@ -436,8 +439,11 @@ class AssistantService:
             async with client.chat.completions.stream(
                 model=turn.model["model_id"],
                 messages=request_messages,
-                **({"tool_choice": "none"} if finish_only else {"tools": schemas}),
-                **options,
+                tool_choice="none" if finish_only else omit,
+                tools=omit if finish_only else schemas,
+                max_completion_tokens=output_budget if openai_options else omit,
+                max_tokens=omit if openai_options else output_budget,
+                stream_options={"include_usage": True} if openai_options else omit,
             ) as stream:
                 async for event in stream:
                     if event.type == "content.delta" and event.delta:

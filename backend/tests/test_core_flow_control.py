@@ -6,8 +6,11 @@ from typing import Any
 import pytest
 
 from app.core.flow.context import Context
+from app.core.flow.edge import Source
+from app.core.flow.handles import STOP
 from app.core.flow.nodes.control.condition import ConditionNode
 from app.core.flow.nodes.control.loop import LoopNode
+from app.core.flow.nodes.control.merge import MergeNode
 
 
 def _context(values: dict[str, Any]) -> Context:
@@ -76,3 +79,33 @@ def test_loop(values):
             handle = LoopNode.Handles.loop_continue
 
     assert asyncio.run(run()) == values
+
+
+@pytest.mark.parametrize("maximum", [1, 2, 3])
+def test_merge(maximum):
+    async def run():
+        sources = [Source(name, handle_id="output") for name in ("one", "two")]
+        data = {"maximum": maximum, "timeout": 0}
+        results = [
+            await MergeNode.execute(node_data=data, source=source, sources=sources)
+            for source in sources
+        ]
+        repeated = await MergeNode.execute(
+            node_data=data, source=sources[0], sources=sources
+        )
+
+        expected = (
+            [MergeNode.Handles.output, STOP]
+            if maximum == 1
+            else [STOP, MergeNode.Handles.output]
+        )
+        assert results == expected
+        assert repeated is STOP
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["maximum", "timeout"])
+def test_merge_empty_field(field):
+    with pytest.raises(ValueError, match="must not be empty"):
+        asyncio.run(MergeNode.execute(node_data={field: None}))

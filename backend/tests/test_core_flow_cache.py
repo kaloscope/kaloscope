@@ -14,8 +14,9 @@ from app.core.flow.nodes.general import cache
     [
         ('{"count": 1}', 10, {}, '{"count": 1}', 110),
         ("{{ payload | tojson }}", 0, {"payload": "123"}, '"123"', None),
+        ('{"count": 1}', None, {}, '{"count": 1}', None),
     ],
-    ids=["json", "template"],
+    ids=["json", "template", "empty_ttl"],
 )
 def test_value(monkeypatch, value, ttl, values, expected, expires):
     context = Context.__new__(Context)

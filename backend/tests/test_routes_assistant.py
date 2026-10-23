@@ -2,13 +2,17 @@
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from sanic import Request, Sanic
+from sanic.compat import Header
+from sanic.models.protocol_types import TransportProtocol
 from sanic.response.types import BaseHTTPResponse
 from sanic_ext.exceptions import ValidationError
 from tortoise import Tortoise, timezone
@@ -40,13 +44,38 @@ def application():
         BaseHTTPResponse._dumps = original_dumps
 
 
+async def call_route(handler: object, request: Request, **arguments: object) -> None:
+    """Call a decorated route using its runtime asynchronous handler contract.
+
+    Args:
+        handler: Route callable whose signature is obscured by Sanic decorators.
+        request: Request passed through authorization and validation.
+        **arguments: URL parameters supplied by the router.
+
+    Returns:
+        `None` after the route finishes streaming.
+    """
+    callback = cast(Callable[..., Awaitable[None]], handler)
+    await callback(request, **arguments)
+
+
 def request(app, *, body=BODY, authenticated=True):
+    """Create an isolated request for assistant transport tests.
+
+    Args:
+        app: Sanic application receiving the request.
+        body: Submitted JSON request body.
+        authenticated: Whether to attach an administrator session.
+
+    Returns:
+        Request without an active network transport.
+    """
     result = Request(
         url_bytes=b"/_api/assistant/conversations/1/chat",
-        headers={"content-type": "application/json"},
+        headers=Header({"content-type": "application/json"}),
         version="1.1",
         method="POST",
-        transport=None,
+        transport=cast(TransportProtocol, None),
         app=app,
     )
     result.body = json.dumps(body).encode()
@@ -69,8 +98,10 @@ def test_invalid_request(application, monkeypatch):
 
     with pytest.raises(ValidationError):
         asyncio.run(
-            routes.persistent_chat(
-                request(application, body={**BODY, "user_id": 2}), conversation_id=1
+            call_route(
+                routes.persistent_chat,
+                request(application, body={**BODY, "user_id": 2}),
+                conversation_id=1,
             )
         )
 
