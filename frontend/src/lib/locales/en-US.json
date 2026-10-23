@@ -1162,7 +1162,10 @@
       "uncertain": "Save status unknown",
       "retry": "Load again",
       "saved": "Kept and saved as a draft.",
+      "unchanged": "Kept. The saved draft already matched.",
       "reverted": "Assistant changes reverted.",
+      "no_change": "No canvas changes were needed.",
+      "no_change_unsaved": "No canvas changes were needed. Earlier edits remain unsaved.",
       "record": "Canvas edit record. Changes are never reapplied automatically.",
       "leave_title": "Leave this canvas?",
       "leave_message": "Assistant changes will be reverted. Earlier unsaved manual edits still prompt you to save."

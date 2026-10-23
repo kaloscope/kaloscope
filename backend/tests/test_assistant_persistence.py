@@ -21,6 +21,7 @@ from app.core.exceptions import (
 from app.models.ai import AIProviderPreset
 from app.models.assistant import (
     AssistantConversation,
+    AssistantProposal,
     AssistantSnapshot,
     AssistantSnapshotRequest,
     AssistantToolCall,
@@ -173,6 +174,94 @@ def test_cross_page_context(monkeypatch):
             assert "untrusted data" in current["content"]
             assert "original script" not in dumps(messages).decode()
             assert messages[-1] == {"role": "user", "content": "Continue"}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["editable", "readonly_route", "locked"])
+def test_direct_edit_eligibility(monkeypatch, case):
+    from tests.test_assistant_proposals import document, set_url
+
+    requests = []
+    arguments = {}
+
+    def handler(upstream):
+        requests.append(loads(upstream.content))
+        if len(requests) == 1:
+            call = call_delta("preview_workflow_draft", dumps(arguments).decode())
+            return response(
+                [chunk({"role": "assistant", "tool_calls": [call]}, "tool_calls")]
+            )
+        return response([chunk({"role": "assistant", "content": "Done"}, "stop")])
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await FlowGraph.create(
+                name="Eligibility fixture",
+                category="schedule",
+                state="draft",
+                draft=document(),
+                editable=case != "locked",
+            )
+            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            snapshot = await Sessions.snapshot(
+                conversation["id"],
+                graph.id,
+                0,
+                GraphDocument.model_validate(document()),
+                "canvas",
+                owner,
+            )
+            arguments.update(
+                workflow_id=graph.id,
+                draft_version=0,
+                snapshot_id=snapshot.id,
+                changes=[set_url()],
+            )
+            mode = "r/" if case == "readonly_route" else ""
+
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request(
+                        context={
+                            "page_type": "workflow_designer",
+                            "route": f"/settings/workflows/graphs/{mode}{graph.id}",
+                            "resource_id": graph.id,
+                            "draft_version": 0,
+                            "unsaved": False,
+                            "editable": case != "readonly_route",
+                            "snapshot_id": snapshot.id,
+                        }
+                    ),
+                    owner,
+                )
+            ]
+            turn = await AssistantTurn.get(conversation_id=conversation["id"])
+            result = next(
+                event.data for event in events if event.event == "tool_result"
+            )
+            page = next(
+                message["content"]
+                for message in requests[0]["messages"]
+                if str(message.get("content")).startswith("Current page")
+            )
+
+            assert events[-1].event == "done"
+            assert turn.context["editable"] is (case == "editable")
+            assert f'"editable":{str(case == "editable").lower()}' in page
+            if case == "locked":
+                assert result["error"]["code"] == "flow_not_editable"
+            else:
+                assert result["ok"]
+                assert "proposal_snapshot_id" in result["data"]
+                assert ("proposal_id" in result["data"]) is (case == "editable")
+                assert ("canvas_change_count" in result["data"]) is (case == "editable")
+            assert await AssistantProposal.all().count() == int(case == "editable")
+            assert (await FlowGraph.get(id=graph.id)).draft_version == 0
 
     asyncio.run(run())
 

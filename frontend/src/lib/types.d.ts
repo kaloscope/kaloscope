@@ -107,6 +107,8 @@ export type AssistantPageContext =
       resource_id: number;
       draft_version: number;
       unsaved: boolean;
+      // whether this designer accepts direct canvas edits; the server may narrow it
+      editable: boolean;
       canvas: NonNullable<FlowGraph['draft']>;
       selected_node_ids: string[];
     };

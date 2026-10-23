@@ -463,7 +463,12 @@
               {#if 'tools' in segment}
                 <ul class="-mx-2 space-y-0.5" aria-label={$_('assistant.activity')}>
                   {#each segment.tools as tool (tool.id)}
-                    <li><AssistantTool {tool} /></li>
+                    <li>
+                      <AssistantTool
+                        {tool}
+                        unsaved={turn.context?.page_type === 'workflow_designer' && turn.context.unsaved}
+                      />
+                    </li>
                   {/each}
                 </ul>
               {:else}

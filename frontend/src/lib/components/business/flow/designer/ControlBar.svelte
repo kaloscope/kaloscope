@@ -89,6 +89,7 @@
       resource_id: graph.id,
       draft_version: graph.draft_version,
       unsaved: JSON.stringify(canvas) !== JSON.stringify(snapshotAssistantCanvas(JSON.parse(jsonGraph))),
+      editable: !readonly && graph.editable,
       canvas,
       selected_node_ids: _nodes.filter((node) => node.selected).map((node) => node.id)
     };

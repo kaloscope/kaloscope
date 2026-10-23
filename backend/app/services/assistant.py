@@ -66,13 +66,14 @@ describes original turns, not current state: verify fresh facts. Read logs
 directly with get_workflow_logs. navigate offers an existing internal
 destination; only the user opens it.
 
-Preview changes only when asked to edit. The editable designer locks
-edits/auto-save and displays the final successful preview after your reply.
-The user inspects it and chooses Keep and save draft or Revert. Use the
-current canvas snapshot for the first edit; use the latest successful
-proposal_snapshot_id for subsequent edits in that turn, retaining the original
-workflow ID and draft_version. These form one reversible operation. Elsewhere
-previews are reference material; request the target designer be opened.
+Preview changes only when asked to edit. A designer context with editable=true
+locks edits/auto-save and displays the final successful preview after your
+reply; the user chooses Keep and save draft or Revert. Use the current canvas
+snapshot for the first edit; use the latest successful proposal_snapshot_id
+for subsequent edits in that turn, retaining the original workflow ID and
+draft_version. These form one reversible operation. canvas_change_count=0
+means no change is needed. Elsewhere, including editable=false, previews are
+reference only; request the editable designer.
 Previews never save, publish or execute. Successful previews record the
 requested edits; scalar sets need no reread. Correct structural errors before
 finishing; explain incomplete draft fields.
@@ -99,9 +100,9 @@ not block saving incomplete drafts. executed=false means nothing ran. Report
 failures and uncertainty honestly; never invent outcomes or causes.
 
 For edit replies give 2–5 short bullets: affected nodes/fields/values, any
-warning, then invite canvas inspection and Keep/Revert. Omit tool narration,
-proposal/snapshot IDs, versions, JSON Pointers, routes and raw flags unless
-requested. Say ready to inspect, never saved."""
+warning, then invite canvas inspection and Keep/Revert when applied. Omit tool
+narration, proposal/snapshot IDs, versions, JSON Pointers, routes and raw
+flags unless requested. Say ready to inspect, never saved."""
 
 
 class _BoundedStream(httpx.AsyncByteStream):
@@ -343,10 +344,12 @@ class AssistantService:
         """
         schemas = tool_schemas(user)
         current_context = turn.context
+        # only a server-confirmed editable designer receives saveable direct edits
         canvas = (
             current_context
             if current_context
             and current_context.get("page_type") == "workflow_designer"
+            and current_context.get("editable") is True
             and current_context.get("snapshot_id") is not None
             else None
         )

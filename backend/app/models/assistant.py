@@ -69,6 +69,9 @@ class WorkflowDesignerContext(ContextModel):
     resource_id: ResourceID
     draft_version: int = Field(ge=0)
     unsaved: bool
+    # the visible designer accepts direct canvas edits; the server narrows it to
+    # actual editor rights and workflow editability before storing the turn
+    editable: bool = False
     canvas: GraphDocument | None = None
     snapshot_id: ResourceID | None = None
     selected_node_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
@@ -77,18 +80,21 @@ class WorkflowDesignerContext(ContextModel):
 
     @model_validator(mode="after")
     def validate_selection(self) -> Self:
-        """Require the route and selected nodes to identify this canvas.
+        """Require the route, mode and selected nodes to identify this canvas.
 
         Returns:
             Consistent designer context.
 
         Raises:
-            ValueError: If the source is ambiguous or the route/selection is invalid.
+            ValueError: If the source is ambiguous, the route/selection is invalid,
+                or a read-only route claims direct editing.
         """
-        if self.route not in {
-            f"{WORKFLOW_PATH}/{self.resource_id}",
-            f"{WORKFLOW_PATH}/r/{self.resource_id}",
-        } or (self.canvas is None) == (self.snapshot_id is None):
+        editor_route = f"{WORKFLOW_PATH}/{self.resource_id}"
+        if (
+            self.route not in {editor_route, f"{WORKFLOW_PATH}/r/{self.resource_id}"}
+            or (self.editable and self.route != editor_route)
+            or (self.canvas is None) == (self.snapshot_id is None)
+        ):
             raise ValueError("Context does not match the visible workflow")
         if self.canvas is not None and not set(self.selected_node_ids).issubset(
             {node.id for node in self.canvas.nodes}

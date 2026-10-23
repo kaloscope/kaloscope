@@ -526,9 +526,17 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     controller.abort();
   };
   const deadline = setTimeout(timeout, 150000);
+  let generating = true;
   const activity = () => {
+    if (!generating) return;
     clearTimeout(idle);
     idle = setTimeout(timeout, 35000);
+  };
+  // the watchdogs guard model generation only; canvas loading has its own request lifetime
+  const disarm = () => {
+    generating = false;
+    clearTimeout(deadline);
+    clearTimeout(idle);
   };
   activity();
   let started = false;
@@ -610,6 +618,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
           break;
       }
     });
+    if (event.event === 'done' || event.event === 'error') disarm();
   }
 
   try {
@@ -692,8 +701,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     });
   } finally {
     endAssistantCanvas(turn.id);
-    clearTimeout(deadline);
-    clearTimeout(idle!);
+    disarm();
     update((value) => {
       value.tools.forEach((tool) => {
         if (tool.status === 'running') tool.status = 'interrupted';

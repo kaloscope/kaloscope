@@ -25,7 +25,6 @@ from app.models.assistant import (
 from app.models.flow import (
     FlowGraph,
     GraphDocument,
-    GraphState,
     GraphWrite,
 )
 from app.models.user import UserInfo
@@ -192,33 +191,34 @@ class AssistantProposalService:
 
     @staticmethod
     def _workflow(
-        proposal: AssistantProposal, graph: FlowGraph, document: dict
-    ) -> dict[str, Any]:
-        """Describe the draft represented by an edit's recorded outcome.
+        proposal: AssistantProposal, graph: FlowGraph
+    ) -> dict[str, Any] | None:
+        """Describe the persisted draft that a saved or unchanged edit represents.
+
+        The draft write, or the canonical no-op check for `unchanged`, already
+        applied the shared workflow state rules, so the persisted row is the
+        only source of state and update time. Proposal resolution times are
+        never reported as workflow times.
 
         Args:
             proposal: Owned edit.
             graph: Current workflow already authorized for the account.
-            document: Immutable edited document.
 
         Returns:
-            Workflow metadata for the saved version, or for the captured base
-            version while the edit is unsaved.
+            Metadata while the workflow still holds the recorded draft version,
+            or `None` when the edit is unsaved or another write has advanced the
+            workflow, so a newer version is never attached to an older canvas.
         """
-        state = GraphState.DRAFT
-        if graph.state != GraphState.DRAFT:
-            state = (
-                GraphState.PUBLISHED
-                if document == graph.definition
-                else GraphState.MODIFIED
-            )
+        if (
+            proposal.status not in SAVED_STATUSES
+            or graph.draft_version != proposal.saved_version
+        ):
+            return None
         return {
             "id": graph.id,
-            "state": state,
-            "draft_version": proposal.saved_version
-            if proposal.saved_version is not None
-            else proposal.base_version,
-            "updated_at": proposal.resolved_at or graph.updated_at,
+            "state": graph.state,
+            "draft_version": graph.draft_version,
+            "updated_at": graph.updated_at,
         }
 
     @classmethod
@@ -233,8 +233,9 @@ class AssistantProposalService:
 
         Returns:
             The public lifecycle state and, for a saved draft that the account
-            can still read, its workflow metadata. A deleted workflow or revoked
-            access omits only the metadata, never the recorded outcome.
+            can still read at that exact version, its workflow metadata. A
+            deleted workflow, revoked access or a newer draft omits only the
+            metadata, never the recorded outcome.
         """
         workflow = None
         if proposal.status in SAVED_STATUSES:
@@ -242,10 +243,7 @@ class AssistantProposalService:
                 graph = await FlowGraphService.get_accessible(
                     proposal.workflow_id, user
                 )
-                document = (
-                    await AssistantSnapshot.get(id=proposal.snapshot_id)
-                ).document
-                workflow = cls._workflow(proposal, graph, document)
+                workflow = cls._workflow(proposal, graph)
         return {"proposal": describe_proposal(proposal), "workflow": workflow}
 
     @classmethod
@@ -311,7 +309,7 @@ class AssistantProposalService:
             "change_count": len(
                 FlowGraphService.compare_documents(base or EMPTY_GRAPH, document)
             ),
-            "workflow": cls._workflow(proposal, graph, document),
+            "workflow": cls._workflow(proposal, graph),
         }
 
     @classmethod

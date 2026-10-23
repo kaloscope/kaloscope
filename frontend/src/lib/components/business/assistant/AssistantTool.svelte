@@ -3,7 +3,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
-  const { tool }: { tool: AssistantTool } = $props();
+  const { tool, unsaved = false }: { tool: AssistantTool; unsaved?: boolean } = $props();
   const statusIcon = $derived.by(() => {
     if (tool.status === 'complete') return icons.checkmark;
     if (tool.status === 'error') return icons.warning;
@@ -61,10 +61,15 @@
 {:else}
   <div class="flex min-h-7 items-center gap-2 px-2 text-xs text-base-content/60">{@render row()}</div>
 {/if}
-{#if tool.name === 'preview_workflow_draft' && tool.result?.ok}
+{#if tool.name === 'preview_workflow_draft' && tool.result?.ok && tool.result.data?.proposal_id}
   <p class="ml-8 text-xs leading-5 text-base-content/60">
-    {#if tool.proposal?.status === 'saved' || tool.proposal?.status === 'unchanged'}
+    {#if tool.proposal?.status === 'saved'}
       {$_('assistant.canvas.saved')}
+    {:else if tool.proposal?.status === 'unchanged'}
+      {$_('assistant.canvas.unchanged')}
+    {:else if tool.result.data?.canvas_change_count === 0}
+      <!-- compared with the captured canvas, so no change says nothing about earlier unsaved edits -->
+      {$_(unsaved ? 'assistant.canvas.no_change_unsaved' : 'assistant.canvas.no_change')}
     {:else if tool.proposal?.status === 'cancelled'}
       {$_('assistant.canvas.reverted')}
     {:else}
