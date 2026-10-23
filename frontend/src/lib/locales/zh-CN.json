@@ -1162,7 +1162,10 @@
       "uncertain": "保存结果待确认",
       "retry": "重新加载",
       "saved": "已保留并保存为草稿",
+      "unchanged": "已保留，草稿原本一致",
       "reverted": "已撤回助手修改",
+      "no_change": "画布无需修改",
+      "no_change_unsaved": "画布无需修改，此前的编辑仍未保存",
       "record": "画布修改记录，不会自动重新应用",
       "leave_title": "离开当前画布？",
       "leave_message": "助手修改将被撤回，此前未保存的手工编辑仍会提示保存"

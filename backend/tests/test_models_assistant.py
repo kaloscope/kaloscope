@@ -99,6 +99,8 @@ def test_snapshot_boundaries(case):
             },
         },
         designer_context(),
+        {**designer_context(), "editable": True},
+        {**designer_context(), "route": "/settings/workflows/graphs/r/3"},
     ],
 )
 def test_page_context(context):
@@ -106,6 +108,8 @@ def test_page_context(context):
 
     assert turn.context.page_type == context["page_type"]
     assert turn.context.route == context["route"]
+    if context["page_type"] == "workflow_designer":
+        assert turn.context.editable is context.get("editable", False)
 
 
 @pytest.mark.parametrize(
@@ -134,6 +138,7 @@ def test_page_context(context):
         },
         {"tools": ["save_workflow_draft"]},
         {"page_type": "arbitrary_page"},
+        {"route": "/settings/workflows/graphs/r/3", "editable": True},
     ],
 )
 def test_invalid_context(patch):

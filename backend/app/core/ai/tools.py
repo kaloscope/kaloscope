@@ -470,6 +470,16 @@ async def execute_tool(
                                     canvas["snapshot_id"],
                                 )
                                 result["proposal_id"] = proposal_record.id
+                                # compare with the visible canvas, including
+                                # unsaved edits, rather than with the saved draft
+                                original = await AssistantSessionService.read_snapshot(
+                                    conversation_id, canvas["snapshot_id"], user
+                                )
+                                result["canvas_change_count"] = len(
+                                    FlowGraphService.compare_documents(
+                                        original.document, snapshot.document
+                                    )
+                                )
                         while (
                             result["changes"]
                             and len(dumps(result)) > MAX_TOOL_RESULT_BYTES

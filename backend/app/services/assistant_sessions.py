@@ -11,6 +11,7 @@ from tortoise.transactions import in_transaction
 from app.core.exceptions import (
     BadRequestException,
     ErrorCode,
+    ForbiddenException,
     KaloscopeException,
     NotFoundException,
 )
@@ -423,6 +424,7 @@ class AssistantSessionService:
                     raise BadRequestException
                 context.pop("canvas", None)
                 context.update(
+                    editable=await cls.direct_edit(body.context, user),
                     snapshot_id=snapshot.id,
                     graph={
                         "node_count": len(snapshot.document["nodes"]),
@@ -443,6 +445,30 @@ class AssistantSessionService:
                     title=body.prompt.strip()[:120]
                 )
         return await cls.owned(conversation_id, user), turn
+
+    @staticmethod
+    async def direct_edit(context: WorkflowDesignerContext, user: UserInfo) -> bool:
+        """Decide whether a designer turn may create saveable canvas edits.
+
+        The page reports only its own mode; current editor rights and workflow
+        editability can narrow it but never widen it. Tools still recheck both
+        when a preview runs.
+
+        Args:
+            context: Validated designer context captured when the request was sent.
+            user: Authenticated account with current permissions.
+
+        Returns:
+            Whether previews in this turn may become direct edits of the canvas.
+        """
+        if not context.editable:
+            return False
+        try:
+            FlowGraphService.require_editor(user)
+            graph = await FlowGraphService.get_accessible(context.resource_id, user)
+        except (ForbiddenException, NotFoundException):
+            return False
+        return graph.editable
 
     @classmethod
     async def checkpoint(cls, turn: AssistantTurn, **values: Any) -> None:

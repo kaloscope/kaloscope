@@ -11,7 +11,8 @@ type Document = NonNullable<FlowGraph['draft']>;
 type DesignerContext = Extract<AssistantPageContext, { page_type: 'workflow_designer' }>;
 type Outcome = {
   proposal: AssistantProposal;
-  // saved-draft metadata, omitted when the workflow is gone or no longer readable
+  // persisted metadata of exactly the saved version, omitted when the workflow is
+  // gone, no longer readable, or already advanced by another write
   workflow: GraphUpdate | null;
 };
 type CanvasResult = {
@@ -21,8 +22,9 @@ type CanvasResult = {
   editable: boolean;
   canvas: Document | null;
   validation: GraphValidation;
+  // changes relative to the original captured canvas, including unsaved edits
   change_count: number;
-  workflow: GraphUpdate;
+  workflow: GraphUpdate | null;
 };
 type CanvasEditor = {
   read: () => DesignerContext | null;
@@ -103,12 +105,25 @@ export function registerAssistantEditor(surface: CanvasEditor): () => void {
  */
 export function resetAssistantCanvas(): void {
   const edit = active;
-  active = null;
   if (edit) {
-    edit.controller.abort();
+    release(edit);
     edit.stop();
-    edit.editor.restore();
   }
+  assistantCanvas.set(null);
+}
+
+/**
+ * Restore the original canvas without stopping generation that is already ending.
+ *
+ * Nothing is applied, cancelled, or saved, so earlier unsaved manual edits keep
+ * their dirty state and normal auto-save resumes.
+ *
+ * @param edit - Live edit to close.
+ */
+function release(edit: Edit): void {
+  active = null;
+  edit.controller.abort();
+  edit.editor.restore();
   assistantCanvas.set(null);
 }
 
@@ -122,7 +137,8 @@ export function resetAssistantCanvas(): void {
  */
 export function beginAssistantCanvas(turnId: string, context: AssistantPageContext | null, stop: () => void): void {
   if (active?.turnId === turnId) return;
-  if (context?.page_type !== 'workflow_designer' || context.route.includes('/graphs/r/')) return;
+  // read-only designers keep their context for inspection but never lock for direct edits
+  if (context?.page_type !== 'workflow_designer' || !context.editable) return;
   const current = editor?.read();
   if (
     active ||
@@ -260,8 +276,9 @@ async function loadEdit(edit: Edit): Promise<void> {
     if (!current || !sameCanvas(current.canvas, edit.context.canvas)) throw new Error('assistant_canvas_changed');
     edit.result = result;
     edit.decision?.(result.proposal);
+    // the count compares with the captured canvas, so a no-op leaves nothing to keep or revert
     if (!result.change_count) {
-      void discardAssistantCanvas();
+      release(edit);
       return;
     }
     edit.editor.apply(result.canvas);
@@ -281,7 +298,7 @@ async function loadEdit(edit: Edit): Promise<void> {
       return;
     }
     // a stale or invalid edit can never apply to this canvas, so release it for a fresh request
-    resetAssistantCanvas();
+    release(edit);
     edit.fail?.(errorCode(error, 'assistant_canvas_not_applied'));
   }
 }
@@ -305,7 +322,8 @@ export async function retryAssistantCanvas(): Promise<void> {
  * @param turnId - Request that is ending.
  */
 export function endAssistantCanvas(turnId: string): void {
-  if (active?.turnId === turnId && get(assistantCanvas)?.phase === 'editing') resetAssistantCanvas();
+  // the request is already ending, so a timeout is not reported as a user stop
+  if (active?.turnId === turnId && get(assistantCanvas)?.phase === 'editing') release(active);
 }
 
 /**
@@ -315,6 +333,7 @@ export function endAssistantCanvas(turnId: string): void {
  * @param outcome - Saved outcome and any readable workflow metadata.
  */
 function acceptSaved(edit: Edit, { proposal, workflow }: Outcome): void {
+  // without exact metadata, mark only the saved version this canvas represents so a newer draft still conflicts
   edit.editor.saved(workflow ?? { id: proposal.workflow_id, draft_version: proposal.saved_version! });
   active = null;
   assistantCanvas.set(null);

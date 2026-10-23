@@ -16,6 +16,7 @@ from app.core.exceptions import (
 )
 from app.models.assistant import (
     AssistantProposal,
+    AssistantSnapshot,
     AssistantToolCall,
     AssistantTurnRequest,
     ConversationCreate,
@@ -448,6 +449,7 @@ def test_save():
             assert recovered["proposal"] == outcome
             assert recovered["workflow"]["draft_version"] == 1
             assert recovered["workflow"]["state"] == GraphState.MODIFIED
+            assert recovered["workflow"]["updated_at"] == env.graph.updated_at
 
     asyncio.run(run())
 
@@ -494,14 +496,113 @@ def test_zero_change(captured):
                     )
                 ).id
             data = await preview(env, [], snapshot_id=snapshot_id)
+            record = await AssistantProposal.get(id=data["proposal_id"])
+            proposed = (await AssistantSnapshot.get(id=record.snapshot_id)).document
+            before = await FlowGraph.get(id=env.graph.id)
 
-            outcome = await save_edit(env, data["proposal_id"])
+            result = await Proposals.confirm(
+                env.conversation,
+                data["proposal_id"],
+                await decision(env, data["proposal_id"], ProposalConfirm),
+                env.owner,
+            )
+            recovered = await Proposals.outcome(
+                env.conversation, data["proposal_id"], env.owner
+            )
             await env.graph.refresh_from_db()
 
-            assert outcome["status"] == "unchanged"
-            assert outcome["saved_version"] == 0
+            assert proposed != before.draft
+            assert not FlowGraphService.compare_documents(before.draft, proposed)
+            assert result["proposal"]["status"] == "unchanged"
+            assert result["proposal"]["saved_version"] == 0
+            assert result["workflow"] == recovered["workflow"]
+            assert result["workflow"] == {
+                "id": env.graph.id,
+                "state": GraphState.PUBLISHED,
+                "draft_version": 0,
+                "updated_at": before.updated_at,
+            }
+            assert env.graph.updated_at == before.updated_at
+            assert env.graph.state == GraphState.PUBLISHED
             assert env.graph.draft_version == 0
             assert await revisions(env) == 0
+
+    asyncio.run(run())
+
+
+def test_advanced_outcome():
+    async def run():
+        async with database() as env:
+            data = await preview(env, [set_url()])
+            saved = await Proposals.confirm(
+                env.conversation,
+                data["proposal_id"],
+                await decision(env, data["proposal_id"], ProposalConfirm),
+                env.owner,
+            )
+            await FlowGraphService.save_graph(
+                env.graph.id, GraphWrite(**document(x=99), draft_version=1), env.owner
+            )
+
+            recovered = await Proposals.outcome(
+                env.conversation, data["proposal_id"], env.owner
+            )
+            cancelled = await Proposals.cancel(
+                env.conversation,
+                data["proposal_id"],
+                await decision(env, data["proposal_id"]),
+                env.owner,
+            )
+            view = await Proposals.canvas(
+                env.conversation, data["proposal_id"], env.owner
+            )
+
+            assert saved["workflow"]["draft_version"] == 1
+            assert recovered["proposal"]["status"] == "saved"
+            assert recovered["proposal"]["saved_version"] == 1
+            assert recovered["workflow"] is None
+            assert cancelled["proposal"]["status"] == "saved"
+            assert cancelled["workflow"] is None
+            assert view["current_version"] == 2
+            assert view["workflow"] is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("unsaved", [False, True])
+def test_canvas_no_op(unsaved):
+    async def run():
+        async with database() as env:
+            canvas = document(
+                url="https://manual.test" if unsaved else "https://old.test"
+            )
+            capture = await Sessions.snapshot(
+                env.conversation,
+                env.graph.id,
+                0,
+                GraphDocument.model_validate(canvas),
+                "canvas",
+                env.owner,
+            )
+            no_op = await preview(env, [], snapshot_id=capture.id, key="no-op")
+            edited = await preview(
+                env, [set_url("https://new.test")], snapshot_id=capture.id, key="edit"
+            )
+
+            view = await Proposals.canvas(
+                env.conversation, no_op["proposal_id"], env.owner
+            )
+            history = await Sessions.turns(env.conversation, env.owner)
+            tools_by_id = {
+                tool["id"]: tool for turn in history["items"] for tool in turn["tools"]
+            }
+
+            assert no_op["canvas_change_count"] == view["change_count"] == 0
+            assert no_op["change_count"] == int(unsaved)
+            assert edited["canvas_change_count"] == 1
+            assert tools_by_id["no-op"]["result"]["data"]["canvas_change_count"] == 0
+            assert tools_by_id["no-op"]["proposal"]["status"] == "pending"
+            assert (await FlowGraph.get(id=env.graph.id)).draft_version == 0
 
     asyncio.run(run())
 
