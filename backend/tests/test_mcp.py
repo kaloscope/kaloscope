@@ -1,9 +1,11 @@
 """Unit tests for scoped HTTP MCP and workflow permissions."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -11,9 +13,10 @@ import pytest
 from jsonschema import Draft202012Validator
 from mcp.client import Client
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
-from sanic import Request, Sanic
+from mcp.types import TextContent, ToolAnnotations
+from sanic import HTTPResponse, Request, Sanic
 from sanic.compat import Header
+from sanic.models.protocol_types import TransportProtocol
 from sanic.response.types import BaseHTTPResponse
 from tortoise import Tortoise, timezone
 
@@ -49,7 +52,7 @@ from app.models.mcp import (
     WorkflowLogs,
 )
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
-from app.models.user import PermType, User, UserInfo, UserPermission
+from app.models.user import PermType, User, UserInfo, UserPermission, UserRole
 from app.routes.mcp import dispatch
 from app.services.ai import AIProviderService
 from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
@@ -74,7 +77,7 @@ async def application():
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
-        for name, role in (("reader", "user"), ("admin", "admin")):
+        for name, role in (("reader", UserRole.USER), ("admin", UserRole.ADMIN)):
             user = await User.create(username=name, password="unused", role=role)
             now = timezone.now()
             app.shared_ctx.sessions[name] = UserInfo(
@@ -103,8 +106,14 @@ async def application():
 
 
 async def post(
-    app, method, params=None, *, token="reader", headers=None, http_method="POST"
-):
+    app,
+    method,
+    params=None,
+    *,
+    token: str | None = "reader",
+    headers=None,
+    http_method="POST",
+) -> HTTPResponse:
     """Dispatch JSON-RPC through the real token middleware and MCP route.
 
     Args:
@@ -134,7 +143,7 @@ async def post(
         headers=Header(request_headers),
         version="1.1",
         method=http_method,
-        transport=None,
+        transport=cast(TransportProtocol, None),
         app=app,
     )
     message = {"jsonrpc": "2.0", "method": method, "params": params or {}}
@@ -142,8 +151,24 @@ async def post(
         message["id"] = 1
     request.body = dumps(message)
     await on_request(request)
-    response = await dispatch(request)
-    return await on_response(request, response)
+    handler = cast(Callable[[Request], Awaitable[HTTPResponse]], dispatch)
+    response = await handler(request)
+    wrapped = await on_response(request, response)
+    assert wrapped is not None
+    return wrapped
+
+
+def response_json(response: HTTPResponse):
+    """Decode a response after verifying that it contains a body.
+
+    Args:
+        response: Response produced by the MCP test transport.
+
+    Returns:
+        Decoded JSON payload.
+    """
+    assert response.body is not None
+    return loads(response.body)
 
 
 async def call(app, name, arguments=None, *, token="reader"):
@@ -162,14 +187,14 @@ async def call(app, name, arguments=None, *, token="reader"):
         app, "tools/call", {"name": name, "arguments": arguments or {}}, token=token
     )
     assert response.status == 200
-    payload = loads(response.body)
+    payload = response_json(response)
     assert "request_id" not in payload and "data" not in payload
     result = payload["result"]
     if not result.get("isError"):
         assert len(result["content"]) == 1
         assert loads(result["content"][0]["text"]) == result["structuredContent"]
         if not hasattr(app.ctx, "output_schemas"):
-            listed = loads((await post(app, "tools/list", token=token)).body)
+            listed = response_json(await post(app, "tools/list", token=token))
             app.ctx.output_schemas = {
                 tool["name"]: tool["outputSchema"] for tool in listed["result"]["tools"]
             }
@@ -204,6 +229,8 @@ def test_protocol(mode):
                 "restore_workflow_draft",
             }
             for tool in result.tools:
+                assert tool.annotations is not None
+                assert tool.output_schema is not None
                 writes = tool.name in {
                     "create_workflow_draft",
                     "save_workflow_draft",
@@ -239,8 +266,10 @@ def test_protocol(mode):
                     assert schema["$defs"]["AIProtocol"]["enum"] == ["chat_completions"]
             result = await client.call_tool("list_workflows", {})
             assert result.is_error
-            assert "authenticated" in result.content[0].text
-            assert "valid Kaloscope MCP access token" in result.content[0].text
+            content = result.content[0]
+            assert isinstance(content, TextContent)
+            assert "authenticated" in content.text
+            assert "valid Kaloscope MCP access token" in content.text
 
     asyncio.run(run())
 
@@ -258,7 +287,7 @@ def test_http_protocol():
                 },
             )
             assert response.status == 200
-            data = loads(response.body)
+            data = response_json(response)
             assert data["jsonrpc"] == "2.0"
             assert data["result"]["serverInfo"]["name"] == "Kaloscope"
             instructions = data["result"]["instructions"]
@@ -271,7 +300,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(loads(response.body)["result"]["tools"]) == 17
+            assert len(response_json(response)["result"]["tools"]) == 17
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

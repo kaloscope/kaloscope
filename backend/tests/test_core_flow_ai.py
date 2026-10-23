@@ -5,6 +5,7 @@ import copy
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -15,14 +16,18 @@ from app.core.config import KaloscopeConfig
 from app.core.exceptions import KaloscopeException
 from app.core.flow.context import Context
 from app.core.flow.engine import NodeWrapper, TransientTask
+from app.core.flow.fields import SelectField
 from app.core.flow.nodes.base import Node
 from app.core.flow.nodes.general.ai import AINode
 from app.models.ai import AIProvider, AIProviderUpsert
 from app.models.flow import FlowGraph, GraphCategory, GraphState, GraphWrite
+from app.models.user import UserInfo
 from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.services.flow import FlowGraphService, FlowLogService
 from app.utils.dict import TrackableDict
+
+ADMIN = cast(UserInfo, SimpleNamespace(role="admin"))
 
 
 @asynccontextmanager
@@ -102,11 +107,13 @@ def test_execution(network, temperature):
     async def run():
         async with database():
             provider = await AIProviderService.upsert(
-                AIProviderUpsert(
-                    name="Example",
-                    base_url="https://example.com/v1",
-                    api_key="private-key",
-                    model_ids=["test-model"],
+                AIProviderUpsert.model_validate(
+                    {
+                        "name": "Example",
+                        "base_url": "https://example.com/v1",
+                        "api_key": "private-key",
+                        "model_ids": ["test-model"],
+                    }
                 )
             )
             node_data = data(
@@ -164,9 +171,10 @@ def test_published_dependency(network, change, code):
             published = await FlowGraphService.publish_graph(
                 graph.id,
                 GraphWrite(**definition(provider.id), draft_version=0),
-                SimpleNamespace(role="admin"),
+                ADMIN,
             )
             saved = copy.deepcopy(published.definition)
+            assert saved is not None
 
             if change == "delete":
                 await AIProviderService.delete(provider.id)
@@ -198,7 +206,7 @@ def test_published_dependency(network, change, code):
                             **definition(provider.id),
                             draft_version=published.draft_version,
                         ),
-                        SimpleNamespace(role="admin"),
+                        ADMIN,
                     )
                 await graph.refresh_from_db()
                 assert graph.definition == saved
@@ -413,7 +421,9 @@ def test_schema_registration():
     assert schema.fields[0].field_type == "ai_model"
     assert schema.icon == "layerDiagonalSparkle"
     fields = {field.id: field for field in schema.fields}
-    assert set(fields["response_format"].options.values()) == {"text", "json_object"}
+    response_format = fields["response_format"]
+    assert isinstance(response_format, SelectField)
+    assert set(response_format.options.values()) == {"text", "json_object"}
     assert fields["native_schema"].default is False
     assert fields["native_schema"].visible_when == {"response_format": "json_object"}
     assert fields["output_schema"].visible_when == {"response_format": "json_object"}

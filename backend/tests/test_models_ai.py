@@ -13,16 +13,19 @@ from app.models.ai import (
 
 
 def test_custom_provider():
-    provider = AIProviderUpsert(
-        name=" Custom gateway ",
-        base_url=" https://AI.Example.com:443/v1/ ",
-        model_ids=[" vendor/model-one ", "model-two:latest"],
-        api_key=" test-key ",
+    provider = AIProviderUpsert.model_validate(
+        {
+            "name": " Custom gateway ",
+            "base_url": " https://AI.Example.com:443/v1/ ",
+            "model_ids": [" vendor/model-one ", "model-two:latest"],
+            "api_key": " test-key ",
+        }
     )
 
     assert provider.name == "Custom gateway"
     assert provider.base_url == "https://ai.example.com/v1"
     assert provider.model_ids == ["vendor/model-one", "model-two:latest"]
+    assert provider.api_key is not None
     assert provider.api_key.get_secret_value() == "test-key"
     assert provider.preset is None
     assert provider.protocol == AIProtocol.CHAT_COMPLETIONS
@@ -59,17 +62,20 @@ def test_invalid_url(url, model):
 
 
 def test_draft_connection():
-    draft = AIProviderConnection(
-        base_url=" https://AI.Example.com:443/v1/ ", api_key=" key "
+    draft = AIProviderConnection.model_validate(
+        {"base_url": " https://AI.Example.com:443/v1/ ", "api_key": " key "}
     )
 
     assert draft.base_url == "https://ai.example.com/v1"
+    assert draft.api_key is not None
     assert draft.api_key.get_secret_value() == "key"
     assert '"key"' not in draft.model_dump_json()
     assert draft.id is None
 
     with pytest.raises(ValidationError):
-        AIProviderConnection(base_url="https://example.com", api_key="key\nheader")
+        AIProviderConnection.model_validate(
+            {"base_url": "https://example.com", "api_key": "key\nheader"}
+        )
 
 
 @pytest.mark.parametrize(
@@ -100,8 +106,8 @@ def test_invalid_config(fields):
 
 def test_validation_redacts_secrets():
     with pytest.raises(ValidationError) as error:
-        AIProviderUpsert(
-            name="", base_url="https://example.com", api_key="secret\nheader"
+        AIProviderUpsert.model_validate(
+            {"name": "", "base_url": "https://example.com", "api_key": "secret\nheader"}
         )
 
     assert "secret" not in str(error.value)

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Literal, Self
 
+from openai.types.chat import ChatCompletionFunctionToolParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.ai.documents import (
@@ -268,7 +269,7 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
     }
 
 
-def tool_schemas(user: UserInfo) -> list[dict[str, Any]]:
+def tool_schemas(user: UserInfo) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
     Args:

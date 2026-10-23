@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,11 +25,12 @@ from app.models.flow import (
     GraphState,
     GraphWrite,
 )
+from app.models.user import UserInfo
 from app.services import flow
 from app.services.flow import FlowGraphService
 
-ADMIN = SimpleNamespace(role="admin")
-READER = SimpleNamespace(role="user")
+ADMIN = cast(UserInfo, SimpleNamespace(role="admin"))
+READER = cast(UserInfo, SimpleNamespace(role="user"))
 
 
 @asynccontextmanager
@@ -47,10 +49,21 @@ async def database(db_url="sqlite://:memory:"):
 
 
 def draft(version=0, url="https://example.test"):
-    return GraphWrite(
-        nodes=[{"id": "http", "data": {"$schema": "http", "url": url}}],
-        edges=[],
-        draft_version=version,
+    """Validate the raw workflow draft used by the service tests.
+
+    Args:
+        version: Expected draft version.
+        url: HTTP node URL.
+
+    Returns:
+        The validated workflow write request.
+    """
+    return GraphWrite.model_validate(
+        {
+            "nodes": [{"id": "http", "data": {"$schema": "http", "url": url}}],
+            "edges": [],
+            "draft_version": version,
+        }
     )
 
 
@@ -152,7 +165,11 @@ def test_preview():
             assert not preview.validation.valid
             assert preview.changes[0].kind == "node"
             assert preview.changes[0].before is None
-            assert preview.changes[0].after["data"]["url"] == ""
+            after = preview.changes[0].after
+            assert isinstance(after, dict)
+            data = after["data"]
+            assert isinstance(data, dict)
+            assert data["url"] == ""
             assert preview.editor_path == f"/settings/workflows/graphs/{graph.id}"
             assert set(preview.model_dump()) == {
                 "workflow_id",
@@ -176,14 +193,14 @@ def test_preview_baseline(monkeypatch, concurrent_write):
         async with database() as graph:
             graph.draft = draft().model_dump(exclude={"draft_version"})
             await graph.save()
-            baseline = GraphDocument(
-                **draft(url="https://manual.test").model_dump(exclude={"draft_version"})
+            baseline = GraphDocument.model_validate(
+                draft(url="https://manual.test").model_dump(exclude={"draft_version"})
             )
             document = baseline.model_dump()
             document["nodes"].append(
                 {"id": "added", "data": {"$schema": "http", "url": ""}}
             )
-            proposed = GraphWrite(**document, draft_version=0)
+            proposed = GraphWrite.model_validate({**document, "draft_version": 0})
 
             async def validate(document, category):
                 result = await validate_document(document, category)
@@ -230,7 +247,7 @@ def test_preview_paths():
             proposed["nodes"][0]["position"]["x"] = 1.0
             unchanged = await FlowGraphService.preview_draft(
                 graph.id,
-                GraphWrite(**proposed, draft_version=0),
+                GraphWrite.model_validate({**proposed, "draft_version": 0}),
                 ADMIN,
             )
             assert unchanged.changes == []
@@ -240,7 +257,7 @@ def test_preview_paths():
             proposed["nodes"][0]["width"] = 300
             preview = await FlowGraphService.preview_draft(
                 graph.id,
-                GraphWrite(**proposed, draft_version=0),
+                GraphWrite.model_validate({**proposed, "draft_version": 0}),
                 ADMIN,
             )
             change = preview.changes[0]
@@ -253,7 +270,9 @@ def test_preview_paths():
             assert preview.validation.executed is False
 
             saved = await FlowGraphService.save_graph(
-                graph.id, GraphWrite(**proposed, draft_version=0), ADMIN
+                graph.id,
+                GraphWrite.model_validate({**proposed, "draft_version": 0}),
+                ADMIN,
             )
             assert saved.draft_version == 1
             assert saved.definition is None
@@ -294,13 +313,17 @@ def test_edge_paths():
             proposed = deepcopy(original)
             proposed["edges"][0]["selected"] = False
             unchanged = await FlowGraphService.preview_draft(
-                graph.id, GraphWrite(**proposed, draft_version=0), ADMIN
+                graph.id,
+                GraphWrite.model_validate({**proposed, "draft_version": 0}),
+                ADMIN,
             )
             assert unchanged.changes == []
 
             proposed["edges"][0].update(sourceHandle="is_false", target="two")
             preview = await FlowGraphService.preview_draft(
-                graph.id, GraphWrite(**proposed, draft_version=0), ADMIN
+                graph.id,
+                GraphWrite.model_validate({**proposed, "draft_version": 0}),
+                ADMIN,
             )
 
             assert preview.validation.valid
@@ -344,12 +367,14 @@ def test_readonly():
 def test_invalid_create():
     async def run():
         async with database():
-            invalid = GraphDocument(
-                nodes=[{"id": "bad", "data": {"$schema": "missing"}}], edges=[]
+            invalid = GraphDocument.model_validate(
+                {"nodes": [{"id": "bad", "data": {"$schema": "missing"}}], "edges": []}
             )
             with pytest.raises(KaloscopeException, match="flow_graph_invalid"):
                 await FlowGraphService.create_draft(
-                    GraphDraftCreate(name="New", category="schedule", document=invalid),
+                    GraphDraftCreate.model_validate(
+                        {"name": "New", "category": "schedule", "document": invalid}
+                    ),
                     ADMIN,
                 )
             assert not await FlowGraph.filter(name="New").exists()

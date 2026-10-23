@@ -90,8 +90,8 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             Current account identity and the verified token's capability grant.
 
         Raises:
-            UnauthorizedException: If the token is invalid, expired, deleted, or
-                no longer belongs to an existing account.
+            UnauthorizedException: If the token is invalid, expired, deleted,
+                missing its creation time, or no longer belongs to an account.
         """
         if not token or not _TOKEN_PATTERN.fullmatch(token):
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
@@ -102,7 +102,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             expires_at__gt=now,
         )
         record = await active.select_related("user").first()
-        if record is None:
+        if record is None or record.created_at is None:
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
         # recheck existence when recording usage, without restoring deleted records
         if not await active.update(last_used_at=now):

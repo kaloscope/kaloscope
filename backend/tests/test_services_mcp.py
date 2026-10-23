@@ -124,6 +124,25 @@ def test_authenticate():
     asyncio.run(run())
 
 
+def test_missing_creation_time():
+    async def run():
+        async with database() as user:
+            issued = await MCPAccessTokenService.create(
+                user.id, MCPAccessTokenCreate(name="Codex")
+            )
+            await MCPAccessToken.filter(id=issued["id"]).update(created_at=None)
+
+            with pytest.raises(UnauthorizedException):
+                await MCPAccessTokenService.authenticate(
+                    issued["token"], client_ip="127.0.0.1", user_agent=None
+                )
+
+            stored = await MCPAccessToken.get(id=issued["id"])
+            assert stored.last_used_at is None
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("state", ["expired", "deleted", "owner_deleted", "changed"])
 def test_unusable(state):
     async def run():

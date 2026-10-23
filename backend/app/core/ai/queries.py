@@ -106,7 +106,8 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
     Returns:
         Run summaries with stable detail identifiers and omission metadata.
         Output counts cover a root array or an object's `items` array, with its
-        exact path; other output shapes have an unknown count and path.
+        exact path; other output shapes have an unknown count and path. Skip
+        groups deleted during retrieval and omit duration without an end time.
     """
     await FlowGraphService.get_accessible(workflow_id, user)
     query = FlowLog.filter(graph_id=workflow_id)
@@ -114,15 +115,19 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
         await query.order_by("-started_at")
         .distinct()
         .limit(limit + 1)
-        .values_list("started_at", flat=True)
+        .only("started_at")
     )
     runs = []
-    for started in starts[:limit]:
+    for start in starts[:limit]:
+        started = start.started_at
         run = query.filter(started_at=started)
         first = await run.order_by("id").first().only("id")
+        if first is None:
+            continue
         error_count = await run.filter(ended_at=None).count()
         errors = await run.filter(ended_at=None).order_by("id").limit(5)
         last = await run.exclude(ended_at=None).order_by("-ended_at", "-id").first()
+        ended_at = last.ended_at if last else None
         output = last.retval if last else None
         items = output.get("items") if isinstance(output, dict) else output
         count = len(items) if isinstance(items, list) else None
@@ -135,14 +140,14 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
             {
                 "run_id": first.id,
                 "started_at": started,
-                "ended_at": last.ended_at if last else None,
+                "ended_at": ended_at,
                 "status": "failed"
                 if error_count
                 else "completed"
                 if last
                 else "incomplete",
-                "duration_ms": (last.ended_at - started).total_seconds() * 1000
-                if last
+                "duration_ms": (ended_at - started).total_seconds() * 1000
+                if ended_at is not None
                 else None,
                 "error_count": error_count,
                 "errors": [
@@ -235,9 +240,14 @@ async def log_detail(
     value = getattr(row, field)
     try:
         for key in path:
-            if not isinstance(value, (list, dict)):
+            if isinstance(value, list):
+                if not isinstance(key, int):
+                    raise KeyError(key)
+                value = value[key]
+            elif isinstance(value, dict):
+                value = value[key]
+            else:
                 raise KeyError(key)
-            value = value[key]
     except (KeyError, IndexError, TypeError):
         raise NotFoundException from None
     return {

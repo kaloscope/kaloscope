@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from enum import StrEnum, auto
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from pydantic import (
     BaseModel,
@@ -290,8 +290,10 @@ class OfflineDownloadJob(TortoiseModel):
     delete_local = BooleanField(default=False, db_default=False)
     unchanged_count = IntField(default=0)
     retry_count = IntField(default=0)
-    last_error_kind: OfflineDownloadErrorKind | None = CharEnumField(
-        max_length=32, enum_type=OfflineDownloadErrorKind, null=True
+    # preserve the nullable value annotation missing from `CharEnumField` overloads
+    last_error_kind: OfflineDownloadErrorKind | None = cast(
+        OfflineDownloadErrorKind | None,
+        CharEnumField(max_length=32, enum_type=OfflineDownloadErrorKind, null=True),
     )
 
     class Meta:

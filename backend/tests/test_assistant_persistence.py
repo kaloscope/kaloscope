@@ -4,10 +4,12 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from openai import AsyncOpenAI
 from tortoise import Tortoise, timezone
 
 from app.core.ai import history, tools
@@ -29,18 +31,29 @@ from app.models.assistant import (
     AssistantTurnRequest,
     ConversationCreate,
 )
-from app.models.flow import FlowGraph, FlowLog, GraphDocument, GraphQuery
-from app.models.user import User, UserRole
+from app.models.flow import FlowGraph, FlowLog, GraphDocument, GraphNode, GraphQuery
+from app.models.user import User, UserInfo, UserRole
 from app.services.assistant import SYSTEM_PROMPT, AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.utils.json import dumps, loads
-from tests.test_services_assistant import call_delta, chunk, configure, response
+from tests.test_services_assistant import (
+    EventStream,
+    call_delta,
+    chunk,
+    configure,
+    response,
+)
 
 MODEL = {"provider_id": 1, "model_id": "fixture"}
 
 
 @asynccontextmanager
 async def database():
+    """Yield account fixtures backed by an isolated in-memory database.
+
+    Yields:
+        Owner and other-account principals with the fields used by the services.
+    """
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
@@ -48,21 +61,68 @@ async def database():
             await User.create(username=name, password="unused", role="admin")
             for name in ("owner", "other")
         ]
-        yield [SimpleNamespace(id=account.id, role="admin") for account in accounts]
+        yield [
+            cast(UserInfo, SimpleNamespace(id=account.id, role="admin"))
+            for account in accounts
+        ]
     finally:
         await Tortoise.close_connections()
 
 
 def request(key="request", **values):
-    return AssistantTurnRequest(
-        model=MODEL, request_id=key, prompt="Continue", **values
+    """Validate a turn request from the test's raw API input.
+
+    Args:
+        key: Request identifier.
+        **values: Additional request fields to validate.
+
+    Returns:
+        The validated assistant turn request.
+    """
+    return AssistantTurnRequest.model_validate(
+        {"model": MODEL, "request_id": key, "prompt": "Continue", **values}
     )
+
+
+def completion_client(create: AsyncMock) -> AsyncOpenAI:
+    """Build the SDK-shaped client used to exercise history compaction.
+
+    Args:
+        create: Mock handling chat completion requests.
+
+    Returns:
+        A client substitute exposing the completion method used by history.
+    """
+    return cast(
+        AsyncOpenAI,
+        SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        ),
+    )
+
+
+def script_code(node: GraphNode) -> str:
+    """Read script source after checking the node's JSON field structure.
+
+    Args:
+        node: Script node returned by a document change.
+
+    Returns:
+        The script source stored in the node.
+    """
+    script = node.data["script"]
+    assert isinstance(script, dict)
+    code = script["code"]
+    assert isinstance(code, str)
+    return code
 
 
 def test_owned_history():
     async def run():
         async with database() as (owner, other):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, turn = await Sessions.begin(conversation["id"], request(), owner)
             await Sessions.finish(turn, content="Original reply", status="complete")
 
@@ -97,7 +157,9 @@ def test_cross_page_context(monkeypatch):
             graph = await FlowGraph.create(
                 name="Context fixture", category="schedule", state="draft"
             )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, original = await Sessions.begin(
                 conversation["id"],
                 request(
@@ -205,7 +267,9 @@ def test_direct_edit_eligibility(monkeypatch, case):
                 draft=document(),
                 editable=case != "locked",
             )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             snapshot = await Sessions.snapshot(
                 conversation["id"],
                 graph.id,
@@ -269,7 +333,9 @@ def test_direct_edit_eligibility(monkeypatch, case):
 def test_concurrent_and_expired():
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             results = await asyncio.gather(
                 Sessions.begin(conversation["id"], request("one"), owner),
                 Sessions.begin(conversation["id"], request("two"), owner),
@@ -304,29 +370,31 @@ def test_script_reference():
                 "# Preserve the original script\n" * 600
                 + "def execute(node_id, node_data, context):\n    pass\n"
             )
-            document = GraphDocument(
-                nodes=[
-                    {
-                        "id": f"n{i}",
-                        "selected": False,
-                        "measured": {},
-                        "data": {
-                            "$schema": "script",
-                            "script": {"language": "python", "code": code},
-                        },
-                    }
-                    for i in range(13)
-                ],
-                edges=[
-                    {
-                        "id": f"e{i}",
-                        "source": f"n{i}",
-                        "target": f"n{i + 1}",
-                        "sourceHandle": "output",
-                        "targetHandle": "input",
-                    }
-                    for i in range(12)
-                ],
+            document = GraphDocument.model_validate(
+                {
+                    "nodes": [
+                        {
+                            "id": f"n{i}",
+                            "selected": False,
+                            "measured": {},
+                            "data": {
+                                "$schema": "script",
+                                "script": {"language": "python", "code": code},
+                            },
+                        }
+                        for i in range(13)
+                    ],
+                    "edges": [
+                        {
+                            "id": f"e{i}",
+                            "source": f"n{i}",
+                            "target": f"n{i + 1}",
+                            "sourceHandle": "output",
+                            "targetHandle": "input",
+                        }
+                        for i in range(12)
+                    ],
+                }
             )
             graph = await FlowGraph.create(
                 name="Script fixture",
@@ -334,7 +402,9 @@ def test_script_reference():
                 state="draft",
                 draft=document.model_dump(),
             )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             snapshot = await Sessions.snapshot(
                 conversation["id"], graph.id, 0, document, "canvas", owner
             )
@@ -383,7 +453,9 @@ def test_script_reference():
             assert len(dumps(base)) < 150
             with pytest.raises(NotFoundException):
                 await Sessions.read_snapshot(conversation["id"], snapshot.id, other)
-            another = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            another = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             with pytest.raises(NotFoundException):
                 await Sessions.read_snapshot(another["id"], snapshot.id, owner)
             changed = GraphProposal.model_validate(
@@ -399,7 +471,7 @@ def test_script_reference():
                 }
             )
             proposal = apply_changes(snapshot.document, changed.changes)
-            assert all(node.data["script"]["code"] == code for node in proposal.nodes)
+            assert all(script_code(node) == code for node in proposal.nodes)
             assert snapshot.document["nodes"][0]["position"] == {"x": 0.0, "y": 0.0}
             field_edit = GraphProposal.model_validate(
                 {
@@ -418,8 +490,8 @@ def test_script_reference():
                 }
             )
             edited = apply_changes(snapshot.document, field_edit.changes)
-            assert edited.nodes[0].data["script"]["code"] == code + "# One edit\n"
-            assert all(node.data["script"]["code"] == code for node in edited.nodes[1:])
+            assert script_code(edited.nodes[0]) == code + "# One edit\n"
+            assert all(script_code(node) == code for node in edited.nodes[1:])
             assert snapshot.document["nodes"][0]["data"]["script"]["code"] == code
             removed = await tools.execute_tool(
                 "preview_workflow_draft",
@@ -465,13 +537,18 @@ def test_snapshot_context_mismatch(mismatch):
             graph = await FlowGraph.create(
                 name="Original", category="indexer", state="draft"
             )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             snapshot = await Sessions.snapshot(
                 conversation["id"],
                 graph.id,
                 0,
-                GraphDocument(
-                    nodes=[{"id": "one", "data": {"$schema": "script"}}], edges=[]
+                GraphDocument.model_validate(
+                    {
+                        "nodes": [{"id": "one", "data": {"$schema": "script"}}],
+                        "edges": [],
+                    }
                 ),
                 "canvas",
                 owner,
@@ -488,7 +565,7 @@ def test_snapshot_context_mismatch(mismatch):
             expected = BadRequestException
             if mismatch == "conversation":
                 conversation = await Sessions.create(
-                    ConversationCreate(model=MODEL), owner
+                    ConversationCreate.model_validate({"model": MODEL}), owner
                 )
                 expected = NotFoundException
             elif mismatch == "workflow":
@@ -610,7 +687,9 @@ def test_active_tool_overflow(monkeypatch):
                     ended_at=at,
                     retval=[{"id": i, "title": "Output " * 50} for i in range(710)],
                 )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, original = await Sessions.begin(
                 conversation["id"], request("original"), owner
             )
@@ -835,7 +914,9 @@ def test_compact_exchange_pairing():
 def test_checkpoint_with_tool_tail():
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, previous = await Sessions.begin(
                 conversation["id"], request("previous"), owner
             )
@@ -898,9 +979,7 @@ def test_checkpoint_with_tool_tail():
                     ]
                 )
             create = AsyncMock()
-            client = SimpleNamespace(
-                chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-            )
+            client = completion_client(create)
             schemas = tools.tool_schemas(owner)
 
             messages, _, compacted = await history.prepare_context(
@@ -1110,7 +1189,9 @@ def test_long_conversation(monkeypatch, preset):
                         for i in range(710)
                     ],
                 )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             for index in range(6):
                 events = [
                     event
@@ -1160,13 +1241,13 @@ def test_summary_failure_preserves_history(monkeypatch, malformed):
         if malformed
         else AsyncMock(side_effect=RuntimeError("upstream unavailable"))
     )
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-    )
+    client = completion_client(create)
 
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             originals = []
             for index in range(4):
                 _, turn = await Sessions.begin(
@@ -1217,13 +1298,13 @@ def test_rolling_summary_sources(monkeypatch, source_ids):
             ],
         )
     )
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-    )
+    client = completion_client(create)
 
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             for index in range(2):
                 _, previous = await Sessions.begin(
                     conversation["id"], request(str(index)), owner
@@ -1265,13 +1346,17 @@ def test_summary_history_sources(monkeypatch, reference):
 
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             for prompt in ["original", "checkpoint"]:
                 _, previous = await Sessions.begin(
                     conversation["id"], request(prompt), owner
                 )
                 await Sessions.finish(previous, content=prompt, status="complete")
-            other = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            other = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, foreign = await Sessions.begin(other["id"], request("foreign"), owner)
             await Sessions.finish(foreign, content="foreign", status="complete")
             source_id = (
@@ -1325,9 +1410,7 @@ def test_summary_history_sources(monkeypatch, reference):
                     ],
                 )
             )
-            client = SimpleNamespace(
-                chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-            )
+            client = completion_client(create)
             _, current = await Sessions.begin(
                 conversation["id"], request("active"), owner
             )
@@ -1351,7 +1434,9 @@ def test_permission_revocation(deleted):
             graph = await FlowGraph.create(
                 name="Private graph", category="schedule", state="draft"
             )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, original = await Sessions.begin(
                 conversation["id"], request("original"), owner
             )
@@ -1370,15 +1455,14 @@ def test_permission_revocation(deleted):
                 owner.role = UserRole.USER
                 owner.perms = None
             _, current = await Sessions.begin(conversation["id"], request("new"), owner)
-            client = SimpleNamespace(
-                chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock()))
-            )
+            create = AsyncMock()
+            client = completion_client(create)
             messages, _, _ = await history.prepare_context(
                 client, current, owner, "system", [], None
             )
             assert "private" not in dumps(messages).decode()
             assert (await Sessions.owned(conversation["id"], owner)).summary == {}
-            client.chat.completions.create.assert_not_awaited()
+            create.assert_not_awaited()
             record = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert record["content"] == ""
             denied = await tools.execute_tool(
@@ -1397,11 +1481,14 @@ def test_partial_reply_is_durable(monkeypatch):
         [chunk({"role": "assistant", "content": "Partial 🪄"})], wait=True
     )
     source = upstream.stream
+    assert isinstance(source, EventStream)
     configure(monkeypatch, lambda _: upstream)
 
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             events = AssistantService.persistent_stream(
                 conversation["id"], request(), owner
             )
@@ -1423,7 +1510,9 @@ def test_summary_fallback_and_cancel(monkeypatch):
 
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             for index in range(3):
                 _, turn = await Sessions.begin(
                     conversation["id"], request(str(index)), owner
@@ -1433,9 +1522,7 @@ def test_summary_fallback_and_cancel(monkeypatch):
                 conversation["id"], request("current"), owner
             )
             create = AsyncMock(side_effect=RuntimeError("Unavailable"))
-            client = SimpleNamespace(
-                chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-            )
+            client = completion_client(create)
             messages, _, compacted = await history.prepare_context(
                 client, current, owner, "system", [], None
             )
@@ -1449,7 +1536,7 @@ def test_summary_fallback_and_cancel(monkeypatch):
                 waiting.set()
                 await asyncio.Future()
 
-            client.chat.completions.create = blocked
+            create.side_effect = blocked
             task = asyncio.create_task(
                 history.prepare_context(client, current, owner, "system", [], None)
             )
@@ -1469,9 +1556,11 @@ def test_summary_fallback_and_cancel(monkeypatch):
 def test_tool_history(with_turn):
     async def run():
         async with database() as (owner, other):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             other_conversation = await Sessions.create(
-                ConversationCreate(model=MODEL), owner
+                ConversationCreate.model_validate({"model": MODEL}), owner
             )
             _, turn = await Sessions.begin(conversation["id"], request(), owner)
             call = await AssistantToolCall.create(
@@ -1656,7 +1745,9 @@ def test_final_answer_context(monkeypatch):
 
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -1704,7 +1795,9 @@ def test_tool_history_resources(monkeypatch):
             graph = await FlowGraph.create(
                 name="Private graph", category="indexer", state="draft"
             )
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             _, source = await Sessions.begin(conversation["id"], request(), owner)
             await Sessions.record_resources(source, [graph.id])
             await AssistantToolCall.create(
@@ -1751,7 +1844,9 @@ def test_tool_history_resources(monkeypatch):
 def test_history_pagination():
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             for index in range(23):
                 await AssistantTurn.create(
                     conversation_id=conversation["id"],
@@ -1783,7 +1878,9 @@ def test_history_pagination():
 def test_long_history_pages(revoked):
     async def run():
         async with database() as (owner, _):
-            conversation = await Sessions.create(ConversationCreate(model=MODEL), owner)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
             graph = await FlowGraph.create(
                 name="Private", category="indexer", state="draft"
             )
@@ -1840,9 +1937,7 @@ def test_long_history_pages(revoked):
                 )
 
             create = AsyncMock(side_effect=summarize)
-            client = SimpleNamespace(
-                chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-            )
+            client = completion_client(create)
             messages, _, _ = await history.prepare_context(
                 client, current, owner, "system", [], None
             )

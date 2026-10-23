@@ -16,7 +16,7 @@ from jinja2.defaults import (
     VARIABLE_START_STRING,
 )
 from jinja2.environment import TemplateExpression
-from jsonpath_ng.ext import parse
+from jsonpath_ng.ext.parser import parse
 from lxml import etree
 
 from app.core.constants import ENCODING

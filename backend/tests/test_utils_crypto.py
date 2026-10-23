@@ -3,9 +3,11 @@
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from app.core.config import KaloscopeConfig
 from app.utils import crypto
 from app.utils.crypto import (
     encrypt,
@@ -15,6 +17,18 @@ from app.utils.crypto import (
     xor_decrypt,
     xor_encrypt,
 )
+
+
+def configuration(**values: object) -> KaloscopeConfig:
+    """Build a minimal configuration substitute for secret-key tests.
+
+    Args:
+        **values: Configuration attributes exercised by the current scenario.
+
+    Returns:
+        Structural substitute exposing the requested configuration attributes.
+    """
+    return cast(KaloscopeConfig, SimpleNamespace(**values))
 
 
 @pytest.mark.parametrize(
@@ -92,7 +106,7 @@ def test_fernet_existing_ciphertext(tmp_path):
 def test_shared_initialization(tmp_path, monkeypatch):
     monkeypatch.setattr(crypto, "_KEY_BYTES", crypto._DEFAULT_KEY_BYTES)
     key_path = tmp_path / "secret.key"
-    config = SimpleNamespace(secret_key_enabled=True, secret_key_path=key_path)
+    config = configuration(secret_key_enabled=True, secret_key_path=key_path)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
@@ -108,6 +122,7 @@ def test_shared_initialization(tmp_path, monkeypatch):
     assert key == crypto._KEY_BYTES
     for i, result in enumerate(results):
         if i % 2:
+            assert isinstance(result, str)
             assert fernet_decrypt(result, key_path) == f"key-{i}"
         else:
             assert result == key
@@ -174,7 +189,7 @@ def test_shared_key(tmp_path, monkeypatch, enabled):
     instance_path = tmp_path / "secret.key"
     instance_key = bytes(range(32))
     instance_path.write_bytes(instance_key)
-    config = SimpleNamespace(secret_key_enabled=enabled, secret_key_path=instance_path)
+    config = configuration(secret_key_enabled=enabled, secret_key_path=instance_path)
     loaded = load_key(config)
     xor_ciphertext = xor_encrypt("existing variable")
     password_hash = encrypt("existing password")
@@ -187,7 +202,7 @@ def test_shared_key(tmp_path, monkeypatch, enabled):
     assert xor_decrypt(xor_ciphertext) == "existing variable"
     assert encrypt("existing password") == password_hash
 
-    load_key(SimpleNamespace(secret_key_enabled=False))
+    load_key(configuration(secret_key_enabled=False))
 
     assert fernet_decrypt(ciphertext, instance_path) == "AI credential"
 
@@ -198,7 +213,7 @@ def test_existing_secret_key(tmp_path, monkeypatch):
     existing_key = bytes(range(32))
     key_path.write_bytes(existing_key)
     modified_at = key_path.stat().st_mtime_ns
-    config = SimpleNamespace(secret_key_enabled=True, secret_key_path=key_path)
+    config = configuration(secret_key_enabled=True, secret_key_path=key_path)
 
     assert load_key(config, create=True) == existing_key
     ciphertext = fernet_encrypt("new credential", key_path, create_key=True)
@@ -217,7 +232,7 @@ def test_existing_secret_key(tmp_path, monkeypatch):
 def test_key_creation_order(tmp_path, monkeypatch, first):
     monkeypatch.setattr(crypto, "_KEY_BYTES", crypto._DEFAULT_KEY_BYTES)
     key_path = tmp_path / "database" / "secret.key"
-    config = SimpleNamespace(secret_key_enabled=True, secret_key_path=key_path)
+    config = configuration(secret_key_enabled=True, secret_key_path=key_path)
     if first == "startup":
         load_key(config, create=True)
     else:

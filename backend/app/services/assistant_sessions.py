@@ -401,6 +401,8 @@ class AssistantSessionService:
             ):
                 raise NotFoundException
             if isinstance(body.context, WorkflowDesignerContext):
+                if context is None:
+                    raise BadRequestException
                 if body.context.canvas is not None:
                     snapshot = await cls.snapshot(
                         conversation_id,
@@ -410,10 +412,12 @@ class AssistantSessionService:
                         "canvas",
                         user,
                     )
-                else:
+                elif body.context.snapshot_id is not None:
                     snapshot = await cls.read_snapshot(
                         conversation_id, body.context.snapshot_id, user
                     )
+                else:
+                    raise BadRequestException
                 if (
                     snapshot.workflow_id != body.context.resource_id
                     or snapshot.draft_version != body.context.draft_version

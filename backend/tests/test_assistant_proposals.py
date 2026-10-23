@@ -4,6 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import cast, overload
 
 import pytest
 from tortoise import Tortoise
@@ -31,7 +32,7 @@ from app.models.flow import (
     GraphState,
     GraphWrite,
 )
-from app.models.user import User
+from app.models.user import User, UserInfo
 from app.services.assistant_proposals import AssistantProposalService as Proposals
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.flow import FlowGraphService
@@ -75,6 +76,14 @@ def document(url="https://old.test", x=10):
 
 @asynccontextmanager
 async def database(db_url="sqlite://:memory:"):
+    """Yield accounts and a workflow from an isolated database.
+
+    Args:
+        db_url: Temporary database connection URL.
+
+    Yields:
+        Account principals, the workflow, and an owned conversation identifier.
+    """
     await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
@@ -90,15 +99,19 @@ async def database(db_url="sqlite://:memory:"):
             definition=document(),
         )
         conversation = await Sessions.create(
-            ConversationCreate(model=MODEL), SimpleNamespace(id=owner.id, role="admin")
+            ConversationCreate.model_validate({"model": MODEL}),
+            cast(UserInfo, SimpleNamespace(id=owner.id, role="admin")),
         )
         yield SimpleNamespace(
-            owner=SimpleNamespace(id=owner.id, role="admin"),
-            other=SimpleNamespace(id=other.id, role="admin"),
-            reader=SimpleNamespace(
-                id=owner.id,
-                role="user",
-                perms=SimpleNamespace(indexer_ids=[graph.id]),
+            owner=cast(UserInfo, SimpleNamespace(id=owner.id, role="admin")),
+            other=cast(UserInfo, SimpleNamespace(id=other.id, role="admin")),
+            reader=cast(
+                UserInfo,
+                SimpleNamespace(
+                    id=owner.id,
+                    role="user",
+                    perms=SimpleNamespace(indexer_ids=[graph.id]),
+                ),
             ),
             graph=graph,
             conversation=conversation["id"],
@@ -108,7 +121,18 @@ async def database(db_url="sqlite://:memory:"):
 
 
 async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):
-    """Run the preview tool against an owned canvas and return its result data."""
+    """Run the preview tool against an owned canvas.
+
+    Args:
+        env: Account, workflow, and conversation fixtures.
+        changes: Raw changes to send to the preview tool.
+        snapshot_id: Existing canvas snapshot, or `None` to capture one.
+        version: Base workflow draft version.
+        key: Tool call and request identifier.
+
+    Returns:
+        The successful preview result data.
+    """
     if snapshot_id is None:
         graph = await FlowGraph.get(id=env.graph.id)
         capture = await Sessions.snapshot(
@@ -128,7 +152,9 @@ async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):
     }
     _, turn = await Sessions.begin(
         env.conversation,
-        AssistantTurnRequest(model=MODEL, request_id=key, prompt="Repair it"),
+        AssistantTurnRequest.model_validate(
+            {"model": MODEL, "request_id": key, "prompt": "Repair it"}
+        ),
         env.owner,
     )
     await AssistantToolCall.create(
@@ -163,7 +189,32 @@ def set_url(url="https://new.test"):
     return {"op": "set_field", "node_id": "http", "field_id": "url", "value": url}
 
 
-async def decision(env, proposal_id, model=ProposalDecision, **values):
+@overload
+async def decision(
+    env, proposal_id, model: type[ProposalConfirm], **values
+) -> ProposalConfirm: ...
+
+
+@overload
+async def decision(
+    env, proposal_id, model: type[ProposalDecision] = ProposalDecision, **values
+) -> ProposalDecision: ...
+
+
+async def decision(
+    env, proposal_id, model: type[ProposalDecision] = ProposalDecision, **values
+) -> ProposalDecision:
+    """Build the selected decision model for a stored proposal.
+
+    Args:
+        env: Account, workflow, and conversation fixtures.
+        proposal_id: Identifier of the stored proposal.
+        model: Decision model to build, including confirmation-only fields.
+        **values: Explicit decision fields overriding fixture defaults.
+
+    Returns:
+        The decision model containing the stored proposal's version and digest.
+    """
     record = await AssistantProposal.get(id=proposal_id)
     if model is ProposalConfirm:
         values.setdefault("base_snapshot_id", record.base_snapshot_id)
@@ -494,6 +545,7 @@ def test_zero_change(captured):
             record = await AssistantProposal.get(id=data["proposal_id"])
             proposed = (await AssistantSnapshot.get(id=record.snapshot_id)).document
             before = await FlowGraph.get(id=env.graph.id)
+            assert before.draft is not None
 
             result = await Proposals.confirm(
                 env.conversation,
@@ -651,7 +703,9 @@ def test_authorization(case):
                 expected = KaloscopeException
             else:
                 conversation = (
-                    await Sessions.create(ConversationCreate(model=MODEL), env.owner)
+                    await Sessions.create(
+                        ConversationCreate.model_validate({"model": MODEL}), env.owner
+                    )
                 )["id"]
 
             with pytest.raises(expected) as error:
@@ -776,8 +830,13 @@ def test_outcome_recovery(case):
             if case == "deleted":
                 await FlowGraph.filter(id=env.graph.id).delete()
             else:
-                user = SimpleNamespace(
-                    id=env.owner.id, role="user", perms=SimpleNamespace(indexer_ids=[])
+                user = cast(
+                    UserInfo,
+                    SimpleNamespace(
+                        id=env.owner.id,
+                        role="user",
+                        perms=SimpleNamespace(indexer_ids=[]),
+                    ),
                 )
 
             recovered = await Proposals.outcome(
@@ -809,9 +868,11 @@ def test_outcome_recovery(case):
                 await Proposals.outcome(
                     env.conversation, saved["proposal_id"], env.other
                 )
-            other = (await Sessions.create(ConversationCreate(model=MODEL), env.owner))[
-                "id"
-            ]
+            other = (
+                await Sessions.create(
+                    ConversationCreate.model_validate({"model": MODEL}), env.owner
+                )
+            )["id"]
             with pytest.raises(NotFoundException):
                 await Proposals.outcome(other, saved["proposal_id"], env.owner)
 
@@ -907,7 +968,7 @@ def test_snapshot_reference(case):
             snapshot_id = 2**53 - 1
             if case == "foreign":
                 conversation = await Sessions.create(
-                    ConversationCreate(model=MODEL), env.other
+                    ConversationCreate.model_validate({"model": MODEL}), env.other
                 )
                 snapshot = await Sessions.snapshot(
                     conversation["id"],
@@ -940,7 +1001,9 @@ def test_snapshot_binding(field):
             value = 999
             if field == "conversation_id":
                 value = (
-                    await Sessions.create(ConversationCreate(model=MODEL), env.other)
+                    await Sessions.create(
+                        ConversationCreate.model_validate({"model": MODEL}), env.other
+                    )
                 )["id"]
             await AssistantSnapshot.filter(id=record.base_snapshot_id).update(
                 **{field: value}

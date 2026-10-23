@@ -10,7 +10,7 @@ from jinja2 import TemplateError
 
 from app.core.exceptions import KaloscopeException
 from app.core.flow.context import LOOP_KEY
-from app.core.flow.fields import Field
+from app.core.flow.fields import Field, NumberField, SelectField
 from app.core.flow.nodes.base import Node, NodeGroup
 from app.core.flow.nodes.general.ai import AINode
 from app.core.renderer import ENV
@@ -90,8 +90,8 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
                 ENV.parse(value)
             except TemplateError:
                 return "template_syntax"
-    elif kind == "number":
-        if type(value) not in (int, float):
+    elif isinstance(field, NumberField):
+        if type(value) is not int and type(value) is not float:
             return "field_type"
         try:
             if not math.isfinite(value):
@@ -104,7 +104,7 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
             or round(value, field.precision) != value
         ):
             return "field_range"
-    elif kind == "select":
+    elif isinstance(field, SelectField):
         if not any(
             type(value) is type(option) and value == option
             for option in field.options.values()

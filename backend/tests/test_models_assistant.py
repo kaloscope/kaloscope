@@ -7,6 +7,7 @@ from app.models.assistant import (
     AssistantSnapshotRequest,
     AssistantTurnRequest,
     ProposalConfirm,
+    WorkflowDesignerContext,
 )
 
 
@@ -77,11 +78,13 @@ def test_snapshot_boundaries(case):
     else:
         context["snapshot_id"] = 1
     with pytest.raises(ValidationError):
-        AssistantTurnRequest(
-            model={"provider_id": 1, "model_id": "test"},
-            request_id="test",
-            prompt="Inspect",
-            context=context,
+        AssistantTurnRequest.model_validate(
+            {
+                "model": {"provider_id": 1, "model_id": "test"},
+                "request_id": "test",
+                "prompt": "Inspect",
+                "context": context,
+            }
         )
 
 
@@ -107,9 +110,11 @@ def test_snapshot_boundaries(case):
 def test_page_context(context):
     turn = AssistantTurnRequest.model_validate(context_body(context))
 
+    assert turn.context is not None
     assert turn.context.page_type == context["page_type"]
     assert turn.context.route == context["route"]
     if context["page_type"] == "workflow_designer":
+        assert isinstance(turn.context, WorkflowDesignerContext)
         assert turn.context.editable is context.get("editable", False)
 
 
@@ -214,13 +219,15 @@ def test_invalid_confirm_snapshot(snapshot_id):
 @pytest.mark.parametrize("size", [0, 512 * 1024])
 def test_confirm_rejects_canvas(size):
     with pytest.raises(ValidationError, match="Extra inputs"):
-        ProposalConfirm(
-            workflow_id=3,
-            base_version=4,
-            digest="a" * 64,
-            base_snapshot_id=5,
-            canvas={
-                "nodes": [{"id": "one", "data": {"script": "x" * size}}],
-                "edges": [],
-            },
+        ProposalConfirm.model_validate(
+            {
+                "workflow_id": 3,
+                "base_version": 4,
+                "digest": "a" * 64,
+                "base_snapshot_id": 5,
+                "canvas": {
+                    "nodes": [{"id": "one", "data": {"script": "x" * size}}],
+                    "edges": [],
+                },
+            }
         )

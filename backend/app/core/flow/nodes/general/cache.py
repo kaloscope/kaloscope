@@ -23,12 +23,14 @@ class CacheNode(Node):
 
         Args:
             graph_id: Flow graph ID.
-            node_data: Configured fields and mutable node state.
+            node_data: Configured fields and mutable node state; an empty `ttl`
+                keeps the cached value indefinitely.
             context: Shared variables and storage for this flow run.
             **kwargs: Unused execution arguments supplied by the flow engine.
         """
         key = cls.key.extract(node_data, context=context)
-        ttl = int(cls.ttl.extract(node_data))
+        configured_ttl = cls.ttl.extract(node_data)
+        ttl = int(configured_ttl) if configured_ttl is not None else 0
         if not key or ttl < 0:
             return
 

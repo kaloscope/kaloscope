@@ -4,6 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,9 +13,9 @@ from tortoise import Tortoise
 from app.core.ai import tools
 from app.core.exceptions import ErrorCode
 from app.models.flow import FlowDraftRevision, FlowGraph, GraphCategory, GraphState
-from app.models.user import Permissions, UserRole
+from app.models.user import Permissions, UserInfo, UserRole
 
-ADMIN = SimpleNamespace(role=UserRole.ADMIN)
+ADMIN = cast(UserInfo, SimpleNamespace(role=UserRole.ADMIN))
 
 
 @asynccontextmanager
@@ -28,7 +29,7 @@ async def database():
 
 
 def test_grants():
-    reader = SimpleNamespace(role=UserRole.USER)
+    reader = cast(UserInfo, SimpleNamespace(role=UserRole.USER))
     read_names = {tool["function"]["name"] for tool in tools.tool_schemas(reader)}
     admin_names = {tool["function"]["name"] for tool in tools.tool_schemas(ADMIN)}
 
@@ -73,7 +74,7 @@ def test_rejected(monkeypatch, name, arguments, role, code):
     read = AsyncMock()
     monkeypatch.setattr(tools.FlowGraphService, "get_details", read)
     result = asyncio.run(
-        tools.execute_tool(name, arguments, SimpleNamespace(role=role))
+        tools.execute_tool(name, arguments, cast(UserInfo, SimpleNamespace(role=role)))
     )
 
     assert result["ok"] is False
@@ -90,8 +91,11 @@ def test_account_scope():
             private = await FlowGraph.create(
                 name="Private", category=GraphCategory.SCHEDULE, state=GraphState.DRAFT
             )
-            reader = SimpleNamespace(
-                role=UserRole.USER, perms=Permissions(indexer_ids=[visible.id])
+            reader = cast(
+                UserInfo,
+                SimpleNamespace(
+                    role=UserRole.USER, perms=Permissions(indexer_ids=[visible.id])
+                ),
             )
 
             listing = await tools.execute_tool("list_workflows", "{}", reader)
@@ -176,10 +180,15 @@ def test_navigation_scope():
             graph = await FlowGraph.create(
                 name="Visible", category=GraphCategory.INDEXER, state=GraphState.DRAFT
             )
-            reader = SimpleNamespace(
-                role=UserRole.USER, perms=Permissions(indexer_ids=[graph.id])
+            reader = cast(
+                UserInfo,
+                SimpleNamespace(
+                    role=UserRole.USER, perms=Permissions(indexer_ids=[graph.id])
+                ),
             )
-            denied = SimpleNamespace(role=UserRole.USER, perms=Permissions())
+            denied = cast(
+                UserInfo, SimpleNamespace(role=UserRole.USER, perms=Permissions())
+            )
             args = json.dumps({"page": "workflow_designer", "resource_id": graph.id})
 
             edit = await tools.execute_tool("navigate", args, ADMIN)

@@ -647,7 +647,9 @@ def create_server() -> MCPServer:
             be used as the `library_id` filter in `list_media_items`.
         """
         user = _user(ctx)
-        watcher = ctx.request_context.request.state.app.ctx.lib_watcher
+        request = ctx.request_context.request
+        assert request is not None
+        watcher = request.state.app.ctx.lib_watcher
         return ItemsResult[LibraryStatus](
             items=await _read(MediaLibService.list_libraries(user, watcher))
         )

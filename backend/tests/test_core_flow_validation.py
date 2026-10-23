@@ -2,6 +2,7 @@
 
 import asyncio
 from copy import deepcopy
+from types import MethodType
 from unittest.mock import AsyncMock
 
 import pytest
@@ -63,7 +64,7 @@ def test_schema_authority():
     original = node(url="https://example.test")
     original["data"]["$schema"] = {"node_type": "http", "fields": [], "handles": []}
     saved = deepcopy(original)
-    document = GraphDocument(nodes=[original], edges=[])
+    document = GraphDocument.model_validate({"nodes": [original], "edges": []})
 
     compressed = compress_document(document)
     compressed["nodes"][0]["data"]["url"] = "changed"
@@ -360,6 +361,7 @@ def test_static_paths(monkeypatch):
 
     execute = AsyncMock(side_effect=AssertionError("Validation must not execute nodes"))
     for executor in Node.executors.values():
+        assert isinstance(executor, MethodType)
         monkeypatch.setattr(executor.__self__, "execute", execute)
     result = check(
         [

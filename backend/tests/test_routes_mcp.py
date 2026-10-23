@@ -18,7 +18,7 @@ from app.core.middleware import SessionHolder, on_request, on_response
 from app.mcp import close_mcp, start_mcp
 from app.models.mcp import MCPAccessToken
 from app.models.media import MediaLib
-from app.models.user import User, UserInfo, UserPermission
+from app.models.user import User, UserInfo, UserPermission, UserRole
 from app.routes.auth import auth
 from app.routes.mcp import mcp
 from app.utils.json import dumps
@@ -57,7 +57,7 @@ async def client(monkeypatch):
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
-        for name, role in (("reader", "user"), ("admin", "admin")):
+        for name, role in (("reader", UserRole.USER), ("admin", UserRole.ADMIN)):
             user = await User.create(username=name, password="unused", role=role)
             now = timezone.now()
             app.shared_ctx.sessions[name] = UserInfo(
