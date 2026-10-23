@@ -16,11 +16,21 @@ from app.models.assistant import (
     AssistantConversation,
     AssistantProposal,
     AssistantSnapshot,
+    AssistantToolCall,
+    AssistantTurn,
 )
-from app.models.flow import FlowDraftRevision, FlowGraph, GraphCategory, GraphState
+from app.models.flow import (
+    FlowDraftRevision,
+    FlowGraph,
+    FlowJob,
+    FlowLog,
+    GraphCategory,
+    GraphState,
+)
 from app.models.user import Permissions, User, UserInfo, UserRole
 
 ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN))
+CREATE = {"name": "Nightly scan", "category": "schedule", "description": "Scan daily"}
 
 
 @asynccontextmanager
@@ -42,6 +52,48 @@ async def database():
         await Tortoise.close_connections()
 
 
+async def record_call(call_id: str, retry_of: AssistantTurn | None = None):
+    """Persist a running tool call in a new turn, as the runtime does before execution.
+
+    Args:
+        call_id: Server-generated tool call identifier.
+        retry_of: Earlier incomplete turn repeated by the new turn.
+
+    Returns:
+        The turn that owns the running call.
+    """
+    turn = await AssistantTurn.create(
+        conversation_id=1,
+        request_id=call_id,
+        prompt="Create a workflow",
+        retry_of=retry_of.id if retry_of else None,
+    )
+    await AssistantToolCall.create(
+        turn_id=turn.id, call_id=call_id, name="create_workflow_draft", arguments="{}"
+    )
+    return turn
+
+
+async def create(arguments=None, call_id="create", user=ADMIN):
+    """Run the creation tool for an already recorded call.
+
+    Args:
+        arguments: Tool arguments; the default describes a valid new workflow.
+        call_id: Recorded tool call identifier.
+        user: Account executing the tool.
+
+    Returns:
+        The sanitized tool result.
+    """
+    return await tools.execute_tool(
+        "create_workflow_draft",
+        json.dumps(arguments or CREATE),
+        user,
+        conversation_id=1,
+        call_id=call_id,
+    )
+
+
 def test_grants():
     reader = cast(UserInfo, SimpleNamespace(role=UserRole.USER))
     read_names = {tool["function"]["name"] for tool in tools.tool_schemas(reader)}
@@ -57,8 +109,14 @@ def test_grants():
         "list_node_types",
         "navigate",
     }
-    assert admin_names - read_names == {"validate_workflow", "preview_workflow_draft"}
-    assert all("save" not in name and "create" not in name for name in admin_names)
+    assert admin_names - read_names == {
+        "validate_workflow",
+        "preview_workflow_draft",
+        "create_workflow_draft",
+    }
+    assert all("save" not in name and "publish" not in name for name in admin_names)
+    # creation accepts metadata only; generated content goes through canvas edits
+    assert set(tools.WorkflowCreate.model_fields) == {"name", "category", "description"}
 
 
 @pytest.mark.parametrize(
@@ -66,6 +124,12 @@ def test_grants():
     [
         ("save_workflow_draft", "{}", UserRole.ADMIN, ErrorCode.FORBIDDEN),
         ("preview_workflow_draft", "{}", UserRole.USER, ErrorCode.FORBIDDEN),
+        (
+            "create_workflow_draft",
+            '{"name":"New","category":"schedule","description":"Purpose"}',
+            UserRole.USER,
+            ErrorCode.FORBIDDEN,
+        ),
         ("list_workflows", '{"page_size":101}', UserRole.ADMIN, ErrorCode.BAD_REQUEST),
         (
             "list_workflows",
@@ -338,6 +402,7 @@ def test_preview_does_not_write():
 
 
 def test_node_schema():
+    original = tools.dumps(tools.FlowGraphService.get_node_schemas(None, "ai"))
     result = asyncio.run(
         tools.execute_tool(
             "list_node_types",
@@ -350,6 +415,7 @@ def test_node_schema():
 
     assert result["ok"] is True
     assert "ai" in json.dumps(result["data"])
+    assert tools.dumps(tools.FlowGraphService.get_node_schemas(None, "ai")) == original
 
 
 def test_preview_budget():
@@ -476,3 +542,164 @@ def test_error_redaction(monkeypatch):
 
     assert result["error"]["code"] == ErrorCode.INTERNAL_SERVER_ERROR
     assert "private-password" not in json.dumps(result)
+
+
+def test_create_draft():
+    async def run():
+        async with database():
+            await record_call("create")
+
+            result = await create()
+
+            assert result["ok"] is True
+            data = result["data"]
+            graph = await FlowGraph.get(id=data["workflow_id"])
+            assert (graph.name, graph.category, graph.description) == (
+                "Nightly scan",
+                GraphCategory.SCHEDULE,
+                "Scan daily",
+            )
+            assert graph.state == GraphState.DRAFT
+            assert graph.draft == {"nodes": [], "edges": []}
+            assert graph.definition is None
+            assert graph.draft_version == data["draft_version"] == 0
+            assert data["editor_path"] == f"/settings/workflows/graphs/{graph.id}"
+            assert data["published"] is data["executed"] is data["replayed"] is False
+            assert await FlowJob.all().count() == await FlowLog.all().count() == 0
+            # the workflow and its successful result are recorded together
+            call = await AssistantToolCall.get(call_id="create")
+            assert call.status == "complete"
+            assert call.result == {
+                "id": "create",
+                "name": "create_workflow_draft",
+                "ok": True,
+                "data": data,
+            }
+
+    asyncio.run(run())
+
+
+def test_create_replay():
+    async def run():
+        async with database():
+            first = await record_call("first")
+            created = await create(call_id="first")
+            await AssistantToolCall.create(
+                turn_id=first.id,
+                call_id="repeat",
+                name="create_workflow_draft",
+                arguments="{}",
+            )
+            retry = await record_call("retry", retry_of=first)
+            await record_call("chained", retry_of=retry)
+
+            repeated = await create({**CREATE, "name": "Other"}, call_id="repeat")
+            retried = await create(call_id="retry")
+            chained = await create({**CREATE, "name": "Third"}, call_id="chained")
+
+            for result in (repeated, retried, chained):
+                assert result["ok"] is True
+                assert result["data"] == {**created["data"], "replayed": True}
+            assert await FlowGraph.all().count() == 1
+
+    asyncio.run(run())
+
+
+def test_create_independent():
+    async def run():
+        async with database():
+            await record_call("first")
+            await record_call("second")
+
+            first = await create(call_id="first")
+            second = await create({**CREATE, "name": "Second scan"}, call_id="second")
+
+            assert first["data"]["workflow_id"] != second["data"]["workflow_id"]
+            assert second["data"]["replayed"] is False
+            assert await FlowGraph.all().count() == 2
+
+    asyncio.run(run())
+
+
+def test_create_existing_name():
+    async def run():
+        async with database():
+            existing = await FlowGraph.create(
+                name="Nightly scan",
+                category=GraphCategory.INDEXER,
+                state=GraphState.PUBLISHED,
+                draft={"nodes": [], "edges": []},
+            )
+            await record_call("create")
+
+            result = await create()
+
+            assert result["error"]["code"] == ErrorCode.NAME_ALREADY_EXISTS
+            assert "Nothing was created" in result["error"]["guidance"]
+            assert "workflow_id" not in json.dumps(result)
+            assert await FlowGraph.all().count() == 1
+            await existing.refresh_from_db()
+            assert existing.category == GraphCategory.INDEXER
+            call = await AssistantToolCall.get(call_id="create")
+            assert (call.status, call.result) == ("running", None)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"category": "schedule", "description": "Scan daily"},
+        {"name": "Scan", "description": "Scan daily"},
+        {"name": "Scan", "category": "schedule"},
+        {**CREATE, "name": "   "},
+        {**CREATE, "description": ""},
+        {**CREATE, "name": "x" * 65},
+        {**CREATE, "category": "download"},
+        {**CREATE, "document": {"nodes": [], "edges": []}},
+    ],
+)
+def test_create_invalid(arguments):
+    async def run():
+        async with database():
+            await record_call("create")
+
+            result = await create(arguments)
+
+            assert result["error"]["code"] == ErrorCode.BAD_REQUEST
+            assert await FlowGraph.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_create_unrecorded():
+    async def run():
+        async with database():
+            result = await create(call_id="missing")
+
+            assert result["error"]["code"] == ErrorCode.NOT_FOUND
+            assert await FlowGraph.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_create_rollback(monkeypatch):
+    original = tools.FlowGraphService.create_draft
+
+    async def interrupted(*args):
+        await original(*args)
+        raise RuntimeError("interrupted after insert")
+
+    monkeypatch.setattr(tools.FlowGraphService, "create_draft", interrupted)
+
+    async def run():
+        async with database():
+            await record_call("create")
+
+            result = await create()
+
+            assert result["error"]["code"] == ErrorCode.INTERNAL_SERVER_ERROR
+            assert await FlowGraph.all().count() == 0
+            assert (await AssistantToolCall.get(call_id="create")).result is None
+
+    asyncio.run(run())

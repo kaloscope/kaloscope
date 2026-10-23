@@ -55,7 +55,10 @@
         {#if state.uncertain}
           <span class="text-xs text-base-content/70">{$_('assistant.canvas.uncertain')}</span>
         {:else if state.phase === 'review' && !state.rejected}
-          <span class="text-xs text-base-content/70">{$_('assistant.canvas.unsaved')}</span>
+          <!-- reverting a newly created draft keeps the workflow and restores its empty canvas -->
+          <span class="text-xs text-base-content/70">
+            {$_(state.empty ? 'assistant.canvas.unsaved_empty' : 'assistant.canvas.unsaved')}
+          </span>
         {/if}
         <div class="ml-auto flex gap-2">
           <button class="btn btn-ghost btn-sm" disabled={busy} onclick={discardAssistantCanvas}

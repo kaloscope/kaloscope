@@ -264,6 +264,12 @@ class ConversationRename(ContextModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class ConversationDelete(ContextModel):
+    """Select a bounded batch of owned conversations for deletion."""
+
+    ids: list[ResourceID] = Field(min_length=1, max_length=999)
+
+
 class AssistantTurnRequest(ContextModel):
     """Submit a new request without accepting client-authored conversation history."""
 

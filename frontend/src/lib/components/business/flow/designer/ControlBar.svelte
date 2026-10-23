@@ -4,7 +4,12 @@
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
   import { registerAssistantContext, snapshotAssistantCanvas } from '$lib/assistant/context';
-  import { assistantCanvas, discardAssistantCanvas, registerAssistantEditor } from '$lib/assistant/canvas';
+  import {
+    assistantCanvas,
+    discardAssistantCanvas,
+    notifyAssistantEditor,
+    registerAssistantEditor
+  } from '$lib/assistant/canvas';
   import { Badge, Button, GraphEditor, Image, PageHeader, alert, confirm } from '$lib/components';
   import { GraphState } from '$lib/enums';
   import { _, time } from '$lib/i18n';
@@ -14,7 +19,7 @@
   import { debounce } from '$lib/utils/timing';
   import { MiniMap, useStore, type Edge, type Node } from '@xyflow/svelte';
   import { isHTTPError } from 'ky';
-  import { getContext, hasContext, onMount } from 'svelte';
+  import { getContext, hasContext, onMount, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import { v4 as uuidv4 } from 'uuid';
@@ -130,6 +135,11 @@
       release();
       read();
     };
+  });
+
+  $effect(() => {
+    // a pending assistant handoff can start only after this workflow has loaded
+    if (graph && jsonGraph !== null) untrack(notifyAssistantEditor);
   });
 
   /**

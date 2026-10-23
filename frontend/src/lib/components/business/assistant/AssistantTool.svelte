@@ -77,3 +77,9 @@
     {/if}
   </p>
 {/if}
+{#if tool.name === 'create_workflow_draft' && tool.result?.ok && tool.result.data}
+  {@const { name, workflow_id, replayed } = tool.result.data}
+  <p class="ml-8 text-xs leading-5 text-base-content/60">
+    {$_(replayed ? 'assistant.create.replayed' : 'assistant.create.created', [String(name), Number(workflow_id)])}
+  </p>
+{/if}

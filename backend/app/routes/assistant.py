@@ -15,6 +15,7 @@ from app.models.assistant import (
     AssistantSnapshotRequest,
     AssistantTurnRequest,
     ConversationCreate,
+    ConversationDelete,
     ConversationRename,
     ProposalConfirm,
     ProposalDecision,
@@ -250,6 +251,25 @@ async def delete_conversation(request: Request, conversation_id: int) -> HTTPRes
         An empty JSON result after deletion.
     """
     await AssistantSessionService.delete(conversation_id, request.ctx.user)
+    return private_json(None)
+
+
+@assistant.post("/conversations/delete")
+@authorize()
+@validate(json=ConversationDelete)
+async def delete_conversations(
+    request: Request, body: ConversationDelete
+) -> HTTPResponse:
+    """Delete a selected batch of idle conversations owned by the current account.
+
+    Args:
+        request: Authenticated request.
+        body: Conversation IDs to delete together.
+
+    Returns:
+        An empty JSON result after the entire batch is deleted.
+    """
+    await AssistantSessionService.delete_many(body.ids, request.ctx.user)
     return private_json(None)
 
 

@@ -1,6 +1,10 @@
+import { goto } from '$app/navigation';
+import { page } from '$app/state';
 import { api } from '$lib/api';
 import { createLoading } from '$lib/helpers';
+import { _ } from '$lib/i18n';
 import { persisted, token, user } from '$lib/stores';
+import { normalizePathname } from '$lib/utils/url';
 import type {
   AIModelSelection,
   AssistantConversation,
@@ -17,12 +21,15 @@ import { v4 as uuidv4 } from 'uuid';
 import { captureAssistantContext } from './context';
 import {
   assistantCanvas,
+  assistantEditorRevision,
   beginAssistantCanvas,
   endAssistantCanvas,
   finishAssistantCanvas,
+  readAssistantEditor,
   resetAssistantCanvas
 } from './canvas';
 import { errorCode } from './errors';
+import { assistantDestination, workflowPath } from './navigation';
 import { consumeAssistantStream } from './stream';
 
 export { errorCode } from './errors';
@@ -70,6 +77,14 @@ type AssistantState = {
   busy: boolean;
   stopping: boolean;
 };
+type AssistantHandoff = {
+  id: number;
+  conversationId: number;
+  workflowId: number;
+  path: string;
+  // `blocked` keeps the draft available after cancelled navigation or a designer that did not load
+  phase: 'opening' | 'blocked';
+};
 
 /**
  * Create an empty account view before loading persisted conversations.
@@ -116,6 +131,10 @@ let listRequest: AbortController | null = null;
 let stopRequest: AbortController | null = null;
 let stopTimer: ReturnType<typeof setTimeout> | undefined;
 let conversationRevision = 0;
+// a created draft waiting for its own designer before the follow-up request builds it
+export const assistantHandoff = writable<AssistantHandoff | null>(null);
+let handoffRevision = 0;
+let handoffTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
  * Clear account data and invalidate all late network callbacks.
@@ -123,6 +142,7 @@ let conversationRevision = 0;
 function resetSession(): void {
   resetAssistantCanvas();
   cancelStopRecovery();
+  clearHandoff();
   conversationRevision += 1;
   active?.abort();
   modelRequest?.abort();
@@ -269,6 +289,107 @@ function isSaveablePreview(tool: AssistantTool): boolean {
 }
 
 /**
+ * Find the workflow created, or replayed, by a completed reply.
+ *
+ * @param turn - Completed turn with its streamed tool results.
+ * @returns The last created workflow ID with a registered designer path, or `null`.
+ */
+function createdWorkflow(turn: AssistantTurn): number | null {
+  const tool = turn.tools.filter((item) => item.name === 'create_workflow_draft' && item.status === 'complete').at(-1);
+  const destination = tool?.result && assistantDestination(tool.result);
+  return destination ? (destination.target.resource_id as number) : null;
+}
+
+/**
+ * Forget a pending handoff so no later designer receives it.
+ */
+function clearHandoff(): void {
+  clearTimeout(handoffTimer);
+  handoffTimer = undefined;
+  assistantHandoff.set(null);
+}
+
+/**
+ * Invalidate automatic opening after navigation and clear a handoff outside its draft.
+ *
+ * @param pathname - Page reached by a completed navigation.
+ */
+export function releaseAssistantHandoff(pathname: string): void {
+  // also invalidate creating replies that have not established a handoff yet
+  handoffRevision += 1;
+  const handoff = get(assistantHandoff);
+  if (handoff && normalizePathname(pathname) !== handoff.path) clearHandoff();
+}
+
+/**
+ * Open the draft created by a completed reply, then build it once its designer is ready.
+ *
+ * Navigation passes through the designer's unsaved-edit and pending-decision guards. A
+ * cancelled navigation or a designer that does not load leaves the empty draft to open later.
+ *
+ * @param conversationId - Conversation whose reply created the draft.
+ * @param workflowId - Workflow ID recorded by the creation tool.
+ * @returns A promise resolving after navigation has been attempted.
+ */
+async function openCreatedWorkflow(conversationId: number, workflowId: number): Promise<void> {
+  clearHandoff();
+  const id = ++handoffRevision;
+  const path = `${workflowPath}/${workflowId}`;
+  assistantHandoff.set({ id, conversationId, workflowId, path, phase: 'opening' });
+  const block = () => assistantHandoff.update((value) => (value?.id === id ? { ...value, phase: 'blocked' } : value));
+  // a decision pending on the current canvas must be resolved before leaving it
+  if (get(assistantCanvas)) {
+    block();
+    return;
+  }
+  if (normalizePathname(page.url.pathname) !== path) {
+    try {
+      await goto(path);
+    } catch {
+      // a failed navigation is reported below like a cancelled one
+    }
+  }
+  if (get(assistantHandoff)?.id !== id) return;
+  if (normalizePathname(page.url.pathname) !== path) {
+    block();
+    return;
+  }
+  handoffTimer = setTimeout(block, 15000);
+  resumeHandoff();
+}
+
+/**
+ * Send the follow-up request once the created draft's own editable designer has loaded.
+ *
+ * The request captures that designer's real workflow ID, draft version, and canvas, so
+ * a previous page's context or snapshot is never reused.
+ */
+function resumeHandoff(): void {
+  const handoff = get(assistantHandoff);
+  const state = get(assistant);
+  if (!handoff || state.conversation?.id !== handoff.conversationId) return;
+  if (
+    state.busy ||
+    state.stopping ||
+    state.historyLoading ||
+    state.modelsLoading !== null ||
+    state.conversation.busy ||
+    get(assistantCanvas)
+  )
+    return;
+  const designer = readAssistantEditor();
+  if (designer?.resource_id !== handoff.workflowId || designer.route !== handoff.path || !designer.editable) return;
+  clearHandoff();
+  void sendAssistant(handoff.path, undefined, get(_)('assistant.create.prompt'));
+}
+
+// recheck a pending handoff when a designer loads or the conversation becomes idle
+assistantEditorRevision.subscribe(() => queueMicrotask(resumeHandoff));
+assistant.subscribe(() => {
+  if (get(assistantHandoff)) queueMicrotask(resumeHandoff);
+});
+
+/**
  * Remember the selected conversation for this account without storing its content.
  *
  * @param id - Conversation identifier, or `null` for an explicitly blank conversation.
@@ -340,11 +461,11 @@ export async function loadAssistantModels(): Promise<void> {
 }
 
 /**
- * Show the assistant and refresh available models while no reply is streaming.
+ * Show the assistant and refresh its catalogs outside generation and history changes.
  */
 export function openAssistant(): void {
   assistant.update((state) => ({ ...state, open: true }));
-  if (!get(assistant).busy) {
+  if (!get(assistant).busy && !get(assistant).historyLoading) {
     void loadAssistantModels();
     void loadAssistantConversations(false, !get(assistant).historyLoaded);
   }
@@ -393,6 +514,7 @@ export function stopAssistant(): void {
 export function newAssistantConversation(): void {
   if (get(assistantCanvas) || get(assistant).busy || get(assistant).historyLoading) return;
   cancelStopRecovery();
+  clearHandoff();
   conversationRevision += 1;
   rememberConversation(null);
   assistant.update((state) => ({
@@ -469,7 +591,10 @@ export async function loadAssistantConversation(id: number, older = false): Prom
     (older && (state.stopping || !state.turnsBefore || state.conversation?.id !== id))
   )
     return;
-  if (!older) cancelStopRecovery();
+  if (!older) {
+    cancelStopRecovery();
+    clearHandoff();
+  }
   const controller = new AbortController();
   historyRequest = controller;
   if (!older) conversationRevision += 1;
@@ -520,33 +645,27 @@ export async function loadAssistantConversation(id: number, older = false): Prom
  * @returns A promise that resolves after the operation or a localized error.
  */
 export async function changeAssistantConversation(id: number, title?: string): Promise<void> {
+  if (title === undefined) {
+    await deleteAssistantConversations([id]);
+    return;
+  }
   if (get(assistantCanvas) || get(assistant).busy || historyRequest) return;
   cancelStopRecovery();
   const controller = new AbortController();
   historyRequest = controller;
   assistant.update((value) => ({ ...value, historyLoading: true, error: null }));
   try {
-    const path = `assistant/conversations/${id}`;
-    if (title === undefined) {
-      await api.delete(path, { signal: controller.signal, retry: 0, context: { silentErrors: true } });
-      if (historyRequest !== controller) return;
-      if (get(assistant).conversation?.id === id) rememberConversation(null);
-      assistant.update((value) =>
-        value.conversation?.id === id ? { ...value, conversation: null, turns: [], turnsBefore: null } : value
-      );
-    } else {
-      if (!title.trim() || title.trim().length > 120) throw new Error('assistant_title_invalid');
-      const { data } = await api
-        .patch(path, {
-          json: { title: title.trim() },
-          signal: controller.signal,
-          retry: 0,
-          context: { silentErrors: true }
-        })
-        .json<Resp<AssistantConversation>>();
-      if (historyRequest !== controller) return;
-      assistant.update((value) => (value.conversation?.id === id ? { ...value, conversation: data } : value));
-    }
+    if (!title.trim() || title.trim().length > 120) throw new Error('assistant_title_invalid');
+    const { data } = await api
+      .patch(`assistant/conversations/${id}`, {
+        json: { title: title.trim() },
+        signal: controller.signal,
+        retry: 0,
+        context: { silentErrors: true }
+      })
+      .json<Resp<AssistantConversation>>();
+    if (historyRequest !== controller) return;
+    assistant.update((value) => (value.conversation?.id === id ? { ...value, conversation: data } : value));
     await loadAssistantConversations();
   } catch (error) {
     if (historyRequest === controller)
@@ -560,13 +679,67 @@ export async function changeAssistantConversation(id: number, title?: string): P
 }
 
 /**
+ * Delete selected conversations together while preserving other history and the composed input.
+ *
+ * @param ids - Owned conversation IDs selected for deletion.
+ * @returns Whether the batch was deleted before the account changed.
+ */
+export async function deleteAssistantConversations(ids: number[]): Promise<boolean> {
+  const state = get(assistant);
+  if (get(assistantCanvas) || state.busy || historyRequest || !ids.length) return false;
+  const selected = new Set(ids);
+  const controller = new AbortController();
+  historyRequest = controller;
+  conversationRevision += 1;
+  // discard in-flight metadata pages so they cannot restore deleted records
+  listRequest?.abort();
+  listRequest = null;
+  assistant.update((value) => ({ ...value, historyLoading: true, conversationsLoading: false, error: null }));
+  try {
+    await api.post('assistant/conversations/delete', {
+      json: { ids: [...selected] },
+      signal: controller.signal,
+      retry: 0,
+      context: { silentErrors: true }
+    });
+    if (historyRequest !== controller) return false;
+    const current = get(assistant).conversation;
+    if (current && selected.has(current.id)) {
+      cancelStopRecovery();
+      clearHandoff();
+      rememberConversation(null);
+    }
+    assistant.update((value) => ({
+      ...value,
+      conversations: value.conversations.filter((item) => !selected.has(item.id)),
+      ...(value.conversation && selected.has(value.conversation.id)
+        ? { conversation: null, turns: [], turnsBefore: null }
+        : {})
+    }));
+    return true;
+  } catch (error) {
+    if (historyRequest === controller) {
+      assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_history_failed') }));
+      await loadAssistantConversations();
+    }
+    return false;
+  } finally {
+    if (historyRequest === controller) {
+      historyRequest = null;
+      assistant.update((value) => ({ ...value, historyLoading: false }));
+    }
+  }
+}
+
+/**
  * Submit only the new prompt and page snapshot to an owned persistent conversation.
  *
  * @param route - Current pathname used to capture the active page.
  * @param retryId - Turn whose prompt is sent again with fresh context; only an incomplete turn is linked as a retry.
+ * @param handoffPrompt - Fixed follow-up request that builds a newly created draft, leaving the composed input intact.
  * @returns A promise that resolves after completion, cancellation, or error.
  */
-export async function sendAssistant(route: string, retryId?: string): Promise<void> {
+export async function sendAssistant(route: string, retryId?: string, handoffPrompt?: string): Promise<void> {
   const state = get(assistant);
   if (
     state.busy ||
@@ -581,7 +754,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
   const retry = retryId
     ? state.turns.find((turn) => turn.id === retryId && (turn.status !== 'complete' || turn.canvasError))
     : null;
-  const prompt = (retry?.prompt ?? state.input).trim();
+  const prompt = (handoffPrompt ?? retry?.prompt ?? state.input).trim();
   if (!prompt) return;
   let context: AssistantPageContext | null;
   try {
@@ -594,6 +767,9 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_context_invalid') }));
     return;
   }
+  // a new request supersedes any created draft still waiting for its designer
+  clearHandoff();
+  const requestHandoffRevision = handoffRevision;
   conversationRevision += 1;
   const turn: AssistantTurn = {
     id: uuidv4(),
@@ -608,7 +784,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
   active = controller;
   assistant.update((value) => ({
     ...value,
-    input: retry ? value.input : '',
+    input: retry || handoffPrompt ? value.input : '',
     error: null,
     busy: true,
     turns: [...value.turns, turn]
@@ -635,6 +811,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
   activity();
   let started = false;
   let submittedConversationId: number | null = null;
+  let created: number | null = null;
 
   /**
    * Publish a turn update only while its original account and request are current.
@@ -772,13 +949,14 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
       throw new Error('assistant_stream_invalid');
     }
     const terminal = await consumeAssistantStream(response.body, receive, activity);
-    if (terminal === 'done' && submittedContext?.page_type === 'workflow_designer' && submittedContext.snapshot_id) {
-      const completed = get(assistant).turns.find((item) => item.id === turn.id);
+    const completed =
+      terminal === 'done' && active === controller
+        ? get(assistant).turns.find((item) => item.id === turn.id && item.status === 'complete')
+        : undefined;
+    if (completed) created = createdWorkflow(completed);
+    if (completed && submittedContext?.page_type === 'workflow_designer' && submittedContext.snapshot_id) {
       // the backend advances its snapshot chain only after successful previews
-      const preview =
-        active === controller && completed?.status === 'complete'
-          ? completed.tools.filter(isSaveablePreview).at(-1)
-          : undefined;
+      const preview = completed.tools.filter(isSaveablePreview).at(-1);
       if (preview) {
         await finishAssistantCanvas(
           turn.id,
@@ -819,6 +997,10 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
       } else {
         cancelStopRecovery();
         void loadAssistantConversations();
+      }
+      // leaving and returning to the original page still cancels automatic opening
+      if (created !== null && submittedConversationId !== null && handoffRevision === requestHandoffRevision) {
+        void openCreatedWorkflow(submittedConversationId, created);
       }
     }
   }

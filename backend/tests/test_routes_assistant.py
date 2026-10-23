@@ -85,7 +85,11 @@ def request(app, *, body=BODY, authenticated=True):
 
 @pytest.mark.parametrize(
     ("handler", "kwargs"),
-    [(routes.persistent_chat, {"conversation_id": 1}), (routes.list_models, {})],
+    [
+        (routes.persistent_chat, {"conversation_id": 1}),
+        (routes.list_models, {}),
+        (routes.delete_conversations, {}),
+    ],
 )
 def test_login_required(application, handler, kwargs):
     with pytest.raises(UnauthorizedException):
@@ -389,6 +393,39 @@ def test_http_contract(application, monkeypatch):
                 await client.delete(path, headers=headers)
                 missing = await client.get(path + "/turns", headers=headers)
                 assert missing.status_code == 404
+                ids = []
+                for title in ("First selected chat", "Second selected chat"):
+                    created = await client.post(
+                        "/_api/assistant/conversations",
+                        json={"model": BODY["model"], "title": title},
+                        headers=headers,
+                    )
+                    ids.append(created.json()["data"]["id"])
+                batch_path = "/_api/assistant/conversations/delete"
+                for auth, status in (
+                    ({"authorization": "Bearer invalid"}, 401),
+                    (other_headers, 404),
+                ):
+                    denied = await client.post(
+                        batch_path, json={"ids": ids}, headers=auth
+                    )
+                    assert denied.status_code == status
+                invalid = await client.post(
+                    batch_path, json={"ids": []}, headers=headers
+                )
+                assert invalid.status_code == 400
+
+                deleted = await client.post(
+                    batch_path, json={"ids": ids}, headers=headers
+                )
+
+                assert deleted.status_code == 200
+                assert deleted.headers["cache-control"] == "no-store"
+                assert deleted.json()["data"] is None
+                listing = await client.get(
+                    "/_api/assistant/conversations", headers=headers
+                )
+                assert listing.json()["data"]["items"] == []
         finally:
             await Tortoise.close_connections()
 

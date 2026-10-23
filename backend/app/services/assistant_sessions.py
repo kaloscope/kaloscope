@@ -152,16 +152,40 @@ class AssistantSessionService:
             user: Authenticated owner.
 
         Raises:
+            NotFoundException: If the conversation is absent or belongs to another
+                account.
             KaloscopeException: If a generation is still active.
         """
-        await cls.owned(conversation_id, user)
-        deleted = await AssistantConversation.filter(
-            Q(active_request=None) | Q(lease_until__lt=timezone.now()),
-            id=conversation_id,
-            user_id=user.id,
-        ).delete()
-        if not deleted:
-            raise KaloscopeException(ErrorCode.ASSISTANT_BUSY, status_code=409)
+        await cls.delete_many([conversation_id], user)
+
+    @classmethod
+    async def delete_many(cls, conversation_ids: list[int], user: UserInfo) -> None:
+        """Delete owned idle conversations and their records as one transaction.
+
+        Args:
+            conversation_ids: Selected conversations; repeated IDs are deleted once.
+            user: Authenticated owner, including administrators.
+
+        Raises:
+            BadRequestException: If no conversations are selected.
+            NotFoundException: If any conversation is absent or belongs to another
+                account.
+            KaloscopeException: If any generation is active; the entire batch is
+                retained.
+        """
+        ids = set(conversation_ids)
+        if not ids:
+            raise BadRequestException
+        async with in_transaction():
+            conversations = AssistantConversation.filter(id__in=ids, user_id=user.id)
+            if await conversations.count() != len(ids):
+                raise NotFoundException
+            await conversations.filter(
+                Q(active_request=None) | Q(lease_until__lt=timezone.now())
+            ).delete()
+            # sqlite deletion counts include cascaded records, so inspect the parents
+            if await conversations.exists():
+                raise KaloscopeException(ErrorCode.ASSISTANT_BUSY, status_code=409)
 
     @classmethod
     async def allowed(cls, resource_ids: list[int], user: UserInfo) -> bool:

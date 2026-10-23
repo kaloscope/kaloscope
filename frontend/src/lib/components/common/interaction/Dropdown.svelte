@@ -20,6 +20,12 @@
     class?: string;
     triggerClass?: string;
     contentClass?: string;
+    /** Whether the dropdown is expanded. */
+    open?: boolean;
+    /** Whether clicking a content button closes the dropdown. */
+    closeOnClick?: boolean;
+    /** Whether clicks outside the dropdown dismiss it. */
+    closeOnOutsideClick?: boolean;
     /** The click event handler. */
     onclick?: MouseEventHandler<HTMLElement>;
   };
@@ -49,10 +55,12 @@
     class: _class,
     triggerClass,
     contentClass,
+    open = $bindable(false),
+    closeOnClick = true,
+    closeOnOutsideClick = true,
     onclick
   }: DropdownProps = $props();
 
-  let open: boolean = $state(false);
   let dropdown: HTMLDetailsElement;
   let dropdownContent: HTMLElement | null = $state(null);
 
@@ -72,9 +80,8 @@
     if (!(event.target instanceof Node)) {
       return;
     }
-    if (!dropdown.contains(event.target) || event.target instanceof HTMLButtonElement) {
-      // close the dropdown when clicking outside of it
-      // or when clicking a button inside it
+    const outside = !dropdown.contains(event.target);
+    if ((outside && closeOnOutsideClick) || (!outside && closeOnClick && event.target instanceof HTMLButtonElement)) {
       open = false;
     }
   }}
@@ -106,12 +113,12 @@
       </div>
     {/if}
   </summary>
-  <p
+  <div
     bind:this={dropdownContent}
     class="dropdown-content overflow-auto rounded-box border bg-base-100 shadow-xl [&_.menu]:w-full {contentClass}"
     style:max-height={contentMaxHeight}
     style:width={contentWidth}
   >
     {@render children()}
-  </p>
+  </div>
 </details>

@@ -6,10 +6,12 @@
   import { assistantDestination } from '$lib/assistant/navigation';
   import {
     assistant,
+    assistantHandoff,
     assistantRestoring,
     closeAssistant,
     loadAssistantModels,
     loadAssistantConversation,
+    releaseAssistantHandoff,
     sendAssistant,
     stopAssistant,
     type AssistantTool as Tool,
@@ -19,7 +21,6 @@
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { AssistantDestination } from '$lib/types';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
   import AssistantHistory from './AssistantHistory.svelte';
@@ -71,14 +72,19 @@
     const items: { path: string; label: string }[] = [];
     const pathname = normalizePathname(page.url.pathname);
     for (const { result } of lastTurn?.tools ?? []) {
-      const path = result && assistantDestination(result);
-      if (!path || path === pathname || items.some((item) => item.path === path)) continue;
-      const target = result.data!.target as AssistantDestination;
+      const destination = result && assistantDestination(result);
+      if (!destination) continue;
+      const { path, target } = destination;
+      if (path === pathname || items.some((item) => item.path === path)) continue;
       const name = $_(`assistant.pages.${target.page}`);
       items.push({ path, label: $_('action.open', target.resource_id ? `${name} #${target.resource_id}` : name) });
     }
     return items;
   });
+  // a created draft waiting for its designer belongs to the conversation that created it
+  const handoff = $derived(
+    $assistantHandoff?.conversationId === $assistant.conversation?.id ? $assistantHandoff : null
+  );
 
   /**
    * Keep a dragged panel inside the visible viewport, including after resizing.
@@ -302,9 +308,10 @@
   beforeNavigate(() => {
     restoreAfterNavigation = !!panel?.contains(document.activeElement);
   });
-  afterNavigate(() => {
+  afterNavigate(({ from, to }) => {
     if ($assistant.open && restoreAfterNavigation) composer?.focus({ preventScroll: true });
     restoreAfterNavigation = false;
+    if (from?.url.pathname !== to?.url.pathname) releaseAssistantHandoff(page.url.pathname);
   });
 
   onMount(() => {
@@ -524,11 +531,19 @@
         </button>
       {/if}
 
-      {#if lastTurn && (retryable || destinations.length)}
+      {#if lastTurn && (retryable || destinations.length || handoff)}
         <section
           class="mb-1.5 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs"
           aria-label={$_('assistant.turn_actions')}
         >
+          {#if handoff}
+            <p class="flex basis-full items-center gap-1.5 px-1 pb-0.5 text-base-content/70" role="status">
+              {#if handoff.phase === 'opening'}
+                <span class="loading loading-xs loading-spinner" aria-hidden="true"></span>
+              {/if}
+              {$_(`assistant.create.${handoff.phase}`, handoff.workflowId)}
+            </p>
+          {/if}
           {#if retryable}
             <button
               type="button"

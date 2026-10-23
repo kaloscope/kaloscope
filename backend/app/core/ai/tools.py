@@ -6,6 +6,7 @@ from typing import Any, Literal, Self
 
 from openai.types.chat import ChatCompletionFunctionToolParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from tortoise.transactions import in_transaction
 
 from app.core.ai.documents import (
     GraphProposal,
@@ -22,10 +23,17 @@ from app.core.ai.queries import (
     workflow_logs,
 )
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
-from app.models.assistant import WORKFLOW_PATH, ResourceID, WorkflowOrdering
+from app.models.assistant import (
+    WORKFLOW_PATH,
+    AssistantToolCall,
+    AssistantTurn,
+    ResourceID,
+    WorkflowOrdering,
+)
 from app.models.flow import (
     GraphCategory,
     GraphDocument,
+    GraphDraftCreate,
     GraphQuery,
     GraphState,
     GraphWrite,
@@ -37,6 +45,7 @@ from app.utils.json import dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
+CREATE_TOOL = "create_workflow_draft"
 
 
 class ToolArguments(BaseModel):
@@ -123,6 +132,18 @@ class HistoryQuery(ToolArguments):
     tool_call_id: str | None = Field(default=None, max_length=64)
     offset: int = Field(default=0, ge=0, strict=True)
     limit: int = Field(default=2000, ge=1, le=8000, strict=True)
+
+
+class WorkflowCreate(ToolArguments):
+    """Describe a new workflow without accepting any graph content."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=64)
+    category: GraphCategory
+    description: str = Field(
+        min_length=1, max_length=512, description="Purpose; saved as the description."
+    )
 
 
 class NavigationTarget(ToolArguments):
@@ -222,6 +243,15 @@ TOOLS = (
         admin=True,
     ),
     AssistantTool(
+        CREATE_TOOL,
+        "Create one empty, unpublished workflow draft from a unique name, "
+        "category and purpose. Repeated calls and retries of this request return "
+        "the same workflow (replayed=true). On name_already_exists nothing was "
+        "created.",
+        WorkflowCreate,
+        admin=True,
+    ),
+    AssistantTool(
         "read_workflow_log",
         "Read an exact log field or nested path with explicit "
         "pagination; IDs come from get_workflow_logs.",
@@ -260,7 +290,8 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
         user: Authenticated account with current resource permissions.
 
     Returns:
-        Read and preview tools; no write or execution tools are registered.
+        Read and preview tools, plus empty draft creation for editors; no tool
+        saves canvas content, publishes, or executes workflows.
     """
     return {
         tool.name: tool
@@ -350,6 +381,8 @@ async def execute_tool(
                         readonly = user.role != UserRole.ADMIN or not graph.editable
                         path += f"/{'r/' if readonly else ''}{graph.id}"
                     result = NavigationResult(target=args, path=path)
+                case WorkflowCreate():
+                    result = await create_workflow(args, conversation_id, call_id, user)
                 case WorkflowList():
                     result = await workflow_list(GraphQuery(**args.model_dump()), user)
                 case LogDetailQuery():
@@ -504,6 +537,27 @@ async def execute_tool(
                             ]
                             for group, nodes in result.items()
                         }
+                    else:
+                        # omit editor decoration, retaining field semantics and widths
+                        for nodes in result.values():
+                            for node in nodes:
+                                node.pop("icon")
+                                node.pop("order")
+                                for field in node["fields"]:
+                                    for key in (
+                                        "span",
+                                        "tabsize",
+                                        "lineLength",
+                                        "collapse",
+                                        "darkmode",
+                                        "copier",
+                                        "resetter",
+                                        "formatter",
+                                    ):
+                                        field.pop(key, None)
+                                    for key, value in list(field.items()):
+                                        if value is None and key != "default":
+                                            field.pop(key)
                 case HistoryQuery():
                     result = await read_history(args, conversation_id, user)
         encoded = dumps(
@@ -521,6 +575,13 @@ async def execute_tool(
             if exc.message in ErrorCode
             else ErrorCode.INTERNAL_SERVER_ERROR
         )
+        if code == ErrorCode.NAME_ALREADY_EXISTS:
+            return tool_error(
+                code,
+                "Nothing was created. Another workflow already uses this name and "
+                "is not the requested one. Ask the user for a different name; do "
+                "not add suffixes or reuse the existing workflow.",
+            )
         return tool_error(
             code,
             "For denied access, stop; permissions must change before retrying. "
@@ -577,6 +638,88 @@ async def resolve_document(
     return graph.draft or {"nodes": [], "edges": []}
 
 
+async def create_workflow(
+    args: WorkflowCreate, conversation_id: int, call_id: str, user: UserInfo
+) -> dict:
+    """Create at most one empty draft per request and record it with its tool call.
+
+    The workflow and the call's successful result commit in one transaction. A
+    repeated call or a retry of the same request finds that record and returns the
+    same workflow; without the record nothing was created, even when the original
+    response was lost.
+
+    Args:
+        args: Validated name, category, and purpose.
+        conversation_id: Server-owned conversation of the current turn.
+        call_id: Server-generated identifier of this tool call.
+        user: Account whose editor rights the creation service checks.
+
+    Returns:
+        Workflow identity, its empty unpublished draft state, and designer path;
+        `replayed` marks a workflow created earlier for this request.
+
+    Raises:
+        NotFoundException: If the call record or the recorded workflow is missing.
+        ForbiddenException: If the account cannot edit workflows.
+        KaloscopeException: If the name already exists.
+    """
+    call = await AssistantToolCall.get_or_none(
+        call_id=call_id, turn__conversation_id=conversation_id
+    )
+    if call is None:
+        raise NotFoundException
+    FlowGraphService.require_editor(user)
+    turn_ids: list[int] = []
+    turn_id = call.turn_id
+    # a retry repeats its original request, so include every earlier attempt
+    while turn_id is not None and turn_id not in turn_ids:
+        turn_ids.append(turn_id)
+        turn = await AssistantTurn.get_or_none(
+            id=turn_id, conversation_id=conversation_id
+        )
+        turn_id = turn.retry_of if turn else None
+    earlier = (
+        await AssistantToolCall.filter(
+            turn_id__in=turn_ids, name=CREATE_TOOL, status="complete"
+        )
+        .exclude(id=call.id)
+        .order_by("id")
+        .first()
+    )
+    if earlier is not None and earlier.result:
+        data = earlier.result["data"]
+        await FlowGraphService.get_accessible(data["workflow_id"], user)
+        return {**data, "replayed": True}
+    async with in_transaction():
+        graph = await FlowGraphService.create_draft(
+            GraphDraftCreate(
+                name=args.name,
+                description=args.description,
+                category=args.category,
+                document=GraphDocument(nodes=[], edges=[]),
+            ),
+            user,
+        )
+        data = {
+            "workflow_id": graph.id,
+            "name": graph.name,
+            "category": str(graph.category),
+            "description": graph.description,
+            "state": str(graph.state),
+            "draft_version": graph.draft_version,
+            "node_count": 0,
+            "editor_path": f"{WORKFLOW_PATH}/{graph.id}",
+            "published": False,
+            "executed": False,
+            "replayed": False,
+        }
+        await AssistantToolCall.filter(id=call.id).update(
+            result={"id": call_id, "name": CREATE_TOOL, "ok": True, "data": data},
+            status="complete",
+        )
+    return data
+
+
 async def read_history(
     args: HistoryQuery, conversation_id: int, user: UserInfo
 ) -> dict:
@@ -596,7 +739,6 @@ async def read_history(
         NotFoundException: If a reference is missing or belongs elsewhere.
         KaloscopeException: If source resource permissions have changed.
     """
-    from app.models.assistant import AssistantToolCall, AssistantTurn
     from app.services.assistant_sessions import AssistantSessionService
 
     await AssistantSessionService.owned(conversation_id, user)

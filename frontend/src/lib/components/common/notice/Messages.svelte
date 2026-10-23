@@ -130,7 +130,15 @@
 
 {#each messages.entries() as [id, msg] (id)}
   {@const icon = msg.icon || (msg.prompt ? icons.info : icons.warning)}
-  <dialog {id} class="modal transition-none" transition:fade={{ duration: 200 }}>
+  <dialog
+    {id}
+    class="modal transition-none"
+    transition:fade={{ duration: 200 }}
+    oncancel={(event) => {
+      event.preventDefault();
+      close(id, msg.shallow, msg.oncancel);
+    }}
+  >
     <form method="dialog" class="modal-backdrop">
       <button onclick={(event) => close(id, msg.shallow, msg.oncancel, event)} aria-label="Close"></button>
     </form>
