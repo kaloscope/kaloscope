@@ -41,7 +41,7 @@ export type AssistantTurn = {
   id: string;
   serverId?: number;
   prompt: string;
-  context: AssistantStoredContext | null;
+  context: AssistantPageContext | AssistantStoredContext | null;
   content: string;
   status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error';
   error?: string;
@@ -115,7 +115,6 @@ let historyRequest: AbortController | null = null;
 let listRequest: AbortController | null = null;
 let stopRequest: AbortController | null = null;
 let stopTimer: ReturnType<typeof setTimeout> | undefined;
-let accountGeneration = 0;
 let conversationRevision = 0;
 
 /**
@@ -124,7 +123,6 @@ let conversationRevision = 0;
 function resetSession(): void {
   resetAssistantCanvas();
   cancelStopRecovery();
-  accountGeneration += 1;
   conversationRevision += 1;
   active?.abort();
   modelRequest?.abort();
@@ -526,13 +524,12 @@ export async function changeAssistantConversation(id: number, title?: string): P
   cancelStopRecovery();
   const controller = new AbortController();
   historyRequest = controller;
-  const generation = accountGeneration;
   assistant.update((value) => ({ ...value, historyLoading: true, error: null }));
   try {
     const path = `assistant/conversations/${id}`;
     if (title === undefined) {
       await api.delete(path, { signal: controller.signal, retry: 0, context: { silentErrors: true } });
-      if (generation !== accountGeneration) return;
+      if (historyRequest !== controller) return;
       if (get(assistant).conversation?.id === id) rememberConversation(null);
       assistant.update((value) =>
         value.conversation?.id === id ? { ...value, conversation: null, turns: [], turnsBefore: null } : value
@@ -547,12 +544,12 @@ export async function changeAssistantConversation(id: number, title?: string): P
           context: { silentErrors: true }
         })
         .json<Resp<AssistantConversation>>();
-      if (generation !== accountGeneration) return;
+      if (historyRequest !== controller) return;
       assistant.update((value) => (value.conversation?.id === id ? { ...value, conversation: data } : value));
     }
     await loadAssistantConversations();
   } catch (error) {
-    if (generation === accountGeneration)
+    if (historyRequest === controller)
       assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_history_failed') }));
   } finally {
     if (historyRequest === controller) {
@@ -735,7 +732,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
       rememberConversation(data.id);
       assistant.update((value) => ({ ...value, conversation: data }));
     }
-    let submittedContext: AssistantStoredContext | null = context;
+    let submittedContext: AssistantStoredContext | null;
     if (context?.page_type === 'workflow_designer') {
       const { canvas, ...metadata } = context;
       const { data } = await api
@@ -752,6 +749,8 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
         value.context = submittedContext;
       });
       activity();
+    } else {
+      submittedContext = context;
     }
     submittedConversationId = conversation.id;
     const response = await api.post(`assistant/conversations/${conversation.id}/chat`, {

@@ -309,8 +309,8 @@ async def execute_tool(
     arguments: str,
     user: UserInfo,
     *,
-    conversation_id: int | None = None,
-    call_id: str | None = None,
+    conversation_id: int,
+    call_id: str,
     canvas: dict[str, Any] | None = None,
     canvas_snapshot_id: int | None = None,
 ) -> dict[str, Any]:
@@ -321,9 +321,8 @@ async def execute_tool(
         arguments: Complete JSON arguments assembled by the SDK.
         user: Authenticated caller; identity never comes from model arguments.
         conversation_id: Server-owned conversation scope for immutable references.
-        call_id: Server-generated call identifier; a preview in a persistent
-            conversation records a pending canvas edit that only the user can save.
-        canvas: Current turn's captured designer context, never historical context.
+        call_id: Server-generated call identifier for this conversation's tool call.
+        canvas: Current turn's editable designer context, never historical context.
         canvas_snapshot_id: Latest successful canvas snapshot in this turn.
 
     Returns:
@@ -442,44 +441,40 @@ async def execute_tool(
                         result["base_kind"] = (
                             "snapshot" if args.snapshot_id else "saved_draft"
                         )
-                        if conversation_id is not None:
-                            from app.services.assistant_sessions import (
-                                AssistantSessionService,
+                        from app.services.assistant_sessions import (
+                            AssistantSessionService,
+                        )
+
+                        snapshot = await AssistantSessionService.snapshot(
+                            conversation_id,
+                            args.workflow_id,
+                            args.draft_version,
+                            proposal,
+                            "proposal",
+                            user,
+                        )
+                        result["proposal_snapshot_id"] = snapshot.id
+                        if canvas is not None:
+                            from app.services.assistant_proposals import (
+                                AssistantProposalService,
                             )
 
-                            snapshot = await AssistantSessionService.snapshot(
-                                conversation_id,
-                                args.workflow_id,
-                                args.draft_version,
-                                proposal,
-                                "proposal",
-                                user,
+                            proposal_record = await AssistantProposalService.create(
+                                call_id,
+                                snapshot,
+                                canvas["snapshot_id"],
                             )
-                            result["proposal_snapshot_id"] = snapshot.id
-                            if call_id is not None and canvas is not None:
-                                from app.services.assistant_proposals import (
-                                    AssistantProposalService,
+                            result["proposal_id"] = proposal_record.id
+                            # compare with the visible canvas, including
+                            # unsaved edits, rather than with the saved draft
+                            original = await AssistantSessionService.read_snapshot(
+                                conversation_id, canvas["snapshot_id"], user
+                            )
+                            result["canvas_change_count"] = len(
+                                FlowGraphService.compare_documents(
+                                    original.document, snapshot.document
                                 )
-
-                                proposal_record = await AssistantProposalService.create(
-                                    conversation_id,
-                                    call_id,
-                                    args.workflow_id,
-                                    args.draft_version,
-                                    snapshot,
-                                    canvas["snapshot_id"],
-                                )
-                                result["proposal_id"] = proposal_record.id
-                                # compare with the visible canvas, including
-                                # unsaved edits, rather than with the saved draft
-                                original = await AssistantSessionService.read_snapshot(
-                                    conversation_id, canvas["snapshot_id"], user
-                                )
-                                result["canvas_change_count"] = len(
-                                    FlowGraphService.compare_documents(
-                                        original.document, snapshot.document
-                                    )
-                                )
+                            )
                         while (
                             result["changes"]
                             and len(dumps(result)) > MAX_TOOL_RESULT_BYTES
@@ -511,19 +506,15 @@ async def execute_tool(
                         }
                 case HistoryQuery():
                     result = await read_history(args, conversation_id, user)
-        data = loads(
-            dumps(
-                result.model_dump(mode="json")
-                if isinstance(result, BaseModel)
-                else result
-            )
+        encoded = dumps(
+            result.model_dump(mode="json") if isinstance(result, BaseModel) else result
         )
-        if len(dumps(data)) > MAX_TOOL_RESULT_BYTES:
+        if len(encoded) > MAX_TOOL_RESULT_BYTES:
             return tool_error(
                 ErrorCode.ASSISTANT_RESULT_LIMIT,
                 "The result is too large. Narrow the query or reduce the page size.",
             )
-        return {"ok": True, "data": data}
+        return {"ok": True, "data": loads(encoded)}
     except KaloscopeException as exc:
         code = (
             ErrorCode(exc.message)
@@ -553,7 +544,7 @@ async def execute_tool(
 
 
 async def resolve_document(
-    reference: GraphReference, conversation_id: int | None, user: UserInfo
+    reference: GraphReference, conversation_id: int, user: UserInfo
 ) -> dict:
     """Resolve the full authorized base without model-generated graph content.
 
@@ -571,8 +562,6 @@ async def resolve_document(
     """
     graph = await FlowGraphService.get_accessible(reference.workflow_id, user)
     if reference.snapshot_id is not None:
-        if conversation_id is None:
-            raise NotFoundException
         from app.services.assistant_sessions import AssistantSessionService
 
         snapshot = await AssistantSessionService.read_snapshot(
@@ -589,7 +578,7 @@ async def resolve_document(
 
 
 async def read_history(
-    args: HistoryQuery, conversation_id: int | None, user: UserInfo
+    args: HistoryQuery, conversation_id: int, user: UserInfo
 ) -> dict:
     """Read a bounded historical value after account and resource checks.
 
@@ -610,8 +599,6 @@ async def read_history(
     from app.models.assistant import AssistantToolCall, AssistantTurn
     from app.services.assistant_sessions import AssistantSessionService
 
-    if conversation_id is None:
-        raise NotFoundException
     await AssistantSessionService.owned(conversation_id, user)
     turn_id = args.turn_id
     if turn_id is None and args.tool_call_id is not None:

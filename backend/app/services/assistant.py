@@ -293,7 +293,7 @@ class AssistantService:
         finished = False
         last_saved = monotonic()
         try:
-            _, turn = await AssistantSessionService.begin(conversation_id, body, user)
+            turn = await AssistantSessionService.begin(conversation_id, body, user)
             async with aclosing(cls.stream(turn, user)) as events:
                 async for event in events:
                     if event.event == "text_delta":

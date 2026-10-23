@@ -52,14 +52,14 @@ async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
 
 
 async def workflow_details(
-    workflow_id: int, user: UserInfo, conversation_id: int | None
+    workflow_id: int, user: UserInfo, conversation_id: int
 ) -> dict:
     """Describe the saved draft and retain a reference without expanded schemas.
 
     Args:
         workflow_id: Workflow whose saved draft to inspect.
         user: Account with current resource permissions.
-        conversation_id: Owning conversation, when persistence is active.
+        conversation_id: Owning conversation for the saved-draft snapshot.
 
     Returns:
         Metadata, exact counts, a bounded saved-draft overview, and its base
@@ -82,16 +82,15 @@ async def workflow_details(
         "published_node_count": len((graph.definition or {}).get("nodes", [])),
         "base": {"workflow_id": graph.id, "draft_version": graph.draft_version},
     }
-    if conversation_id is not None:
-        snapshot = await AssistantSessionService.snapshot(
-            conversation_id,
-            graph.id,
-            graph.draft_version,
-            GraphDocument.model_validate(document),
-            "saved",
-            user,
-        )
-        result["base"]["snapshot_id"] = snapshot.id
+    snapshot = await AssistantSessionService.snapshot(
+        conversation_id,
+        graph.id,
+        graph.draft_version,
+        GraphDocument.model_validate(document),
+        "saved",
+        user,
+    )
+    result["base"]["snapshot_id"] = snapshot.id
     return result
 
 

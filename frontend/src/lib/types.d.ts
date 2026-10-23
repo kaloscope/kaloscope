@@ -131,7 +131,7 @@ export type AssistantConversation = {
 /** Persisted page metadata; full canvases remain behind server-owned references. */
 export type AssistantStoredContext =
   | Extract<AssistantPageContext, { page_type: 'workflows' }>
-  | (Omit<Extract<AssistantPageContext, { page_type: 'workflow_designer' }>, 'canvas'> & { snapshot_id?: number });
+  | (Omit<Extract<AssistantPageContext, { page_type: 'workflow_designer' }>, 'canvas'> & { snapshot_id: number });
 
 /**
  * A registered internal page offered by the navigation tool.
