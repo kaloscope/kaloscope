@@ -2,7 +2,7 @@
   import { api } from '$lib/api';
   import type { Resp } from '$lib/types';
   import type { Language, LanguageSupport } from '@codemirror/language';
-  import type { Extension } from '@codemirror/state';
+  import { Annotation, Transaction, type Extension } from '@codemirror/state';
   import babel from 'prettier/plugins/babel';
   import estree from 'prettier/plugins/estree';
   import yaml from 'prettier/plugins/yaml';
@@ -92,6 +92,11 @@
       changes: { from: 0, to: view.state.doc.length, insert: newDoc }
     });
   }
+
+  /**
+   * Mark document replacements that mirror an external change rather than user input.
+   */
+  const external = Annotation.define<boolean>();
 
   /**
    * Format document based on the language.
@@ -402,7 +407,7 @@
    * An extension to listen to the document changes.
    */
   const updateListener: Extension = EditorView.updateListener.of((update) => {
-    if (update.docChanged) {
+    if (update.docChanged && !update.transactions.some((transaction) => transaction.annotation(external))) {
       if (onchange) {
         debounceTime > 0 ? _onchange() : onchange(update.state.doc.toString());
       } else {
@@ -460,6 +465,16 @@
     return () => {
       editorView.destroy();
     };
+  });
+
+  // mirror external changes into read-only views, which have no local edits to preserve
+  $effect(() => {
+    const doc = document;
+    if (!readOnly || doc === undefined || !editorView || doc === editorView.state.doc.toString()) return;
+    editorView.dispatch({
+      changes: { from: 0, to: editorView.state.doc.length, insert: doc },
+      annotations: [external.of(true), Transaction.addToHistory.of(false)]
+    });
   });
 </script>
 

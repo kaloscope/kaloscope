@@ -63,6 +63,7 @@
     return 'other';
   });
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');
+  const retryable = $derived(incomplete || !!lastTurn?.canvasError);
   const destinations = $derived.by(() => {
     const items: { path: string; label: string }[] = [];
     const pathname = normalizePathname(page.url.pathname);
@@ -196,9 +197,9 @@
   }
 
   /**
-   * Replace an incomplete reply with a new attempt using the current page.
+   * Send a turn's prompt again using the current page.
    *
-   * @param turn - Incomplete turn whose prompt is sent again.
+   * @param turn - Incomplete turn to retry, or a completed turn whose edit could not be applied.
    */
   function retry(turn: AssistantTurn): void {
     // the action strip disappears while generating, so keep focus on the stop control
@@ -491,6 +492,12 @@
                   {/if}
                 </p>
               </div>
+            {:else if turn.canvasError}
+              <div class="flex items-start gap-2 text-xs leading-5 text-base-content/60">
+                <iconify-icon icon={icons.warning} width="0.875rem" class="mt-0.75 size-3.5 shrink-0" aria-hidden="true"
+                ></iconify-icon>
+                <p>{errorMessage(turn.canvasError)}</p>
+              </div>
             {/if}
           </div>
         </li>
@@ -509,16 +516,19 @@
         </button>
       {/if}
 
-      {#if lastTurn && (incomplete || destinations.length)}
+      {#if lastTurn && (retryable || destinations.length)}
         <section
           class="mb-1.5 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs"
           aria-label={$_('assistant.turn_actions')}
         >
-          {#if incomplete}
+          {#if retryable}
             <button
               type="button"
               class="btn gap-1 btn-subtle font-normal btn-xs"
-              disabled={$assistant.busy || $assistant.historyLoading || $assistant.conversation?.busy}
+              disabled={$assistant.busy ||
+                $assistant.historyLoading ||
+                $assistant.conversation?.busy ||
+                !!$assistantCanvas}
               onclick={() => retry(lastTurn)}
             >
               <iconify-icon icon={icons.arrowClockwise} width="0.875rem" class="size-3.5" aria-hidden="true"

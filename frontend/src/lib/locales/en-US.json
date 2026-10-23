@@ -1013,7 +1013,9 @@
     "assistant_title_invalid": "Use a conversation title of 1–120 characters.",
     "assistant_proposal_changed": "The canvas edit record changed. Ask the assistant to edit again.",
     "assistant_canvas_changed": "The canvas changed. Send a new request using the current canvas.",
-    "assistant_canvas_wait_save": "Check the save result before leaving the canvas."
+    "assistant_canvas_wait_save": "Check the save result before leaving the canvas.",
+    "assistant_canvas_already_saved": "The draft had already been saved, so the changes were kept.",
+    "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved."
   },
   "ai": {
     "custom": "Custom provider",
@@ -1092,8 +1094,14 @@
       "assistant_canvas_changed": "The canvas changed. Send a new request using the current canvas.",
       "assistant_canvas_readonly": "This workflow is no longer editable. The original canvas was preserved.",
       "assistant_canvas_invalid": "The workflow has structural errors. Nothing was applied. Ask the assistant to fix them.",
-      "assistant_canvas_conflict": "These changes cannot be saved. Revert them and reload the draft.",
-      "assistant_canvas_uncertain": "The save result is unknown. Check its status before reverting.",
+      "assistant_canvas_conflict": "The draft changed elsewhere, so these changes were not saved. Revert them and reload the draft.",
+      "assistant_canvas_not_editable": "This workflow is no longer editable, so these changes were not saved. Revert them.",
+      "assistant_canvas_missing": "This workflow no longer exists, so these changes were not saved. Revert them.",
+      "assistant_canvas_save_invalid": "The workflow has structural errors, so these changes were not saved. Revert them.",
+      "assistant_canvas_uncertain": "The save could not be confirmed. Check its status, or revert to cancel it if it has not completed.",
+      "assistant_canvas_revert_failed": "The revert could not be confirmed and the save may still complete. Retry or check its status.",
+      "assistant_canvas_load_failed": "The reply is complete, but its changes could not be loaded. Load them again or revert.",
+      "assistant_canvas_not_applied": "The reply is complete, but its changes were not applied. The original canvas was kept.",
       "assistant_canvas_save_failed": "The draft could not be saved. Retry or revert these changes."
     },
     "pages": {
@@ -1141,6 +1149,8 @@
       "editing": "Editing the current canvas...",
       "review": "Changes are ready to inspect",
       "saving": "Saving the draft...",
+      "reverting": "Reverting changes...",
+      "failed": "Changes could not be loaded",
       "locked": "Editing and auto-save are paused. You can pan, zoom and inspect code.",
       "readonly": "Read-only preview",
       "changes": "{0, plural, one {# change} other {# changes}}",
@@ -1149,6 +1159,8 @@
       "revert": "Revert",
       "keep": "Keep and save draft",
       "check_save": "Check save status",
+      "uncertain": "Save status unknown",
+      "retry": "Load again",
       "saved": "Kept and saved as a draft.",
       "reverted": "Assistant changes reverted.",
       "record": "Canvas edit record. Changes are never reapplied automatically.",

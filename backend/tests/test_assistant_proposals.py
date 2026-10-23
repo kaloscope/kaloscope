@@ -225,7 +225,8 @@ def test_canvas_display():
             restored = await Proposals.canvas(
                 env.conversation, result["proposal_id"], env.owner
             )
-            assert restored["proposal"] == saved
+            assert restored["proposal"] == saved["proposal"]
+            assert restored["workflow"] == saved["workflow"]
             assert restored["workflow"]["draft_version"] == 1
             assert restored["workflow"]["state"] == "modified"
             assert (await FlowGraph.get(id=env.graph.id)).definition == document()
@@ -399,9 +400,10 @@ def test_canvas_chained_edits():
 
 async def save_edit(env, proposal_id, user=None, **values):
     body = await decision(env, proposal_id, ProposalConfirm, **values)
-    return await Proposals.confirm(
+    result = await Proposals.confirm(
         env.conversation, proposal_id, body, user or env.owner
     )
+    return result["proposal"]
 
 
 async def revisions(env):
@@ -440,6 +442,12 @@ def test_save():
             tool = turns["items"][-1]["tools"][0]
             assert tool["proposal"]["status"] == "saved"
             assert tool["proposal"]["saved_version"] == 1
+            recovered = await Proposals.outcome(
+                env.conversation, data["proposal_id"], env.reader
+            )
+            assert recovered["proposal"] == outcome
+            assert recovered["workflow"]["draft_version"] == 1
+            assert recovered["workflow"]["state"] == GraphState.MODIFIED
 
     asyncio.run(run())
 
@@ -640,7 +648,8 @@ def test_revert():
             after = await save_edit(env, data["proposal_id"])
             await env.graph.refresh_from_db()
 
-            assert cancelled["status"] == after["status"] == "cancelled"
+            assert cancelled["proposal"]["status"] == after["status"] == "cancelled"
+            assert cancelled["workflow"] is None
             assert env.graph.draft_version == 0
 
             raced = await preview(env, [set_url()], key="raced")
@@ -652,10 +661,100 @@ def test_revert():
                 ),
             )
             await env.graph.refresh_from_db()
-            assert results[0]["status"] == results[1]["status"]
+            assert results[0]["status"] == results[1]["proposal"]["status"]
             assert env.graph.draft_version == (
                 1 if results[0]["status"] == "saved" else 0
             )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["deleted", "revoked"])
+def test_outcome_recovery(case):
+    async def run():
+        async with database() as env:
+            pending = await preview(env, [set_url()], key="pending")
+            saved = await preview(env, [set_url("https://saved.test")], key="saved")
+            await save_edit(env, saved["proposal_id"])
+            user = env.owner
+            if case == "deleted":
+                await FlowGraph.filter(id=env.graph.id).delete()
+            else:
+                user = SimpleNamespace(
+                    id=env.owner.id, role="user", perms=SimpleNamespace(indexer_ids=[])
+                )
+
+            recovered = await Proposals.outcome(
+                env.conversation, saved["proposal_id"], user
+            )
+            unresolved = await Proposals.outcome(
+                env.conversation, pending["proposal_id"], user
+            )
+            cancelled = await Proposals.cancel(
+                env.conversation,
+                pending["proposal_id"],
+                await decision(env, pending["proposal_id"]),
+                user,
+            )
+
+            assert recovered["proposal"]["status"] == "saved"
+            assert recovered["proposal"]["saved_version"] == 1
+            assert recovered["workflow"] is None
+            assert unresolved["proposal"]["status"] == "pending"
+            assert cancelled["proposal"]["status"] == "cancelled"
+            assert (
+                await Proposals.outcome(env.conversation, pending["proposal_id"], user)
+            )["proposal"]["status"] == "cancelled"
+            with pytest.raises(
+                NotFoundException if case == "deleted" else ForbiddenException
+            ):
+                await Proposals.canvas(env.conversation, saved["proposal_id"], user)
+            with pytest.raises(NotFoundException):
+                await Proposals.outcome(
+                    env.conversation, saved["proposal_id"], env.other
+                )
+            other = (await Sessions.create(ConversationCreate(model=MODEL), env.owner))[
+                "id"
+            ]
+            with pytest.raises(NotFoundException):
+                await Proposals.outcome(other, saved["proposal_id"], env.owner)
+
+    asyncio.run(run())
+
+
+def test_cancel_during_save(monkeypatch):
+    save_graph = FlowGraphService.save_graph
+
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed(cls, id, body, user):
+            started.set()
+            await release.wait()
+            return await save_graph(id, body, user)
+
+        async with database() as env:
+            data = await preview(env, [set_url()])
+            body = await decision(env, data["proposal_id"])
+            monkeypatch.setattr(FlowGraphService, "save_graph", classmethod(delayed))
+
+            saving = asyncio.create_task(save_edit(env, data["proposal_id"]))
+            await started.wait()
+            cancelling = asyncio.create_task(
+                Proposals.cancel(env.conversation, data["proposal_id"], body, env.owner)
+            )
+            for _ in range(10):
+                await asyncio.sleep(0)
+            blocked = not cancelling.done()
+            release.set()
+            saved, cancelled = await asyncio.gather(saving, cancelling)
+            await env.graph.refresh_from_db()
+
+            assert blocked
+            assert saved["status"] == cancelled["proposal"]["status"] == "saved"
+            assert cancelled["workflow"]["draft_version"] == 1
+            assert env.graph.draft_version == 1
+            assert await revisions(env) == 1
 
     asyncio.run(run())
 
@@ -743,8 +842,9 @@ def test_missing_sources():
                 env.conversation, data["proposal_id"], body, env.owner
             )
 
-            assert outcome["status"] == "failed"
-            assert outcome["error"] == "not_found"
+            assert outcome["proposal"]["status"] == "failed"
+            assert outcome["proposal"]["error"] == "not_found"
+            assert outcome["workflow"] is None
             await Sessions.delete(env.conversation, env.owner)
             assert not await AssistantProposal.exists()
 

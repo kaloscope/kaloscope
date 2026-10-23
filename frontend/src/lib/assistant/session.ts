@@ -45,6 +45,8 @@ export type AssistantTurn = {
   content: string;
   status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error';
   error?: string;
+  // a completed reply whose canvas edit could not be applied keeps its status
+  canvasError?: string;
   tools: AssistantTool[];
 };
 type AssistantState = {
@@ -153,6 +155,35 @@ function recordAssistantProposal(proposal: AssistantProposal): void {
     });
     return { ...value, turns };
   });
+}
+
+/**
+ * Show why a completed reply's canvas edit was not applied without failing the reply.
+ *
+ * @param id - Local identity of the completed turn.
+ * @param code - Public error code describing the stale or invalid edit.
+ */
+function recordCanvasError(id: string, code: string): void {
+  assistant.update((value) => ({
+    ...value,
+    turns: value.turns.map((turn) => (turn.id === id ? { ...turn, canvasError: code } : turn))
+  }));
+}
+
+/**
+ * Check whether a tool call produced a saveable canvas edit.
+ *
+ * @param tool - Streamed tool call.
+ * @returns Whether the call is a successful preview with an internal save checkpoint.
+ */
+function isSaveablePreview(tool: AssistantTool): boolean {
+  return (
+    tool.name === 'preview_workflow_draft' &&
+    tool.status === 'complete' &&
+    !!tool.result?.ok &&
+    Number.isSafeInteger(tool.result.data?.proposal_id) &&
+    (tool.result.data!.proposal_id as number) > 0
+  );
 }
 
 /**
@@ -446,14 +477,16 @@ export async function changeAssistantConversation(id: number, title?: string): P
  * Submit only the new prompt and page snapshot to an owned persistent conversation.
  *
  * @param route - Current pathname used to capture the active page.
- * @param retryId - Incomplete turn linked to a new attempt with fresh context.
+ * @param retryId - Turn whose prompt is sent again with fresh context; only an incomplete turn is linked as a retry.
  * @returns A promise that resolves after completion, cancellation, or error.
  */
 export async function sendAssistant(route: string, retryId?: string): Promise<void> {
   const state = get(assistant);
   if (state.busy || state.historyLoading || state.conversation?.busy || state.modelsLoading !== null) return;
   if (get(assistantCanvas)) return;
-  const retry = retryId ? state.turns.find((turn) => turn.id === retryId && turn.status !== 'complete') : null;
+  const retry = retryId
+    ? state.turns.find((turn) => turn.id === retryId && (turn.status !== 'complete' || turn.canvasError))
+    : null;
   const prompt = (retry?.prompt ?? state.input).trim();
   if (!prompt) return;
   let context: AssistantPageContext | null;
@@ -619,7 +652,8 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
         prompt,
         request_id: turn.id,
         context: submittedContext,
-        ...(retry?.serverId ? { retry_of: retry.serverId } : {})
+        // a completed turn cannot be retried, so its prompt starts a fresh request
+        ...(retry?.serverId && retry.status !== 'complete' ? { retry_of: retry.serverId } : {})
       },
       signal: controller.signal,
       timeout: false,
@@ -633,21 +667,26 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     const terminal = await consumeAssistantStream(response.body, receive, activity);
     if (terminal === 'done' && submittedContext?.page_type === 'workflow_designer' && submittedContext.snapshot_id) {
       const completed = get(assistant).turns.find((item) => item.id === turn.id);
-      const preview = completed?.tools.filter((tool) => tool.name === 'preview_workflow_draft').at(-1);
-      const proposalId = preview?.result?.ok ? preview.result.data?.proposal_id : undefined;
-      if (typeof proposalId === 'number') {
+      // the backend advances its snapshot chain only after successful previews
+      const preview =
+        active === controller && completed?.status === 'complete'
+          ? completed.tools.filter(isSaveablePreview).at(-1)
+          : undefined;
+      if (preview) {
         await finishAssistantCanvas(
           turn.id,
           conversation.id,
-          proposalId,
+          preview.result!.data!.proposal_id as number,
           submittedContext.snapshot_id,
-          recordAssistantProposal
+          recordAssistantProposal,
+          (code) => recordCanvasError(turn.id, code)
         );
       }
     }
   } catch (error) {
     update((value) => {
-      if (value.status === 'stopped') return;
+      // the server already completed this turn, so a later local failure must not make it retryable
+      if (value.status === 'stopped' || value.status === 'complete') return;
       value.error = timedOut ? 'ai_timeout' : errorCode(error, 'assistant_stream_interrupted');
       value.status = value.error === 'assistant_stream_interrupted' ? 'interrupted' : 'error';
     });

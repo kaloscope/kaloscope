@@ -1,12 +1,19 @@
 import { api } from '$lib/api';
+import { alert } from '$lib/components';
 import { trackGraphWrite, type GraphUpdate } from '$lib/components/business/flow/graphWrites';
 import type { AssistantPageContext, AssistantProposal, FlowGraph, GraphValidation, Resp } from '$lib/types';
+import { isHTTPError } from 'ky';
 import { get, writable } from 'svelte/store';
 import { snapshotAssistantCanvas } from './context';
 import { errorCode } from './errors';
 
 type Document = NonNullable<FlowGraph['draft']>;
 type DesignerContext = Extract<AssistantPageContext, { page_type: 'workflow_designer' }>;
+type Outcome = {
+  proposal: AssistantProposal;
+  // saved-draft metadata, omitted when the workflow is gone or no longer readable
+  workflow: GraphUpdate | null;
+};
 type CanvasResult = {
   proposal: AssistantProposal;
   base_snapshot_id: number | null;
@@ -27,11 +34,15 @@ type CanvasEditor = {
 type CanvasState = {
   workflowId: number;
   turnId: string;
-  phase: 'editing' | 'review' | 'saving';
+  // `failed` keeps a completed reply's edit locked so a transient load error can be retried
+  phase: 'editing' | 'failed' | 'review' | 'saving' | 'reverting';
   changes: number;
   issues: number;
   error: string | null;
+  // a confirmation may have reached the server and no terminal outcome is known yet
   uncertain: boolean;
+  // the server recorded a conflict or failure, so the edit can only be reverted
+  rejected: boolean;
 };
 type Edit = {
   editor: CanvasEditor;
@@ -40,8 +51,12 @@ type Edit = {
   controller: AbortController;
   stop: () => void;
   path?: string;
+  snapshotId?: number;
   result?: CanvasResult;
+  // set once a confirmation is sent, after which a pending record no longer proves that nothing was saved
+  submitted: boolean;
   decision?: (proposal: AssistantProposal) => void;
+  fail?: (code: string) => void;
 };
 
 export const assistantCanvas = writable<CanvasState | null>(null);
@@ -57,6 +72,16 @@ let active: Edit | null = null;
  */
 function sameCanvas(left: Document, right: Document): boolean {
   return JSON.stringify(snapshotAssistantCanvas(left)) === JSON.stringify(snapshotAssistantCanvas(right));
+}
+
+/**
+ * Check whether a recorded outcome wrote, or already matched, the workflow draft.
+ *
+ * @param proposal - Recorded canvas edit.
+ * @returns Whether the edit is durably part of the draft.
+ */
+function isSaved(proposal: AssistantProposal): boolean {
+  return proposal.status === 'saved' || proposal.status === 'unchanged';
 }
 
 /**
@@ -110,7 +135,7 @@ export function beginAssistantCanvas(turnId: string, context: AssistantPageConte
   }
   const surface = editor!;
   surface.begin();
-  active = { editor: surface, context, turnId, controller: new AbortController(), stop };
+  active = { editor: surface, context, turnId, controller: new AbortController(), stop, submitted: false };
   assistantCanvas.set({
     workflowId: context.resource_id,
     turnId,
@@ -118,12 +143,13 @@ export function beginAssistantCanvas(turnId: string, context: AssistantPageConte
     changes: 0,
     issues: 0,
     error: null,
-    uncertain: false
+    uncertain: false,
+    rejected: false
   });
 }
 
 /**
- * Read an edit's complete canvas or durable outcome within its mounted lifetime.
+ * Read an edit's complete canvas within its mounted lifetime.
  *
  * @param edit - Current live edit with an owned API path.
  * @returns Authorized canvas data after checking request lifetime.
@@ -138,6 +164,51 @@ async function readResult(edit: Edit): Promise<CanvasResult> {
 }
 
 /**
+ * Read only the recorded outcome, which stays available after workflow access is lost.
+ *
+ * @param edit - Current live edit with an owned API path.
+ * @returns The authoritative recorded outcome.
+ */
+async function readOutcome(edit: Edit): Promise<Outcome> {
+  const { data } = await api
+    .get(`${edit.path}/outcome`, { signal: edit.controller.signal, context: { silentErrors: true } })
+    .json<Resp<Outcome>>();
+  edit.controller.signal.throwIfAborted();
+  return data;
+}
+
+/**
+ * Atomically close an open edit, or learn the outcome that already closed it.
+ *
+ * @param edit - Live edit whose displayed identity is known.
+ * @param signal - Optional request lifetime.
+ * @returns The authoritative recorded outcome.
+ */
+async function cancelEdit(edit: Edit, signal?: AbortSignal): Promise<Outcome> {
+  const { workflow_id, base_version, digest } = edit.result!.proposal;
+  const { data } = await api
+    .post(`${edit.path}/cancel`, {
+      json: { workflow_id, base_version, digest },
+      signal,
+      retry: 0,
+      context: { silentErrors: true }
+    })
+    .json<Resp<Outcome>>();
+  return data;
+}
+
+/**
+ * Check whether a canvas load failure may succeed when retried with the same live edit.
+ *
+ * @param error - Load or application failure.
+ * @returns Whether the failure came from the network or a temporary server condition.
+ */
+function isTransient(error: unknown): boolean {
+  if (isHTTPError(error)) return error.response.status >= 500 || [408, 429].includes(error.response.status);
+  return !(error instanceof Error && error.message.startsWith('assistant_'));
+}
+
+/**
  * Apply the final successful edit once after the model finishes its summary.
  *
  * @param turnId - Request that owns the canvas lock.
@@ -145,50 +216,87 @@ async function readResult(edit: Edit): Promise<CanvasResult> {
  * @param proposalId - Last successful preview's internal save checkpoint.
  * @param snapshotId - Original captured canvas identity, preserved across tool calls.
  * @param decision - Callback updating the conversation's recorded outcome.
- * @returns A promise resolving after the canvas is ready to inspect.
- * @throws If validation, permissions, the base, or the mounted page changed.
+ * @param fail - Callback reporting why a completed reply's edit was not applied.
+ * @returns A promise resolving after the canvas is ready, retryable, or restored.
  */
 export async function finishAssistantCanvas(
   turnId: string,
   conversationId: number,
   proposalId: number,
   snapshotId: number,
-  decision: (proposal: AssistantProposal) => void
+  decision: (proposal: AssistantProposal) => void,
+  fail: (code: string) => void
 ): Promise<void> {
   const edit = active;
   if (!edit || edit.turnId !== turnId) return;
   edit.path = `assistant/conversations/${conversationId}/proposals/${proposalId}`;
+  edit.snapshotId = snapshotId;
   edit.decision = decision;
-  const result = await readResult(edit);
-  if (!result.editable) throw new Error('assistant_canvas_readonly');
-  if (
-    result.proposal.status !== 'pending' ||
-    result.proposal.workflow_id !== edit.context.resource_id ||
-    result.base_snapshot_id !== snapshotId ||
-    result.current_version !== edit.context.draft_version ||
-    result.proposal.base_version !== edit.context.draft_version
-  ) {
-    throw new Error('assistant_canvas_changed');
+  edit.fail = fail;
+  await loadEdit(edit);
+}
+
+/**
+ * Validate and apply a live edit, keeping transient failures retryable.
+ *
+ * @param edit - Live edit whose reply has completed.
+ * @returns A promise resolving after applying, pausing for retry, or restoring the canvas.
+ */
+async function loadEdit(edit: Edit): Promise<void> {
+  try {
+    const result = await readResult(edit);
+    if (!result.editable) throw new Error('assistant_canvas_readonly');
+    if (
+      result.proposal.status !== 'pending' ||
+      result.proposal.workflow_id !== edit.context.resource_id ||
+      result.base_snapshot_id !== edit.snapshotId ||
+      result.current_version !== edit.context.draft_version ||
+      result.proposal.base_version !== edit.context.draft_version
+    ) {
+      throw new Error('assistant_canvas_changed');
+    }
+    if (!result.canvas) throw new Error('assistant_canvas_invalid');
+    const current = edit.editor.read();
+    if (!current || !sameCanvas(current.canvas, edit.context.canvas)) throw new Error('assistant_canvas_changed');
+    edit.result = result;
+    edit.decision?.(result.proposal);
+    if (!result.change_count) {
+      void discardAssistantCanvas();
+      return;
+    }
+    edit.editor.apply(result.canvas);
+    assistantCanvas.update(
+      (state) =>
+        state && {
+          ...state,
+          phase: 'review',
+          changes: result.change_count,
+          issues: result.validation.issues.length + result.validation.readiness.warning_count
+        }
+    );
+  } catch (error) {
+    if (active !== edit) return;
+    if (!edit.result && isTransient(error)) {
+      assistantCanvas.update((state) => state && { ...state, phase: 'failed', error: 'assistant_canvas_load_failed' });
+      return;
+    }
+    // a stale or invalid edit can never apply to this canvas, so release it for a fresh request
+    resetAssistantCanvas();
+    edit.fail?.(errorCode(error, 'assistant_canvas_not_applied'));
   }
-  if (!result.canvas) throw new Error('assistant_canvas_invalid');
-  const current = edit.editor.read();
-  if (!current || !sameCanvas(current.canvas, edit.context.canvas)) throw new Error('assistant_canvas_changed');
-  edit.result = result;
-  decision(result.proposal);
-  if (!result.change_count) {
-    discardAssistantCanvas();
-    return;
-  }
-  edit.editor.apply(result.canvas);
-  assistantCanvas.update(
-    (state) =>
-      state && {
-        ...state,
-        phase: 'review',
-        changes: result.change_count,
-        issues: result.validation.issues.length + result.validation.readiness.warning_count
-      }
-  );
+}
+
+/**
+ * Load a completed reply's edit again while its original canvas remains locked.
+ *
+ * @returns A promise resolving after applying, pausing for retry, or restoring the canvas.
+ */
+export async function retryAssistantCanvas(): Promise<void> {
+  const edit = active;
+  const state = get(assistantCanvas);
+  if (!edit?.path || state?.phase !== 'failed') return;
+  assistantCanvas.set({ ...state, phase: 'editing', error: null });
+  await loadEdit(edit);
 }
 
 /**
@@ -201,96 +309,146 @@ export function endAssistantCanvas(turnId: string): void {
 }
 
 /**
- * Restore the pre-assistant canvas, including its unsaved manual work.
- */
-export function discardAssistantCanvas(): void {
-  const edit = active;
-  const state = get(assistantCanvas);
-  if (!edit || state?.phase === 'saving' || state?.uncertain) return;
-  const result = edit.result;
-  if (result && edit.path) {
-    const { workflow_id, base_version, digest } = result.proposal;
-    // cancelling an unaccepted checkpoint never writes the workflow draft
-    void api
-      .post(`${edit.path}/cancel`, {
-        json: { workflow_id, base_version, digest },
-        retry: 0,
-        context: { silentErrors: true }
-      })
-      .catch(() => {});
-    edit.decision?.({ ...result.proposal, status: 'cancelled' });
-  }
-  resetAssistantCanvas();
-}
-
-/**
- * Mark a confirmed save in the existing editor history without reloading the page.
+ * Mark a durable save in the existing editor history without reloading the page.
  *
  * @param edit - Live edit that owns the saved canvas.
- * @param result - Durable save outcome and its corresponding metadata.
- * @returns Whether the result represents a successful save.
+ * @param outcome - Saved outcome and any readable workflow metadata.
  */
-function acceptSaved(edit: Edit, result: CanvasResult): boolean {
-  if (!['saved', 'unchanged'].includes(result.proposal.status)) return false;
-  edit.decision?.(result.proposal);
-  edit.editor.saved(result.workflow);
+function acceptSaved(edit: Edit, { proposal, workflow }: Outcome): void {
+  edit.editor.saved(workflow ?? { id: proposal.workflow_id, draft_version: proposal.saved_version! });
   active = null;
   assistantCanvas.set(null);
-  return true;
+  if (workflow) void trackGraphWrite(proposal.workflow_id, async () => workflow).catch(() => {});
 }
 
 /**
- * Save the visible edit once, recovering a lost response before allowing reversal.
+ * Resolve the live edit from an authoritative terminal outcome.
  *
- * @returns A promise resolving with the canvas saved or a visible retryable error.
+ * @param edit - Live edit whose outcome was recorded by the server.
+ * @param outcome - Recorded outcome other than `pending`.
+ */
+function settle(edit: Edit, outcome: Outcome): void {
+  const { proposal } = outcome;
+  edit.result = { ...edit.result!, proposal };
+  edit.decision?.(proposal);
+  if (isSaved(proposal)) {
+    acceptSaved(edit, outcome);
+    return;
+  }
+  if (proposal.status === 'cancelled') {
+    // an earlier revert reached the server after its response was lost
+    alert({ level: 'warning', message: 'assistant_canvas_already_reverted' });
+    resetAssistantCanvas();
+    return;
+  }
+  let error = 'assistant_canvas_save_failed';
+  if (proposal.status === 'conflict' || proposal.error === 'flow_draft_conflict') error = 'assistant_canvas_conflict';
+  else if (proposal.error === 'flow_not_editable') error = 'assistant_canvas_not_editable';
+  else if (proposal.error === 'not_found') error = 'assistant_canvas_missing';
+  else if (proposal.error === 'flow_graph_invalid') error = 'assistant_canvas_save_invalid';
+  assistantCanvas.update((state) => state && { ...state, phase: 'review', error, uncertain: false, rejected: true });
+}
+
+/**
+ * Restore the pre-assistant canvas, including its unsaved manual work.
+ *
+ * An edit that was never submitted, or whose save was rejected, is restored at once.
+ * After a confirmation may have reached the server, only an atomic cancellation or a
+ * recorded save resolves the race, so the canvas stays as shown until one is known.
+ *
+ * @returns A promise resolving after the canvas is restored, saved, or still awaiting a known outcome.
+ */
+export async function discardAssistantCanvas(): Promise<void> {
+  const edit = active;
+  const state = get(assistantCanvas);
+  if (!edit || !state || state.phase === 'saving' || state.phase === 'reverting') return;
+  if (!edit.result || !edit.path) {
+    resetAssistantCanvas();
+    return;
+  }
+  if (!edit.submitted || state.rejected) {
+    resetAssistantCanvas();
+    // record the decision only when the server confirms it, never as a local assumption
+    void cancelEdit(edit)
+      .then(({ proposal }) => edit.decision?.(proposal))
+      .catch(() => {});
+    return;
+  }
+  assistantCanvas.set({ ...state, phase: 'reverting', error: null });
+  try {
+    const outcome = await cancelEdit(edit, edit.controller.signal);
+    if (active !== edit) return;
+    edit.decision?.(outcome.proposal);
+    if (isSaved(outcome.proposal)) {
+      alert({ level: 'info', message: 'assistant_canvas_already_saved' });
+      acceptSaved(edit, outcome);
+    } else if (outcome.proposal.status === 'pending') {
+      throw new Error('assistant_canvas_revert_failed');
+    } else {
+      resetAssistantCanvas();
+    }
+  } catch (error) {
+    if (active === edit) {
+      assistantCanvas.set({ ...state, phase: 'review', error: errorCode(error, 'assistant_canvas_revert_failed') });
+    }
+  }
+}
+
+/**
+ * Save the visible edit once, recovering a lost response before reporting its outcome.
+ *
+ * @returns A promise resolving with the canvas saved, rejected, or awaiting a known outcome.
  */
 export async function keepAssistantCanvas(): Promise<void> {
   const edit = active;
   const state = get(assistantCanvas);
-  if (!edit?.result || !state || state.phase !== 'review') return;
+  if (!edit?.result || !edit.path || state?.phase !== 'review' || state.rejected) return;
   assistantCanvas.set({ ...state, phase: 'saving', error: null });
-  let submitted = state.uncertain;
+  const earlier = edit.submitted;
+  edit.submitted = true;
+  let outcome: Outcome | undefined;
+  let failure: unknown;
   try {
+    // serialize with designer saves to the same workflow
     await trackGraphWrite(edit.context.resource_id, async (signal) => {
-      const current = await readResult(edit);
-      if (acceptSaved(edit, current)) return current.workflow;
-      if (current.proposal.status !== 'pending') throw new Error('assistant_canvas_conflict');
-      const { workflow_id, base_version, digest } = current.proposal;
-      submitted = true;
-      await api.post(`${edit.path}/confirm`, {
-        json: { workflow_id, base_version, digest, canvas: edit.context.canvas },
-        signal: AbortSignal.any([signal, edit.controller.signal]),
-        retry: 0,
-        context: { silentErrors: true }
-      });
-      const result = await readResult(edit);
-      edit.result = result;
-      if (!acceptSaved(edit, result)) throw new Error('assistant_canvas_conflict');
-      return result.workflow;
+      const { workflow_id, base_version, digest } = edit.result!.proposal;
+      const { data } = await api
+        .post(`${edit.path}/confirm`, {
+          json: { workflow_id, base_version, digest, canvas: edit.context.canvas },
+          signal: AbortSignal.any([signal, edit.controller.signal]),
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<Resp<Outcome>>();
+      outcome = data;
     });
   } catch (error) {
-    if (active !== edit) return;
-    let uncertain = submitted;
-    if (submitted) {
-      try {
-        const result = await readResult(edit);
-        if (acceptSaved(edit, result)) {
-          await trackGraphWrite(edit.context.resource_id, async () => result.workflow);
-          return;
-        }
-        edit.result = result;
-        uncertain = false;
-      } catch {
-        // keep reversal disabled until the server's durable save outcome is known
-      }
-    }
-    if (active === edit) {
-      assistantCanvas.set({
-        ...state,
-        phase: 'review',
-        error: uncertain ? 'assistant_canvas_uncertain' : errorCode(error, 'assistant_canvas_save_failed'),
-        uncertain
-      });
-    }
+    failure = error;
   }
+  if (active !== edit) return;
+  if (!outcome) {
+    // a validation or identity rejection proves that only this first attempt wrote nothing
+    if (!earlier && isHTTPError(failure) && [400, 409, 422].includes(failure.response.status)) {
+      edit.submitted = false;
+      assistantCanvas.set({ ...state, phase: 'review', error: errorCode(failure, 'assistant_canvas_save_failed') });
+      return;
+    }
+    try {
+      outcome = await readOutcome(edit);
+    } catch {
+      // neither a failed read nor a missing response proves that the save failed
+    }
+    if (active !== edit) return;
+  }
+  if (!outcome || outcome.proposal.status === 'pending') {
+    // a pending record only means no save has committed yet; the sent confirmation may still claim it
+    assistantCanvas.set({
+      ...state,
+      phase: 'review',
+      error: errorCode(failure, 'assistant_canvas_uncertain'),
+      uncertain: true
+    });
+    return;
+  }
+  settle(edit, outcome);
 }
