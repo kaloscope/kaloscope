@@ -97,8 +97,18 @@ class SnapshotQuery(GraphReference):
 
     collection: Literal["nodes", "edges"] = "nodes"
     node_id: str | None = Field(default=None, max_length=64)
-    field_id: str | None = Field(default=None, max_length=128)
-    path: list[str | int] = Field(default_factory=list, max_length=10)
+    field_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Authored field inside node.data, e.g. url or headers; never data. "
+        "Omit to read the node itself.",
+    )
+    path: list[str | int] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Keys inside the selected value; use integers for array indices, "
+        "e.g. [0, 'value'] for the first header value.",
+    )
     offset: int = Field(default=0, ge=0, strict=True)
     limit: int = Field(default=10, ge=1, le=2000, strict=True)
 
@@ -199,8 +209,13 @@ TOOLS = (
         "against its saved draft_version."
         "Use snapshot_id for captured unsaved edits; changes=[] "
         "previews the unchanged base."
-        "Never regenerate unchanged nodes or scripts. No saving. "
-        "Conflicts require review. changed_paths are exact element-relative JSON "
+        "Never regenerate unchanged nodes or scripts. On an editable designer, "
+        "the app displays the final successful preview directly on that canvas, "
+        "then the user keeps and saves it or reverts it. Use this only when asked "
+        "to change the canvas. For subsequent edits in this turn, use the latest "
+        "proposal_snapshot_id as snapshot_id. You cannot save or publish. "
+        "On conflict, ask the user to revert, load the latest draft and request "
+        "a new edit. changed_paths are exact element-relative JSON "
         "Pointers with omission counts; validation includes static readiness only.",
         WorkflowPreview,
         admin=True,
@@ -289,7 +304,14 @@ def tool_error(code: ErrorCode, guidance: str) -> dict[str, Any]:
 
 
 async def execute_tool(
-    name: str, arguments: str, user: UserInfo, *, conversation_id: int | None = None
+    name: str,
+    arguments: str,
+    user: UserInfo,
+    *,
+    conversation_id: int | None = None,
+    call_id: str | None = None,
+    canvas: dict[str, Any] | None = None,
+    canvas_snapshot_id: int | None = None,
 ) -> dict[str, Any]:
     """Validate and invoke a registered tool using the current account's services.
 
@@ -298,6 +320,10 @@ async def execute_tool(
         arguments: Complete JSON arguments assembled by the SDK.
         user: Authenticated caller; identity never comes from model arguments.
         conversation_id: Server-owned conversation scope for immutable references.
+        call_id: Server-generated call identifier; a preview in a persistent
+            conversation records a pending canvas edit that only the user can save.
+        canvas: Current turn's captured designer context, never historical context.
+        canvas_snapshot_id: Latest successful canvas snapshot in this turn.
 
     Returns:
         Bounded JSON data or a sanitized recoverable tool error.
@@ -367,6 +393,19 @@ async def execute_tool(
                         ).model_dump(mode="json")
                         result["base"] = args.model_dump()
                     else:
+                        if canvas is not None and (
+                            args.workflow_id != canvas["resource_id"]
+                            or args.draft_version != canvas["draft_version"]
+                            or args.snapshot_id != canvas_snapshot_id
+                        ):
+                            return tool_error(
+                                ErrorCode.ASSISTANT_CANVAS_CHANGED,
+                                "Edit only the current canvas. Use its original "
+                                "workflow/version and the latest successful "
+                                "proposal_snapshot_id, or the page snapshot for "
+                                "the first edit. Do not use a saved or historical "
+                                "base.",
+                            )
                         proposal = apply_changes(document, args.changes)
                         preview = await FlowGraphService.preview_draft(
                             args.workflow_id,
@@ -417,6 +456,20 @@ async def execute_tool(
                                 user,
                             )
                             result["proposal_snapshot_id"] = snapshot.id
+                            if call_id is not None and canvas is not None:
+                                from app.services.assistant_proposals import (
+                                    AssistantProposalService,
+                                )
+
+                                proposal_record = await AssistantProposalService.create(
+                                    conversation_id,
+                                    call_id,
+                                    args.workflow_id,
+                                    args.draft_version,
+                                    snapshot,
+                                    canvas["snapshot_id"],
+                                )
+                                result["proposal_id"] = proposal_record.id
                         while (
                             result["changes"]
                             and len(dumps(result)) > MAX_TOOL_RESULT_BYTES

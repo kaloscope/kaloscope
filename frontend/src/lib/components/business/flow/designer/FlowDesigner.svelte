@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
+  import { assistantCanvas } from '$lib/assistant/canvas';
   import { Overlay } from '$lib/components';
   import { LOOP_TAG } from '$lib/constants';
   import { createLoading } from '$lib/helpers';
@@ -41,6 +42,20 @@
   let graph: FlowGraph | null = $state(null);
   let jsonGraph: string | null = $state(null);
   let interactive: boolean = $derived(store.nodesDraggable || store.nodesConnectable || store.elementsSelectable);
+  const canvasLocked = $derived($assistantCanvas?.workflowId === Number(graphId));
+  let interactionBeforeAssistant: [boolean, boolean, boolean] | null = null;
+
+  $effect(() => {
+    if (canvasLocked && !interactionBeforeAssistant) {
+      interactionBeforeAssistant = [store.nodesDraggable, store.nodesConnectable, store.elementsSelectable];
+      store.nodesDraggable = false;
+      store.nodesConnectable = false;
+      store.elementsSelectable = false;
+    } else if (!canvasLocked && interactionBeforeAssistant) {
+      [store.nodesDraggable, store.nodesConnectable, store.elementsSelectable] = interactionBeforeAssistant;
+      interactionBeforeAssistant = null;
+    }
+  });
 
   /**
    * Handle the drag over event.
@@ -61,7 +76,7 @@
    */
   function ondrop(event: DragEvent) {
     event.preventDefault();
-    if (!event.dataTransfer || !interactive) {
+    if (!event.dataTransfer || !interactive || canvasLocked) {
       return;
     }
     const data = event.dataTransfer.getData('application/svelteflow');
@@ -414,6 +429,7 @@
       minZoom={0.2}
       maxZoom={2}
       snapGrid={[10, 10]}
+      deleteKey={canvasLocked ? null : undefined}
       nodeTypes={{ node: NodeWrapper as any }}
       edgeTypes={{ edge: EdgeWrapper as any }}
       defaultEdgeOptions={{
@@ -431,7 +447,7 @@
       <Background gap={10} variant={BackgroundVariant.Dots} patternColor="rgba(128,128,128,0.4)" />
     </SvelteFlow>
   </div>
-  <NodeSchemas bind:nodes {graph} {sidebar} {interactive} />
+  <NodeSchemas bind:nodes {graph} {sidebar} interactive={interactive && !canvasLocked} />
 </div>
 
 <style>

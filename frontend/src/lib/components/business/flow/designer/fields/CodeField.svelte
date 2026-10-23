@@ -24,6 +24,8 @@
 </script>
 
 <script lang="ts">
+  import { assistantCanvas } from '$lib/assistant/canvas';
+  import { get } from 'svelte/store';
   import { CodeMirror, Label } from '$lib/components';
   import { jsonc } from '$lib/grammars/jsonc';
   import { nodeFormatter } from '$lib/i18n';
@@ -136,6 +138,7 @@
       tabSize={field.tabsize}
       lineLength={field.lineLength}
       readOnly={field.readonly}
+      enlarger={true}
       darkMode={field.darkmode}
       title={$label(field.label)}
       copier={field.copier}
@@ -148,6 +151,7 @@
       editorClass="nodrag nowheel"
       debounceTime={field.visible_when ? 0 : undefined}
       onchange={(doc) => {
+        if (get(assistantCanvas)) return;
         updateNodeData(field.nodeId, { [field.id]: doc });
       }}
     />

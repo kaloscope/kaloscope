@@ -513,12 +513,34 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
         if not graph.editable:
             raise ForbiddenException(ErrorCode.FLOW_NOT_EDITABLE)
         cls._check_version(graph, body.draft_version)
-        proposed = comparison_document(compress_document(body))
-        previous = comparison_document(graph.draft or {"nodes": [], "edges": []})
+        return GraphPreview(
+            workflow_id=id,
+            draft_version=graph.draft_version,
+            changes=cls.compare_documents(
+                graph.draft or {"nodes": [], "edges": []}, compress_document(body)
+            ),
+            validation=await validate_document(body, graph.category),
+            editor_path=f"/settings/workflows/graphs/{id}",
+        )
+
+    @staticmethod
+    def compare_documents(previous: dict, proposed: dict) -> list[GraphChange]:
+        """List canonical node and edge differences between two compressed graphs.
+
+        Args:
+            previous: Graph before the change, such as a saved draft.
+            proposed: Graph after the change.
+
+        Returns:
+            Ordered differences ignoring transient editor state, with bounded
+            JSON Pointers and exact path counts.
+        """
+        before_document = comparison_document(previous)
+        after_document = comparison_document(proposed)
         changes = []
         for collection, kind in (("nodes", "node"), ("edges", "edge")):
-            before = {item["id"]: item for item in previous[collection]}
-            after = {item["id"]: item for item in proposed[collection]}
+            before = {item["id"]: item for item in before_document[collection]}
+            after = {item["id"]: item for item in after_document[collection]}
             for item_id in sorted(before.keys() | after.keys()):
                 paths, path_count = changed_paths(
                     before.get(item_id), after.get(item_id)
@@ -542,13 +564,7 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
                             omitted_changed_paths=path_count - len(paths),
                         )
                     )
-        return GraphPreview(
-            workflow_id=id,
-            draft_version=graph.draft_version,
-            changes=changes,
-            validation=await validate_document(body, graph.category),
-            editor_path=f"/settings/workflows/graphs/{id}",
-        )
+        return changes
 
     @classmethod
     @atomic()

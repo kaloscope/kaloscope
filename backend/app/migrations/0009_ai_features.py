@@ -65,6 +65,28 @@ class Migration(migrations.Migration):
             bases=['TortoiseModel'],
         ),
         ops.CreateModel(
+            name='AssistantProposal',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('conversation', fields.ForeignKeyField('models.AssistantConversation', source_field='conversation_id', db_constraint=True, to_field='id', related_name=False, on_delete=OnDelete.CASCADE)),
+                ('call_id', fields.CharField(db_index=True, max_length=64)),
+                ('snapshot', fields.ForeignKeyField('models.AssistantSnapshot', source_field='snapshot_id', db_constraint=True, to_field='id', related_name=False, on_delete=OnDelete.CASCADE)),
+                ('base_snapshot', fields.ForeignKeyField('models.AssistantSnapshot', source_field='base_snapshot_id', null=True, db_constraint=True, to_field='id', related_name=False, on_delete=OnDelete.CASCADE)),
+                ('workflow_id', fields.IntField()),
+                ('base_version', fields.IntField()),
+                ('digest', fields.CharField(max_length=64)),
+                ('status', fields.CharField(default='pending', max_length=16)),
+                ('saved_version', fields.IntField(null=True)),
+                ('error', fields.CharField(null=True, max_length=128)),
+                ('attempts', fields.IntField(default=0)),
+                ('resolved_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=False)),
+            ],
+            options={'table': 'assistant_proposal', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Record the durable save outcome of one immutable assistant canvas edit.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
             name='AssistantTurn',
             fields=[
                 ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),

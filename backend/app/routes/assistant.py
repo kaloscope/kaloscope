@@ -10,14 +10,16 @@ from sanic_ext import validate
 
 from app.core.decorators import authorize
 from app.models.assistant import (
-    AssistantChat,
     AssistantEvent,
     AssistantSnapshotRequest,
     AssistantTurnRequest,
     ConversationCreate,
     ConversationRename,
+    ProposalConfirm,
+    ProposalDecision,
 )
 from app.services.assistant import AssistantService
+from app.services.assistant_proposals import AssistantProposalService
 from app.services.assistant_sessions import AssistantSessionService
 from app.utils.json import dumps
 
@@ -49,19 +51,6 @@ async def list_models(_: Request) -> HTTPResponse:
         Enabled providers and model IDs without credentials or endpoint settings.
     """
     return private_json(await AssistantService.list_models())
-
-
-@assistant.post("/chat")
-@authorize()
-@validate(json=AssistantChat)
-async def chat(request: Request, body: AssistantChat) -> None:
-    """Stream one assistant turn and cancel it when the browser disconnects.
-
-    Args:
-        request: Authenticated browser request with current account permissions.
-        body: Validated text history and selected model.
-    """
-    await serve_events(request, AssistantService.stream(body, request.ctx.user))
 
 
 async def serve_events(request: Request, events: AsyncIterator[AssistantEvent]) -> None:
@@ -273,4 +262,77 @@ async def persistent_chat(
     await serve_events(
         request,
         AssistantService.persistent_stream(conversation_id, body, request.ctx.user),
+    )
+
+
+PROPOSAL = "/conversations/<conversation_id:int>/proposals/<proposal_id:int>"
+
+
+@assistant.get(f"{PROPOSAL}/canvas")
+@authorize()
+async def get_proposal_canvas(
+    request: Request, conversation_id: int, proposal_id: int
+) -> HTTPResponse:
+    """Read an owned edit for direct display in the workflow designer.
+
+    Args:
+        request: Authenticated request with current editor permissions.
+        conversation_id: Conversation owning the immutable edit.
+        proposal_id: Edit whose complete canvas and outcome to read.
+
+    Returns:
+        Renderable canvas, validation, and save metadata without publishing it.
+    """
+    return private_json(
+        await AssistantProposalService.canvas(
+            conversation_id, proposal_id, request.ctx.user
+        )
+    )
+
+
+@assistant.post(f"{PROPOSAL}/confirm")
+@authorize()
+@validate(json=ProposalConfirm)
+async def confirm_proposal(
+    request: Request, conversation_id: int, proposal_id: int, body: ProposalConfirm
+) -> HTTPResponse:
+    """Save the displayed canvas edit after the user chooses to keep it.
+
+    Args:
+        request: Authenticated request from the edit owner.
+        conversation_id: Conversation owning the edit.
+        proposal_id: Canvas edit to save.
+        body: Displayed identity and the original designer canvas.
+
+    Returns:
+        The single recorded outcome.
+    """
+    return private_json(
+        await AssistantProposalService.confirm(
+            conversation_id, proposal_id, body, request.ctx.user
+        )
+    )
+
+
+@assistant.post(f"{PROPOSAL}/cancel")
+@authorize()
+@validate(json=ProposalDecision)
+async def cancel_proposal(
+    request: Request, conversation_id: int, proposal_id: int, body: ProposalDecision
+) -> HTTPResponse:
+    """Dismiss an open edit without writing the workflow.
+
+    Args:
+        request: Authenticated request from the edit owner.
+        conversation_id: Conversation owning the edit.
+        proposal_id: Canvas edit to revert.
+        body: Displayed identity.
+
+    Returns:
+        The recorded lifecycle state.
+    """
+    return private_json(
+        await AssistantProposalService.cancel(
+            conversation_id, proposal_id, body, request.ctx.user
+        )
     )

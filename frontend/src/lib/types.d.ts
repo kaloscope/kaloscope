@@ -150,12 +150,42 @@ export type AssistantToolResult = {
   error?: { code: string; guidance?: string };
 };
 
-/**
- * Completed turn history; attachments remain untrusted data on the server.
- */
-export type AssistantMessage =
-  | { role: 'user'; content: string; context?: AssistantPageContext | null }
-  | { role: 'assistant'; content: string; tool_results?: AssistantToolResult[] };
+/** Durable save lifecycle of an assistant canvas edit. */
+export type AssistantProposalStatus = 'pending' | 'saved' | 'unchanged' | 'conflict' | 'failed' | 'cancelled';
+
+/** Recorded outcome of one immutable canvas edit. */
+export type AssistantProposal = {
+  id: number;
+  call_id: string;
+  status: AssistantProposalStatus;
+  workflow_id: number;
+  base_version: number;
+  digest: string;
+  saved_version: number | null;
+  error: string | null;
+};
+
+/** A located validation issue that never echoes field content. */
+export type GraphIssue = {
+  code: string;
+  severity: 'error' | 'warning';
+  node_id?: string | null;
+  field_id?: string | null;
+  edge_id?: string | null;
+};
+
+/** Structure and field validity, separate from static readiness; nothing is executed. */
+export type GraphValidation = {
+  valid: boolean;
+  issues: GraphIssue[];
+  executed: false;
+  readiness: {
+    status: 'not_checked' | 'empty' | 'invalid' | 'incomplete' | 'ready';
+    warnings: GraphIssue[];
+    warning_count: number;
+    omitted_warnings: number;
+  };
+};
 
 /**
  * A validated event from the assistant's streaming response.
@@ -977,6 +1007,7 @@ export type Field = {
   label: string | null;
   tooltip: string | null;
   required: boolean;
+  readonly?: boolean;
   default: any; // eslint-disable-line
 };
 

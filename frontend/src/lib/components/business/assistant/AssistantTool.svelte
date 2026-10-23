@@ -4,6 +4,11 @@
   import { icons } from '$lib/icons';
 
   const { tool }: { tool: AssistantTool } = $props();
+  const statusIcon = $derived.by(() => {
+    if (tool.status === 'complete') return icons.checkmark;
+    if (tool.status === 'error') return icons.warning;
+    return icons.subtractCircle;
+  });
   const detail = $derived(tool.result?.data ? JSON.stringify(tool.result.data, null, 2) : '');
   const error = $derived(
     tool.result?.error
@@ -19,15 +24,7 @@
     {#if tool.status === 'running'}
       <span class="loading loading-xs loading-spinner"></span>
     {:else}
-      <iconify-icon
-        icon={tool.status === 'complete'
-          ? icons.checkmark
-          : tool.status === 'error'
-            ? icons.warning
-            : icons.subtractCircle}
-        width="0.875rem"
-        class="size-3.5"
-      ></iconify-icon>
+      <iconify-icon icon={statusIcon} width="0.875rem" class="size-3.5"></iconify-icon>
     {/if}
   </span>
   <span class="min-w-0 truncate font-medium">
@@ -65,5 +62,13 @@
   <div class="flex min-h-7 items-center gap-2 px-2 text-xs text-base-content/60">{@render row()}</div>
 {/if}
 {#if tool.name === 'preview_workflow_draft' && tool.result?.ok}
-  <p class="ml-8 text-xs leading-5 text-base-content/60">{$_('assistant.preview_only')}</p>
+  <p class="ml-8 text-xs leading-5 text-base-content/60">
+    {#if tool.proposal?.status === 'saved' || tool.proposal?.status === 'unchanged'}
+      {$_('assistant.canvas.saved')}
+    {:else if tool.proposal?.status === 'cancelled'}
+      {$_('assistant.canvas.reverted')}
+    {:else}
+      {$_('assistant.canvas.record')}
+    {/if}
+  </p>
 {/if}
