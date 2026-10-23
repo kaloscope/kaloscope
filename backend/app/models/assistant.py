@@ -323,23 +323,6 @@ class ProposalDecision(ContextModel):
 
 
 class ProposalConfirm(ProposalDecision):
-    """Save a canvas edit against the original captured designer document."""
+    """Bind a save to the original immutable designer snapshot."""
 
-    canvas: GraphDocument
-
-    @model_validator(mode="after")
-    def validate_size(self) -> Self:
-        """Bound the original canvas used to detect newer local edits.
-
-        Returns:
-            A decision whose canvas fits the snapshot budget.
-
-        Raises:
-            ValueError: If the canvas is oversized or cannot be serialized.
-        """
-        try:
-            if len(dumps(self.canvas.model_dump(mode="json"))) > MAX_SNAPSHOT_BYTES:
-                raise ValueError("Canvas exceeds the snapshot limit")
-        except (TypeError, OverflowError) as exc:
-            raise ValueError("Unsupported canvas values") from exc
-        return self
+    base_snapshot_id: ResourceID

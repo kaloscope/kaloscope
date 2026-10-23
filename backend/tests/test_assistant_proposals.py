@@ -165,11 +165,8 @@ def set_url(url="https://new.test"):
 
 async def decision(env, proposal_id, model=ProposalDecision, **values):
     record = await AssistantProposal.get(id=proposal_id)
-    if model is ProposalConfirm and "canvas" not in values:
-        base = await Sessions.read_snapshot(
-            env.conversation, record.base_snapshot_id, env.owner
-        )
-        values["canvas"] = base.document
+    if model is ProposalConfirm:
+        values.setdefault("base_snapshot_id", record.base_snapshot_id)
     return model(
         workflow_id=record.workflow_id,
         base_version=record.base_version,
@@ -218,18 +215,16 @@ def test_canvas_display():
             saved = await Proposals.confirm(
                 env.conversation,
                 result["proposal_id"],
-                await decision(
-                    env, result["proposal_id"], ProposalConfirm, canvas=original
-                ),
+                await decision(env, result["proposal_id"], ProposalConfirm),
                 env.owner,
             )
             restored = await Proposals.canvas(
                 env.conversation, result["proposal_id"], env.owner
             )
             assert restored["proposal"] == saved["proposal"]
-            assert restored["workflow"] == saved["workflow"]
-            assert restored["workflow"]["draft_version"] == 1
-            assert restored["workflow"]["state"] == "modified"
+            assert "workflow" not in restored
+            assert saved["workflow"]["draft_version"] == 1
+            assert saved["workflow"]["state"] == "modified"
             assert (await FlowGraph.get(id=env.graph.id)).definition == document()
 
     asyncio.run(run())
@@ -564,7 +559,7 @@ def test_advanced_outcome():
             assert cancelled["proposal"]["status"] == "saved"
             assert cancelled["workflow"] is None
             assert view["current_version"] == 2
-            assert view["workflow"] is None
+            assert "workflow" not in view
 
     asyncio.run(run())
 
@@ -880,19 +875,89 @@ def test_captured_canvas():
             assert view["base_snapshot_id"] == snapshot.id
             assert view["canvas"]["nodes"][0]["position"]["x"] == 50
             assert view["change_count"] == 1
-            newer = GraphDocument.model_validate(document(x=70))
+            newer = await Sessions.snapshot(
+                env.conversation,
+                env.graph.id,
+                0,
+                GraphDocument.model_validate(document(x=70)),
+                "canvas",
+                env.owner,
+            )
             with pytest.raises(KaloscopeException, match="assistant_canvas_changed"):
-                await save_edit(env, data["proposal_id"], canvas=newer)
+                await save_edit(env, data["proposal_id"], base_snapshot_id=newer.id)
             record = await AssistantProposal.get(id=data["proposal_id"])
             assert record.status == "pending"
             assert record.attempts == 0
 
-            saved = await save_edit(env, data["proposal_id"], canvas=canvas)
+            saved = await save_edit(env, data["proposal_id"])
             await env.graph.refresh_from_db()
 
             assert saved["status"] == "saved"
             assert env.graph.draft["nodes"][0]["position"]["x"] == 50
             assert env.graph.draft["nodes"][0]["data"]["url"] == "https://new.test"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["foreign", "missing"])
+def test_snapshot_reference(case):
+    async def run():
+        async with database() as env:
+            data = await preview(env, [set_url()])
+            snapshot_id = 2**53 - 1
+            if case == "foreign":
+                conversation = await Sessions.create(
+                    ConversationCreate(model=MODEL), env.other
+                )
+                snapshot = await Sessions.snapshot(
+                    conversation["id"],
+                    env.graph.id,
+                    0,
+                    GraphDocument.model_validate(document()),
+                    "canvas",
+                    env.other,
+                )
+                snapshot_id = snapshot.id
+
+            with pytest.raises(KaloscopeException, match="assistant_canvas_changed"):
+                await save_edit(env, data["proposal_id"], base_snapshot_id=snapshot_id)
+
+            record = await AssistantProposal.get(id=data["proposal_id"])
+            assert record.status == "pending"
+            assert record.attempts == 0
+            assert (await FlowGraph.get(id=env.graph.id)).draft_version == 0
+            assert await revisions(env) == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["conversation_id", "workflow_id", "draft_version"])
+def test_snapshot_binding(field):
+    async def run():
+        async with database() as env:
+            data = await preview(env, [set_url()])
+            record = await AssistantProposal.get(id=data["proposal_id"])
+            value = 999
+            if field == "conversation_id":
+                value = (
+                    await Sessions.create(ConversationCreate(model=MODEL), env.other)
+                )["id"]
+            await AssistantSnapshot.filter(id=record.base_snapshot_id).update(
+                **{field: value}
+            )
+
+            view = await Proposals.canvas(
+                env.conversation, data["proposal_id"], env.owner
+            )
+            with pytest.raises(KaloscopeException, match="assistant_canvas_changed"):
+                await save_edit(env, data["proposal_id"])
+
+            await record.refresh_from_db()
+            assert view["canvas"] is None
+            assert record.status == "pending"
+            assert record.attempts == 0
+            assert (await FlowGraph.get(id=env.graph.id)).draft_version == 0
+            assert await revisions(env) == 0
 
     asyncio.run(run())
 

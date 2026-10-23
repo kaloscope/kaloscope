@@ -1,5 +1,5 @@
 import { goto } from '$app/navigation';
-import { alert } from '$lib/components';
+import { alert } from '$lib/components/common/notice/Alerts.svelte';
 import { UserRole } from '$lib/enums';
 import { token, user } from '$lib/stores';
 import type { BaseResp, Resp, User } from '$lib/types';
@@ -42,25 +42,39 @@ export const api = ky.create({
     beforeError: [
       async ({ error, options }) => {
         if (isHTTPError(error)) {
-          const resp = error.data as BaseResp;
+          const data = error.data;
+          const resp =
+            data &&
+            typeof data === 'object' &&
+            'status' in data &&
+            typeof data.status === 'number' &&
+            Number.isInteger(data.status) &&
+            data.status >= 400 &&
+            data.status <= 599 &&
+            'message' in data &&
+            typeof data.message === 'string'
+              ? { status: data.status, message: data.message }
+              : undefined;
+          const status = resp?.status ?? error.response.status;
+          const unauthorized = status === 401 || error.response.status === 401;
 
           // goto login page if unauthorized
-          if (resp.status === 401) {
+          if (unauthorized) {
             token.set(null);
             goto('/login');
           }
 
-          error.message = resp.message;
+          if (resp?.message) error.message = resp.message;
           // allow callers to display errors in place while preserving login handling
-          if (options.context.silentErrors && resp.status !== 401) {
+          if (options.context.silentErrors && !unauthorized) {
             return error;
           }
           // alert error message
-          if (resp.message || resp.status === 500) {
+          if (resp?.message || status >= 500) {
             alert({
               level: 'error',
-              message: resp.message || 'internal_server_error',
-              unique: resp.status === 401
+              message: resp?.message || 'internal_server_error',
+              unique: unauthorized
             });
             return error;
           }

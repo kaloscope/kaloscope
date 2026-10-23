@@ -1,5 +1,5 @@
 import { api } from '$lib/api';
-import { alert } from '$lib/components';
+import { alert } from '$lib/components/common/notice/Alerts.svelte';
 import { trackGraphWrite, type GraphUpdate } from '$lib/components/business/flow/graphWrites';
 import type { AssistantPageContext, AssistantProposal, FlowGraph, GraphValidation, Resp } from '$lib/types';
 import { isHTTPError } from 'ky';
@@ -24,7 +24,6 @@ type CanvasResult = {
   validation: GraphValidation;
   // changes relative to the original captured canvas, including unsaved edits
   change_count: number;
-  workflow: GraphUpdate | null;
 };
 type CanvasEditor = {
   read: () => DesignerContext | null;
@@ -35,7 +34,6 @@ type CanvasEditor = {
 };
 type CanvasState = {
   workflowId: number;
-  turnId: string;
   // `failed` keeps a completed reply's edit locked so a transient load error can be retried
   phase: 'editing' | 'failed' | 'review' | 'saving' | 'reverting';
   changes: number;
@@ -154,7 +152,6 @@ export function beginAssistantCanvas(turnId: string, context: AssistantPageConte
   active = { editor: surface, context, turnId, controller: new AbortController(), stop, submitted: false };
   assistantCanvas.set({
     workflowId: context.resource_id,
-    turnId,
     phase: 'editing',
     changes: 0,
     issues: 0,
@@ -421,7 +418,7 @@ export async function discardAssistantCanvas(): Promise<void> {
 export async function keepAssistantCanvas(): Promise<void> {
   const edit = active;
   const state = get(assistantCanvas);
-  if (!edit?.result || !edit.path || state?.phase !== 'review' || state.rejected) return;
+  if (!edit?.result || !edit.path || !edit.snapshotId || state?.phase !== 'review' || state.rejected) return;
   assistantCanvas.set({ ...state, phase: 'saving', error: null });
   const earlier = edit.submitted;
   edit.submitted = true;
@@ -433,7 +430,7 @@ export async function keepAssistantCanvas(): Promise<void> {
       const { workflow_id, base_version, digest } = edit.result!.proposal;
       const { data } = await api
         .post(`${edit.path}/confirm`, {
-          json: { workflow_id, base_version, digest, canvas: edit.context.canvas },
+          json: { workflow_id, base_version, digest, base_snapshot_id: edit.snapshotId },
           signal: AbortSignal.any([signal, edit.controller.signal]),
           retry: 0,
           context: { silentErrors: true }
