@@ -149,6 +149,105 @@ def test_owned_history():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_batch_delete(expired):
+    async def run():
+        async with database() as (owner, other):
+            selected = [
+                await Sessions.create(
+                    ConversationCreate.model_validate({"model": MODEL}), owner
+                )
+                for _ in range(2)
+            ]
+            retained = [
+                await Sessions.create(
+                    ConversationCreate.model_validate({"model": MODEL}), account
+                )
+                for account in (owner, other)
+            ]
+            ids = [item["id"] for item in selected]
+            for conversation_id in ids:
+                turn = await Sessions.begin(conversation_id, request(), owner)
+                await Sessions.finish(turn, content="Saved reply", status="complete")
+                await AssistantToolCall.create(
+                    turn_id=turn.id,
+                    call_id=f"tool-{turn.id}",
+                    name="fixture",
+                    arguments="{}",
+                    status="complete",
+                )
+                snapshot = await AssistantSnapshot.create(
+                    conversation_id=conversation_id,
+                    workflow_id=1,
+                    draft_version=0,
+                    digest="fixture",
+                    origin="canvas",
+                    document={"nodes": [], "edges": []},
+                )
+                await AssistantProposal.create(
+                    conversation_id=conversation_id,
+                    call_id=f"tool-{turn.id}",
+                    snapshot_id=snapshot.id,
+                    workflow_id=1,
+                    base_version=0,
+                    digest="fixture",
+                )
+            if expired:
+                await AssistantConversation.filter(id=ids[1]).update(
+                    active_request="expired",
+                    lease_until=timezone.now() - timedelta(seconds=1),
+                )
+
+            await Sessions.delete_many([*ids, ids[0]], owner)
+
+            assert set(
+                await AssistantConversation.all().values_list("id", flat=True)
+            ) == {item["id"] for item in retained}
+            assert await AssistantTurn.all().count() == 0
+            assert await AssistantToolCall.all().count() == 0
+            assert await AssistantSnapshot.all().count() == 0
+            assert await AssistantProposal.all().count() == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reason", ["foreign", "missing", "busy"])
+def test_batch_delete_rejected(reason):
+    async def run():
+        async with database() as (owner, other):
+            first = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            second = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}),
+                other if reason == "foreign" else owner,
+            )
+            turn = await Sessions.begin(first["id"], request(), owner)
+            await Sessions.finish(turn, content="Retain this reply", status="complete")
+            if reason == "busy":
+                await Sessions.begin(second["id"], request(), owner)
+            target = second["id"] + 1 if reason == "missing" else second["id"]
+            error = KaloscopeException if reason == "busy" else NotFoundException
+
+            with pytest.raises(error) as raised:
+                await Sessions.delete_many([first["id"], target], owner)
+
+            assert raised.value.status_code == (409 if reason == "busy" else 404)
+            assert await AssistantConversation.all().count() == 2
+            assert (await AssistantTurn.get(id=turn.id)).content == "Retain this reply"
+
+    asyncio.run(run())
+
+
+def test_empty_delete_batch():
+    async def run():
+        async with database() as (owner, _):
+            with pytest.raises(BadRequestException):
+                await Sessions.delete_many([], owner)
+
+    asyncio.run(run())
+
+
 def test_cross_page_context(monkeypatch):
     requests = []
 
@@ -715,7 +814,7 @@ def test_active_tool_overflow(monkeypatch):
             )
             await Sessions.finish(
                 original,
-                content="Do not execute workflows. " + "History. " * 450,
+                content="Do not execute workflows. " + "History. " * 250,
                 status="complete",
             )
 
@@ -942,7 +1041,7 @@ def test_checkpoint_with_tool_tail():
             )
             await Sessions.finish(previous, content="Original", status="complete")
             summary = {
-                "constraints": ["Keep original scripts. " * 110],
+                "constraints": ["Keep original scripts. " * 60],
                 "source_turn_ids": [previous.id],
             }
             await AssistantConversation.filter(id=conversation["id"]).update(
@@ -1875,6 +1974,269 @@ def test_tool_history_resources(monkeypatch):
                     call_id="test",
                 )
                 assert denied["error"]["code"] == "permission_denied"
+
+    asyncio.run(run())
+
+
+def test_created_draft_retry(monkeypatch):
+    calls = []
+
+    def handler(upstream):
+        calls.append(loads(upstream.content))
+        if len(calls) <= 2:
+            arguments = {
+                "name": "Nightly scan" if len(calls) == 1 else "Nightly scan 2",
+                "category": "schedule",
+                "description": "Scan the library every night",
+            }
+            delta = call_delta(
+                "create_workflow_draft", dumps(arguments).decode(), f"call-{len(calls)}"
+            )
+            return response(
+                [
+                    chunk({"role": "assistant", "tool_calls": [delta]}),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        return response(
+            [chunk({"role": "assistant", "content": "Created an empty draft."}, "stop")]
+        )
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            # the connection drops right after creation, before the reply arrives
+            events = AssistantService.persistent_stream(
+                conversation["id"], request("first"), owner
+            )
+            async for event in events:
+                if event.event == "tool_result":
+                    created = event.data
+                    break
+            await events.aclose()
+            original = await AssistantTurn.get(request_id="first")
+            workflow_id = created["data"]["workflow_id"]
+
+            retry = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request("retry", retry_of=original.id),
+                    owner,
+                )
+            ]
+
+            assert original.status == "interrupted"
+            assert original.resource_ids == [workflow_id]
+            restored = (await Sessions.turns(conversation["id"], owner))["items"]
+            assert restored[0]["tools"][0]["result"]["data"]["workflow_id"] == (
+                workflow_id
+            )
+            assert retry[-1].event == "done"
+            replayed = next(
+                event.data for event in retry if event.event == "tool_result"
+            )
+            assert replayed["data"] == {**created["data"], "replayed": True}
+            graph = await FlowGraph.get()
+            assert (graph.id, graph.name, graph.state) == (
+                workflow_id,
+                "Nightly scan",
+                "draft",
+            )
+            assert graph.definition is None
+            assert graph.draft == {"nodes": [], "edges": []}
+            assert await FlowGraph.all().count() == 1
+            assert await FlowLog.all().count() == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "narration", ["", "正在读取节点定义并检查画布。 " * 80], ids=["short", "compacted"]
+)
+def test_created_draft_schemas(monkeypatch, narration):
+    streams = []
+    prompt = (
+        "创建定时调度工作流健康检查：开始 → HTTP GET "
+        "https://example.test/health → 结束，超时 20 秒；只搭建草稿，不发布、不执行。"
+    )
+
+    def handler(upstream):
+        body = loads(upstream.content)
+        assert history.context_size(body["messages"], body.get("tools", [])) <= (
+            32000 - 4096
+        )
+        if not body.get("stream"):
+            sources = loads(body["messages"][-1]["content"])["turn_ids"]
+            summary = {
+                "goals": [prompt],
+                "constraints": [
+                    "仅搭建草稿，不发布、不执行；生成结果由用户检查后保留或撤回。",
+                    "HTTP 使用 GET，请求 https://example.test/health，超时 20 秒，"
+                    "节点按开始、请求、结束顺序连接。",
+                ],
+                "decisions": [
+                    "已创建空白定时调度草稿，接下来在新草稿自己的设计器中生成。",
+                    "需要读取开始、HTTP 和结束的注册字段与连接端口再搭建。",
+                    "没有额外鉴权信息，未提供的可选配置保持默认；不创建定时任务，"
+                    "也不执行网络请求。",
+                ],
+                "source_turn_ids": sources,
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": dumps(summary).decode(),
+                            },
+                        }
+                    ]
+                },
+            )
+        streams.append(body)
+        if len(streams) == 1:
+            calls = [
+                (
+                    "create_workflow_draft",
+                    {
+                        "name": "健康检查",
+                        "category": "schedule",
+                        "description": prompt,
+                    },
+                ),
+                ("list_node_types", {"category": "schedule"}),
+            ]
+        elif len(streams) == 3:
+            calls = [
+                ("list_node_types", {"category": "schedule"}),
+                ("get_workflow", {"workflow_id": 1}),
+            ]
+        elif len(streams) == 4:
+            calls = [
+                ("list_node_types", {"node_type": name})
+                for name in ("schedule_start", "http", "schedule_end")
+            ]
+        else:
+            return response(
+                [
+                    chunk(
+                        {"role": "assistant", "content": "已完成读取，继续搭建。"},
+                        "stop",
+                    )
+                ]
+            )
+        return response(
+            [
+                chunk(
+                    {
+                        "role": "assistant",
+                        "content": narration if len(streams) == 4 else "",
+                        "tool_calls": [
+                            call_delta(name, dumps(args).decode(), str(index), index)
+                            for index, (name, args) in enumerate(calls)
+                        ],
+                    },
+                    "tool_calls",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            created = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request("create", prompt=prompt), owner
+                )
+            ]
+            assert created[-1].event == "done"
+            graph = await FlowGraph.get()
+            snapshot = await Sessions.snapshot(
+                conversation["id"],
+                graph.id,
+                0,
+                GraphDocument(nodes=[], edges=[]),
+                "canvas",
+                owner,
+            )
+            context = {
+                "page_type": "workflow_designer",
+                "route": f"/settings/workflows/graphs/{graph.id}",
+                "resource_id": graph.id,
+                "draft_version": 0,
+                "unsaved": False,
+                "editable": True,
+                "snapshot_id": snapshot.id,
+                "selected_node_ids": [],
+            }
+            generated = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request(
+                        "build",
+                        prompt="按用途在画布上搭建这个新工作流，并列出仍需我补充的配置",
+                        context=context,
+                    ),
+                    owner,
+                )
+            ]
+
+            assert generated[-1].event == "done", generated[-1]
+            assert len(streams) == 5
+            assert streams[-1].get("tool_choice") != "none"
+            assert "preview_workflow_draft" in {
+                tool["function"]["name"] for tool in streams[-1]["tools"]
+            }
+            results = []
+            for message in streams[-1]["messages"]:
+                if message["role"] == "tool":
+                    results.append(loads(message["content"]))
+                elif (message.get("content") or "").startswith(
+                    "Completed tool exchange"
+                ):
+                    results.extend(loads(message["content"].split("\n", 1)[1])["tools"])
+            schemas = {
+                node["node_type"]: node
+                for result in results
+                if result.get("name") == "list_node_types"
+                for group in result["data"].values()
+                if isinstance(group, list)
+                for node in group
+                if "fields" in node
+            }
+            assert set(schemas) == {"schedule_start", "http", "schedule_end"}
+            fields = {field["id"]: field for field in schemas["http"]["fields"]}
+            assert fields["timeout"]["min"] == 1
+            assert fields["timeout"]["default"] == 30
+            assert fields["url"]["required"] is True
+            assert fields["url"]["maxlength"] == 1024
+            assert fields["method"]["options"]["GET"] == "GET"
+            assert fields["formatter"]["width"] == "32rem"
+            assert fields["formatter"]["language"] == "jinja2"
+            assert fields["formatter"]["readonly"] is False
+            assert fields["divider_9"]["default"] is None
+            assert schemas["schedule_start"]["fields"][0]["default"] == (
+                "{{ params|tojson }}"
+            )
+            assert schemas["schedule_end"]["fields"][0]["default"] is False
+            assert {handle["id"] for handle in schemas["http"]["handles"]} == {
+                "input",
+                "output",
+            }
 
     asyncio.run(run())
 

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.models.assistant import (
     AssistantSnapshotRequest,
     AssistantTurnRequest,
+    ConversationDelete,
     ProposalConfirm,
     WorkflowDesignerContext,
 )
@@ -24,6 +25,26 @@ def test_prompt():
 
     assert turn.prompt == "查看工作流"
     assert turn.model.provider_id == 1
+
+
+@pytest.mark.parametrize("ids", [[1], list(range(1, 1000)), [1, 1, 2]])
+def test_delete_batch(ids):
+    selection = ConversationDelete.model_validate({"ids": ids})
+
+    assert selection.ids == ids
+
+
+@pytest.mark.parametrize(
+    "ids", [[], list(range(1, 1001)), [0], [-1], [True], ["1"], [1.0], [2**53], None]
+)
+def test_invalid_delete_batch(ids):
+    with pytest.raises(ValidationError):
+        ConversationDelete.model_validate({"ids": ids})
+
+
+def test_delete_owner():
+    with pytest.raises(ValidationError):
+        ConversationDelete.model_validate({"ids": [1], "user_id": 2})
 
 
 @pytest.mark.parametrize("prompt", ["", "   ", "x" * 32769])

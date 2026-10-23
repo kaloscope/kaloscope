@@ -43,6 +43,8 @@ type CanvasState = {
   uncertain: boolean;
   // the server recorded a conflict or failure, so the edit can only be reverted
   rejected: boolean;
+  // reverting restores an empty canvas, such as a newly created draft
+  empty: boolean;
 };
 type Edit = {
   editor: CanvasEditor;
@@ -60,6 +62,8 @@ type Edit = {
 };
 
 export const assistantCanvas = writable<CanvasState | null>(null);
+// advances when a designer mounts, finishes loading, or unmounts so pending handoffs can recheck it
+export const assistantEditorRevision = writable(0);
 let editor: CanvasEditor | null = null;
 let active: Edit | null = null;
 
@@ -92,10 +96,30 @@ function isSaved(proposal: AssistantProposal): boolean {
  */
 export function registerAssistantEditor(surface: CanvasEditor): () => void {
   editor = surface;
+  notifyAssistantEditor();
   return () => {
     if (active?.editor === surface) resetAssistantCanvas();
-    if (editor === surface) editor = null;
+    if (editor === surface) {
+      editor = null;
+      notifyAssistantEditor();
+    }
   };
+}
+
+/**
+ * Announce that the mounted designer loaded or changed the workflow it can edit.
+ */
+export function notifyAssistantEditor(): void {
+  assistantEditorRevision.update((value) => value + 1);
+}
+
+/**
+ * Read the mounted designer without locking it.
+ *
+ * @returns Its current editable context, or `null` before loading, while saving, or when read-only.
+ */
+export function readAssistantEditor(): DesignerContext | null {
+  return editor?.read() ?? null;
 }
 
 /**
@@ -157,7 +181,8 @@ export function beginAssistantCanvas(turnId: string, context: AssistantPageConte
     issues: 0,
     error: null,
     uncertain: false,
-    rejected: false
+    rejected: false,
+    empty: !context.canvas.nodes.length && !context.canvas.edges.length
   });
 }
 
