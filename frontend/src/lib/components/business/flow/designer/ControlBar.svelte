@@ -4,12 +4,13 @@
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
   import { registerAssistantContext, snapshotAssistantCanvas } from '$lib/assistant/context';
+  import { assistantCanvas, discardAssistantCanvas, registerAssistantEditor } from '$lib/assistant/canvas';
   import { Badge, Button, GraphEditor, Image, PageHeader, alert, confirm } from '$lib/components';
   import { GraphState } from '$lib/enums';
   import { _, time } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { mediaQuery } from '$lib/stores';
-  import type { FlowGraph, FlowGraphContext, Resp } from '$lib/types';
+  import type { AssistantPageContext, FlowGraph, FlowGraphContext, Resp } from '$lib/types';
   import { debounce } from '$lib/utils/timing';
   import { MiniMap, useStore, type Edge, type Node } from '@xyflow/svelte';
   import { isHTTPError } from 'ky';
@@ -38,6 +39,7 @@
   let graphEditor: GraphEditor | null = $state(null);
   const minimap = mediaQuery('(min-width: 40rem)');
   const store = useStore();
+  const canvasLocked = $derived(!!graph && $assistantCanvas?.workflowId === graph.id);
 
   // ignore some properties of nodes to avoid unnecessary history records
   let nodes = $derived(_nodes.map((node) => ({ ...node, selected: false, measured: {} })));
@@ -48,6 +50,7 @@
    * @param value - Specific value to set, or toggle if not provided.
    */
   function toggleInteractivity(value?: boolean) {
+    if (canvasLocked) return;
     interactive = value ?? !interactive;
     store.nodesDraggable = interactive;
     store.nodesConnectable = interactive;
@@ -70,28 +73,69 @@
   let savedHistoryId: string = $state('');
   let firstHistoryId: string = $state('');
   let lastHistoryId: string = $state('');
+  let beforeAssistant: History | null = null;
+
+  /**
+   * Capture the visible document, including edits not yet saved as a draft.
+   *
+   * @returns A complete designer context, or `null` before loading.
+   */
+  function readAssistantContext(): Extract<AssistantPageContext, { page_type: 'workflow_designer' }> | null {
+    if (!graph || jsonGraph === null) return null;
+    const canvas = snapshotAssistantCanvas({ nodes, edges });
+    return {
+      page_type: 'workflow_designer',
+      route: page.url.pathname.replace(/\/$/, ''),
+      resource_id: graph.id,
+      draft_version: graph.draft_version,
+      unsaved: JSON.stringify(canvas) !== JSON.stringify(snapshotAssistantCanvas(JSON.parse(jsonGraph))),
+      canvas,
+      selected_node_ids: _nodes.filter((node) => node.selected).map((node) => node.id)
+    };
+  }
 
   onMount(() => {
-    const route = page.url.pathname.replace(/\/$/, '');
-    return registerAssistantContext(() => {
-      if (!graph || jsonGraph === null) return null;
-      const canvas = snapshotAssistantCanvas({ nodes, edges });
-      return {
-        page_type: 'workflow_designer',
-        route,
-        resource_id: graph.id,
-        draft_version: graph.draft_version,
-        unsaved: JSON.stringify(canvas) !== JSON.stringify(snapshotAssistantCanvas(JSON.parse(jsonGraph))),
-        canvas,
-        selected_node_ids: _nodes.filter((node) => node.selected).map((node) => node.id)
-      };
+    const read = registerAssistantContext(readAssistantContext);
+    const release = registerAssistantEditor({
+      read: () => (readonly || saving || publishing ? null : readAssistantContext()),
+      begin: () => {
+        recordHistoryNow(nodes, edges);
+        beforeAssistant = $state.snapshot({ nodes: _nodes, edges } as unknown) as History;
+      },
+      apply: (document) => {
+        _nodes = document.nodes;
+        edges = document.edges;
+      },
+      restore: () => {
+        if (beforeAssistant) {
+          _nodes = beforeAssistant.nodes;
+          edges = beforeAssistant.edges;
+          beforeAssistant = null;
+        }
+      },
+      saved: (metadata) => {
+        if (!graph) return;
+        graph = { ...graph, ...metadata };
+        const document = { nodes: _nodes.map((node) => ({ ...node, selected: false, measured: {} })), edges };
+        recordHistoryNow(document.nodes, document.edges);
+        savedHistoryId = historyId;
+        jsonGraph = JSON.stringify(document);
+        autoSaveSignal = false;
+        autoSaveCountdown = 0;
+        beforeAssistant = null;
+      }
     });
+    return () => {
+      release();
+      read();
+    };
   });
 
   /**
    * Undo the previous operation.
    */
   function undo() {
+    if (readonly || canvasLocked) return;
     const keys = Array.from(histories.keys());
     const index = keys.indexOf(historyId);
     if (index > 0) {
@@ -107,6 +151,7 @@
    * Redo the next operation.
    */
   function redo() {
+    if (readonly || canvasLocked) return;
     const keys = Array.from(histories.keys());
     const index = keys.indexOf(historyId);
     if (index < keys.length - 1) {
@@ -137,9 +182,12 @@
   }
 
   /**
-   * Record the operation history.
+   * Record one complete operation, flushing the manual baseline before an assistant edit.
+   *
+   * @param nodes - Authored nodes for the history entry.
+   * @param edges - Authored connections for the history entry.
    */
-  const recordHistory = debounce((nodes: Node[], edges: Edge[]) => {
+  function recordHistoryNow(nodes: Node[], edges: Edge[]): void {
     if (graph === null || jsonGraph === null) {
       return;
     }
@@ -162,6 +210,10 @@
       lastHistoryId = historyId;
     }
     histories.set(historyId, $state.snapshot({ nodes: nodes, edges: edges } as unknown) as History);
+  }
+
+  const recordHistory = debounce((nodes: Node[], edges: Edge[]) => {
+    if (!canvasLocked) recordHistoryNow(nodes, edges);
   });
 
   $effect(() => {
@@ -184,6 +236,7 @@
       autoSaveSignal = false;
       autoSaveCountdown = 0;
       autoSaveInterval = setInterval(() => {
+        if (canvasLocked) return;
         // countdown to save the graph or monitor the changes
         if (autoSaveCountdown > 0) {
           autoSaveCountdown--;
@@ -206,8 +259,10 @@
   const validators = hasContext('flow/graph') && (getContext('flow/graph') as FlowGraphContext).validators;
   let saving: boolean = $state(false);
   let publishing: boolean = $state(false);
-  let savable: boolean = $derived(!(publishing || readonly || savedHistoryId === historyId));
-  let publishable: boolean = $derived(!(saving || (readonly && graph?.state === 'published') || nodes.length === 0));
+  let savable: boolean = $derived(!(canvasLocked || publishing || readonly || savedHistoryId === historyId));
+  let publishable: boolean = $derived(
+    !(canvasLocked || saving || (readonly && graph?.state === 'published') || nodes.length === 0)
+  );
 
   /**
    * Update metadata without changing the version represented by the current canvas.
@@ -332,6 +387,31 @@
   let leaving = false;
   let confirming = false;
   beforeNavigate(({ to, type, cancel }) => {
+    if (canvasLocked) {
+      cancel();
+      if (type === 'leave' || confirming) return;
+      if ($assistantCanvas?.phase === 'saving' || $assistantCanvas?.uncertain) {
+        alert({ level: 'warning', message: 'assistant_canvas_wait_save' });
+        return;
+      }
+      confirming = true;
+      confirm({
+        title: $_('assistant.canvas.leave_title'),
+        message: $_('assistant.canvas.leave_message'),
+        // closing a navigation guard must not trigger another history navigation
+        shallow: false,
+        oncancel: () => {
+          confirming = false;
+        },
+        onconfirm: () => {
+          discardAssistantCanvas();
+          confirming = false;
+          // let the normal unsaved-edit guard protect the restored manual baseline
+          if (to) void goto(to.url);
+        }
+      });
+      return;
+    }
     if (leaving || readonly || savedHistoryId === historyId) {
       // no confirmation needed
       return;
@@ -389,6 +469,7 @@
   {#if graph}
     <button
       class="group relative flex-center hover-dashed gap-2 px-2"
+      disabled={canvasLocked}
       onclick={() => graphEditor && graphEditor.showModal()}
       use:tooltip={{
         zIndex: 9999,
@@ -452,7 +533,7 @@
         size="xs"
         icon={interactive ? icons.lockOpen : icons.lockClosed}
         text={$_('flow.interactivity')}
-        disabled={readonly}
+        disabled={readonly || canvasLocked}
         onclick={() => toggleInteractivity()}
       />
     </div>
@@ -463,7 +544,7 @@
           size="xs"
           icon={icons.arrowHookUpLeft}
           text={$_('action.undo')}
-          disabled={histories.size <= 1 || historyId === firstHistoryId}
+          disabled={canvasLocked || histories.size <= 1 || historyId === firstHistoryId}
           onclick={() => {
             window.dispatchEvent(
               new KeyboardEvent('keydown', {
@@ -480,7 +561,7 @@
           size="xs"
           icon={icons.arrowHookUpRight}
           text={$_('action.redo')}
-          disabled={histories.size <= 1 || historyId === lastHistoryId}
+          disabled={canvasLocked || histories.size <= 1 || historyId === lastHistoryId}
           onclick={() => {
             window.dispatchEvent(
               new KeyboardEvent('keydown', {
@@ -498,7 +579,13 @@
     <div class="divider mx-0! divider-horizontal"></div>
     <div class="flex-center gap-2">
       {#if autoSaveMode}
-        <Button size="xs" text={$_('flow.autosave.off')} class="group" onclick={() => autoSave(false)}>
+        <Button
+          size="xs"
+          text={$_('flow.autosave.off')}
+          class="group"
+          disabled={canvasLocked}
+          onclick={() => autoSave(false)}
+        >
           <iconify-icon
             icon={icons.arrowRotateClockwise}
             width="1.125rem"
@@ -516,7 +603,7 @@
           size="xs"
           icon={icons.arrowRotateClockwise}
           text={$_('flow.autosave.on')}
-          disabled={readonly}
+          disabled={readonly || canvasLocked}
           onclick={() => autoSave(true)}
         />
       {/if}

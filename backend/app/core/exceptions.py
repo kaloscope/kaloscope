@@ -72,6 +72,8 @@ class ErrorCode(StrEnum):
     ASSISTANT_CONTEXT_LIMIT = auto()
     ASSISTANT_RESULT_LIMIT = auto()
     ASSISTANT_COMPACTION_FAILED = auto()
+    ASSISTANT_PROPOSAL_CHANGED = auto()
+    ASSISTANT_CANVAS_CHANGED = auto()
     EXPORT_ITEMS_FAILED = auto()
     IMPORT_ITEMS_FAILED = auto()
     FILE_NOT_EXISTS = auto()

@@ -7,15 +7,25 @@ import type {
   AssistantStoredContext,
   AssistantModelProvider,
   AssistantPageContext,
+  AssistantProposal,
   AssistantStreamEvent,
   AssistantToolResult,
   Resp
 } from '$lib/types';
-import { isHTTPError } from 'ky';
 import { get, writable } from 'svelte/store';
 import { v4 as uuidv4 } from 'uuid';
 import { captureAssistantContext } from './context';
+import {
+  assistantCanvas,
+  beginAssistantCanvas,
+  endAssistantCanvas,
+  finishAssistantCanvas,
+  resetAssistantCanvas
+} from './canvas';
+import { errorCode } from './errors';
 import { consumeAssistantStream } from './stream';
+
+export { errorCode } from './errors';
 
 export type AssistantTool = {
   id: string;
@@ -24,6 +34,8 @@ export type AssistantTool = {
   // reply text length when the call started, preserving the streamed order of text and tools
   offset: number;
   result?: AssistantToolResult;
+  // latest recorded decision for a preview; live previews start pending without it
+  proposal?: AssistantProposal;
 };
 export type AssistantTurn = {
   id: string;
@@ -97,6 +109,7 @@ let conversationRevision = 0;
  * Clear account data and invalidate all late network callbacks.
  */
 function resetSession(): void {
+  resetAssistantCanvas();
   accountGeneration += 1;
   conversationRevision += 1;
   active?.abort();
@@ -124,6 +137,25 @@ user.subscribe((value) => {
 });
 
 /**
+ * Show the durable outcome of a canvas edit on its tool call.
+ *
+ * @param proposal - Recorded canvas edit returned by the server.
+ */
+function recordAssistantProposal(proposal: AssistantProposal): void {
+  assistant.update((value) => {
+    const turns = value.turns.map((turn) => {
+      if (!turn.tools.some((tool) => tool.id === proposal.call_id)) return turn;
+      const tools = turn.tools.map((tool) => {
+        if (tool.id !== proposal.call_id) return tool;
+        return { ...tool, proposal };
+      });
+      return { ...turn, tools };
+    });
+    return { ...value, turns };
+  });
+}
+
+/**
  * Remember the selected conversation for this account without storing its content.
  *
  * @param id - Conversation identifier, or `null` for an explicitly blank conversation.
@@ -132,22 +164,6 @@ function rememberConversation(id: number | null): void {
   const ownerId = accountId;
   if (ownerId === undefined) return;
   selectedConversations.update((value) => ({ ...value, [ownerId]: id }));
-}
-
-/**
- * Convert request failures to existing translated application error codes.
- *
- * @param error - Transport or application failure.
- * @param fallback - Safe localized code when no public code is available.
- * @returns A public error code without upstream bodies.
- */
-function errorCode(error: unknown, fallback: string): string {
-  if (isHTTPError(error)) {
-    const message = (error.data as { message?: unknown } | undefined)?.message;
-    if (typeof message === 'string' && /^[a-z][a-z0-9_]+$/.test(message)) return message;
-  }
-  if (error instanceof Error && error.message.startsWith('assistant_')) return error.message;
-  return fallback;
 }
 
 /**
@@ -222,9 +238,10 @@ export function openAssistant(): void {
 }
 
 /**
- * Collapse the assistant while leaving generation and composed text intact.
+ * Collapse the assistant only after its canvas edit has been resolved.
  */
 export function closeAssistant(): void {
+  if (get(assistantCanvas)) return;
   assistant.update((state) => ({ ...state, open: false }));
 }
 
@@ -243,15 +260,14 @@ export function stopAssistant(): void {
   if (!active) return;
   assistant.update((state) => ({
     ...state,
-    turns: state.turns.map((turn) =>
-      turn.status === 'streaming'
-        ? {
-            ...turn,
-            status: 'stopped',
-            tools: turn.tools.map((tool) => (tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool))
-          }
-        : turn
-    )
+    turns: state.turns.map((turn) => {
+      if (turn.status !== 'streaming') return turn;
+      const tools = turn.tools.map((tool) => {
+        if (tool.status !== 'running') return tool;
+        return { ...tool, status: 'interrupted' as const };
+      });
+      return { ...turn, status: 'stopped', tools };
+    })
   }));
   active.abort();
 }
@@ -260,10 +276,16 @@ export function stopAssistant(): void {
  * Start a fresh conversation while retaining the chosen model and composed input.
  */
 export function newAssistantConversation(): void {
-  if (get(assistant).busy || get(assistant).historyLoading) return;
+  if (get(assistantCanvas) || get(assistant).busy || get(assistant).historyLoading) return;
   conversationRevision += 1;
   rememberConversation(null);
-  assistant.update((state) => ({ ...state, conversation: null, turns: [], turnsBefore: null, error: null }));
+  assistant.update((state) => ({
+    ...state,
+    conversation: null,
+    turns: [],
+    turnsBefore: null,
+    error: null
+  }));
 }
 
 /**
@@ -324,7 +346,13 @@ export async function loadAssistantConversations(older = false, restore = false)
  */
 export async function loadAssistantConversation(id: number, older = false): Promise<void> {
   const state = get(assistant);
-  if (state.busy || historyRequest || (older && (!state.turnsBefore || state.conversation?.id !== id))) return;
+  if (
+    get(assistantCanvas) ||
+    state.busy ||
+    historyRequest ||
+    (older && (!state.turnsBefore || state.conversation?.id !== id))
+  )
+    return;
   const controller = new AbortController();
   historyRequest = controller;
   if (!older) conversationRevision += 1;
@@ -339,17 +367,19 @@ export async function loadAssistantConversation(id: number, older = false): Prom
       .json<Resp<{ conversation: AssistantConversation; items: AssistantTurn[]; next_before: number | null }>>();
     if (historyRequest !== controller) return;
     const items = data.items.map((turn) => ({ ...turn, serverId: Number(turn.id) }));
-    assistant.update((value) => ({
-      ...value,
-      conversation: data.conversation,
-      turns: older ? [...items, ...value.turns] : items,
-      turnsBefore: data.next_before,
-      model: older
-        ? value.model
-        : !value.modelsLoaded || isModelAvailable(data.conversation.model, value.models)
-          ? data.conversation.model
-          : value.model
-    }));
+    assistant.update((value) => {
+      let model = value.model;
+      if (!older && (!value.modelsLoaded || isModelAvailable(data.conversation.model, value.models))) {
+        model = data.conversation.model;
+      }
+      return {
+        ...value,
+        conversation: data.conversation,
+        turns: older ? [...items, ...value.turns] : items,
+        turnsBefore: data.next_before,
+        model
+      };
+    });
     if (!older) rememberConversation(data.conversation.id);
   } catch (error) {
     if (historyRequest === controller) {
@@ -373,7 +403,7 @@ export async function loadAssistantConversation(id: number, older = false): Prom
  * @returns A promise that resolves after the operation or a localized error.
  */
 export async function changeAssistantConversation(id: number, title?: string): Promise<void> {
-  if (get(assistant).busy || historyRequest) return;
+  if (get(assistantCanvas) || get(assistant).busy || historyRequest) return;
   const controller = new AbortController();
   historyRequest = controller;
   const generation = accountGeneration;
@@ -422,6 +452,7 @@ export async function changeAssistantConversation(id: number, title?: string): P
 export async function sendAssistant(route: string, retryId?: string): Promise<void> {
   const state = get(assistant);
   if (state.busy || state.historyLoading || state.conversation?.busy || state.modelsLoading !== null) return;
+  if (get(assistantCanvas)) return;
   const retry = retryId ? state.turns.find((turn) => turn.id === retryId && turn.status !== 'complete') : null;
   const prompt = (retry?.prompt ?? state.input).trim();
   if (!prompt) return;
@@ -446,6 +477,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     tools: []
   };
   const controller = new AbortController();
+  controller.signal.addEventListener('abort', () => endAssistantCanvas(turn.id), { once: true });
   active = controller;
   assistant.update((value) => ({
     ...value,
@@ -511,6 +543,11 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
             value.conversation && event.data.compacted ? { ...value.conversation, compacted: true } : value.conversation
         }));
       return;
+    }
+    if (event.event === 'tool_start' && event.data.name === 'preview_workflow_draft') {
+      beginAssistantCanvas(turn.id, context, stopAssistant);
+      // reveal the decision controls if the panel was closed before editing started
+      if (get(assistantCanvas)) openAssistant();
     }
     update((value) => {
       switch (event.event) {
@@ -593,7 +630,21 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
     if (!response.headers.get('content-type')?.startsWith('text/event-stream') || !response.body) {
       throw new Error('assistant_stream_invalid');
     }
-    await consumeAssistantStream(response.body, receive, activity);
+    const terminal = await consumeAssistantStream(response.body, receive, activity);
+    if (terminal === 'done' && submittedContext?.page_type === 'workflow_designer' && submittedContext.snapshot_id) {
+      const completed = get(assistant).turns.find((item) => item.id === turn.id);
+      const preview = completed?.tools.filter((tool) => tool.name === 'preview_workflow_draft').at(-1);
+      const proposalId = preview?.result?.ok ? preview.result.data?.proposal_id : undefined;
+      if (typeof proposalId === 'number') {
+        await finishAssistantCanvas(
+          turn.id,
+          conversation.id,
+          proposalId,
+          submittedContext.snapshot_id,
+          recordAssistantProposal
+        );
+      }
+    }
   } catch (error) {
     update((value) => {
       if (value.status === 'stopped') return;
@@ -601,6 +652,7 @@ export async function sendAssistant(route: string, retryId?: string): Promise<vo
       value.status = value.error === 'assistant_stream_interrupted' ? 'interrupted' : 'error';
     });
   } finally {
+    endAssistantCanvas(turn.id);
     clearTimeout(deadline);
     clearTimeout(idle!);
     update((value) => {

@@ -49,9 +49,8 @@ function toInlines(tokens: Token[] | undefined): MarkdownInline[] {
     const token = item as MarkedToken;
     switch (token.type) {
       case 'text':
-        return token.tokens
-          ? toInlines(token.tokens)
-          : [{ type: 'text', text: token.escaped ? token.text : decodeEntities(token.text) }];
+        if (token.tokens) return toInlines(token.tokens);
+        return [{ type: 'text', text: token.escaped ? token.text : decodeEntities(token.text) }];
       case 'escape':
       case 'html':
         return [{ type: 'text', text: token.text }];

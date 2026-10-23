@@ -1,5 +1,6 @@
 <script lang="ts">
   import { _ } from '$lib/i18n';
+  import { assistantCanvas } from '$lib/assistant/canvas';
   import { icons } from '$lib/icons';
   import type { Field, NodeSchema } from '$lib/types';
   import { useEdges, useNodes, useStore, type NodeProps } from '@xyflow/svelte';
@@ -25,6 +26,7 @@
   // check if the node is interactive
   const store = useStore();
   let interactive = $derived(store.nodesDraggable || store.nodesConnectable || store.elementsSelectable);
+  const canvasLocked = $derived($assistantCanvas !== null);
 
   // dynamic class names
   const shadowClass = $derived(selected ? 'shadow-xl' : 'shadow-lg hover:shadow-xl');
@@ -45,6 +47,7 @@
    */
   function copyNode(event: MouseEvent) {
     event.stopPropagation();
+    if (!interactive || canvasLocked) return;
     const node = nodes.current.find((node) => node.id === id);
     if (!node) {
       return;
@@ -68,6 +71,7 @@
    */
   function deleteNode(event: MouseEvent) {
     event.stopPropagation();
+    if (!interactive || canvasLocked) return;
     nodes.current = nodes.current.filter((node) => node.id !== id);
     edges.current = edges.current.filter((edge) => edge.source !== id && edge.target !== id);
   }
@@ -96,7 +100,7 @@
 </script>
 
 <div class="group relative w-max min-w-80 rounded-box backdrop-blur-lg transition-all {shadowClass} {borderClass}">
-  <div class="absolute z-1 size-full bg-transparent {interactive ? 'hidden' : ''}"></div>
+  <div class="absolute z-1 size-full bg-transparent {interactive || canvasLocked ? 'hidden' : ''}"></div>
   <div class="flex items-center gap-2 rounded-t-box p-2 {titleClass}">
     <iconify-icon icon={schema.icon in icons ? icons[schema.icon] : icons.box3d} width="1.5rem"></iconify-icon>
     <span class="mr-auto text-lg font-medium">
@@ -104,12 +108,22 @@
     </span>
     <!-- copy button -->
     {#if schema.group !== 'start'}
-      <button class="btn btn-square btn-subtle btn-sm" aria-label="Copy" onclick={(event) => copyNode(event)}>
+      <button
+        class="btn btn-square btn-subtle btn-sm"
+        aria-label="Copy"
+        disabled={canvasLocked}
+        onclick={(event) => copyNode(event)}
+      >
         <iconify-icon icon={icons.documentCopy} width="1.25rem"></iconify-icon>
       </button>
     {/if}
     <!-- delete button -->
-    <button class="btn btn-square btn-subtle btn-sm" aria-label="Delete" onclick={(event) => deleteNode(event)}>
+    <button
+      class="btn btn-square btn-subtle btn-sm"
+      aria-label="Delete"
+      disabled={canvasLocked}
+      onclick={(event) => deleteNode(event)}
+    >
       <iconify-icon icon={icons.delete} width="1.25rem"></iconify-icon>
     </button>
   </div>
@@ -118,8 +132,23 @@
       {#each schema.fields as field (field.id)}
         {@const Field = fields[field.field_type]}
         {#if fieldVisible(field)}
-          <div class="min-w-0 px-1 [&:not(:first-child):has(>.collapse)]:mt-3" style={fieldLayoutStyle(field)}>
-            <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
+          <div
+            class="min-w-0 px-1 [&:not(:first-child):has(>.collapse)]:mt-3"
+            style={fieldLayoutStyle(field)}
+            inert={canvasLocked && field.field_type !== 'code' && field.field_type !== 'script'}
+          >
+            {#if field.field_type === 'code' || field.field_type === 'script'}
+              {#key canvasLocked}
+                <Field
+                  nodeId={id}
+                  {...field}
+                  readonly={canvasLocked || field.readonly}
+                  data={data[field.id] ?? field.default}
+                />
+              {/key}
+            {:else}
+              <Field nodeId={id} {...field} data={data[field.id] ?? field.default} />
+            {/if}
           </div>
         {/if}
       {/each}

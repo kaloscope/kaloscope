@@ -39,7 +39,13 @@ class AddNode(ContextModel):
     """Add a node with an explicit stable identifier."""
 
     op: Literal["add_node"]
-    node: GraphNode
+    node: GraphNode = Field(
+        description=(
+            'Set type to "node" and data.$schema to the exact registered node_type '
+            '(for example, "http"). Put the authored fields beside $schema inside '
+            "data, not at the node root. Read list_node_types for field definitions."
+        )
+    )
 
 
 class RemoveNode(ContextModel):

@@ -2,6 +2,7 @@
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { tooltip } from '$lib/actions';
+  import { assistantCanvas } from '$lib/assistant/canvas';
   import { assistantDestination } from '$lib/assistant/navigation';
   import {
     assistant,
@@ -21,6 +22,7 @@
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
   import AssistantHistory from './AssistantHistory.svelte';
+  import AssistantChanges from './AssistantChanges.svelte';
   import AssistantMarkdown from './AssistantMarkdown.svelte';
   import AssistantTool from './AssistantTool.svelte';
 
@@ -46,16 +48,20 @@
   const rows = $derived(compact ? 1 : 2);
   const modelsBusy = $derived($assistant.modelsLoading !== null);
   const canSend = $derived(
-    !modelsBusy && !$assistant.historyLoading && !$assistant.conversation?.busy && !!input.trim() && !!$assistant.model
+    !$assistantCanvas &&
+      !modelsBusy &&
+      !$assistant.historyLoading &&
+      !$assistant.conversation?.busy &&
+      !!input.trim() &&
+      !!$assistant.model
   );
   const modelValue = $derived($assistant.model ? JSON.stringify($assistant.model) : null);
-  const currentPage = $derived(
-    /\/graphs\/(r\/)?\d+\/?$/.test(page.url.pathname)
-      ? 'workflow_designer'
-      : /\/workflows\/graphs\/?$/.test(page.url.pathname)
-        ? 'workflows'
-        : 'other'
-  );
+  const currentPage = $derived.by(() => {
+    const pathname = page.url.pathname;
+    if (/\/graphs\/(r\/)?\d+\/?$/.test(pathname)) return 'workflow_designer';
+    if (/\/workflows\/graphs\/?$/.test(pathname)) return 'workflows';
+    return 'other';
+  });
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');
   const destinations = $derived.by(() => {
     const items: { path: string; label: string }[] = [];
@@ -272,11 +278,7 @@
   function contextLabel(context: AssistantStoredContext): string {
     const parts = [$_(`assistant.pages.${context.page_type}`)];
     if (context.page_type === 'workflow_designer') {
-      parts.push(
-        `#${context.resource_id}`,
-        `v${context.draft_version}`,
-        $_(context.unsaved ? 'assistant.unsaved' : 'assistant.saved')
-      );
+      parts.push(`#${context.resource_id}`, $_(context.unsaved ? 'assistant.unsaved' : 'assistant.saved'));
     }
     return parts.join(' · ');
   }
@@ -313,11 +315,12 @@
       tick().then(() => {
         if ($assistant.open) {
           resize();
-          composer?.focus({ preventScroll: true });
+          (composer ?? panel)?.focus({ preventScroll: true });
         }
       });
     } else {
-      untrack(() => {
+      tick().then(() => {
+        if ($assistant.open) return;
         // restore focus only when it left with the panel, not after a click on the topbar trigger
         const lost = !document.activeElement || document.activeElement === document.body;
         if (lost && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
@@ -356,7 +359,7 @@
 
 <svelte:window onresize={resize} />
 
-{#if $assistant.open}
+{#if isOpen}
   <div
     id="assistant-panel"
     role="dialog"
@@ -375,7 +378,9 @@
     onkeydown={panelKeydown}
   >
     <h2 id="assistant-title" class="sr-only">{$_('assistant.title')}</h2>
-    <p id="assistant-help" class="sr-only">{$_('assistant.keyboard')}</p>
+    <p id="assistant-help" class="sr-only">
+      {$_($assistantCanvas ? 'assistant.canvas.locked' : 'assistant.keyboard')}
+    </p>
 
     <div class="flex h-8 shrink-0 items-center px-1.5 pt-1">
       <!-- the left inset matches the close button so the grip stays centered on the panel -->
@@ -399,9 +404,10 @@
         type="button"
         class="btn btn-circle btn-subtle opacity-80 btn-xs"
         aria-label={$_('assistant.close')}
+        disabled={!!$assistantCanvas}
         onclick={closeAssistant}
       >
-        <iconify-icon icon={icons.dismiss} width="1.125rem" aria-hidden="true"></iconify-icon>
+        <iconify-icon icon={icons.dismiss} width="1rem" aria-hidden="true"></iconify-icon>
       </button>
     </div>
 
@@ -536,132 +542,136 @@
         </section>
       {/if}
 
-      <div
-        class="rounded-box bg-base-100 shadow-[var(--assistant-composer-shadow)] ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80"
-      >
-        <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
-        <textarea
-          id="assistant-input"
-          bind:this={composer}
-          bind:value={$assistant.input}
-          {rows}
-          maxlength="32768"
-          class="block w-full resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-1 text-sm leading-6 outline-none placeholder:text-base-content/60"
-          class:max-h-40={!compact}
-          class:max-h-20={compact}
-          placeholder={$_('assistant.placeholder')}
-          aria-describedby="assistant-help"></textarea>
+      {#if $assistantCanvas}
+        <AssistantChanges />
+      {:else}
+        <div
+          class="rounded-box bg-base-100 shadow-[var(--assistant-composer-shadow)] ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80"
+        >
+          <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
+          <textarea
+            id="assistant-input"
+            bind:this={composer}
+            bind:value={$assistant.input}
+            {rows}
+            maxlength="32768"
+            class="block w-full resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-1 text-sm leading-6 outline-none placeholder:text-base-content/60"
+            class:max-h-40={!compact}
+            class:max-h-20={compact}
+            placeholder={$_('assistant.placeholder')}
+            aria-describedby="assistant-help"></textarea>
 
-        {#if $assistant.modelsError || $assistant.error}
-          <div class="space-y-0.5 px-3 pt-1 text-xs leading-5 text-base-content/60">
-            {#if $assistant.modelsError}
-              <p role="alert">
-                {errorMessage($assistant.modelsError)}
-              </p>
-            {/if}
-            {#if $assistant.error}
-              <p role="alert">{errorMessage($assistant.error)}</p>
-            {/if}
-          </div>
-        {/if}
+          {#if $assistant.modelsError || $assistant.error}
+            <div class="space-y-0.5 px-3 pt-1 text-xs leading-5 text-base-content/60">
+              {#if $assistant.modelsError}
+                <p role="alert">
+                  {errorMessage($assistant.modelsError)}
+                </p>
+              {/if}
+              {#if $assistant.error}
+                <p role="alert">{errorMessage($assistant.error)}</p>
+              {/if}
+            </div>
+          {/if}
 
-        <div class="flex items-center gap-1 p-1.5">
-          {#if currentPage !== 'other'}
-            <span
-              class="flex h-7 min-w-0 shrink items-center gap-1 rounded-full bg-base-content/5 px-2 text-xs text-base-content/70"
-            >
-              <iconify-icon icon={icons.contentView} width="0.875rem" class="size-3.5 shrink-0" aria-hidden="true"
-              ></iconify-icon>
-              <span class="sr-only">{$_('assistant.context')}:</span>
-              <span class="truncate @max-xs:sr-only">{$_(`assistant.pages.${currentPage}`)}</span>
-            </span>
-          {/if}
-          {#if $assistant.modelsLoaded && !$assistant.models.length}
-            <Button
-              icon={icons.redo}
-              size="xs"
-              class="size-7! min-h-7! shrink-0"
-              loading={$assistant.modelsLoading}
-              disabled={$assistant.busy || modelsBusy}
-              onclick={loadAssistantModels}
-            />
-          {/if}
-          <div class="flex min-w-0 shrink-[2] items-center" aria-busy={modelsBusy}>
-            <label class="sr-only" for="assistant-model">{$_('assistant.model')}</label>
-            <Select
-              id="assistant-model"
-              class="[field-sizing:content] h-7 min-h-7 w-auto max-w-full min-w-0 select-ghost pr-7 pl-2 text-xs select-sm disabled:border-transparent disabled:bg-transparent disabled:text-base-content/60"
-              disabled={$assistant.busy || modelsBusy || !$assistant.models.length}
-              value={modelValue}
-              onchange={(event) => ($assistant.model = JSON.parse((event.currentTarget as HTMLSelectElement).value))}
-            >
-              <option value={null} disabled>
-                {$assistant.modelsLoaded && !$assistant.models.length
-                  ? $_('assistant.no_models')
-                  : $_('action.select', $_('assistant.model').toLocaleLowerCase())}
-              </option>
-              {#each $assistant.models as provider (provider.id)}
-                <optgroup label={provider.name}>
-                  {#each provider.model_ids as model (model)}
-                    <option value={JSON.stringify({ provider_id: provider.id, model_id: model })}>{model}</option>
-                  {/each}
-                </optgroup>
-              {/each}
-            </Select>
-          </div>
-          <span class="flex-1"></span>
-          {#if position}
-            <Dropdown
-              class="assistant-menu dropdown-end dropdown-top"
-              triggerClass="rounded-field focus-visible:outline-2 focus-visible:outline-primary"
-              contentClass="mb-1 shadow-lg!"
-              contentWidth="13rem"
-              contentMaxHeight={menuHeight}
-              onclick={openMenu}
-            >
-              {#snippet trigger()}
-                <span class="btn btn-square btn-subtle btn-sm">
-                  <iconify-icon icon={icons.moreVertical} width="1.125rem" class="size-4.5" aria-hidden="true"
-                  ></iconify-icon>
-                  <span class="sr-only">{$_('assistant.more')}</span>
-                </span>
-              {/snippet}
-              <ul class="menu w-full gap-0.5 menu-sm p-1.5">
-                <li>
-                  <button
-                    type="button"
-                    onclick={() => {
-                      position = null;
-                      closeMenu(mover);
-                    }}
-                  >
-                    <iconify-icon icon={icons.focusCentered} width="1rem" class="size-4" aria-hidden="true"
+          <div class="flex items-center gap-1 p-1.5">
+            {#if currentPage !== 'other'}
+              <span
+                class="flex h-7 min-w-0 shrink items-center gap-1 rounded-full bg-base-content/5 px-2 text-xs text-base-content/70"
+              >
+                <iconify-icon icon={icons.contentView} width="0.875rem" class="size-3.5 shrink-0" aria-hidden="true"
+                ></iconify-icon>
+                <span class="sr-only">{$_('assistant.context')}:</span>
+                <span class="truncate @max-xs:sr-only">{$_(`assistant.pages.${currentPage}`)}</span>
+              </span>
+            {/if}
+            {#if $assistant.modelsLoaded && !$assistant.models.length}
+              <Button
+                icon={icons.redo}
+                size="xs"
+                class="size-7! min-h-7! shrink-0"
+                loading={$assistant.modelsLoading}
+                disabled={$assistant.busy || modelsBusy}
+                onclick={loadAssistantModels}
+              />
+            {/if}
+            <div class="flex min-w-0 shrink-[2] items-center" aria-busy={modelsBusy}>
+              <label class="sr-only" for="assistant-model">{$_('assistant.model')}</label>
+              <Select
+                id="assistant-model"
+                class="[field-sizing:content] h-7 min-h-7 w-auto max-w-full min-w-0 select-ghost pr-7 pl-2 text-xs select-sm disabled:border-transparent disabled:bg-transparent disabled:text-base-content/60"
+                disabled={$assistant.busy || modelsBusy || !$assistant.models.length}
+                value={modelValue}
+                onchange={(event) => ($assistant.model = JSON.parse((event.currentTarget as HTMLSelectElement).value))}
+              >
+                <option value={null} disabled>
+                  {$assistant.modelsLoaded && !$assistant.models.length
+                    ? $_('assistant.no_models')
+                    : $_('action.select', $_('assistant.model').toLocaleLowerCase())}
+                </option>
+                {#each $assistant.models as provider (provider.id)}
+                  <optgroup label={provider.name}>
+                    {#each provider.model_ids as model (model)}
+                      <option value={JSON.stringify({ provider_id: provider.id, model_id: model })}>{model}</option>
+                    {/each}
+                  </optgroup>
+                {/each}
+              </Select>
+            </div>
+            <span class="flex-1"></span>
+            {#if position}
+              <Dropdown
+                class="assistant-menu dropdown-end dropdown-top"
+                triggerClass="rounded-field focus-visible:outline-2 focus-visible:outline-primary"
+                contentClass="mb-1 shadow-lg!"
+                contentWidth="13rem"
+                contentMaxHeight={menuHeight}
+                onclick={openMenu}
+              >
+                {#snippet trigger()}
+                  <span class="btn btn-square btn-subtle btn-sm">
+                    <iconify-icon icon={icons.moreVertical} width="1.125rem" class="size-4.5" aria-hidden="true"
                     ></iconify-icon>
-                    {$_('assistant.restore_position')}
-                  </button>
-                </li>
-              </ul>
-            </Dropdown>
-          {/if}
-          <button
-            bind:this={primary}
-            type="button"
-            class="btn btn-circle shrink-0 btn-sm {$assistant.busy ? 'btn-neutral' : 'btn-primary'}"
-            class:btn-disabled={!$assistant.busy && !canSend}
-            aria-disabled={!$assistant.busy && !canSend}
-            aria-label={$_($assistant.busy ? 'assistant.stop' : 'assistant.send')}
-            aria-keyshortcuts={$assistant.busy ? undefined : 'Control+Enter Meta+Enter'}
-            use:tooltip={{ content: $assistant.busy ? '' : $_('assistant.send_shortcut'), zIndex: 10000 }}
-            onclick={submit}
-          >
-            <iconify-icon
-              icon={$assistant.busy ? icons.stopFilled : icons.arrowUp}
-              width={$assistant.busy ? '0.875rem' : '1.125rem'}
-              aria-hidden="true"
-            ></iconify-icon>
-          </button>
+                    <span class="sr-only">{$_('assistant.more')}</span>
+                  </span>
+                {/snippet}
+                <ul class="menu w-full gap-0.5 menu-sm p-1.5">
+                  <li>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        position = null;
+                        closeMenu(mover);
+                      }}
+                    >
+                      <iconify-icon icon={icons.focusCentered} width="1rem" class="size-4" aria-hidden="true"
+                      ></iconify-icon>
+                      {$_('assistant.restore_position')}
+                    </button>
+                  </li>
+                </ul>
+              </Dropdown>
+            {/if}
+            <button
+              bind:this={primary}
+              type="button"
+              class="btn btn-circle shrink-0 btn-sm {$assistant.busy ? 'btn-neutral' : 'btn-primary'}"
+              class:btn-disabled={!$assistant.busy && !canSend}
+              aria-disabled={!$assistant.busy && !canSend}
+              aria-label={$_($assistant.busy ? 'assistant.stop' : 'assistant.send')}
+              aria-keyshortcuts={$assistant.busy ? undefined : 'Control+Enter Meta+Enter'}
+              use:tooltip={{ content: $assistant.busy ? '' : $_('assistant.send_shortcut'), zIndex: 10000 }}
+              onclick={submit}
+            >
+              <iconify-icon
+                icon={$assistant.busy ? icons.stopFilled : icons.arrowUp}
+                width={$assistant.busy ? '0.875rem' : '1.125rem'}
+                aria-hidden="true"
+              ></iconify-icon>
+            </button>
+          </div>
         </div>
-      </div>
+      {/if}
     </footer>
     <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {$assistant.busy ? $_('assistant.generating') : lastTurn ? $_(`assistant.status.${lastTurn.status}`) : ''}

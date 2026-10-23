@@ -17,14 +17,15 @@ from app.core.exceptions import UnauthorizedException
 from app.core.middleware import on_request, on_response
 from app.models.ai import AIProvider
 from app.models.assistant import AssistantEvent
-from app.models.flow import FlowGraph
+from app.models.flow import FlowGraph, GraphDocument
 from app.models.user import User, UserRole
 from app.routes import assistant as routes
 from app.utils.json import dumps
 
 BODY = {
     "model": {"provider_id": 1, "model_id": "test"},
-    "messages": [{"role": "user", "content": "hello"}],
+    "prompt": "hello",
+    "request_id": "first",
 }
 
 
@@ -41,7 +42,7 @@ def application():
 
 def request(app, *, body=BODY, authenticated=True):
     result = Request(
-        url_bytes=b"/_api/assistant/chat",
+        url_bytes=b"/_api/assistant/conversations/1/chat",
         headers={"content-type": "application/json"},
         version="1.1",
         method="POST",
@@ -53,10 +54,13 @@ def request(app, *, body=BODY, authenticated=True):
     return result
 
 
-@pytest.mark.parametrize("handler", [routes.chat, routes.list_models])
-def test_login_required(application, handler):
+@pytest.mark.parametrize(
+    ("handler", "kwargs"),
+    [(routes.persistent_chat, {"conversation_id": 1}), (routes.list_models, {})],
+)
+def test_login_required(application, handler, kwargs):
     with pytest.raises(UnauthorizedException):
-        asyncio.run(handler(request(application, authenticated=False)))
+        asyncio.run(handler(request(application, authenticated=False), **kwargs))
 
 
 def test_invalid_request(application, monkeypatch):
@@ -64,7 +68,11 @@ def test_invalid_request(application, monkeypatch):
     monkeypatch.setattr(Request, "respond", respond)
 
     with pytest.raises(ValidationError):
-        asyncio.run(routes.chat(request(application, body={**BODY, "user_id": 2})))
+        asyncio.run(
+            routes.persistent_chat(
+                request(application, body={**BODY, "user_id": 2}), conversation_id=1
+            )
+        )
 
     respond.assert_not_awaited()
 
@@ -88,10 +96,8 @@ def test_heartbeat_and_disconnect(application, monkeypatch):
 
     response = SimpleNamespace(send=send)
     monkeypatch.setattr(Request, "respond", AsyncMock(return_value=response))
-    monkeypatch.setattr(routes.AssistantService, "stream", stream)
-
     with pytest.raises(BrokenPipeError):
-        asyncio.run(routes.chat(request(application)))
+        asyncio.run(routes.serve_events(request(application), stream()))
 
     assert frames[0].startswith("event: start\n")
     assert frames[-1] == ": keep-alive\n\n"
@@ -119,8 +125,7 @@ def test_cancel_backpressure(application, monkeypatch):
         monkeypatch.setattr(
             Request, "respond", AsyncMock(return_value=SimpleNamespace(send=send))
         )
-        monkeypatch.setattr(routes.AssistantService, "stream", stream)
-        task = asyncio.create_task(routes.chat(request(application)))
+        task = asyncio.create_task(routes.serve_events(request(application), stream()))
         await asyncio.wait_for(sending.wait(), 5)
         await asyncio.sleep(0)
         task.cancel()
@@ -149,11 +154,12 @@ def test_http_contract(application, monkeypatch):
     app.shared_ctx.sessions = {"browser-session": user}
     users = []
 
-    async def stream(body, user, *, turn=None):
+    async def stream(turn, user):
         users.append(user)
-        assert body.messages[0].content == "hello"
+        assert turn.prompt == "hello"
         yield AssistantEvent(
-            event="start", data={"turn_id": str(turn.id) if turn else "one"}
+            event="start",
+            data={"turn_id": str(turn.id), "conversation_id": turn.conversation_id},
         )
         yield AssistantEvent(event="text_delta", data={"text": "你好\n世界"})
         yield AssistantEvent(event="done", data={"usage": None, "tool_calls": 0})
@@ -189,7 +195,9 @@ def test_http_contract(application, monkeypatch):
             ) as client:
                 for headers in ({}, {"authorization": "Bearer ks_mcp_not_a_session"}):
                     denied = await client.post(
-                        "/_api/assistant/chat", json=BODY, headers=headers
+                        "/_api/assistant/conversations/1/chat",
+                        json=BODY,
+                        headers=headers,
                     )
                     assert denied.status_code == 401
                 assert users == []
@@ -200,22 +208,10 @@ def test_http_contract(application, monkeypatch):
                 ]
                 assert "private.example" not in models.text
                 assert "encrypted-secret" not in models.text
-                result = await client.post(
+                retired = await client.post(
                     "/_api/assistant/chat", json=BODY, headers=headers
                 )
-
-                assert result.status_code == 200
-                assert result.headers["content-type"].startswith("text/event-stream")
-                assert result.headers["cache-control"] == "no-store"
-                assert result.headers["x-accel-buffering"] == "no"
-                assert (
-                    'event: text_delta\ndata: {"text":"你好\\n世界"}\n\n' in result.text
-                )
-                assert result.text.endswith(
-                    'event: done\ndata: {"usage":null,"tool_calls":0}\n\n'
-                )
-                assert users[0].id == 1
-                assert users[0].perms.indexer_ids == []
+                assert retired.status_code == 404
                 created = await client.post(
                     "/_api/assistant/conversations",
                     json={"model": BODY["model"]},
@@ -232,7 +228,18 @@ def test_http_contract(application, monkeypatch):
                     },
                     headers=headers,
                 )
-                assert "event: done" in reply.text
+                assert reply.status_code == 200
+                assert reply.headers["content-type"].startswith("text/event-stream")
+                assert reply.headers["cache-control"] == "no-store"
+                assert reply.headers["x-accel-buffering"] == "no"
+                assert (
+                    'event: text_delta\ndata: {"text":"你好\\n世界"}\n\n' in reply.text
+                )
+                assert reply.text.endswith(
+                    'event: done\ndata: {"usage":null,"tool_calls":0}\n\n'
+                )
+                assert users[0].id == 1
+                assert users[0].perms.indexer_ids == []
                 history = await client.get(path + "/turns", headers=headers)
                 assert history.headers["cache-control"] == "no-store"
                 assert history.json()["data"]["items"][0]["content"] == "你好\n世界"
@@ -325,6 +332,165 @@ def test_http_contract(application, monkeypatch):
                 await client.delete(path, headers=headers)
                 missing = await client.get(path + "/turns", headers=headers)
                 assert missing.status_code == 404
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_canvas_edit_routes(application):
+    from app.core.ai import tools
+    from app.models.assistant import (
+        AssistantProposal,
+        AssistantToolCall,
+        AssistantTurnRequest,
+        ConversationCreate,
+    )
+    from app.services.assistant_sessions import AssistantSessionService as Sessions
+    from tests.test_assistant_proposals import document, set_url
+
+    app = application
+    app.config.AUTO_EXTEND = False
+    app.config.TOUCHUP = False
+    app.config.AUTH_EXCLUDE_PATHS = []
+    app.config.TOKEN_EXPIRATION_HOURS = 24
+    app.asgi = True
+    app.blueprint(routes.assistant, url_prefix="/_api/assistant")
+    app.register_middleware(on_request, "request")
+    app.register_middleware(on_response, "response")
+    expire = timezone.now() + timedelta(hours=1)
+    app.shared_ctx.sessions = {
+        "owner": SimpleNamespace(id=1, role=UserRole.ADMIN, expire_at=expire),
+        "other": SimpleNamespace(id=2, role=UserRole.ADMIN, expire_at=expire),
+    }
+    owner = {"authorization": "Bearer owner"}
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        try:
+            await Tortoise.generate_schemas()
+            for user_id, name in ((1, "owner"), (2, "other")):
+                await User.create(id=user_id, username=name, password="x", role="admin")
+            graph = await FlowGraph.create(
+                name="Route fixture",
+                category="schedule",
+                state="draft",
+                draft=document(),
+            )
+            user = app.shared_ctx.sessions["owner"]
+            conversation = await Sessions.create(
+                ConversationCreate(model=BODY["model"]), user
+            )
+            _, turn = await Sessions.begin(
+                conversation["id"],
+                AssistantTurnRequest(
+                    model=BODY["model"], request_id="turn", prompt="Repair"
+                ),
+                user,
+            )
+            capture = await Sessions.snapshot(
+                conversation["id"],
+                graph.id,
+                0,
+                GraphDocument.model_validate(document()),
+                "canvas",
+                user,
+            )
+            arguments = dumps(
+                {
+                    "workflow_id": graph.id,
+                    "draft_version": 0,
+                    "snapshot_id": capture.id,
+                    "changes": [set_url()],
+                }
+            ).decode()
+            await AssistantToolCall.create(
+                turn_id=turn.id,
+                call_id="call",
+                name="preview_workflow_draft",
+                arguments=arguments,
+            )
+            preview = await tools.execute_tool(
+                "preview_workflow_draft",
+                arguments,
+                user,
+                conversation_id=conversation["id"],
+                call_id="call",
+                canvas={
+                    "resource_id": graph.id,
+                    "draft_version": 0,
+                    "snapshot_id": capture.id,
+                },
+                canvas_snapshot_id=capture.id,
+            )
+            await Sessions.finish(turn, status="complete", content="Ready")
+            record = await AssistantProposal.get(id=preview["data"]["proposal_id"])
+            path = (
+                f"/_api/assistant/conversations/{conversation['id']}"
+                f"/proposals/{record.id}"
+            )
+            decision = {
+                "workflow_id": graph.id,
+                "base_version": 0,
+                "digest": record.digest,
+                "canvas": document(),
+            }
+            await app._startup()
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                assert (await client.get(path + "/canvas")).status_code == 401
+                other = await client.get(
+                    path + "/canvas", headers={"authorization": "Bearer other"}
+                )
+                assert other.status_code == 404
+                view = await client.get(path + "/canvas", headers=owner)
+                assert view.headers["cache-control"] == "no-store"
+                assert view.json()["data"]["change_count"] == 1
+                assert (
+                    view.json()["data"]["canvas"]["nodes"][0]["data"]["url"]
+                    == "https://new.test"
+                )
+                for obsolete in (path, path + "/changes", path + "/value"):
+                    assert (
+                        await client.get(obsolete, headers=owner)
+                    ).status_code == 404
+                assert (
+                    await client.post(path + "/refresh", json=decision, headers=owner)
+                ).status_code == 404
+                missing_canvas = {
+                    key: value for key, value in decision.items() if key != "canvas"
+                }
+                assert (
+                    await client.post(
+                        path + "/confirm", json=missing_canvas, headers=owner
+                    )
+                ).status_code == 400
+                extra = await client.post(
+                    path + "/confirm", json={**decision, "user_id": 2}, headers=owner
+                )
+                assert extra.status_code == 400
+                changed = await client.post(
+                    path + "/confirm",
+                    json={**decision, "digest": "f" * 64},
+                    headers=owner,
+                )
+                assert changed.status_code == 409
+                assert changed.json()["message"] == "assistant_proposal_changed"
+                for _ in range(2):
+                    saved = await client.post(
+                        path + "/confirm", json=decision, headers=owner
+                    )
+                    assert saved.json()["data"]["status"] == "saved"
+                    assert saved.json()["data"]["saved_version"] == 1
+                cancelled = await client.post(
+                    path + "/cancel", json=missing_canvas, headers=owner
+                )
+                assert cancelled.json()["data"]["status"] == "saved"
+                await graph.refresh_from_db()
+                assert graph.draft_version == 1
         finally:
             await Tortoise.close_connections()
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { assistantCanvas } from '$lib/assistant/canvas';
   import {
     assistant,
     changeAssistantConversation,
@@ -11,7 +12,7 @@
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
-  const locked = $derived($assistant.busy || $assistant.historyLoading);
+  const locked = $derived(!!$assistantCanvas || $assistant.busy || $assistant.historyLoading);
 
   /**
    * Start a new conversation and move focus to the composer before the button disappears.

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { assistantCanvas } from '$lib/assistant/canvas';
+  import { get } from 'svelte/store';
   import { CodeMirror, Label } from '$lib/components';
   import { nodeFormatter } from '$lib/i18n';
   import type { Field, FlowGraphContext } from '$lib/types';
@@ -71,6 +73,7 @@ def execute(node_id, node_data, context):
     copier: boolean;
     resetter: boolean;
     formatter: boolean;
+    readonly?: boolean;
   } = $props();
 
   let data: ScriptData = $derived(scriptData(_data.language, _data.code));
@@ -121,6 +124,7 @@ def execute(node_id, node_data, context):
   <select
     class="nodrag select w-full appearance-none select-sm"
     value={data.language}
+    disabled={field.readonly}
     onchange={(event) => {
       data = scriptData(event.currentTarget.value as Language);
       updateNodeData(field.nodeId, {
@@ -137,6 +141,8 @@ def execute(node_id, node_data, context):
   {#key data.language}
     <CodeMirror
       document={data.code}
+      readOnly={field.readonly}
+      enlarger={true}
       language={data.support}
       placeholder={$placeholder(field.placeholder)}
       tabSize={field.tabsize}
@@ -150,6 +156,7 @@ def execute(node_id, node_data, context):
       class={validatorClass}
       editorClass="nodrag nowheel"
       onchange={(doc) => {
+        if (get(assistantCanvas)) return;
         updateNodeData(field.nodeId, {
           [field.id]: { language: data.language, code: doc }
         });

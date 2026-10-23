@@ -19,6 +19,7 @@
   import { afterNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { tooltip } from '$lib/actions';
+  import { assistantCanvas } from '$lib/assistant/canvas';
   import { assistant, toggleAssistant } from '$lib/assistant/session';
   import { Languages, Logo, Notifications, PageHeader, Signposts, Themes, UserCenter } from '$lib/components';
   import { _ } from '$lib/i18n';
@@ -159,14 +160,10 @@
         aria-haspopup="dialog"
         aria-expanded={$assistant.open}
         aria-controls="assistant-panel"
+        disabled={!!$assistantCanvas}
         onclick={toggleAssistant}
       >
-        {#if $assistant.busy}
-          <span class="loading size-6 loading-spinner opacity-90" aria-hidden="true"></span>
-        {:else}
-          <iconify-icon icon={icons.botSquare} width="1.5rem" class="size-6 opacity-90" aria-hidden="true"
-          ></iconify-icon>
-        {/if}
+        <iconify-icon icon={icons.botSquare} width="1.5rem" class="size-6 opacity-90" aria-hidden="true"></iconify-icon>
       </button>
     {/if}
     <UserCenter

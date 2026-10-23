@@ -203,9 +203,11 @@ class AssistantSessionService:
             query = query.filter(id__lt=before)
         records = await query.order_by("-id").limit(21)
         items = []
+        visible = []
         for turn in reversed(records[:20]):
             allowed = await cls.allowed(turn.resource_ids, user)
             calls = await AssistantToolCall.filter(turn_id=turn.id) if allowed else []
+            visible.extend(call.call_id for call in calls)
             items.append(
                 {
                     "id": str(turn.id),
@@ -229,6 +231,14 @@ class AssistantSessionService:
                     "retry_of": turn.retry_of,
                 }
             )
+        from app.services.assistant_proposals import AssistantProposalService
+
+        # attach each preview's latest decision so reloads restore its outcome
+        proposals = await AssistantProposalService.latest(conversation_id, visible)
+        for item in items:
+            for tool in item["tools"]:
+                if tool["id"] in proposals:
+                    tool["proposal"] = proposals[tool["id"]]
         return {
             "conversation": cls.describe(conversation),
             "items": items,
