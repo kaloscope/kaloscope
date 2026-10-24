@@ -22,7 +22,13 @@ MAX_PAGE_CONTEXT_BYTES = 128 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024
 WORKFLOW_PATH = "/settings/workflows/graphs"
 MEDIA_PATH = "/medialibs"
+# the download pages split shared tasks into active and completed views
+DOWNLOAD_PATHS = {
+    "active_downloads": "/downloads/downloading",
+    "completed_downloads": "/downloads/completed",
+}
 type ResourceID = Annotated[int, Field(gt=0, le=2**53 - 1, strict=True)]
+type DownloadOrdering = Literal["", "name", "-name", "downloader_id", "-downloader_id"]
 type WorkflowOrdering = Literal[
     "",
     "name",
@@ -190,11 +196,45 @@ class AssistantSnapshotRequest(ContextModel):
         return self
 
 
+class DownloadFilters(ContextModel):
+    """Describe the filters of the displayed download results."""
+
+    name: str = Field(default="", max_length=255)
+    downloader_id: ResourceID | None = None
+    ordering: DownloadOrdering = ""
+    page_num: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=100)
+
+
+class DownloadListContext(ContextModel):
+    """Identify the active or completed download page and its displayed results."""
+
+    page_type: Literal["active_downloads", "completed_downloads"]
+    route: str = Field(max_length=160)
+    selected_ids: list[ResourceID] = Field(default_factory=list, max_length=100)
+    filters: DownloadFilters = Field(default_factory=DownloadFilters)
+
+    @model_validator(mode="after")
+    def validate_route(self) -> Self:
+        """Require the route to match the active or completed view.
+
+        Returns:
+            Consistent download context.
+
+        Raises:
+            ValueError: If the route names the other view or another page.
+        """
+        if self.route != DOWNLOAD_PATHS[self.page_type]:
+            raise ValueError("Context does not match the visible download page")
+        return self
+
+
 type AssistantPageContext = Annotated[
     WorkflowListContext
     | WorkflowDesignerContext
     | MediaLibraryContext
-    | MediaItemContext,
+    | MediaItemContext
+    | DownloadListContext,
     Field(discriminator="page_type"),
 ]
 

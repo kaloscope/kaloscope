@@ -66,6 +66,8 @@
     if (/\/workflows\/graphs\/?$/.test(pathname)) return 'workflows';
     if (/^\/medialibs\/\d+\/\d+\/?$/.test(pathname)) return 'media_item';
     if (/^\/medialibs\/\d+\/?$/.test(pathname)) return 'media_library';
+    if (/^\/downloads\/downloading\/?$/.test(pathname)) return 'active_downloads';
+    if (/^\/downloads\/completed\/?$/.test(pathname)) return 'completed_downloads';
     return 'other';
   });
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');

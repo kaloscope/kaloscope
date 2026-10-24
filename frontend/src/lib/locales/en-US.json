@@ -1116,6 +1116,8 @@
       "workflow_designer": "Workflow Designer",
       "media_library": "Media Library",
       "media_item": "Media Details",
+      "active_downloads": "Downloading",
+      "completed_downloads": "Completed Downloads",
       "other": "No Page Context"
     },
     "tools": {
@@ -1132,7 +1134,9 @@
       "read_conversation_history": "Read original conversation",
       "list_media_libraries": "Find Media Libraries",
       "list_media_items": "Find Media",
-      "get_media_item": "Read Media Details"
+      "get_media_item": "Read Media Details",
+      "list_download_tasks": "Find Download Tasks",
+      "get_download_task": "Read Download Details"
     },
     "tool_status": {
       "running": "Running",

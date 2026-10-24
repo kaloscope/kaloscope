@@ -125,6 +125,19 @@ export type AssistantPageContext =
       library_id: number;
       // an episode or chapter selected within the visible work
       selected_id: number | null;
+    }
+  | {
+      page_type: 'active_downloads' | 'completed_downloads';
+      route: string;
+      selected_ids: number[];
+      // filters and page of the results on screen, not unsubmitted input
+      filters: {
+        name: string;
+        downloader_id: number | null;
+        ordering: string;
+        page_num: number;
+        page_size: number;
+      };
     };
 
 /**
@@ -144,14 +157,14 @@ export type AssistantConversation = {
 
 /** Persisted page metadata; full canvases remain behind server-owned references. */
 export type AssistantStoredContext =
-  | Extract<AssistantPageContext, { page_type: 'workflows' | 'media_library' | 'media_item' }>
+  | Exclude<AssistantPageContext, { page_type: 'workflow_designer' }>
   | (Omit<Extract<AssistantPageContext, { page_type: 'workflow_designer' }>, 'canvas'> & { snapshot_id: number });
 
 /**
  * A registered internal page offered by the navigation tool.
  */
 export type AssistantDestination = {
-  page: 'workflows' | 'workflow_designer' | 'media_library' | 'media_item';
+  page: 'workflows' | 'workflow_designer' | 'media_library' | 'media_item' | 'active_downloads' | 'completed_downloads';
   resource_id?: number | null;
 };
 

@@ -1,11 +1,19 @@
-"""Expose bounded, permission-checked workflow and media tools to the assistant."""
+"""Expose bounded, permission-checked workflow, media, and download tools."""
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from enum import StrEnum
+from typing import Annotated, Any, Literal, Self
 
 from openai.types.chat import ChatCompletionFunctionToolParam
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    WithJsonSchema,
+    model_validator,
+)
 from tortoise.transactions import in_transaction
 
 from app.core.ai.documents import (
@@ -16,6 +24,8 @@ from app.core.ai.documents import (
     value_summary,
 )
 from app.core.ai.queries import (
+    download_task_details,
+    download_tasks,
     log_detail,
     media_item_details,
     media_items,
@@ -25,16 +35,20 @@ from app.core.ai.queries import (
     workflow_list,
     workflow_logs,
 )
+from app.core.dl.driver import DownloadState
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.models.assistant import (
+    DOWNLOAD_PATHS,
     MEDIA_PATH,
     WORKFLOW_PATH,
     AssistantToolCall,
     AssistantTurn,
+    DownloadOrdering,
     ResourceID,
     WorkflowOrdering,
     media_resource,
 )
+from app.models.download import DownloadQuery
 from app.models.flow import (
     GraphCategory,
     GraphDocument,
@@ -53,6 +67,27 @@ from app.utils.json import dumps, loads
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
 CREATE_TOOL = "create_workflow_draft"
+SAFE_INTEGER = 2**53 - 1
+
+
+def plain_enum(enum: type[StrEnum], description: str | None = None) -> WithJsonSchema:
+    """Describe enum values without repeating the enum's full documentation.
+
+    Args:
+        enum: String enum still used to validate the argument.
+        description: Short replacement for the enum's documentation, if needed.
+
+    Returns:
+        A schema override listing the accepted values.
+    """
+    schema: dict[str, Any] = {"type": "string", "enum": [item.value for item in enum]}
+    if description:
+        schema["description"] = description
+    return WithJsonSchema(schema)
+
+
+# the creation tool documents categories once; other tools only list the values
+type CategoryValue = Annotated[GraphCategory, plain_enum(GraphCategory)]
 
 
 class ToolArguments(BaseModel):
@@ -65,8 +100,18 @@ class WorkflowList(ToolArguments):
     """Bound workflow searches and their result pages."""
 
     name: str | None = Field(default=None, max_length=255)
-    category: GraphCategory | None = None
-    state: GraphState | None = None
+    category: CategoryValue | None = None
+    state: (
+        Annotated[
+            GraphState,
+            plain_enum(
+                GraphState,
+                "draft: never published; modified: published with newer draft "
+                "changes; published: draft matches. Not execution status.",
+            ),
+        ]
+        | None
+    ) = None
     ordering: WorkflowOrdering = ""
     page_num: int = Field(default=1, ge=1, strict=True)
     page_size: int = Field(default=10, ge=1, le=100, strict=True)
@@ -87,7 +132,7 @@ class WorkflowLogQuery(WorkflowID):
 class NodeQuery(ToolArguments):
     """Filter registered node schemas by workflow category and node type."""
 
-    category: GraphCategory | None = None
+    category: CategoryValue | None = None
     node_type: str | None = Field(default=None, min_length=1, max_length=255)
 
 
@@ -179,15 +224,42 @@ class MediaItemQuery(ToolArguments):
     limit: int = Field(default=20, ge=1, le=2000, strict=True)
 
 
+class DownloadList(ToolArguments):
+    """Bound shared download searches and their result pages."""
+
+    scope: Literal["all", "active", "completed"] = "all"
+    state: Annotated[DownloadState, plain_enum(DownloadState)] | None = None
+    name: str | None = Field(default=None, max_length=255)
+    downloader_id: ResourceID | None = None
+    ordering: DownloadOrdering = ""
+    page_num: int = Field(default=1, ge=1, strict=True)
+    page_size: int = Field(default=10, ge=1, le=25, strict=True)
+
+
+class DownloadDetails(ToolArguments):
+    """Read one shared task and a character page of its error message."""
+
+    task_id: ResourceID
+    offset: int = Field(default=0, ge=0, strict=True)
+    limit: int = Field(default=2000, ge=1, le=2000, strict=True)
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
-    page: Literal["workflows", "workflow_designer", "media_library", "media_item"]
+    page: Literal[
+        "workflows",
+        "workflow_designer",
+        "media_library",
+        "media_item",
+        "active_downloads",
+        "completed_downloads",
+    ]
     resource_id: ResourceID | None = None
 
     @model_validator(mode="after")
     def validate_target(self) -> Self:
-        """Require a resource for every destination except the workflow list.
+        """Require a resource for workflow designer and media destinations only.
 
         Returns:
             A complete registered navigation target.
@@ -195,7 +267,8 @@ class NavigationTarget(ToolArguments):
         Raises:
             ValueError: If the resource does not match the destination type.
         """
-        if (self.page == "workflows") != (self.resource_id is None):
+        listed = self.page == "workflows" or self.page in DOWNLOAD_PATHS
+        if listed != (self.resource_id is None):
             raise ValueError("Resource does not match the destination")
         return self
 
@@ -330,11 +403,26 @@ TOOLS = (
         MediaItemQuery,
     ),
     AssistantTool(
+        "list_download_tasks",
+        "List shared stored tasks; active excludes completed. A 50-row page N "
+        "is pages 2N-1 and 2N here. Only state=completed means complete; "
+        "submit_unknown is unconfirmed. Read details/errors with get_download_task.",
+        DownloadList,
+    ),
+    AssistantTool(
+        "get_download_task",
+        "Read a selected/task ID: stored status, sizes (bytes), speeds (bytes/s), "
+        "progress (0-100), update time and error. Null is unknown. Error offset/limit "
+        "are characters; follow next_offset. Nothing is polled or controlled.",
+        DownloadDetails,
+    ),
+    AssistantTool(
         "navigate",
         "Offer a button to open an existing page: workflows, workflow_designer, "
-        "media_library or media_item. Every page except workflows requires an "
-        "accessible ID from page context or tools. The user decides whether to "
-        "open it and confirms leaving unsaved edits. This does not modify data.",
+        "media_library, media_item, active_downloads or completed_downloads. "
+        "The designer and media pages require an accessible ID from page context "
+        "or tools. The user decides whether to open it and confirms leaving "
+        "unsaved edits. This does not modify data.",
         NavigationTarget,
     ),
 )
@@ -360,9 +448,11 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
 def compact_schema(value: Any) -> Any:
     """Drop generated schema annotations that cost context without guiding calls.
 
-    Generated titles repeat property names and discriminator mappings repeat each
-    variant's constant `op`. Constraints, defaults and field descriptions remain,
-    and execution still validates against the complete argument models.
+    Generated titles repeat property names, discriminator mappings repeat each
+    variant's constant `op`, resource IDs repeat the JavaScript safe-integer bound,
+    and null defaults restate that an optional field may be omitted. Other
+    constraints, defaults and descriptions remain, and execution still validates
+    against the complete argument models.
 
     Args:
         value: JSON schema node generated by Pydantic.
@@ -377,6 +467,8 @@ def compact_schema(value: Any) -> Any:
             # property schemas are dicts, so fields with these names are kept
             if not (key == "title" and isinstance(item, str))
             and not (key == "discriminator" and "propertyName" in item)
+            and not (key == "maximum" and item == SAFE_INTEGER)
+            and not (key == "default" and item is None)
         }
     if isinstance(value, list):
         return [compact_schema(item) for item in value]
@@ -499,6 +591,10 @@ async def execute_tool(
                         path=f"{MEDIA_PATH}/{item.lib_id}/{item.id}",
                         library_id=item.lib_id,
                     )
+                case NavigationTarget(page="active_downloads" | "completed_downloads"):
+                    result = NavigationResult(
+                        target=args, path=DOWNLOAD_PATHS[args.page]
+                    )
                 case NavigationTarget():
                     path = WORKFLOW_PATH
                     if args.resource_id is not None:
@@ -523,6 +619,12 @@ async def execute_tool(
                     )
                 case MediaItemQuery():
                     result = await media_item_details(**args.model_dump(), user=user)
+                case DownloadList():
+                    result = await download_tasks(
+                        DownloadQuery(**args.model_dump(exclude={"scope"})), args.scope
+                    )
+                case DownloadDetails():
+                    result = await download_task_details(**args.model_dump())
                 case WorkflowCreate():
                     result = await create_workflow(args, conversation_id, call_id, user)
                 case WorkflowList():

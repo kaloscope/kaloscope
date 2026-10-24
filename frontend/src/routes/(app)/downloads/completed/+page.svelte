@@ -1,6 +1,8 @@
 <script lang="ts">
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
+  import { registerAssistantContext } from '$lib/assistant/context';
+  import { downloadPaths } from '$lib/assistant/navigation';
   import {
     alert,
     Badge,
@@ -33,6 +35,15 @@
   const ordering = createSortField();
   const loading = createLoading();
 
+  // filters and page of the displayed tasks, so the assistant never reads unsubmitted input
+  let displayed: {
+    name: string;
+    downloader_id: number | null;
+    ordering: string;
+    page_num: number;
+    page_size: number;
+  } | null = null;
+
   /**
    * Search for download tasks.
    *
@@ -46,6 +57,7 @@
     } else if ($loading !== null) {
       return;
     }
+    const filters = { name, downloader_id: downloader || null, ordering: $ordering, page_num: page, page_size: size };
     api
       .get('download/list', {
         searchParams: {
@@ -63,6 +75,7 @@
         pagination.size = size;
         pagination.total = data.total;
         tasks = data.items;
+        displayed = filters;
       })
       .finally(() => {
         loading.end();
@@ -137,6 +150,22 @@
     $ordering; // eslint-disable-line
     untrack(() => search());
   });
+
+  onMount(() =>
+    registerAssistantContext(() =>
+      displayed
+        ? {
+            page_type: 'completed_downloads',
+            route: downloadPaths.completed_downloads,
+            // only rows still displayed count as selected
+            selected_ids: (headerCheckbox?.getSelectedKeys() ?? [])
+              .map(Number)
+              .filter((id) => tasks.some((task) => task.id === id)),
+            filters: { ...displayed, name: displayed.name.slice(0, 255) }
+          }
+        : null
+    )
+  );
 
   onMount(() => {
     navigatorClipboard = !!navigator.clipboard;

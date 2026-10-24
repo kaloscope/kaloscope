@@ -1,15 +1,18 @@
-"""Project workflow and media records into bounded facts for assistant conversations."""
+"""Project workflow, media, and download records into bounded assistant facts."""
 
 from typing import Any, Literal
 
 from sanic import Sanic
 
 from app.core.ai.documents import graph_summary, value_summary
+from app.core.dl.driver import DownloadState
 from app.core.exceptions import NotFoundException
 from app.core.media.watcher import LibWatcher
+from app.models.download import Downloader, DownloadQuery, DownloadTask
 from app.models.flow import FlowLog, GraphDocument, GraphQuery
 from app.models.media import MediaItem, MediaQuery
 from app.models.user import UserInfo
+from app.services.download import DownloadTaskService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps
@@ -42,6 +45,25 @@ DETAIL_FIELDS = (
 )
 CHILD_SAMPLE = 10
 METADATA_PREVIEW_BYTES = 1200
+DOWNLOAD_FIELDS = (
+    "id",
+    "name",
+    "downloader_id",
+    "state",
+    "raw_state",
+    "error_kind",
+    "percentage",
+    "completed_size",
+    "total_size",
+    "dl_speed",
+    "up_speed",
+    "transfer_lib_id",
+    "completed_at",
+    "updated_at",
+)
+DOWNLOAD_STORED_FIELDS = tuple(
+    field for field in DOWNLOAD_FIELDS if field != "error_kind"
+) + ("error_msg",)
 
 
 async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
@@ -487,4 +509,85 @@ async def media_item_details(
             "items": children[:CHILD_SAMPLE],
             "omitted": max(0, len(children) - CHILD_SAMPLE),
         },
+    }
+
+
+async def download_tasks(
+    query: DownloadQuery, scope: Literal["all", "active", "completed"]
+) -> dict:
+    """Page stored download tasks like the active and completed download pages.
+
+    Visibility matches the shared download pages. Values come from the database,
+    so no downloader is polled or controlled.
+
+    Args:
+        query: Name, state, downloader, ordering, and pagination filters.
+        scope: `active` excludes completed tasks, `completed` keeps only completed
+            tasks, and `all` applies no state scope.
+
+    Returns:
+        The exact matching total, this page's count and continuation, downloader
+        names, and compact task identities, states and progress. Error lengths
+        indicate when a detail read can retrieve stored error text. Sizes, speeds,
+        raw status and update times remain available through the detail tool.
+    """
+    if scope == "active":
+        query.states = [state for state in DownloadState if state != "completed"]
+    elif scope == "completed":
+        query.states = [DownloadState.COMPLETED]
+    # the service adds `error_kind` from offline jobs after serializing stored fields
+    page = await DownloadTaskService.list_tasks(query, include=DOWNLOAD_STORED_FIELDS)
+    items = []
+    for task in page["items"]:
+        item = {
+            key: task.get(key)
+            for key in ("id", "name", "downloader_id", "state", "percentage")
+        }
+        error = task.get("error_msg")
+        if error:
+            item["error_length"] = len(error)
+        items.append(item)
+    downloaders = await Downloader.filter(
+        id__in={task["downloader_id"] for task in page["items"]}
+    ).values("id", "name")
+    more = query.page_num * query.page_size < page["total"]
+    return {
+        "scope": scope,
+        "filters": query.model_dump(
+            include={"name", "state", "downloader_id", "ordering"}
+        ),
+        "total": page["total"],
+        "page_num": query.page_num,
+        "page_size": query.page_size,
+        "page_counts": {"returned": len(items)},
+        "next_page_num": query.page_num + 1 if more else None,
+        "downloaders": sorted(downloaders, key=lambda row: row["id"]),
+        "items": items,
+    }
+
+
+async def download_task_details(task_id: int, offset: int, limit: int) -> dict:
+    """Read one shared task and an exact page of its stored error message.
+
+    Args:
+        task_id: Task ID from the displayed selection or a query result.
+        offset: Zero-based character offset in the error message.
+        limit: Maximum error characters to return.
+
+    Returns:
+        Named task fields and a paged error, or null when no error was recorded.
+        Values use the same shared visibility and stored status as list queries.
+
+    Raises:
+        NotFoundException: If the task no longer exists.
+    """
+    task = await DownloadTask.get_or_none(id=task_id)
+    if task is None:
+        raise NotFoundException
+    data = await DownloadTaskService.dump(task, include=DOWNLOAD_STORED_FIELDS)
+    return {
+        **{key: data.get(key) for key in DOWNLOAD_FIELDS},
+        "error": value_page(task.error_msg, offset, limit)
+        if task.error_msg is not None
+        else None,
     }
