@@ -32,7 +32,8 @@ from app.models.assistant import (
     ConversationCreate,
 )
 from app.models.flow import FlowGraph, FlowLog, GraphDocument, GraphNode, GraphQuery
-from app.models.user import User, UserInfo, UserRole
+from app.models.media import MediaItem, MediaLib
+from app.models.user import Permissions, User, UserInfo, UserRole
 from app.services.assistant import SYSTEM_PROMPT, AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.utils.json import dumps, loads
@@ -2237,6 +2238,126 @@ def test_created_draft_schemas(monkeypatch, narration):
                 "input",
                 "output",
             }
+
+    asyncio.run(run())
+
+
+def test_media_context(monkeypatch):
+    streams = []
+
+    def handler(upstream):
+        streams.append(loads(upstream.content))
+        if len(streams) == 1:
+            current = streams[0]["messages"][-2]["content"]
+            item_id = loads(current.split("\n", 1)[1])["resource_id"]
+            arguments = dumps({"item_id": item_id}).decode()
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [call_delta("get_media_item", arguments)],
+                        }
+                    ),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        return response([chunk({"role": "assistant", "content": "Done"}, "stop")])
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            movies = await MediaLib.create(
+                lib_type="movie", dir="/media/movies", name="Movies", priority=1
+            )
+            shows = await MediaLib.create(
+                lib_type="tv_show", dir="/media/shows", name="Shows", priority=2
+            )
+            show = await MediaItem.create(
+                lib=shows, dir=shows.dir, path="/media/shows/Show", name="Show"
+            )
+            graph = await FlowGraph.create(
+                name="Media fixture", category="ingest", state="draft"
+            )
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            item_context = {
+                "page_type": "media_item",
+                "route": f"/medialibs/{shows.id}/{show.id}",
+                "resource_id": show.id,
+                "library_id": shows.id,
+            }
+            library_context = {
+                "page_type": "media_library",
+                "route": f"/medialibs/{movies.id}",
+                "resource_id": movies.id,
+                "filters": {"keyword": "", "page_num": 2, "page_size": 20},
+            }
+            separate = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            mixed = await Sessions.begin(separate["id"], request("mixed"), owner)
+            await Sessions.record_resources(
+                mixed, [f"media_lib:{movies.id}", graph.id, graph.id]
+            )
+            await Sessions.finish(mixed, content="Mixed sources", status="complete")
+
+            for key, context in (("item", item_context), ("library", library_context)):
+                events = [
+                    event
+                    async for event in AssistantService.persistent_stream(
+                        conversation["id"], request(key, context=context), owner
+                    )
+                ]
+                assert events[-1].event == "done"
+            item_turn = await AssistantTurn.get(request_id="item")
+            library_turn = await AssistantTurn.get(request_id="library")
+
+            # workflow IDs stay integers and sort before typed media references
+            assert (await AssistantTurn.get(id=mixed.id)).resource_ids == [
+                graph.id,
+                f"media_lib:{movies.id}",
+            ]
+            assert item_turn.resource_ids == [f"media_lib:{shows.id}"]
+            # the later turn also depends on the earlier media data it was given
+            assert library_turn.resource_ids == [
+                f"media_lib:{movies.id}",
+                f"media_lib:{shows.id}",
+            ]
+            # the second turn sends its own page; the first is only historical data
+            current = loads(streams[-1]["messages"][-2]["content"].split("\n", 1)[1])
+            assert current == library_context
+            historical = [
+                message["content"]
+                for message in streams[-1]["messages"]
+                if message["content"].startswith("Historical turn facts")
+            ]
+            assert len(historical) == 1
+            assert f'"library_id":{shows.id}' in historical[0]
+            assert '"name":"get_media_item"' in historical[0]
+
+            # losing one library hides only turns that depended on its data
+            owner.role = UserRole.USER
+            owner.perms = Permissions(media_lib_ids=[shows.id])
+            turns = (await Sessions.turns(conversation["id"], owner))["items"]
+            assert [turn["error"] for turn in turns] == [None, "permission_denied"]
+            assert turns[0]["content"] == "Done"
+            assert turns[1]["content"] == "" and turns[1]["tools"] == []
+            denied = await tools.execute_tool(
+                "read_conversation_history",
+                dumps({"turn_id": library_turn.id}).decode(),
+                owner,
+                conversation_id=conversation["id"],
+                call_id="test",
+            )
+            assert denied["error"]["code"] == "permission_denied"
+            with pytest.raises(KaloscopeException) as rejected:
+                await Sessions.begin(
+                    conversation["id"], request("stale", context=library_context), owner
+                )
+            assert rejected.value.status_code == 403
 
     asyncio.run(run())
 

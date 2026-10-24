@@ -111,6 +111,20 @@ export type AssistantPageContext =
       editable: boolean;
       canvas: NonNullable<FlowGraph['draft']>;
       selected_node_ids: string[];
+    }
+  | {
+      page_type: 'media_library';
+      route: string;
+      resource_id: number;
+      filters: { keyword: string; page_num: number; page_size: number };
+    }
+  | {
+      page_type: 'media_item';
+      route: string;
+      resource_id: number;
+      library_id: number;
+      // an episode or chapter selected within the visible work
+      selected_id: number | null;
     };
 
 /**
@@ -130,14 +144,14 @@ export type AssistantConversation = {
 
 /** Persisted page metadata; full canvases remain behind server-owned references. */
 export type AssistantStoredContext =
-  | Extract<AssistantPageContext, { page_type: 'workflows' }>
+  | Extract<AssistantPageContext, { page_type: 'workflows' | 'media_library' | 'media_item' }>
   | (Omit<Extract<AssistantPageContext, { page_type: 'workflow_designer' }>, 'canvas'> & { snapshot_id: number });
 
 /**
  * A registered internal page offered by the navigation tool.
  */
 export type AssistantDestination = {
-  page: 'workflows' | 'workflow_designer';
+  page: 'workflows' | 'workflow_designer' | 'media_library' | 'media_item';
   resource_id?: number | null;
 };
 

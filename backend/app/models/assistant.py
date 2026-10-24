@@ -21,6 +21,7 @@ MAX_PROMPT_BYTES = 128 * 1024
 MAX_PAGE_CONTEXT_BYTES = 128 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024
 WORKFLOW_PATH = "/settings/workflows/graphs"
+MEDIA_PATH = "/medialibs"
 type ResourceID = Annotated[int, Field(gt=0, le=2**53 - 1, strict=True)]
 type WorkflowOrdering = Literal[
     "",
@@ -33,6 +34,18 @@ type WorkflowOrdering = Literal[
     "state",
     "-state",
 ]
+
+
+def media_resource(library_id: int) -> str:
+    """Reference a media library in turn provenance, distinct from workflow IDs.
+
+    Args:
+        library_id: Library whose data contributed to a turn or checkpoint.
+
+    Returns:
+        A typed reference; bare integers remain workflow IDs.
+    """
+    return f"media_lib:{library_id}"
 
 
 class ContextModel(BaseModel):
@@ -96,6 +109,62 @@ class WorkflowDesignerContext(ContextModel):
         return self
 
 
+class MediaFilters(ContextModel):
+    """Describe the visible library list without accepting arbitrary query keys."""
+
+    keyword: str = Field(default="", max_length=255)
+    page_num: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
+
+
+class MediaLibraryContext(ContextModel):
+    """Identify the visible media library and its list filters."""
+
+    page_type: Literal["media_library"]
+    route: str = Field(max_length=160)
+    resource_id: ResourceID
+    filters: MediaFilters = Field(default_factory=MediaFilters)
+
+    @model_validator(mode="after")
+    def validate_route(self) -> Self:
+        """Require the route to identify this library.
+
+        Returns:
+            Consistent library context.
+
+        Raises:
+            ValueError: If the route names another page or library.
+        """
+        if self.route != f"{MEDIA_PATH}/{self.resource_id}":
+            raise ValueError("Context does not match the visible library")
+        return self
+
+
+class MediaItemContext(ContextModel):
+    """Identify the visible media item, its library, and a selected child item."""
+
+    page_type: Literal["media_item"]
+    route: str = Field(max_length=160)
+    resource_id: ResourceID
+    library_id: ResourceID
+    # an episode or chapter selected within the visible work
+    selected_id: ResourceID | None = None
+
+    @model_validator(mode="after")
+    def validate_route(self) -> Self:
+        """Require the route to identify this item and its library.
+
+        Returns:
+            Consistent item context.
+
+        Raises:
+            ValueError: If the route names another page, library, or item.
+        """
+        if self.route != f"{MEDIA_PATH}/{self.library_id}/{self.resource_id}":
+            raise ValueError("Context does not match the visible item")
+        return self
+
+
 class AssistantSnapshotRequest(ContextModel):
     """Upload an immutable canvas separately from the bounded model context."""
 
@@ -122,7 +191,10 @@ class AssistantSnapshotRequest(ContextModel):
 
 
 type AssistantPageContext = Annotated[
-    WorkflowListContext | WorkflowDesignerContext,
+    WorkflowListContext
+    | WorkflowDesignerContext
+    | MediaLibraryContext
+    | MediaItemContext,
     Field(discriminator="page_type"),
 ]
 

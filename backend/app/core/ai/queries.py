@@ -1,12 +1,47 @@
-"""Project workflow records into bounded facts for assistant conversations."""
+"""Project workflow and media records into bounded facts for assistant conversations."""
 
-from typing import Any
+from typing import Any, Literal
+
+from sanic import Sanic
 
 from app.core.ai.documents import graph_summary, value_summary
 from app.core.exceptions import NotFoundException
+from app.core.media.watcher import LibWatcher
 from app.models.flow import FlowLog, GraphDocument, GraphQuery
+from app.models.media import MediaItem, MediaQuery
 from app.models.user import UserInfo
 from app.services.flow import FlowGraphService
+from app.services.media import MediaItemService, MediaLibService
+from app.utils.json import dumps
+
+MEDIA_FIELDS = (
+    "id",
+    "lib_id",
+    "parent_id",
+    "title",
+    "name",
+    "year",
+    "season",
+    "episode",
+    "rating",
+)
+DETAIL_FIELDS = (
+    "title",
+    "name",
+    "year",
+    "season",
+    "episode",
+    "rating",
+    "aired",
+    "media_type",
+    "path",
+    "size",
+    "format",
+    "index_state",
+    "index_error",
+)
+CHILD_SAMPLE = 10
+METADATA_PREVIEW_BYTES = 1200
 
 
 async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
@@ -255,4 +290,201 @@ async def log_detail(
         "field": field,
         "path": path,
         **value_page(value, offset, limit),
+    }
+
+
+def lib_watcher() -> LibWatcher:
+    """Return the current worker's library watcher for read-only scan status.
+
+    Returns:
+        The watcher started with this application worker.
+    """
+    return Sanic.get_app().ctx.lib_watcher
+
+
+def media_fact(item: dict, **owners: int | None) -> dict:
+    """Keep the identity and display facts of a serialized media item.
+
+    Args:
+        item: Media item dumped by the media service, which omits relation IDs.
+        **owners: Known `lib_id` and `parent_id` values for the item.
+
+    Returns:
+        Compact facts; null values mean unavailable or, for `parent_id`, a
+        top-level work.
+    """
+    return {key: item.get(key) for key in MEDIA_FIELDS} | owners
+
+
+def _child_order(item: dict) -> tuple:
+    """Order children by season, episode, and display name like the item page.
+
+    Args:
+        item: Serialized child item.
+
+    Returns:
+        A deterministic sort key with unknown numbers last.
+    """
+    return (
+        item.get("season") is None,
+        item.get("season") or 0,
+        item.get("episode") is None,
+        item.get("episode") or 0,
+        (item.get("title") or item.get("name") or "").casefold(),
+        item["id"],
+    )
+
+
+async def media_libraries(user: UserInfo) -> dict:
+    """List accessible libraries with the facts needed to answer questions.
+
+    Args:
+        user: Account whose library permissions apply.
+
+    Returns:
+        The exact number of accessible libraries and their identities, scan state,
+        and bound ingest workflows. Reading this never starts a scan.
+    """
+    libraries = await MediaLibService.list_libraries(user, lib_watcher())
+    fields = ("id", "name", "lib_type", "language", "dir", "scanning")
+    return {
+        "total": len(libraries),
+        "items": [
+            {
+                **{key: library[key] for key in fields},
+                "ingest_workflows": [
+                    {"id": trigger["graph_id"], "name": trigger["graph_name"]}
+                    for trigger in library["triggers"]
+                ],
+            }
+            for library in libraries
+        ],
+    }
+
+
+async def media_items(query: MediaQuery, user: UserInfo) -> dict:
+    """Page visible items while keeping unavailable libraries distinct from empty ones.
+
+    Args:
+        query: Library, title keyword, exact path, and pagination filters.
+        user: Account whose library permissions apply.
+
+    Returns:
+        The exact matching total, this page's count and continuation, and compact
+        items in the library page's order.
+
+    Raises:
+        NotFoundException: If the requested library does not exist.
+        ForbiddenException: If the requested library is not accessible.
+    """
+    if query.lib_id is not None:
+        # a missing or inaccessible library must not look like an empty one
+        await MediaLibService.get_accessible(query.lib_id, user)
+    page = await MediaItemService.list_items(query, user)
+    owners = {
+        row["id"]: row
+        for row in await MediaItem.filter(
+            id__in=[item["id"] for item in page["items"]]
+        ).values("id", "lib_id", "parent_id")
+    }
+    more = query.page_num * query.page_size < page["total"]
+    return {
+        "total": page["total"],
+        "page_num": query.page_num,
+        "page_size": query.page_size,
+        "page_counts": {"returned": len(page["items"])},
+        "next_page_num": query.page_num + 1 if more else None,
+        "scope": "exact_path" if query.path else "top_level_works",
+        "items": [
+            media_fact(
+                item,
+                lib_id=owners.get(item["id"], {}).get("lib_id"),
+                parent_id=owners.get(item["id"], {}).get("parent_id"),
+            )
+            for item in page["items"]
+        ],
+    }
+
+
+async def media_item_details(
+    item_id: int,
+    section: Literal["summary", "metadata", "children"],
+    field: str | None,
+    offset: int,
+    limit: int,
+    user: UserInfo,
+) -> dict:
+    """Read an accessible item as a compact summary or one bounded detail page.
+
+    Args:
+        item_id: Requested media item.
+        section: `summary`, a `metadata` page, or a `children` page.
+        field: Metadata key to page instead of the whole metadata object.
+        offset: Zero-based item or character offset within the selected value.
+        limit: Maximum returned items or characters.
+        user: Account whose library permissions apply.
+
+    Returns:
+        Item facts with metadata state, a bounded metadata preview and child sample,
+        or the requested page; omitted counts and continuation offsets are explicit.
+
+    Raises:
+        NotFoundException: If the item, its visible parent, or the field is missing.
+        ForbiddenException: If the item's library is not accessible.
+    """
+    details = await MediaItemService.get_details(item_id, user)
+    base = {"item_id": item_id, "library_id": details["lib"]["id"], "section": section}
+    # the service returns only visible children in the item's own library
+    children = [
+        media_fact(child, lib_id=base["library_id"], parent_id=item_id)
+        for child in sorted(details["children"], key=_child_order)
+    ]
+    if section == "children":
+        return {**base, **value_page(children, offset, limit)}
+    metadata = details.get("metadata")
+    if section == "metadata":
+        value = metadata
+        if field is not None:
+            if not isinstance(metadata, dict) or field not in metadata:
+                raise NotFoundException
+            value = metadata[field]
+        return {
+            **base,
+            "field": field,
+            "metadata_state": details["metadata_state"],
+            **value_page(value, offset, limit),
+        }
+    preview: dict[str, Any] = {}
+    empty = omitted = 0
+    for key, value in (metadata or {}).items():
+        if value in (None, "", [], {}):
+            empty += 1
+            continue
+        summary = value_summary(value, limit=200)
+        if len(dumps({**preview, key: summary})) > METADATA_PREVIEW_BYTES:
+            omitted += 1
+            continue
+        preview[key] = summary
+    parent = details.get("parent")
+    return {
+        **base,
+        **{key: details.get(key) for key in DETAIL_FIELDS},
+        **{key: details[key] for key in ("role", "metadata_task") if key in details},
+        "lib": {key: details["lib"][key] for key in ("id", "name", "lib_type")},
+        "parent": (
+            {key: parent.get(key) for key in ("id", "title", "name")}
+            if parent
+            else None
+        ),
+        "metadata_state": details["metadata_state"],
+        "metadata_issues": value_summary(details["metadata_issues"], limit=600),
+        "metadata": preview,
+        "metadata_field_count": len(metadata or {}),
+        "empty_metadata_fields": empty,
+        "omitted_metadata_fields": omitted,
+        "children": {
+            "total": len(children),
+            "items": children[:CHILD_SAMPLE],
+            "omitted": max(0, len(children) - CHILD_SAMPLE),
+        },
     }

@@ -142,6 +142,19 @@ def test_invalid_snapshot_upload(canvas):
         designer_context(),
         {**designer_context(), "editable": True},
         {**designer_context(), "route": "/settings/workflows/graphs/r/3"},
+        {
+            "page_type": "media_library",
+            "route": "/medialibs/2",
+            "resource_id": 2,
+            "filters": {"keyword": "电影", "page_num": 3, "page_size": 20},
+        },
+        {
+            "page_type": "media_item",
+            "route": "/medialibs/2/7",
+            "resource_id": 7,
+            "library_id": 2,
+            "selected_id": 9,
+        },
     ],
 )
 def test_page_context(context):
@@ -210,6 +223,27 @@ def test_invalid_context(patch):
             "page_type": "workflow_logs",
             "route": "/settings/workflows/graphs/logs/3",
             "resource_id": 3,
+        },
+        {"page_type": "media_library", "route": "/medialibs/3", "resource_id": 2},
+        {
+            "page_type": "media_library",
+            "route": "/medialibs/2",
+            "resource_id": 2,
+            "filters": {"lib_id": 3},
+        },
+        {
+            "page_type": "media_item",
+            "route": "/medialibs/3/7",
+            "resource_id": 7,
+            "library_id": 2,
+        },
+        {"page_type": "media_item", "route": "/medialibs/7", "resource_id": 7},
+        {
+            "page_type": "media_item",
+            "route": "/medialibs/2/7",
+            "resource_id": 7,
+            "library_id": 2,
+            "selected_id": "9",
         },
     ],
 )

@@ -1,4 +1,4 @@
-"""Expose bounded, permission-checked workflow tools to the in-app assistant."""
+"""Expose bounded, permission-checked workflow and media tools to the assistant."""
 
 import asyncio
 from dataclasses import dataclass
@@ -17,6 +17,9 @@ from app.core.ai.documents import (
 )
 from app.core.ai.queries import (
     log_detail,
+    media_item_details,
+    media_items,
+    media_libraries,
     value_page,
     workflow_details,
     workflow_list,
@@ -24,11 +27,13 @@ from app.core.ai.queries import (
 )
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.models.assistant import (
+    MEDIA_PATH,
     WORKFLOW_PATH,
     AssistantToolCall,
     AssistantTurn,
     ResourceID,
     WorkflowOrdering,
+    media_resource,
 )
 from app.models.flow import (
     GraphCategory,
@@ -39,8 +44,10 @@ from app.models.flow import (
     GraphWrite,
 )
 from app.models.mcp import NodeTypesResult
+from app.models.media import MediaQuery
 from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowGraphService
+from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
@@ -146,15 +153,41 @@ class WorkflowCreate(ToolArguments):
     )
 
 
+class MediaLibraryList(ToolArguments):
+    """List accessible media libraries without filters."""
+
+
+class MediaItemList(ToolArguments):
+    """Bound media searches within accessible libraries."""
+
+    library_id: ResourceID | None = None
+    keyword: str | None = Field(default=None, max_length=255)
+    path: str | None = Field(
+        default=None, max_length=4096, description="Exact saved item path"
+    )
+    page_num: int = Field(default=1, ge=1, strict=True)
+    page_size: int = Field(default=10, ge=1, le=50, strict=True)
+
+
+class MediaItemQuery(ToolArguments):
+    """Select one accessible item and an optional bounded detail page."""
+
+    item_id: ResourceID
+    section: Literal["summary", "metadata", "children"] = "summary"
+    field: str | None = Field(default=None, max_length=128, description="Metadata key")
+    offset: int = Field(default=0, ge=0, strict=True)
+    limit: int = Field(default=20, ge=1, le=2000, strict=True)
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
-    page: Literal["workflows", "workflow_designer"]
+    page: Literal["workflows", "workflow_designer", "media_library", "media_item"]
     resource_id: ResourceID | None = None
 
     @model_validator(mode="after")
     def validate_target(self) -> Self:
-        """Require a resource only for workflow-specific destinations.
+        """Require a resource for every destination except the workflow list.
 
         Returns:
             A complete registered navigation target.
@@ -172,6 +205,8 @@ class NavigationResult(BaseModel):
 
     target: NavigationTarget
     path: str
+    # media destinations name their library for history permission checks
+    library_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -273,11 +308,33 @@ TOOLS = (
         HistoryQuery,
     ),
     AssistantTool(
+        "list_media_libraries",
+        "List accessible media libraries: type, scan state and bound ingest "
+        "workflows. Reading starts no scan.",
+        MediaLibraryList,
+    ),
+    AssistantTool(
+        "list_media_items",
+        "Page visible media in library page order by library_id and title keyword "
+        "(omit keyword for all titles). "
+        "Without path only top-level works are listed. total counts all matches; "
+        "page_counts covers this page.",
+        MediaItemList,
+    ),
+    AssistantTool(
+        "get_media_item",
+        "Read an accessible item: summary facts, metadata state/preview and a "
+        "children sample. Page larger values with section metadata (optional "
+        "field) or children. offset/limit count items, or characters for text; "
+        "use limit=2000 for long text fields. Nothing is scanned, scraped or played.",
+        MediaItemQuery,
+    ),
+    AssistantTool(
         "navigate",
-        "Offer a button to open an existing internal page: workflows or "
-        "workflow_designer. The designer requires an accessible "
-        "workflow ID from page context or tools. The user decides whether to open "
-        "the page and confirms leaving unsaved edits. This does not modify data.",
+        "Offer a button to open an existing page: workflows, workflow_designer, "
+        "media_library or media_item. Every page except workflows requires an "
+        "accessible ID from page context or tools. The user decides whether to "
+        "open it and confirms leaving unsaved edits. This does not modify data.",
         NavigationTarget,
     ),
 )
@@ -291,13 +348,39 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
 
     Returns:
         Read and preview tools, plus empty draft creation for editors; no tool
-        saves canvas content, publishes, or executes workflows.
+        saves canvas content, publishes, executes workflows, or changes media.
     """
     return {
         tool.name: tool
         for tool in TOOLS
         if not tool.admin or user.role == UserRole.ADMIN
     }
+
+
+def compact_schema(value: Any) -> Any:
+    """Drop generated schema annotations that cost context without guiding calls.
+
+    Generated titles repeat property names and discriminator mappings repeat each
+    variant's constant `op`. Constraints, defaults and field descriptions remain,
+    and execution still validates against the complete argument models.
+
+    Args:
+        value: JSON schema node generated by Pydantic.
+
+    Returns:
+        An equivalent schema node for the model request.
+    """
+    if isinstance(value, dict):
+        return {
+            key: compact_schema(item)
+            for key, item in value.items()
+            # property schemas are dicts, so fields with these names are kept
+            if not (key == "title" and isinstance(item, str))
+            and not (key == "discriminator" and "propertyName" in item)
+        }
+    if isinstance(value, list):
+        return [compact_schema(item) for item in value]
+    return value
 
 
 def tool_schemas(user: UserInfo) -> list[ChatCompletionFunctionToolParam]:
@@ -307,19 +390,25 @@ def tool_schemas(user: UserInfo) -> list[ChatCompletionFunctionToolParam]:
         user: Account whose tool catalog is being requested.
 
     Returns:
-        Chat Completions function definitions, validated again on execution.
+        Chat Completions function definitions, validated again on execution. The
+        argument model's own summary is omitted because the tool description
+        already states its purpose.
     """
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.arguments.model_json_schema(),
-            },
-        }
-        for tool in available_tools(user).values()
-    ]
+    schemas = []
+    for tool in available_tools(user).values():
+        parameters = compact_schema(tool.arguments.model_json_schema())
+        parameters.pop("description", None)
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": parameters,
+                },
+            }
+        )
+    return schemas
 
 
 def tool_error(code: ErrorCode, guidance: str) -> dict[str, Any]:
@@ -333,6 +422,30 @@ def tool_error(code: ErrorCode, guidance: str) -> dict[str, Any]:
         Failed tool result suitable for the model and the event stream.
     """
     return {"ok": False, "error": {"code": code, "guidance": guidance}}
+
+
+def media_resources(name: str, arguments: dict, data: dict) -> list[str]:
+    """Name the media libraries whose data a successful tool result revealed.
+
+    Args:
+        name: Executed tool name.
+        arguments: Parsed model arguments for that call.
+        data: Successful result data.
+
+    Returns:
+        Typed library references for later history permission checks; empty for
+        tools that return no media data.
+    """
+    ids: list[int] = []
+    if name == "list_media_libraries":
+        ids = [item["id"] for item in data["items"]]
+    elif name == "list_media_items":
+        ids = [item["lib_id"] for item in data["items"] if item["lib_id"]]
+        if isinstance(arguments.get("library_id"), int):
+            ids.append(arguments["library_id"])
+    elif name == "get_media_item" or (name == "navigate" and data.get("library_id")):
+        ids = [data["library_id"]]
+    return [media_resource(library_id) for library_id in ids]
 
 
 async def execute_tool(
@@ -372,6 +485,20 @@ async def execute_tool(
     try:
         async with asyncio.timeout(TOOL_TIMEOUT):
             match args:
+                case NavigationTarget(page="media_library", resource_id=int(lib_id)):
+                    library = await MediaLibService.get_accessible(lib_id, user)
+                    result = NavigationResult(
+                        target=args,
+                        path=f"{MEDIA_PATH}/{library.id}",
+                        library_id=library.id,
+                    )
+                case NavigationTarget(page="media_item", resource_id=int(item_id)):
+                    item = await MediaItemService.get_accessible(item_id, user)
+                    result = NavigationResult(
+                        target=args,
+                        path=f"{MEDIA_PATH}/{item.lib_id}/{item.id}",
+                        library_id=item.lib_id,
+                    )
                 case NavigationTarget():
                     path = WORKFLOW_PATH
                     if args.resource_id is not None:
@@ -381,6 +508,21 @@ async def execute_tool(
                         readonly = user.role != UserRole.ADMIN or not graph.editable
                         path += f"/{'r/' if readonly else ''}{graph.id}"
                     result = NavigationResult(target=args, path=path)
+                case MediaLibraryList():
+                    result = await media_libraries(user)
+                case MediaItemList():
+                    result = await media_items(
+                        MediaQuery(
+                            lib_id=args.library_id,
+                            keyword=args.keyword,
+                            path=args.path,
+                            page_num=args.page_num,
+                            page_size=args.page_size,
+                        ),
+                        user,
+                    )
+                case MediaItemQuery():
+                    result = await media_item_details(**args.model_dump(), user=user)
                 case WorkflowCreate():
                     result = await create_workflow(args, conversation_id, call_id, user)
                 case WorkflowList():
@@ -586,7 +728,7 @@ async def execute_tool(
             code,
             "For denied access, stop; permissions must change before retrying. "
             "For a missing resource or version conflict, read the latest accessible "
-            "list or workflow before retrying. Do not guess IDs or versions.",
+            "list or record before retrying. Do not guess IDs or versions.",
         )
     except (ValueError, KeyError, IndexError, TypeError):
         return tool_error(

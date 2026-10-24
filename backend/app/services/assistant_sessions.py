@@ -25,13 +25,27 @@ from app.models.assistant import (
     AssistantTurnRequest,
     ConversationCreate,
     WorkflowDesignerContext,
+    media_resource,
 )
 from app.models.flow import GraphDocument
 from app.models.user import UserInfo
 from app.services.flow import FlowGraphService
+from app.services.media import MediaLibService
 from app.utils.json import dumps
 
 LEASE_SECONDS = 180
+
+
+def resource_order(resource_id: int | str) -> tuple[bool, int | str]:
+    """Sort workflow IDs numerically before typed media library references.
+
+    Args:
+        resource_id: Bare workflow ID or typed reference from `media_resource`.
+
+    Returns:
+        A key that never compares integers with strings.
+    """
+    return isinstance(resource_id, str), resource_id
 
 
 class AssistantSessionService:
@@ -188,19 +202,27 @@ class AssistantSessionService:
                 raise KaloscopeException(ErrorCode.ASSISTANT_BUSY, status_code=409)
 
     @classmethod
-    async def allowed(cls, resource_ids: list[int], user: UserInfo) -> bool:
+    async def allowed(cls, resource_ids: list[int | str], user: UserInfo) -> bool:
         """Recheck historical business resources before revealing their stored content.
 
         Args:
-            resource_ids: Resources contributing to one record or checkpoint.
+            resource_ids: Resources contributing to one record or checkpoint: bare
+                workflow IDs or typed media library references.
             user: Account with current permissions.
 
         Returns:
-            Whether all source resources remain accessible.
+            Whether all source resources remain accessible. Unknown reference
+            types are treated as inaccessible.
         """
         for resource_id in set(resource_ids):
             try:
-                await FlowGraphService.get_accessible(resource_id, user)
+                if isinstance(resource_id, str):
+                    kind, _, value = resource_id.partition(":")
+                    if kind != "media_lib" or not value.isdecimal():
+                        return False
+                    await MediaLibService.get_accessible(int(value), user)
+                else:
+                    await FlowGraphService.get_accessible(resource_id, user)
             except KaloscopeException as exc:
                 if exc.status_code not in (403, 404):
                     raise
@@ -390,12 +412,17 @@ class AssistantSessionService:
         conversation = await cls.owned(conversation_id, user)
         await cls.recover(conversation)
         context = body.context.model_dump(mode="json") if body.context else None
-        resource_ids = []
+        resource_ids: list[int | str] = []
         if context:
-            resource_ids = context.get(
-                "selected_ids",
-                [context["resource_id"]] if "resource_id" in context else [],
-            )
+            # page references are rechecked now and with every later history read
+            if context["page_type"] == "workflows":
+                resource_ids = context["selected_ids"]
+            elif context["page_type"] == "workflow_designer":
+                resource_ids = [context["resource_id"]]
+            elif context["page_type"] == "media_library":
+                resource_ids = [media_resource(context["resource_id"])]
+            else:
+                resource_ids = [media_resource(context["library_id"])]
             if not await cls.allowed(resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
         async with in_transaction():
@@ -525,13 +552,16 @@ class AssistantSessionService:
 
     @classmethod
     async def record_resources(
-        cls, turn: AssistantTurn, resource_ids: list[int]
+        cls, turn: AssistantTurn, resource_ids: list[int | str]
     ) -> None:
         """Track business resources contributing data to this attempt.
 
         Args:
             turn: Active persisted attempt.
-            resource_ids: Resource identities returned by authorized tools.
+            resource_ids: Workflow IDs or typed media library references returned
+                by authorized tools.
         """
-        turn.resource_ids = sorted(set(turn.resource_ids) | set(resource_ids))
+        turn.resource_ids = sorted(
+            set(turn.resource_ids) | set(resource_ids), key=resource_order
+        )
         await cls.checkpoint(turn, resource_ids=turn.resource_ids)

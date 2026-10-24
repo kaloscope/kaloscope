@@ -2,6 +2,7 @@
   import { beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
+  import { registerAssistantContext } from '$lib/assistant/context';
   import {
     Backdrop,
     Container,
@@ -19,7 +20,7 @@
   import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
   import type { MediaItem, Page, Resp } from '$lib/types';
   import { compactRecord } from '$lib/utils/object';
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { get } from 'svelte/store';
   import { queryParameters, ssp } from 'sveltekit-search-params';
@@ -65,6 +66,24 @@
   beforeNavigate(({ from, to }) => {
     captureScrollPosition(from, to, view, standaloneMode.current);
   });
+
+  // read the library and list filters when a message is sent, since this page is reused across libraries
+  onMount(() =>
+    registerAssistantContext(() =>
+      lib
+        ? {
+            page_type: 'media_library',
+            route: page.url.pathname.replace(/\/$/, ''),
+            resource_id: lib.id,
+            filters: {
+              keyword: query.keyword.slice(0, 255),
+              page_num: Math.max(1, query.page_num || 1),
+              page_size: Math.min(100, Math.max(1, query.page_size || 20))
+            }
+          }
+        : null
+    )
+  );
 
   /**
    * Search for media items.
