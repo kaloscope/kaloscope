@@ -1127,6 +1127,8 @@
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
+      "probe_http_request": "探测 HTTP 请求",
+      "validate_workflow_template": "验证模板",
       "get_workflow_logs": "读取运行日志",
       "validate_workflow": "校验工作流",
       "preview_workflow_draft": "调整画布草稿",

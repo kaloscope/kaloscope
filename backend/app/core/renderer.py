@@ -16,6 +16,7 @@ from jinja2.defaults import (
     VARIABLE_START_STRING,
 )
 from jinja2.environment import TemplateExpression
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jsonpath_ng.ext.parser import parse
 from lxml import etree
 
@@ -661,6 +662,20 @@ def is_dir(path: Any) -> bool:
 ENV.tests["file"] = jinja2.pass_context(lambda _, path: is_file(path))
 ENV.tests["dir"] = jinja2.pass_context(lambda _, path: is_dir(path))
 
+# authoring tools share filters and syntax, but cannot traverse Python internals
+SANDBOX_ENV = ImmutableSandboxedEnvironment(
+    trim_blocks=ENV.trim_blocks,
+    lstrip_blocks=ENV.lstrip_blocks,
+    finalize=ENV.finalize,
+)
+SANDBOX_ENV.filters.update(ENV.filters)
+SANDBOX_ENV.tests.update(ENV.tests)
+SANDBOX_ENV.policies = ENV.policies.copy()
+SANDBOX_STRICT_ENV = SANDBOX_ENV.overlay(
+    undefined=jinja2.StrictUndefined, finalize=STRICT_ENV.finalize
+)
+SANDBOX_STRICT_ENV.policies = STRICT_ENV.policies.copy()
+
 
 def _check_undefined(value: Any) -> Any:
     """Check rendered values for undefined variables.
@@ -687,7 +702,7 @@ def _check_undefined(value: Any) -> Any:
 
 @lru_cache(maxsize=512)
 def _compile_template(
-    value: str, raw: bool, strict: bool
+    value: str, raw: bool, strict: bool, sandboxed: bool = False
 ) -> jinja2.Template | TemplateExpression:
     """Compile and cache a Jinja template or a single expression.
 
@@ -695,11 +710,16 @@ def _compile_template(
         value: Template string to compile.
         raw: Whether to preserve native expression types.
         strict: Whether to raise an error for undefined variables.
+        sandboxed: Whether to restrict Python access for authoring tools.
 
     Returns:
         Compiled template or single expression.
     """
-    env = STRICT_ENV if strict else ENV
+    env = (
+        (SANDBOX_STRICT_ENV if strict else SANDBOX_ENV)
+        if sandboxed
+        else (STRICT_ENV if strict else ENV)
+    )
     if raw:
         tree = env.parse(value)
         if (
@@ -719,7 +739,12 @@ def _compile_template(
 
 
 def render(
-    value: json.JSONType, context: dict, *, raw: bool = False, strict: bool = False
+    value: json.JSONType,
+    context: dict,
+    *,
+    raw: bool = False,
+    strict: bool = False,
+    sandboxed: bool = False,
 ) -> Any:
     """Render a JSON value with a context.
 
@@ -729,6 +754,8 @@ def render(
         raw: Whether to preserve native types in single expressions. Defaults to
             `False`.
         strict: Whether to raise an error for undefined variables. Defaults to `False`.
+        sandboxed: Whether to restrict Python access. Workflow execution keeps its
+            existing environment by default.
 
     Returns:
         Rendered value.
@@ -737,7 +764,7 @@ def render(
         if raw and (key := raw_key(context, value)) is not None:
             result = get_raw(context, key)
         else:
-            template = _compile_template(value, raw, strict)
+            template = _compile_template(value, raw, strict, sandboxed)
             result = (
                 template.render(context)
                 if isinstance(template, jinja2.Template)
@@ -748,9 +775,15 @@ def render(
         # undefined values render as empty text or raise in strict mode
         return str(result) if isinstance(result, jinja2.Undefined) else result
     elif isinstance(value, list):
-        return [render(v, context, raw=raw, strict=strict) for v in value]
+        return [
+            render(v, context, raw=raw, strict=strict, sandboxed=sandboxed)
+            for v in value
+        ]
     elif isinstance(value, dict):
-        return {k: render(v, context, raw=raw, strict=strict) for k, v in value.items()}
+        return {
+            k: render(v, context, raw=raw, strict=strict, sandboxed=sandboxed)
+            for k, v in value.items()
+        }
     else:
         return value
 

@@ -1127,6 +1127,8 @@
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_reference": "Read Workflow Reference",
+      "probe_http_request": "Probe HTTP Request",
+      "validate_workflow_template": "Validate Template",
       "get_workflow_logs": "Read Run Logs",
       "validate_workflow": "Validate Workflow",
       "preview_workflow_draft": "Edit canvas draft",

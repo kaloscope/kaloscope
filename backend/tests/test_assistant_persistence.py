@@ -37,6 +37,7 @@ from app.models.download import Downloader, DownloadTask
 from app.models.flow import FlowGraph, FlowLog, GraphDocument, GraphNode, GraphQuery
 from app.models.media import MediaItem, MediaLib
 from app.models.user import Permissions, User, UserInfo, UserRole
+from app.services import workflow_authoring as authoring
 from app.services.assistant import SYSTEM_PROMPT, AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.utils.json import dumps, loads
@@ -2776,5 +2777,322 @@ def test_node_knowledge_budget(monkeypatch, narration):
             assert await FlowLog.all().count() == 0
             await graph.refresh_from_db()
             assert graph.draft == {"nodes": [], "edges": []}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "narration", ["", "Inspecting the fixture. " * 200], ids=["short", "compacted"]
+)
+@pytest.mark.parametrize("designer", [False, True], ids=["global", "designer"])
+def test_authoring_build(monkeypatch, narration, designer):
+    streams = []
+    base = {}
+    expected = {"total": 3, "items": [{"id": "one", "title": "Lantern"}]}
+    formatter = (
+        '{"total":{{ response.text|jsonpath_first("$.total") }},'
+        '"items":{{ response.text|jsonpath_all("$.items[*]")|tojson }}}'
+    )
+    template = '{"total":{{ total }},"items":{{ items|tojson }}}'
+    nodes = [
+        {
+            "id": "start",
+            "type": "node",
+            "position": {"x": 0, "y": 0},
+            "data": {"$schema": "search_start"},
+        },
+        {
+            "id": "http",
+            "type": "node",
+            "position": {"x": 800, "y": 0},
+            "data": {
+                "$schema": "http",
+                "url": "https://example.test/search?page={{ page_num }}",
+                "formatter": formatter,
+            },
+        },
+        {
+            "id": "end",
+            "type": "node",
+            "position": {"x": 1600, "y": 0},
+            "data": {"$schema": "search_end", "response": template},
+        },
+    ]
+    changes = [{"op": "add_node", "node": node} for node in nodes] + [
+        {
+            "op": "add_edge",
+            "edge": {
+                "id": source + target,
+                "source": source,
+                "target": target,
+                "sourceHandle": "output",
+                "targetHandle": "input",
+            },
+        }
+        for source, target in (("start", "http"), ("http", "end"))
+    ]
+
+    def handler(upstream):
+        body = loads(upstream.content)
+        assert (
+            history.context_size(body["messages"], body.get("tools", []))
+            <= 32000 - 4096
+        )
+        if not body.get("stream"):
+            summary = {
+                "goals": ["Build the fixture indexer on the current canvas."],
+                "constraints": ["Do not publish or execute the workflow."],
+                "decisions": ["The empty indexer draft has been created."],
+                "source_turn_ids": loads(body["messages"][-1]["content"])["turn_ids"],
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": dumps(summary).decode(),
+                            },
+                        }
+                    ]
+                },
+            )
+        streams.append(body)
+        step = len(streams)
+        if step == 1:
+            calls = [
+                (
+                    "create_workflow_draft",
+                    {
+                        "name": "HTTP 模板复查草稿" if designer else "Fixture indexer",
+                        "category": "indexer",
+                        "description": (
+                            "探测合成分页 JSON，验证提取模板，"
+                            "搭建搜索开始 → HTTP → 搜索结束；仅草稿。"
+                        )
+                        if designer
+                        else "Search a fixture and map paginated results.",
+                    },
+                )
+            ]
+        elif step == 3:
+            calls = [
+                ("list_node_types", {"node_type": name})
+                for name in ("search_start", "http", "search_end")
+            ]
+        elif step == 4:
+            calls = [
+                (
+                    "probe_http_request",
+                    {
+                        "request": {
+                            "url": "https://example.test/search?page={{ page_num }}"
+                        },
+                        "context": {"page_num": 2},
+                        "formatter": formatter,
+                    },
+                )
+            ]
+        elif step == 5:
+            calls = [
+                (
+                    "validate_workflow_template",
+                    {"template": template, "context": expected, "mode": "object"},
+                )
+            ]
+        elif step == 6:
+            assert "preview_workflow_draft" in {
+                tool["function"]["name"] for tool in body["tools"]
+            }
+            if designer and narration:
+                checkpoint = next(
+                    message["content"]
+                    for message in body["messages"]
+                    if message["content"].startswith("Historical conversation summary")
+                )
+                summary = loads(checkpoint.split("\n", 1)[1])
+                assert summary["facts"] == []
+                assert summary["omitted_fact_records"] == 1
+                assert len(summary["source_turn_ids"]) == 1
+                assert summary["constraints"] == ["不发布、不执行"]
+            calls = [("preview_workflow_draft", {**base, "changes": changes})]
+        else:
+            return response(
+                [chunk({"role": "assistant", "content": "Ready to inspect."}, "stop")]
+            )
+        return response(
+            [
+                chunk(
+                    {
+                        "role": "assistant",
+                        "content": narration if step >= 3 else "",
+                        "tool_calls": [
+                            call_delta(
+                                name, dumps(args).decode(), f"{step}-{index}", index
+                            )
+                            for index, (name, args) in enumerate(calls)
+                        ],
+                    },
+                    "tool_calls",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+    network = []
+
+    def endpoint(request):
+        network.append(request)
+        return httpx.Response(200, json={**expected, "padding": "x" * 4000})
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(endpoint)
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            origin = None
+            if designer:
+                existing = await FlowGraph.create(
+                    name="Existing indexer", category="indexer", state="draft"
+                )
+                document = GraphDocument.model_validate(
+                    {"nodes": nodes, "edges": [item["edge"] for item in changes[3:]]}
+                )
+                origin_snapshot = await Sessions.snapshot(
+                    conversation["id"], existing.id, 0, document, "canvas", owner
+                )
+                origin = {
+                    "page_type": "workflow_designer",
+                    "route": f"/settings/workflows/graphs/{existing.id}",
+                    "resource_id": existing.id,
+                    "snapshot_id": origin_snapshot.id,
+                    "draft_version": 0,
+                    "unsaved": True,
+                    "editable": True,
+                    "selected_node_ids": [],
+                }
+            created = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request(
+                        "create",
+                        prompt="创建 HTTP 模板复查草稿"
+                        if designer
+                        else "Create the fixture indexer.",
+                        context=origin,
+                    ),
+                    owner,
+                )
+            ]
+            assert created[-1].event == "done"
+            if designer:
+                previous = await AssistantTurn.get(request_id="create")
+                call = await AssistantToolCall.get(turn_id=previous.id)
+                await AssistantConversation.filter(id=conversation["id"]).update(
+                    summary={
+                        "goals": ["浏览器隔离验收"],
+                        "constraints": ["不发布、不执行"],
+                        "source_turn_ids": [previous.id],
+                        "facts": [{"turn_id": previous.id, **tool_facts(call.result)}],
+                        "omitted_fact_records": 0,
+                    },
+                    summary_through=previous.id,
+                    summary_resources=previous.resource_ids,
+                )
+            graph = await FlowGraph.get(
+                name="HTTP 模板复查草稿" if designer else "Fixture indexer"
+            )
+            snapshot = await Sessions.snapshot(
+                conversation["id"],
+                graph.id,
+                0,
+                GraphDocument(nodes=[], edges=[]),
+                "canvas",
+                owner,
+            )
+            base.update(workflow_id=graph.id, draft_version=0, snapshot_id=snapshot.id)
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request(
+                        "build",
+                        prompt="根据用途在当前画布上搭建工作流，并列出需要补充的配置"
+                        if designer
+                        else "Inspect https://example.test/search, verify extraction "
+                        "and build the indexer on this canvas.",
+                        context={
+                            "page_type": "workflow_designer",
+                            "route": f"/settings/workflows/graphs/{graph.id}",
+                            "resource_id": graph.id,
+                            "snapshot_id": snapshot.id,
+                            "draft_version": 0,
+                            "unsaved": False,
+                            "editable": True,
+                            "selected_node_ids": [],
+                        },
+                    ),
+                    owner,
+                )
+            ]
+
+            assert events[-1].event == "done", (
+                events[-1],
+                [
+                    (
+                        history.context_size(
+                            item["messages"], tools.tool_schemas(owner)
+                        ),
+                        item.get("tool_choice"),
+                    )
+                    for item in streams
+                ],
+            )
+            assert len(streams) == 7
+            results = [event.data for event in events if event.event == "tool_result"]
+            assert all(result["ok"] for result in results), results
+            probe = next(
+                r["data"] for r in results if r["name"] == "probe_http_request"
+            )
+            assert probe["body_complete"] and probe["text_truncated"]
+            assert probe["formatted"]["value"] == expected
+            assert (
+                next(
+                    r["data"]
+                    for r in results
+                    if r["name"] == "validate_workflow_template"
+                )["value"]
+                == expected
+            )
+            preview = next(
+                r["data"] for r in results if r["name"] == "preview_workflow_draft"
+            )
+            assert preview["validation"]["valid"] and preview["proposal_id"]
+            assert len(network) == 1
+            assert str(network[0].url) == "https://example.test/search?page=2"
+            proposed = await Sessions.read_snapshot(
+                conversation["id"], preview["proposal_snapshot_id"], owner
+            )
+            assert len(proposed.document["nodes"]) == 3
+            assert len(proposed.document["edges"]) == 2
+            await graph.refresh_from_db()
+            assert graph.draft_version == 0
+            assert graph.draft == {"nodes": [], "edges": []}
+            assert graph.definition is None
+            assert await FlowLog.all().count() == 0
+            if designer:
+                stored = await Sessions.owned(conversation["id"], owner)
+                assert stored.summary["facts"] == [
+                    {"turn_id": previous.id, **tool_facts(call.result)}
+                ]
+                assert stored.summary_resources == previous.resource_ids
+                assert stored.summary["omitted_fact_records"] == 0
 
     asyncio.run(run())
