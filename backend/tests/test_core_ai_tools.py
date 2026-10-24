@@ -559,6 +559,29 @@ def test_node_schema():
     assert tools.dumps(tools.FlowGraphService.get_node_schemas(None, "ai")) == original
 
 
+def test_compact_node_knowledge():
+    original = tools.dumps(tools.FlowGraphService.get_node_schemas(None, "details_end"))
+    result = asyncio.run(
+        tools.execute_tool(
+            "list_node_types",
+            '{"node_type":"details_end","include_examples":false}',
+            ADMIN,
+            conversation_id=1,
+            call_id="compact",
+        )
+    )
+
+    assert result["ok"]
+    fields = result["data"]["end"][0]["fields"]
+    assert {field["id"] for field in fields} == {"response", "force_end"}
+    assert next(field for field in fields if field["id"] == "response")["required"]
+    assert (
+        tools.dumps(tools.FlowGraphService.get_node_schemas(None, "details_end"))
+        == original
+    )
+    assert len(tools.dumps(result)) < len(original) / 2
+
+
 def test_preview_budget():
     async def run():
         async with database():

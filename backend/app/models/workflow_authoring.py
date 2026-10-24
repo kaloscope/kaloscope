@@ -51,8 +51,17 @@ class TemplateValidation(AuthoringInput):
 
     template: str = Field(max_length=8192)
     context: dict[str, Any] = Field(default_factory=dict)
-    mode: Literal["text", "expression", "json", "object", "array"] = "text"
+    mode: Literal[
+        "text", "expression", "json", "object", "array", "search", "details", "movie"
+    ] = "text"
     strict: bool = False
+
+
+class OutputIssue(BaseModel):
+    """Locate a fixture mapping error without echoing input values."""
+
+    path: str
+    message: str
 
 
 class TemplateResult(BaseModel):
@@ -64,6 +73,8 @@ class TemplateResult(BaseModel):
     value: Any = None
     error: str | None = None
     line: int | None = None
+    issues: list[OutputIssue] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class HTTPProbeResult(BaseModel):

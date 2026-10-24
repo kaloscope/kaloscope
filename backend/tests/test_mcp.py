@@ -1242,7 +1242,7 @@ def test_node_knowledge(monkeypatch):
             counts = [
                 await model.all().count() for model in (FlowGraph, FlowJob, FlowLog)
             ]
-            for topic in ("context", "templates"):
+            for topic in ("context", "templates", "json_indexer", "movie_scraper"):
                 result = await call(app, "get_workflow_reference", {"topic": topic})
                 assert (
                     result["structuredContent"]

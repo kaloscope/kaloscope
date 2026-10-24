@@ -157,12 +157,13 @@ class NodeQuery(ToolArguments):
 
     category: CategoryValue | None = None
     node_type: str | None = Field(default=None, min_length=1, max_length=255)
+    include_examples: bool = True
 
 
 class ReferenceQuery(ToolArguments):
     """Select a bundled workflow authoring reference."""
 
-    topic: Literal["context", "templates"]
+    topic: Literal["context", "templates", "json_indexer", "movie_scraper"]
 
 
 class WorkflowValidation(GraphReference):
@@ -337,12 +338,13 @@ TOOLS = (
     ),
     AssistantTool(
         "list_node_types",
-        "List nodes; node_type reads purpose, fields/handles and full examples.",
+        "List nodes; node_type reads fields/handles. include_examples=false omits "
+        "read-only guides; default true includes full examples.",
         NodeQuery,
     ),
     AssistantTool(
         "get_workflow_reference",
-        "Read context passing rules or project template functions. Read-only.",
+        "Read context/templates or json_indexer/movie_scraper authoring recipes.",
         ReferenceQuery,
     ),
     AssistantTool(
@@ -356,6 +358,7 @@ TOOLS = (
     AssistantTool(
         "validate_workflow_template",
         "Check Jinja fixtures: expression=native, json/object/array=JSONC; "
+        "search/details/movie check business output; fix issues and recheck. "
         "strict rejects undefined. No nodes execute; Python internals blocked.",
         TemplateValidation,
     ),
@@ -540,11 +543,15 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
     return value
 
 
-def tool_schemas(user: UserInfo) -> list[ChatCompletionFunctionToolParam]:
+def tool_schemas(
+    user: UserInfo, *, authoring: bool = False
+) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
     Args:
         user: Account whose tool catalog is being requested.
+        authoring: Focus this recipe turn on workflow construction. Other tools
+            return next turn; this changes model context, never authorization.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -553,6 +560,21 @@ def tool_schemas(user: UserInfo) -> list[ChatCompletionFunctionToolParam]:
     """
     schemas = []
     for tool in available_tools(user).values():
+        if authoring and tool.name not in {
+            "list_workflows",
+            "get_workflow",
+            "list_node_types",
+            "get_workflow_reference",
+            "probe_http_request",
+            "validate_workflow_template",
+            "validate_workflow",
+            "preview_workflow_draft",
+            "create_workflow_draft",
+            "read_workflow_snapshot",
+            "read_conversation_history",
+            "navigate",
+        }:
+            continue
         parameters = compact_schema(tool.arguments.model_json_schema())
         parameters.pop("description", None)
         encoded = dumps(parameters)
@@ -847,7 +869,9 @@ async def execute_tool(
                     result = validate_workflow_template(args)
                 case NodeQuery():
                     schemas = FlowGraphService.get_node_schemas(
-                        args.category, args.node_type
+                        args.category,
+                        args.node_type,
+                        include_examples=args.include_examples,
                     )
                     result = NodeTypesResult.model_validate(
                         loads(dumps(schemas))

@@ -11,6 +11,7 @@ from jinja2 import TemplateError
 
 from app.core.exceptions import ForbiddenException
 from app.core.flow.nodes.general.http import HTTPNode
+from app.core.flow.outputs import check_output
 from app.core.network import NetworkTransport
 from app.core.renderer import render
 from app.models.user import UserInfo, UserRole
@@ -35,6 +36,7 @@ def validate_workflow_template(
 
     Args:
         args: Template, supplied context, output form and undefined-value policy.
+            Business modes check end-node output against supplied fixtures only.
         response: Detached probe response for HTTP formatter evaluation only.
 
     Returns:
@@ -55,18 +57,27 @@ def validate_workflow_template(
         )
         value = (
             loads_jsonc(rendered)
-            if args.mode in {"json", "object", "array"}
+            if args.mode not in {"text", "expression"}
             else rendered
         )
         if args.mode == "object" and not isinstance(value, dict):
             return TemplateResult(valid=False, error="Expected a JSON object.")
         if args.mode == "array" and not isinstance(value, list):
             return TemplateResult(valid=False, error="Expected a JSON array.")
+        business = args.mode in {"search", "details", "movie"}
+        issues, warnings = (
+            check_output(args.mode, value, args.context) if business else ([], [])
+        )
         result = TemplateResult(
-            valid=True,
-            rendered=rendered,
+            valid=not issues,
+            rendered=None if business else rendered,
             value=value,
             value_type=type(value).__name__,
+            issues=issues,
+            warnings=warnings,
+            error="Correct the reported output fields and validate again."
+            if issues
+            else None,
         )
         try:
             encoded = orjson.dumps(result.model_dump())
