@@ -1,0 +1,10 @@
+// PURPOSE: Inputs to auth_start for password login.
+// CONTEXT: Read as {{ username }} and {{ password }}; no request wrapper.
+// OUTPUT: The start node forwards context unchanged. Build the remote login
+// request with HTTP, then return auth_end's documented response.
+// SECURITY: Values below are fictional. Never hardcode real credentials.
+{
+  "$start": "auth_start", // entry selector supplied by the caller
+  "username": "demo-reader", // string
+  "password": "example-password" // string
+}

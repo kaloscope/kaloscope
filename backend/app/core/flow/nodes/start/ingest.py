@@ -11,6 +11,13 @@ from app.models.flow import GraphCategory
 
 @start_node(order=1, icon="boxMultipleSearch", categories=(GraphCategory.INGEST,))
 class IngestStartNode(Node):
+    """Start media metadata ingestion or candidate search.
+
+    Input: server/caller media fields shown in `example`, available directly in
+    context. Output: unchanged context. Automatic runs stop if the target NFO
+    already exists; manual runs skip that check. Finish with the appropriate
+    movie, tv_show, episode, novel or comic metadata node."""
+
     example = CodeField(
         "request_example",
         language="jsonc",

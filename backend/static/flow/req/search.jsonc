@@ -1,0 +1,11 @@
+// PURPOSE: Inputs to search_start for a paginated resource search.
+// CONTEXT: Read {{ keyword }}, {{ page_num }}, {{ page_size }} directly.
+// OUTPUT: Context is unchanged. search_end returns {"total": N, "items": [...]}.
+// Configured UI filter IDs are additional top-level keys, not a filters object.
+{
+  "$start": "search_start",
+  "page_num": 1, // integer, first page is 1
+  "page_size": 1, // small page to demonstrate total > items.length in the response
+  "keyword": "Lantern", // string; may be empty if configuration permits
+  "mobile": false // optional boolean, supplied by the indexer page
+}

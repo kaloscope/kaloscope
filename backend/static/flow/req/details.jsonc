@@ -1,0 +1,21 @@
+// PURPOSE: Inputs to details_start for one remote resource or chapter.
+// CONTEXT: {{ id }} is a remote resource ID, not a workflow/media-library ID.
+// OUTPUT: Unchanged context; details_end returns the playable/readable resource.
+// Optional client hints may be absent in other callers; check before use.
+{
+  "$start": "details_start",
+  "id": "resource-001", // string
+  "chapter_id": null, // optional string; null asks for the main resource
+  "dash_supported": true, // optional boolean, browser playback capability
+  "ua": {
+    // optional parsed user-agent information
+    "ua": "Example browser",
+    "browser": { "name": "Chrome", "version": "130.0", "major": "130" },
+    "engine": { "name": "Blink", "version": "130.0" },
+    "os": { "name": "Linux", "version": "6" },
+    "device": {},
+    "cpu": { "architecture": "amd64" },
+    "navigator": { "platform": "Linux x86_64", "maxTouchPoints": 0 }
+  },
+  "page": 1 // optional, 1-based incremental image-page request
+}

@@ -110,6 +110,22 @@ def _get_strict_builtins() -> dict[str, Any]:
 
 @general_node(order=5, icon="code")
 class ScriptNode(Node):
+    """Transform context with a synchronous Python or JavaScript function.
+
+    Input: `script={"language":"python"|"javascript","code":"..."}`.
+    Python: `def execute(node_id, node_data, context):
+        context["count"] = len(context.get("items", []))`.
+    JavaScript: `function execute(node_id, node_data, context) {
+        context.count = (context.items || []).length;
+    }`.
+    Output: context changes follow the engine's deep-merge rules; JavaScript
+    assignments also merge lists/objects. Use Python `context.replace(key, value)`
+    for whole-value replacement. `node_data` changes are run state, not saved
+    draft edits. The function return is ignored. Python receives a Context
+    mapping; JavaScript receives plain JSON
+    objects in QuickJS, not browser/Node.js APIs. Python strict mode restricts
+    imports and builtins. No automatic template rendering of source code."""
+
     script = ScriptField("code", required=True)
 
     @classmethod

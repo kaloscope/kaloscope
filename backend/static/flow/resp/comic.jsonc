@@ -1,0 +1,31 @@
+// PURPOSE: Candidate array rendered by comic.response (maximum 100 entries).
+// OUTPUT: Normalized candidates in $retval; ratings become decimal strings and
+// default/empty fields are omitted. [] means no match. Automatic runs
+// save the first candidate to the server-selected item; manual lookup is read-only.
+// Optional metadata may be omitted/null. Dates are integer year/month/day;
+// authors/illustrators/genres are string arrays. Keep number as a string.
+// Writable fields below round-trip through ComicInfo; originaltitle cannot
+// currently be saved. Cover page is a zero-based index in the source archive.
+[
+  {
+    "title": "The Lost Observatory",
+    "plot": "Two explorers restore an abandoned observatory above a floating city.",
+    "rating": 8.1,
+    "year": 2024,
+    "month": 6,
+    "day": 18,
+    "authors": ["Mira Chen"],
+    "illustrators": ["Rowan Hale"],
+    "publisher": "Northlight Press",
+    "language": "en",
+    "isbn": "9780000000019", // fictional, checksum-valid example
+    "series": "Skybound Explorers",
+    "number": "3", // issue number; keep as text, including values such as "3.5"
+    "volume": "1",
+    "genres": ["Science Fiction", "Adventure"],
+    "tags": ["astronomy", "floating city"],
+    "pages": 48,
+    "monochrome": false,
+    "cover": { "page": 0 } // optional; use null when unavailable
+  }
+]

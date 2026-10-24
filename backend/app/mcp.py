@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Awaitable
 from contextlib import suppress
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -20,6 +20,7 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
+from app.core.flow.reference import get_workflow_reference as read_workflow_reference
 from app.models.download import DownloadQuery, DownloadState
 from app.models.flow import (
     GraphCategory,
@@ -49,6 +50,7 @@ from app.models.mcp import (
     WorkflowDraftVersion,
     WorkflowJob,
     WorkflowLogs,
+    WorkflowReference,
     WorkflowResult,
 )
 from app.models.media import MediaQuery
@@ -85,6 +87,7 @@ _READ_TOOLS = frozenset(
         "list_workflows",
         "get_workflow",
         "list_node_types",
+        "get_workflow_reference",
         "get_workflow_logs",
         "list_media_libraries",
         "list_media_items",
@@ -557,6 +560,27 @@ def create_server() -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    async def get_workflow_reference(
+        ctx: Context,
+        topic: Annotated[
+            Literal["context", "templates"],
+            Field(description="Read `context` passing rules or `templates` functions."),
+        ],
+    ) -> WorkflowReference:
+        """Read shared workflow authoring rules without executing anything.
+
+        Args:
+            ctx: Authenticated request context supplied by the server.
+            topic: Context passing rules or project-specific template functions.
+
+        Returns:
+            Complete English reference. Read exact node schemas separately with
+            `list_node_types` for node purpose, fields and input/output examples.
+        """
+        _user(ctx)
+        return read_workflow_reference(topic)
+
+    @server.tool(annotations=READ_ONLY)
     async def list_node_types(
         ctx: Context,
         category: Annotated[
@@ -574,7 +598,7 @@ def create_server() -> MCPServer:
             ),
         ] = None,
     ) -> NodeTypesResult:
-        """Read node fields, defaults, constraints, and connection handles.
+        """Read node purpose, fields, handles and complete English examples.
 
         Args:
             ctx: Authenticated HTTP request context, supplied by the server.
@@ -587,6 +611,8 @@ def create_server() -> MCPServer:
             controls, defaults, and constraints; `handles` describes edge connections.
             Labels and tooltips may be translation keys. Empty `categories` allows
             every workflow category; these schemas contain no saved node values.
+            Read-only example fields include their complete JSONC in `default`.
+            Use `get_workflow_reference` for context and template rules.
         """
         _user(ctx)
         return NodeTypesResult.model_validate(

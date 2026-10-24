@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from app.core.flow.fields.base import Field
@@ -24,6 +25,14 @@ class CodeField(Field[str]):
     resetter: bool = True
     formatter: bool = True
     width: str | None = "24rem"
+
+    def __post_init__(self):
+        """Load the declared example into the shared field definition."""
+        super().__post_init__()
+        if self.template:
+            self.default = (
+                Path(__file__).parents[4] / "static" / "flow" / self.template
+            ).read_text(encoding="utf-8")
 
     def _field_type(self) -> str:
         return "code"

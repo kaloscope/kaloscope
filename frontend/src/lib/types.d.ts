@@ -1066,6 +1066,7 @@ export type Field = {
 export type NodeSchema = {
   node_type: string;
   name: string;
+  description: string;
   icon: keyof typeof icons;
   group: string;
   order: number;

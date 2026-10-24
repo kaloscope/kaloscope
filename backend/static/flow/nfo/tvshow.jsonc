@@ -1,0 +1,36 @@
+// PURPOSE: Candidate array rendered by tv_show.response.
+// OUTPUT: $retval contains all candidates; [] means no match.
+// Automatic ingestion writes the first candidate to the requested NFO target;
+// manual lookup only returns candidates. Use the matching nfo_type: tvshow.
+// Optional metadata may be omitted. Strings below are illustrative; do not
+// invent unknown facts. Dates use YYYY-MM-DD; rating is numeric, year integer.
+[
+  {
+    "id": "series-001",
+    "site": "example.test",
+    "title": "The Wayfinder Journals",
+    "originaltitle": "The Wayfinder Journals",
+    "tagline": "A new map. A new mystery.",
+    "plot": "Two cartographers chart forgotten islands and record the people they meet.",
+    "rating": 8.2,
+    "year": 2024,
+    "premiered": "2024-04-05",
+    "country": "Canada",
+    "mpaa": "TV-PG",
+    "tags": ["maps", "islands"],
+    "genres": ["Adventure", "Drama"],
+    "studios": ["Northlight Pictures"],
+    "directors": ["Avery Morgan"],
+    "writers": ["Mira Chen"],
+    "credits": ["Mira Chen"],
+    "actors": [
+      {
+        "name": "Alex Rowan",
+        "role": "The Cartographer",
+        "thumb": "https://example.test/people/alex-rowan.jpg"
+      }
+    ],
+    "poster": "https://example.test/posters/wayfinder-journals.jpg",
+    "backdrop": "https://example.test/backdrops/wayfinder-journals.jpg"
+  }
+]

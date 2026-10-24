@@ -21,6 +21,7 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
+from app.core.flow.reference import get_workflow_reference
 from app.models.ai import AIProviderPreset
 from app.models.assistant import (
     AssistantConversation,
@@ -2200,6 +2201,10 @@ def test_created_draft_schemas(monkeypatch, narration):
 
             assert generated[-1].event == "done", generated[-1]
             assert len(streams) == 5
+            assert (
+                history.context_size(streams[-1]["messages"], tools.tool_schemas(owner))
+                <= 32000 - 4096
+            )
             assert streams[-1].get("tool_choice") != "none"
             assert "preview_workflow_draft" in {
                 tool["function"]["name"] for tool in streams[-1]["tools"]
@@ -2642,5 +2647,134 @@ def test_long_history_pages(revoked):
             else:
                 assert 1 <= create.await_count <= 3
             assert await AssistantTurn.all().count() == 207
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "narration",
+    ["", "Reading authoring references. " * 200],
+    ids=["short", "compacted"],
+)
+def test_node_knowledge_budget(monkeypatch, narration):
+    streams = []
+    calls = [
+        ("get_workflow_reference", {"topic": "context"}),
+        ("get_workflow_reference", {"topic": "templates"}),
+        ("list_node_types", {"node_type": "http"}),
+    ]
+
+    def handler(upstream):
+        body = loads(upstream.content)
+        assert body["stream"]
+        assert history.context_size(body["messages"], body.get("tools", [])) <= (
+            32000 - 4096
+        )
+        streams.append(body)
+        if len(streams) > len(calls):
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "content": "Ready to author the HTTP node.",
+                        },
+                        "stop",
+                    )
+                ]
+            )
+        name, args = calls[len(streams) - 1]
+        return response(
+            [
+                chunk(
+                    {
+                        "role": "assistant",
+                        "content": narration,
+                        "tool_calls": [
+                            call_delta(name, dumps(args).decode(), str(len(streams)))
+                        ],
+                    },
+                    "tool_calls",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await FlowGraph.create(
+                name="Knowledge review",
+                category="schedule",
+                state="draft",
+                draft={"nodes": [], "edges": []},
+            )
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            snapshot = await Sessions.snapshot(
+                conversation["id"],
+                graph.id,
+                0,
+                GraphDocument(nodes=[], edges=[]),
+                "canvas",
+                owner,
+            )
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request(
+                        prompt="Read context rules, template functions and the HTTP "
+                        "definition before building.",
+                        context={
+                            "page_type": "workflow_designer",
+                            "route": f"/settings/workflows/graphs/{graph.id}",
+                            "resource_id": graph.id,
+                            "snapshot_id": snapshot.id,
+                            "draft_version": 0,
+                            "unsaved": False,
+                            "editable": True,
+                            "selected_node_ids": [],
+                        },
+                    ),
+                    owner,
+                )
+            ]
+            assert events[-1].event == "done", events[-1]
+            assert len(streams) == 4
+            assert (
+                history.context_size(streams[-1]["messages"], tools.tool_schemas(owner))
+                <= 32000 - 4096
+            )
+            assert streams[-1].get("tool_choice") != "none"
+            results = []
+            for message in streams[-1]["messages"]:
+                if message["role"] == "tool":
+                    results.append(loads(message["content"]))
+                elif (message.get("content") or "").startswith(
+                    "Completed tool exchange"
+                ):
+                    results.extend(loads(message["content"].split("\n", 1)[1])["tools"])
+            assert {
+                result["data"]["topic"]: result["data"]["content"]
+                for result in results
+                if result.get("name") == "get_workflow_reference"
+            } == {
+                topic: get_workflow_reference(topic).content
+                for topic in ("context", "templates")
+            }
+            schema = next(
+                r["data"]["general"][0]
+                for r in results
+                if r["name"] == "list_node_types"
+            )
+            assert schema["node_type"] == "http"
+            assert next(f for f in schema["fields"] if f["id"] == "formatter")[
+                "default"
+            ]
+            assert await FlowLog.all().count() == 0
+            await graph.refresh_from_db()
+            assert graph.draft == {"nodes": [], "edges": []}
 
     asyncio.run(run())

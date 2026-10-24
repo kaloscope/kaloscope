@@ -8,6 +8,13 @@ from app.utils import json
 
 @general_node(order=3, icon="bracesVariable")
 class VariablesNode(Node):
+    """Render a JSONC object and merge its keys into context.
+
+    Input: `variables`, e.g. `{"query": {{ keyword|tojson }}, "page": 1}`.
+    With `keyword="cats"`, output adds `query="cats"` and `page=1`. Existing nested
+    objects are deep-merged; lists append new elements. Other keys remain.
+    Non-object output writes nothing. This does not persist variables between runs."""
+
     variables = CodeField(
         "variables",
         language="jinja2",

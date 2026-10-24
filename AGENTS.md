@@ -23,23 +23,23 @@ The frontend is an SPA: `frontend/src/routes/+layout.ts` disables SSR, and `fron
 static output in `frontend/build` with a `404.html` fallback. Production serves these assets and `/_api` through
 `backend/app/main.py`. Keep server-side business logic in the Python backend.
 
-| Location                                                                       | Responsibility                                                                                                              |
-| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| `frontend/src/routes`                                                          | Login, setup, and the dashboard, search, library, download, and settings pages under `(app)`                                |
-| `frontend/src/lib/components`                                                  | Reusable UI in `common`; domain components in `business`                                                                    |
-| `frontend/src/lib/helpers.ts`                                                  | Shared form constraints, loading state, and sort helpers                                                                    |
-| `frontend/src/lib/utils`                                                       | Shared browser, media, text, date, URL, and other focused utilities                                                         |
-| `frontend/src/lib`                                                             | API client in `api.ts`; API types in `types.d.ts`; display enums in `enums.ts`; shared state in `stores.ts`                 |
-| `frontend/src/lib/i18n.ts`, `frontend/src/lib/locales`                         | Translation helpers and the `en-US.json` / `zh-CN.json` catalogs                                                            |
-| `backend/app/routes`, `backend/app/services`, `backend/app/models`             | HTTP endpoints, reusable domain logic, ORM models, and Pydantic request models                                              |
-| `backend/app/utils`                                                            | Shared parsing, serialization, filesystem, async, and other utility functions                                               |
-| `backend/app/main.py`, `backend/app/core/config.py`, `backend/app/config.toml` | Lifecycle, process-shared state, configuration, and workspace paths                                                         |
-| `backend/app/core/flow`, `backend/app/core/renderer.py`                        | Workflow engine, context, nodes, fields, edges, and template rendering                                                      |
-| `backend/app/core/dl`                                                          | Downloader contracts, configuration, synchronization, and the `rpc` / `openlist` drivers                                    |
-| `backend/app/core/media`, `backend/app/core/transcode`                         | Library monitoring, ingestion, metadata, FFmpeg transcoding, and hardware acceleration                                      |
-| `frontend/src/lib/components/common/media`                                     | Video, image, and text viewers                                                                                              |
-| `frontend/src/templates`, `backend/static`                                     | Node editor JSONC examples; NFO templates in `backend/static/templates`; downloader presets in `backend/static/downloaders` |
-| `backend/app/migrations`, `backend/tests`, `scripts`                           | Database migrations, Pytest tests, and maintenance scripts                                                                  |
+| Location                                                                       | Responsibility                                                                                                                   |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `frontend/src/routes`                                                          | Login, setup, and the dashboard, search, library, download, and settings pages under `(app)`                                     |
+| `frontend/src/lib/components`                                                  | Reusable UI in `common`; domain components in `business`                                                                         |
+| `frontend/src/lib/helpers.ts`                                                  | Shared form constraints, loading state, and sort helpers                                                                         |
+| `frontend/src/lib/utils`                                                       | Shared browser, media, text, date, URL, and other focused utilities                                                              |
+| `frontend/src/lib`                                                             | API client in `api.ts`; API types in `types.d.ts`; display enums in `enums.ts`; shared state in `stores.ts`                      |
+| `frontend/src/lib/i18n.ts`, `frontend/src/lib/locales`                         | Translation helpers and the `en-US.json` / `zh-CN.json` catalogs                                                                 |
+| `backend/app/routes`, `backend/app/services`, `backend/app/models`             | HTTP endpoints, reusable domain logic, ORM models, and Pydantic request models                                                   |
+| `backend/app/utils`                                                            | Shared parsing, serialization, filesystem, async, and other utility functions                                                    |
+| `backend/app/main.py`, `backend/app/core/config.py`, `backend/app/config.toml` | Lifecycle, process-shared state, configuration, and workspace paths                                                              |
+| `backend/app/core/flow`, `backend/app/core/renderer.py`                        | Workflow engine, context, nodes, fields, edges, and template rendering                                                           |
+| `backend/app/core/dl`                                                          | Downloader contracts, configuration, synchronization, and the `rpc` / `openlist` drivers                                         |
+| `backend/app/core/media`, `backend/app/core/transcode`                         | Library monitoring, ingestion, metadata, FFmpeg transcoding, and hardware acceleration                                           |
+| `frontend/src/lib/components/common/media`                                     | Video, image, and text viewers                                                                                                   |
+| `backend/static/flow`, `backend/static`                                        | Shared node examples/references; NFO templates in `backend/static/templates`; downloader presets in `backend/static/downloaders` |
+| `backend/app/migrations`, `backend/tests`, `scripts`                           | Database migrations, Pytest tests, and maintenance scripts                                                                       |
 
 Runtime data lives in the root `workspace` directory locally and `/workspace` in containers. It includes the database,
 secret key, caches, transcoded media, and workflow repositories. Keep runtime data out of source changes and use temporary

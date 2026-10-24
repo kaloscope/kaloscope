@@ -18,6 +18,12 @@ calendar:
 
 @start_node(order=2, icon="appsListDetail", categories=(GraphCategory.INDEXER,))
 class BoardStartNode(Node):
+    """Start an indexer board request.
+
+    Input: caller boot parameters (an empty object `{}` is sufficient when the
+    board needs no parameters). `config` controls display/calendar options.
+    Output: unchanged context through `output`; finish with `board_end`."""
+
     config = CodeField(
         "config",
         language="yaml",

@@ -23,6 +23,9 @@ from tortoise import Tortoise, timezone
 from app.core.config import KaloscopeConfig
 from app.core.constants import MCP_PATH, SESSION_ID
 from app.core.exceptions import ForbiddenException, UnauthorizedException
+from app.core.flow.engine import FlowEngine
+from app.core.flow.nodes.base import Node
+from app.core.flow.reference import get_workflow_reference
 from app.core.middleware import on_request, on_response
 from app.mcp import close_mcp, create_server, start_mcp
 from app.models.ai import AIProvider
@@ -213,6 +216,7 @@ def test_protocol(mode):
                 "list_workflows",
                 "get_workflow",
                 "list_node_types",
+                "get_workflow_reference",
                 "get_workflow_logs",
                 "list_media_libraries",
                 "list_media_items",
@@ -300,7 +304,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 17
+            assert len(response_json(response)["result"]["tools"]) == 18
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )
@@ -1213,5 +1217,46 @@ methods:
             assert empty_page["structuredContent"] == {"total": 1, "items": []}
             assert await DownloadTask.all().values() == before
             network.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_node_knowledge(monkeypatch):
+    execute = AsyncMock(side_effect=AssertionError("Read tools cannot execute"))
+    complete = AsyncMock(side_effect=AssertionError("Read tools cannot call AI"))
+    monkeypatch.setattr(FlowEngine, "execute", execute)
+    monkeypatch.setattr(AIProviderService, "complete", complete)
+
+    async def run():
+        async with application() as app:
+            counts = [
+                await model.all().count() for model in (FlowGraph, FlowJob, FlowLog)
+            ]
+            for topic in ("context", "templates"):
+                result = await call(app, "get_workflow_reference", {"topic": topic})
+                assert (
+                    result["structuredContent"]
+                    == get_workflow_reference(topic).model_dump()
+                )
+            invalid = await call(app, "get_workflow_reference", {"topic": "../config"})
+            assert invalid["isError"]
+            for schema in Node.schemas:
+                node_type = schema.node_type
+                result = await call(app, "list_node_types", {"node_type": node_type})
+                expected = loads(
+                    dumps(FlowGraphService.get_node_schemas(node_type=node_type))
+                )
+                assert result["structuredContent"] == expected
+                node = next(iter(result["structuredContent"].values()))[0]
+                assert node["description"]
+                for example in node["fields"]:
+                    if example.get("template"):
+                        assert "// PURPOSE:" in example["default"]
+                        assert example["readonly"]
+            assert counts == [
+                await model.all().count() for model in (FlowGraph, FlowJob, FlowLog)
+            ]
+            execute.assert_not_awaited()
+            complete.assert_not_awaited()
 
     asyncio.run(run())

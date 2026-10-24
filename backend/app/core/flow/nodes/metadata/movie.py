@@ -12,6 +12,14 @@ from app.utils import json
 
 @end_node(order=1, icon="moviesAndTv", categories=(GraphCategory.INGEST,))
 class MovieNode(Node):
+    """Return video metadata candidates and optionally write an NFO.
+
+    Input: render `response` to the complete candidate array in `example`.
+    Output: `$retval` holds candidates. Automatic ingestion writes the first
+    candidate using caller `nfo_type`/`nfo_path`; pair with `movie` inputs.
+    Manual searches only return candidates. `force_end=true` ends the entire run.
+    Execution may write files; reading this definition does not."""
+
     example = CodeField(
         "response_example",
         language="jsonc",

@@ -8,6 +8,11 @@ from app.models.flow import GraphCategory
 
 @end_node(order=1, categories=(GraphCategory.SCHEDULE,))
 class ScheduleEndNode(Node):
+    """End this branch without changing context or returning a value.
+
+    `force_end=true` stops the entire run.
+    """
+
     force_end = ToggleField("force_end", tooltip="force_end", required=True)
 
     class Handles:

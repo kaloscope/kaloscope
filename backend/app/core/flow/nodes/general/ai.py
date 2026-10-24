@@ -33,7 +33,14 @@ OUTPUT_SCHEMA = """{
 
 @general_node(order=6, icon="layerDiagonalSparkle")
 class AINode(Node):
-    """Store a validated completion in a named workflow variable."""
+    """Call a configured model and store a validated completion.
+
+    Input: system_prompt/prompt templates use context variables (strict undefined
+    checks). Select an existing model; JSON mode validates output_schema.
+    Output: replace result_key (default `ai_result`) with
+    `{"text":"...","json":null,"model":"...","usage":{}}`; JSON mode fills
+    `json` with the validated object and available usage contains token counts.
+    Failures leave the previous result intact. Execution calls the provider."""
 
     model = AIModelField(required=True)
     system_prompt = CodeField(language="jinja2", collapse=True, width="32rem")

@@ -1,0 +1,9 @@
+// PURPOSE: JSON object rendered by auth_end.response.
+// OUTPUT: Stored as $retval. A nonempty name also persists workflow-local $auth.
+// With a nonempty name, expires_in is consumed from both $retval and $auth.
+// An empty name leaves cached login unchanged. Token is optional for cookie login.
+{
+  "name": "Demo Reader", // string, authenticated display name
+  "token": "example-session-token", // optional string, never include real credentials here
+  "expires_in": 3600 // optional integer seconds from now; otherwise cookie expiry
+}

@@ -24,6 +24,12 @@ filters:
 
 @start_node(order=3, icon="boxMultipleSearch", categories=(GraphCategory.INDEXER,))
 class SearchStartNode(Node):
+    """Start a paginated indexer search.
+
+    Input: `page_num`, `page_size`, `keyword` and configured filter values, as shown
+    in `example`. `config` controls the search UI, not the remote API request.
+    Output: unchanged context through `output`; finish with `search_end`."""
+
     example = CodeField(
         "request_example",
         language="jsonc",

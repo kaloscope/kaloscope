@@ -10,6 +10,13 @@ from app.utils import json
 
 @end_node(order=3, icon="boxMultipleSearchFilled", categories=(GraphCategory.INDEXER,))
 class SearchEndNode(Node):
+    """Return a paginated indexer search result.
+
+    Input: render `response` to the complete JSONC object shown in `example`.
+    Output: parsed value in `$retval`, consumed by the search UI. `total` counts
+    all matches, while `items` holds this page. `force_end=true` ends the whole
+    run; otherwise only this branch ends."""
+
     example = CodeField(
         "response_example",
         language="jsonc",

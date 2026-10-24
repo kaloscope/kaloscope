@@ -38,6 +38,7 @@ from app.core.ai.queries import (
 )
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
+from app.core.flow.reference import get_workflow_reference
 from app.models.assistant import (
     DOWNLOAD_PATHS,
     MEDIA_PATH,
@@ -153,6 +154,12 @@ class NodeQuery(ToolArguments):
     node_type: str | None = Field(default=None, min_length=1, max_length=255)
 
 
+class ReferenceQuery(ToolArguments):
+    """Select a bundled workflow authoring reference."""
+
+    topic: Literal["context", "templates"]
+
+
 class WorkflowValidation(GraphReference):
     """Validate an exact saved version or immutable captured canvas."""
 
@@ -179,14 +186,13 @@ class SnapshotQuery(GraphReference):
     field_id: str | None = Field(
         default=None,
         max_length=128,
-        description="Authored field inside node.data, e.g. url or headers; never data. "
-        "Omit to read the node itself.",
+        description="Authored node.data field (url/headers), never data; "
+        "omit for node.",
     )
     path: list[str | int] = Field(
         default_factory=list,
         max_length=10,
-        description="Keys inside the selected value; use integers for array indices, "
-        "e.g. [0, 'value'] for the first header value.",
+        description="Nested keys; integers index arrays, e.g. [0, 'value'].",
     )
     offset: int = Field(default=0, ge=0, strict=True)
     limit: int = Field(default=10, ge=1, le=2000, strict=True)
@@ -315,73 +321,68 @@ class AssistantTool:
 TOOLS = (
     AssistantTool(
         "list_workflows",
-        "Page accessible workflow metadata without graphs. "
-        "Use returned IDs for details.",
+        "Page accessible workflow metadata/IDs without graphs.",
         WorkflowList,
     ),
     AssistantTool(
         "get_workflow",
-        "Read saved workflow facts and a graph base reference. "
-        "Read original fields with read_workflow_snapshot; "
-        "unsaved edits use page snapshots.",
+        "Read saved workflow facts/base. Originals: read_workflow_snapshot. "
+        "Unsaved edits use page snapshots.",
         WorkflowID,
     ),
     AssistantTool(
         "list_node_types",
-        "List a node catalog; specify node_type for exact fields/handles. "
-        "Read exact schemas before building or editing nodes.",
+        "List nodes; node_type reads purpose, fields/handles and full examples.",
         NodeQuery,
     ),
     AssistantTool(
+        "get_workflow_reference",
+        "Read context passing rules or project template functions. Read-only.",
+        ReferenceQuery,
+    ),
+    AssistantTool(
         "get_workflow_logs",
-        "Read execution facts, exact output counts, errors and samples. "
-        "Page full output/errors with read_workflow_log. Logged failures "
-        "describe the workflow, not this tool.",
+        "Read execution counts/errors/samples; page originals with read_workflow_log. "
+        "Logged failures concern the workflow, not this tool.",
         WorkflowLogQuery,
     ),
     AssistantTool(
         "validate_workflow",
-        "Validate an exact graph base; use the page snapshot for unsaved edits. "
-        "Checks structure/fields and static entry-path readiness, never execution.",
+        "Validate exact-base structure/fields/readiness, never execute. "
+        "Unsaved edits use page snapshots.",
         WorkflowValidation,
         admin=True,
     ),
     AssistantTool(
         "preview_workflow_draft",
-        "Apply requested edits to an exact base; changes=[] previews it unchanged. "
-        "Use the page snapshot, then the latest proposal_snapshot_id for more edits. "
-        "The final preview updates the editable canvas for Keep/Revert. Never saves "
-        "or publishes. On conflict, ask the user to revert, load the latest draft "
-        "and request a new edit. Elsewhere previews are reference only.",
+        "Preview exact-base edits; changes=[] reads unchanged. Designer: Keep/Revert; "
+        "elsewhere reference only. Never saves/publishes. On conflict, revert and "
+        "load the latest draft before editing.",
         WorkflowPreview,
         admin=True,
     ),
     AssistantTool(
         CREATE_TOOL,
-        "Create one empty unpublished draft with a unique name, category and purpose. "
-        "Repeated calls/retries return it (replayed=true). "
-        "name_already_exists creates nothing.",
+        "Create one empty unpublished draft: unique name, category, purpose. "
+        "Retries replay it; name_already_exists creates nothing.",
         WorkflowCreate,
         admin=True,
     ),
     AssistantTool(
         "read_workflow_log",
-        "Read an exact log field or nested path with explicit "
-        "pagination; IDs come from get_workflow_logs.",
+        "Page a log field/path; IDs come from get_workflow_logs.",
         LogDetailQuery,
     ),
     AssistantTool(
         "read_workflow_snapshot",
-        "Read original graph fields or structure by an exact base. "
-        "Use node_id, field_id and path to inspect scripts; "
+        "Read exact-base graph originals. Select scripts via node_id/field_id/path; "
         "paginate long text.",
         SnapshotQuery,
     ),
     AssistantTool(
         "read_conversation_history",
-        "Read originals by turn_id or tool_call_id; omit both for an index paged "
-        "with before. Page originals with offset/limit. source_facts are summaries, "
-        "not original values.",
+        "Read originals by turn_id/tool_call_id; omit both for index pages via "
+        "before. Page text with offset/limit. source_facts are summaries.",
         HistoryQuery,
     ),
     AssistantTool(
@@ -459,9 +460,9 @@ def compact_schema(value: Any) -> Any:
 
     Generated titles repeat property names, discriminator mappings repeat each
     variant's constant `op`, resource IDs repeat the JavaScript safe-integer bound,
-    and null defaults restate that an optional field may be omitted. Other
-    constraints, defaults and descriptions remain, and execution still validates
-    against the complete argument models.
+    constant values imply their type, and null defaults restate that an optional
+    field may be omitted. Other constraints, defaults and descriptions remain,
+    and execution still validates against the complete argument models.
 
     Args:
         value: JSON schema node generated by Pydantic.
@@ -475,6 +476,7 @@ def compact_schema(value: Any) -> Any:
             for key, item in value.items()
             # property schemas are dicts, so fields with these names are kept
             if not (key == "title" and isinstance(item, str))
+            and not (key == "type" and isinstance(item, str) and "const" in value)
             and not (key == "discriminator" and "propertyName" in item)
             and not (key == "maximum" and item == SAFE_INTEGER)
             and not (key == "default" and item is None)
@@ -775,6 +777,8 @@ async def execute_tool(
                     result = await workflow_details(
                         args.workflow_id, user, conversation_id
                     )
+                case ReferenceQuery():
+                    result = get_workflow_reference(args.topic)
                 case NodeQuery():
                     schemas = FlowGraphService.get_node_schemas(
                         args.category, args.node_type
@@ -787,7 +791,6 @@ async def execute_tool(
                             group: [
                                 {
                                     "node_type": node["node_type"],
-                                    "name": node["name"],
                                     "categories": node["categories"],
                                 }
                                 for node in nodes
@@ -795,11 +798,20 @@ async def execute_tool(
                             for group, nodes in result.items()
                         }
                     else:
-                        # omit editor decoration, retaining field semantics and widths
+                        # omit editor decoration, retaining field constraints and widths
                         for nodes in result.values():
                             for node in nodes:
                                 node.pop("icon")
                                 node.pop("order")
+                                node.pop("name")
+                                node.pop("group")
+                                if node["width"] is None:
+                                    node.pop("width")
+                                for handle in node["handles"]:
+                                    handle.pop("style", None)
+                                    handle.pop("position", None)
+                                    if handle.get("tag") is None:
+                                        handle.pop("tag", None)
                                 for field in node["fields"]:
                                     for key in (
                                         "span",
@@ -810,6 +822,8 @@ async def execute_tool(
                                         "copier",
                                         "resetter",
                                         "formatter",
+                                        "label",
+                                        "tooltip",
                                     ):
                                         field.pop(key, None)
                                     for key, value in list(field.items()):

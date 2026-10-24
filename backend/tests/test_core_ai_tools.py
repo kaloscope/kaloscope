@@ -8,6 +8,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from jsonschema import Draft202012Validator
 from tortoise import Tortoise
 
 from app.core.ai import tools
@@ -108,6 +109,7 @@ def test_grants():
         "read_workflow_snapshot",
         "read_conversation_history",
         "list_node_types",
+        "get_workflow_reference",
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
@@ -452,6 +454,26 @@ def test_preview_does_not_write():
             assert await FlowDraftRevision.all().count() == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("value", [None, False, 1, "set_field", "add_node", {}, []])
+def test_compact_constant(value):
+    original = {"type": "string", "const": "set_field"}
+    compact = tools.compact_schema(original)
+
+    assert compact == {"const": "set_field"}
+    assert Draft202012Validator(compact).is_valid(value) == Draft202012Validator(
+        original
+    ).is_valid(value)
+
+
+def test_compact_property_names():
+    schema = {
+        "type": "object",
+        "properties": {"type": {"type": "string"}, "const": {"type": "integer"}},
+    }
+
+    assert tools.compact_schema(schema) == schema
 
 
 def test_node_schema():

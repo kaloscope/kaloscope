@@ -12,6 +12,12 @@ specific:
 
 @start_node(order=4, icon="contentView", categories=(GraphCategory.INDEXER,))
 class DetailsStartNode(Node):
+    """Start an indexer resource or chapter lookup.
+
+    Input: resource `id` and optional `chapter_id`, as shown in `example`.
+    `config.specific` supplies display defaults. Output: unchanged context through
+    `output`; finish with `details_end`. IDs belong to the remote indexer."""
+
     example = CodeField(
         "request_example",
         language="jsonc",
