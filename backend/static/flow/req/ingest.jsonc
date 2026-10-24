@@ -1,0 +1,25 @@
+// PURPOSE: Inputs to ingest_start for metadata lookup/automatic ingestion.
+// CONTEXT: Fields are top-level variables. Null means unavailable, not a default
+// to invent. item_id/path/lib_type are server-selected for automatic ingestion.
+// OUTPUT: Unchanged context; metadata end nodes return a candidate array.
+// Automatic runs may write metadata. Manual lookup only returns candidates.
+{
+  "item_id": 1, // integer, local media item; absent in some manual searches
+  "path": "/media/The Lantern Archive (2024).mp4",
+  "name": "The Lantern Archive (2024)", // source name
+  "role": null, // reading media: book | collection | chapter
+  "lib_type": "movie", // movie | tv_show | novel | comic
+  "nfo_path": "/media/The Lantern Archive (2024).nfo", // video target; null for reading media
+  "nfo_type": "movie", // movie | tvshow | episode; null for reading media
+  "language": "en-US",
+  "title": "The Lantern Archive",
+  "series": null,
+  "number": null, // reading series/issue number
+  "year": 2024,
+  "season": null, // integer for a TV episode
+  "episode": null, // integer for a TV episode
+  "site": null, // metadata source
+  "series_id": null, // ID at the metadata source, not a local workflow ID
+  "page_num": 1, // 1-based metadata candidate search page
+  "page_size": 5
+}

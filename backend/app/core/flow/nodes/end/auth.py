@@ -20,6 +20,14 @@ from app.utils import json
 
 @end_node(order=1, icon="keyFilled", categories=(GraphCategory.INDEXER,))
 class AuthEndNode(Node):
+    """Return and persist indexer authentication.
+
+    Input: render `response` to the object documented in `example`.
+    Output: `$retval`; a nonempty `name` also persists workflow-local `$auth`,
+    consuming `expires_in` from both results to compute expiry. Empty `name`
+    leaves cached authentication unchanged. Configured cookies are saved.
+    `force_end=true` ends the whole run; otherwise only this branch ends."""
+
     example = CodeField(
         "response_example",
         language="jsonc",

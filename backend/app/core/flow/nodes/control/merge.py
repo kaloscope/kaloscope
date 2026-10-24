@@ -14,6 +14,13 @@ _RECEIVED = "$received"
 
 @control_node(order=3, icon="circleDashedPlus")
 class MergeNode(Node):
+    """Synchronize incoming branches before continuing once.
+
+    Input: branch contexts; wait for `min(maximum, incoming source count)` sources.
+    A positive timeout permits continuation with available sources; zero disables
+    the timer. Output: ordinary merged context through `output`, not an array of
+    branch results. Example: maximum 2 joins two incoming branches."""
+
     maximum = NumberField(
         tooltip="merge_maximum", required=True, min=1, max=20, default=1
     )

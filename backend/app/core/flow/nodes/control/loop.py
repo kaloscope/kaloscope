@@ -9,6 +9,14 @@ from app.core.flow.nodes.base import Node, control_node
 
 @control_node(order=2, icon="arrowSyncCircle")
 class LoopNode(Node):
+    """Repeat a branch over a finite, indexable sequence.
+
+    Input: `expression` (e.g. `{{ items }}`) and `varname` (e.g. `item`). An integer
+    becomes range(0, n); a dictionary becomes key/value pairs. Output: `loop_start`
+    binds `item` for the body; connect its last node to `loop_continue`. Normal
+    `output` runs after exhaustion (immediately for an empty sequence). The index
+    is internal node state, not an automatically available context variable."""
+
     expression = TextField("expression", required=True, maxlength=1024)
     varname = TextField("varname", required=True, maxlength=32)
 

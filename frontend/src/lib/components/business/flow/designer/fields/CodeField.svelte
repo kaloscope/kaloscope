@@ -5,22 +5,6 @@
    * Supported languages for the code field.
    */
   type Language = 'yaml' | 'json' | 'jsonc' | 'jinja2' | 'python' | 'javascript';
-
-  /**
-   * Preload all template files from the templates directory.
-   */
-  const templates: Record<string, string> = import.meta.glob('/src/templates/**/*.jsonc', {
-    eager: true,
-    query: '?raw',
-    import: 'default'
-  });
-
-  /**
-   * Load a template file by its name.
-   *
-   * @param template - Name of the template file.
-   */
-  const loadTemplate = (template: string) => templates[`/src/templates/${template}`] ?? '';
 </script>
 
 <script lang="ts">
@@ -100,12 +84,10 @@
     });
   }
 
-  // load template if data is empty and template is set
+  // examples always use the current schema, including when old graphs saved a copy
+  const document = $derived(field.template ? field.default : data);
   let mounted = $state(false);
   onMount(() => {
-    if (!data && field.template) {
-      data = loadTemplate(field.template);
-    }
     mounted = true;
   });
 </script>
@@ -132,11 +114,12 @@
 {#snippet code(_class?: string)}
   {#if mounted}
     <CodeMirror
-      document={data}
+      {document}
       language={languageSupport(field.language)}
       placeholder={$placeholder(field.placeholder)}
       tabSize={field.tabsize}
       lineLength={field.lineLength}
+      lineWrapping={!!field.template}
       readOnly={field.readonly}
       enlarger={true}
       darkMode={field.darkmode}
@@ -151,7 +134,7 @@
       editorClass="nodrag nowheel"
       debounceTime={field.visible_when ? 0 : undefined}
       onchange={(doc) => {
-        if (get(assistantCanvas)) return;
+        if (field.readonly || get(assistantCanvas)) return;
         updateNodeData(field.nodeId, { [field.id]: doc });
       }}
     />

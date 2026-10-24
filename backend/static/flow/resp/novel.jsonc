@@ -1,0 +1,28 @@
+// PURPOSE: Candidate array rendered by novel.response (maximum 100 entries).
+// OUTPUT: Normalized candidates in $retval; ratings become decimal strings and
+// default/empty fields are omitted. [] means no match. Automatic runs
+// save the first candidate to the server-selected item; manual lookup is read-only.
+// Optional metadata may be omitted/null. Dates are integer year/month/day;
+// authors/illustrators/genres are string arrays. Keep number as a string.
+// Writable fields below round-trip through OPF. originaltitle, volume, tags,
+// pages and monochrome cannot currently be saved in this format.
+// Cover href is a relative/HTTP(S) image reference, not a downloaded image.
+[
+  {
+    "title": "A Map of Quiet Stars",
+    "plot": "A young cartographer follows an unfinished star map across distant islands.",
+    "rating": 8.7,
+    "year": 2023,
+    "month": 9,
+    "day": 12,
+    "authors": ["Mira Chen"],
+    "illustrators": ["Rowan Hale"],
+    "publisher": "Northlight Press",
+    "language": "en",
+    "isbn": "9780000000002", // fictional, checksum-valid example
+    "series": "The Wayfinder Journals",
+    "number": "1", // series index
+    "genres": ["Fantasy", "Adventure"],
+    "cover": { "href": "cover.jpg" } // optional; use null when unavailable
+  }
+]

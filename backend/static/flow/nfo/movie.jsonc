@@ -1,0 +1,36 @@
+// PURPOSE: Candidate array rendered by movie.response.
+// OUTPUT: $retval contains all candidates; [] means no match.
+// Automatic ingestion writes the first candidate to the requested NFO target;
+// manual lookup only returns candidates. Use the matching nfo_type: movie.
+// Optional metadata may be omitted. Strings below are illustrative; do not
+// invent unknown facts. Dates use YYYY-MM-DD; rating is numeric, year integer.
+[
+  {
+    "id": "movie-001",
+    "site": "example.test",
+    "title": "The Lantern Archive",
+    "originaltitle": "The Lantern Archive",
+    "tagline": "Every light keeps a story.",
+    "plot": "An archivist follows a trail of lanterns to recover a lost town history.",
+    "rating": 8.4,
+    "year": 2024,
+    "premiered": "2024-03-15",
+    "country": "United Kingdom",
+    "mpaa": "PG",
+    "tags": ["archives", "small town"],
+    "genres": ["Mystery", "Adventure"],
+    "studios": ["Northlight Pictures"],
+    "directors": ["Avery Morgan"],
+    "writers": ["Mira Chen"],
+    "credits": ["Mira Chen"],
+    "actors": [
+      {
+        "name": "Alex Rowan",
+        "role": "The Archivist",
+        "thumb": "https://example.test/people/alex-rowan.jpg"
+      }
+    ],
+    "poster": "https://example.test/posters/lantern-archive.jpg",
+    "backdrop": "https://example.test/backdrops/lantern-archive.jpg"
+  }
+]

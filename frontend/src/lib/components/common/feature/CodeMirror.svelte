@@ -19,6 +19,8 @@
     tabSize: number;
     /** The maximum length of a line. */
     lineLength: number;
+    /** Whether long lines wrap within the editor. */
+    lineWrapping: boolean;
     /** Whether the editor is read-only. */
     readOnly: boolean;
     /** Whether to use the dark theme. */
@@ -238,6 +240,7 @@
     placeholder: _placeholder,
     tabSize = 2,
     lineLength = 80,
+    lineWrapping = false,
     readOnly = false,
     darkMode = false,
 
@@ -458,6 +461,7 @@
           tabKeyHandler,
           darkModeHandler,
           readOnlyHandler,
+          lineWrapping ? EditorView.lineWrapping : [],
           placeholderHandler
         ]
       })
@@ -550,6 +554,7 @@
       placeholder={_placeholder}
       {tabSize}
       {lineLength}
+      {lineWrapping}
       {readOnly}
       {darkMode}
       minHeight="80dvh"
@@ -579,6 +584,7 @@
       placeholder={_placeholder}
       {tabSize}
       {lineLength}
+      {lineWrapping}
       {readOnly}
       {darkMode}
       minHeight="12rem"

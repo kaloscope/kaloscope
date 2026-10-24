@@ -1,0 +1,45 @@
+// PURPOSE: JSON object rendered by details_end.response for the resource view.
+// OUTPUT: $retval; media_type selects video | audio | image | text.
+// Below is a video example. Optional display fields may be omitted.
+// AUDIO: use {"media_type":"audio","url":"https://example.test/audio.mp3"}.
+// TEXT: use {"media_type":"text","text":["Paragraph one","Paragraph two"]};
+// text may also be one string. Chapters may be used for all reading resources.
+// IMAGE: use {"media_type":"image","images":["https://example.test/1.jpg"],
+// "image_count":20}; image_count optionally gives the complete image count.
+{
+  "id": "resource-001",
+  "title": "The Lantern Archive",
+  "uploader": "Demo Reader",
+  "uploaded_at": "2024-03-15",
+  "media_type": "video",
+  // Playback URL, not the download link returned by search_end.
+  "url": "https://example.test/streams/resource-001/master.m3u8",
+  "video_type": "hls", // optional: mp4 | flv | hls | dash
+  "definitions": [
+    // optional alternate qualities
+    {
+      "url": "https://example.test/streams/resource-001/1080p.m3u8",
+      "definition": 1080
+    }
+  ],
+  "chapters": [
+    // optional; id requests details again, url can link directly
+    {
+      "id": "chapter-1",
+      "url": "https://example.test/streams/resource-001/chapter-1.m3u8",
+      "title": "Opening Scene",
+      "volume": "Part One"
+    }
+  ],
+  "danmakus": [
+    // optional timed overlay comments
+    {
+      "id": "comment-1", // optional
+      "text": "Look at the lantern on the shelf!",
+      "mode": "scroll", // optional: scroll | top | bottom
+      "color": "#ffffff", // optional
+      "start": 12500, // optional milliseconds; appears at 00:12.5
+      "duration": 5000 // optional milliseconds
+    }
+  ]
+}

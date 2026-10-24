@@ -11,6 +11,12 @@ from app.utils import json
 
 @start_node(order=1, categories=(GraphCategory.SCHEDULE,))
 class ScheduleStartNode(Node):
+    """Start a schedule workflow; does not create a job.
+
+    Input: `params` holds caller parameters. Render `bootparams` as a JSONC object
+    and merge into context: `{"limit":3}` exposes `{{ limit }}` downstream.
+    """
+
     bootparams = CodeField(
         "bootparams",
         language="jinja2",

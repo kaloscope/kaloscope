@@ -15,6 +15,14 @@ from app.utils import json
 
 @end_node(order=5, icon="imageMultiple", categories=(GraphCategory.INGEST,))
 class ComicNode(Node):
+    """Return validated comic metadata candidates and optionally save metadata.
+
+    Input: render `response` to the candidate array in `example` (at most 100).
+    Output: `$retval` holds validated candidates. Automatic ingestion uses the
+    server's `item_id` in a matching library and saves the first candidate;
+    manual searches only return candidates and require matching `lib_type`.
+    `force_end=true` ends the entire run. Execution may update metadata/files."""
+
     example = CodeField(
         "response_example",
         language="jsonc",

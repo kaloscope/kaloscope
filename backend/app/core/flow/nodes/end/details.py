@@ -10,6 +10,12 @@ from app.utils import json
 
 @end_node(order=4, icon="contentViewFilled", categories=(GraphCategory.INDEXER,))
 class DetailsEndNode(Node):
+    """Return an indexer resource for playback or reading.
+
+    Input: render `response` to the JSONC object shown in `example`, using fields
+    appropriate to its media type. Output: parsed value in `$retval`.
+    `force_end=true` ends the whole run; otherwise only this branch ends."""
+
     example = CodeField(
         "response_example",
         language="jsonc",

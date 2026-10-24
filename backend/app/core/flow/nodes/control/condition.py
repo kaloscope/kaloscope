@@ -10,6 +10,12 @@ from app.core.flow.nodes.base import Node, control_node
 
 @control_node(order=1, icon="arrowCircleDownSplit")
 class ConditionNode(Node):
+    """Choose a branch using a rendered expression.
+
+    Input: `expression`, e.g. `{{ items|length > 0 }}`. Native false/empty values
+    and text `false`, `0`, `none`, `null` are false; an XML/HTML element is true.
+    Output: unchanged context via `is_true` or `is_false`; no new variable."""
+
     expression = TextField("expression", required=True, maxlength=1024)
 
     class Handles:

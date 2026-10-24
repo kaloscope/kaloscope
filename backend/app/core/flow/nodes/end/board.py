@@ -10,6 +10,13 @@ from app.utils import json
 
 @end_node(order=2, icon="appsListDetailFilled", categories=(GraphCategory.INDEXER,))
 class BoardEndNode(Node):
+    """Return grouped indexer resources.
+
+    Input: render `response` to the JSONC array shown in `example`.
+    Output: parsed groups in `$retval` for the board UI. This is an array, not a
+    search page object. `force_end=true` ends the whole run; otherwise only this
+    branch ends."""
+
     example = CodeField(
         "response_example",
         language="jsonc",

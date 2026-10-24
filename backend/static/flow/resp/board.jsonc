@@ -1,0 +1,23 @@
+// PURPOSE: JSON array rendered by board_end.response; not a search page object.
+// OUTPUT: $retval feeds dashboard groups. Empty result: [].
+// Each group has title and items; item fields follow the search result contract.
+[
+  {
+    "title": "Featured Movies",
+    "items": [
+      {
+        "id": "resource-001",
+        "title": "The Lantern Archive",
+        "cover": "https://example.test/posters/lantern-archive.jpg",
+        "ranking": 1,
+        "rating": 8.4,
+        "link": "https://example.test/downloads/resource-001.torrent",
+        "size": "1.4 GB",
+        "misc": "1080p / English / 01:42:00",
+        "category": "Movie",
+        "uploader": "Demo Reader",
+        "uploaded_at": "2024-03-15"
+      }
+    ]
+  }
+]

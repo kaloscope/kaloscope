@@ -33,6 +33,17 @@ _IMPERSONATION_HEADERS = {
 
 @general_node(order=1, icon="globe")
 class HTTPNode(Node):
+    """Send HTTP and merge extracted data into context.
+
+    Input: templated URL, headers (`[{"key":"Accept","value":"application/json"}]`),
+    body; valid JSONC plus Content-Type selects JSON/form, otherwise bytes.
+    Formatter alone gets
+    `response.text/status_code/headers`. Example:
+    `{"items": {{ response.text|jsonpath_all('$.items[*]')|tojson }}}`.
+    Output: merge JSONC objects only. Default stores text under `response`.
+    HTTP error status codes do not auto-fail. Execution sends a real request.
+    """
+
     client = SelectField(
         required=True,
         options={"httpx": "httpx", "curl_cffi": "curl_cffi"},

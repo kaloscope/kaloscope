@@ -1,5 +1,0 @@
-{
-  "name": "Admin",
-  "token": "...", // optional
-  "expires_in": 3600 // seconds
-}

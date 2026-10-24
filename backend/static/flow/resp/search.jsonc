@@ -1,0 +1,24 @@
+// PURPOSE: JSON object rendered by search_end.response; not an HTTP envelope.
+// OUTPUT: $retval feeds the search page. Use upstream total for all matches;
+// items.length is only this page's count. Empty result: {"total": 0, "items": []}.
+// Resource fields are optional display data; keep stable id/title when known.
+// Fictional response to req/search.jsonc: one item on page 1 of three matches.
+{
+  "total": 3, // integer, all matching resources across all pages
+  "items": [
+    {
+      "id": "resource-001", // remote ID used by details_start
+      "title": "The Lantern Archive",
+      "cover": "https://example.test/posters/lantern-archive.jpg",
+      "ranking": 1, // optional display rank
+      "rating": 8.4,
+      // Download URL, not the playback URL returned by details_end.
+      "link": "https://example.test/downloads/resource-001.torrent",
+      "size": "1.4 GB", // display string
+      "misc": "1080p / English / 01:42:00", // additional display text
+      "category": "Movie",
+      "uploader": "Demo Reader",
+      "uploaded_at": "2024-03-15" // display string, preserve source precision
+    }
+  ]
+}

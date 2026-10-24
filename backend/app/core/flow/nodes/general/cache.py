@@ -9,6 +9,13 @@ from app.models.flow import FlowVariable
 
 @general_node(order=4, icon="save", width="32rem")
 class CacheNode(Node):
+    """Persist a workflow-local variable for later runs.
+
+    Input: rendered `key` and `value`; `ttl` is seconds, zero/null means no expiry.
+    Example: key `token`, value `{{ session_token }}`, ttl `3600` stores rendered
+    text for one hour. Output: no current-context update; later runs load `token`.
+    JSON-looking values remain strings; parse them explicitly when reading."""
+
     key = TextField(required=True, maxlength=64, span=70)
     ttl = NumberField(tooltip="cache_ttl", min=0, span=30)
     value = CodeField(

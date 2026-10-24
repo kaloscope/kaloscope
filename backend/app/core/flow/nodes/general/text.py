@@ -12,6 +12,13 @@ from app.models.media import MediaLib
 
 @general_node(order=2, icon="documentSignature")
 class TextNode(Node):
+    """Write rendered text to a file inside a registered media library.
+
+    Input: `path`, `content`, and mode `x` (create), `w` (replace), or `a` (append).
+    Example: path `/media/note.txt`, content `{{ title }}` writes the title if that
+    path belongs to a library. Parent directories are created. Outside paths are
+    skipped. Output: no new context variables. Execution changes files."""
+
     path = TextField("path", required=True, maxlength=1024)
     mode = SelectField(
         required=True,

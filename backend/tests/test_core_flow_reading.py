@@ -109,9 +109,7 @@ def test_node_schema(reading_node):
 def test_reading_example(reading_node):
     lib_type, node = reading_node
     template = (
-        Path(__file__).resolve().parents[2]
-        / "frontend/src/templates"
-        / node.example.template
+        Path(__file__).resolve().parents[1] / "static/flow" / node.example.template
     )
     candidates = json.try_loads(template.read_text(), with_comments=True)
     assert isinstance(candidates, list) and len(candidates) == 1

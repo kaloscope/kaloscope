@@ -1,0 +1,19 @@
+// PURPOSE: Candidate array rendered by episode.response.
+// OUTPUT: $retval contains all candidates; [] means no match.
+// Automatic ingestion writes the first candidate to the requested NFO target;
+// manual lookup only returns candidates. Use the matching nfo_type: episode.
+// Optional metadata may be omitted. Strings below are illustrative; do not
+// invent unknown facts. Dates use YYYY-MM-DD; rating is numeric, year integer.
+[
+  {
+    "id": "series-001-s01e02",
+    "site": "example.test",
+    "title": "The Island Without a Name",
+    "plot": "The cartographers find an island missing from every map in their journals.",
+    "rating": 8.6,
+    "aired": "2024-04-12",
+    "season": 1,
+    "episode": 2,
+    "poster": "https://example.test/stills/wayfinder-s01e02.jpg"
+  }
+]

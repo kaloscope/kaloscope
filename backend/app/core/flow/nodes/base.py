@@ -2,6 +2,7 @@ import re
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum, auto
+from inspect import getdoc
 from typing import Any, Protocol, TypeVar
 
 import yaml
@@ -59,6 +60,7 @@ class NodeSchema:
     fields: tuple[Field, ...]
     handles: tuple[Handle, ...]
     categories: tuple[GraphCategory, ...]
+    description: str
 
     def __eq__(self, other):
         if isinstance(other, NodeSchema):
@@ -103,7 +105,9 @@ class NodeMeta(ABCMeta):
 
         # collect the node fields
         fields: list[Field] = []
-        for index, (attr_name, field) in enumerate(namespace.items()):
+        # documentation must not shift persisted divider field IDs
+        members = ((key, value) for key, value in namespace.items() if key != "__doc__")
+        for index, (attr_name, field) in enumerate(members):
             if isinstance(field, DividerField):
                 field.id = f"divider_{index}"
                 fields.append(field)
@@ -173,6 +177,9 @@ class Node(metaclass=NodeMeta):
                 icon.
             categories: Available graph categories for the node. An empty tuple
                 permits all graph categories.
+
+        Returns:
+            Decorator that registers the node's schema and executor.
         """
 
         def decorator(node_cls: type[N]) -> type[N]:
@@ -198,6 +205,7 @@ class Node(metaclass=NodeMeta):
                 tuple(node_cls._fields),
                 tuple(node_cls._handles),
                 categories,
+                getdoc(node_cls) or "",
             )
             # check if the node type is duplicated
             if schema in cls.schemas:

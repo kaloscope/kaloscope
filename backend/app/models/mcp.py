@@ -239,6 +239,7 @@ class NodeResult(Result):
         description="Stable node type identifier referenced by saved graph schemas."
     )
     name: str = Field(description="Registered Python node class name.")
+    description: str = Field(description="English purpose and runtime data contract.")
     icon: str
     group: str = Field(
         description="Designer palette group: `start`, `general`, `control`, or `end`."
@@ -263,6 +264,13 @@ class NodeResult(Result):
 
 class NodeTypesResult(RootModel[dict[str, list[NodeResult]]]):
     """Map designer palette groups to node schemas; unmatched queries return `{}`."""
+
+
+class WorkflowReference(Result):
+    """Return one complete, bundled workflow authoring reference."""
+
+    topic: Literal["context", "templates"]
+    content: str = Field(description="Complete English Markdown reference.")
 
 
 class LogEntry(Result):

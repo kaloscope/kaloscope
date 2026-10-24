@@ -17,6 +17,13 @@ cookie:
 
 @start_node(order=1, icon="key", categories=(GraphCategory.INDEXER,))
 class AuthStartNode(Node):
+    """Start an indexer login request.
+
+    Input: caller credentials shown in `example` become top-level context variables.
+    `config.login` selects the login UI; `config.cookie` selects saved cookies.
+    Output: unchanged context through `output`; connect to an `auth_end` path.
+    This node does not authenticate by itself."""
+
     example = CodeField(
         "request_example",
         language="jsonc",
