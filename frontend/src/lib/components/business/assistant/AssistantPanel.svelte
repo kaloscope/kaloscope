@@ -64,6 +64,7 @@
     const pathname = page.url.pathname;
     if (/\/graphs\/(r\/)?\d+\/?$/.test(pathname)) return 'workflow_designer';
     if (/\/workflows\/graphs\/?$/.test(pathname)) return 'workflows';
+    if (/^\/settings\/workflows\/schedules\/?$/.test(pathname)) return 'workflow_jobs';
     if (/^\/medialibs\/\d+\/\d+\/?$/.test(pathname)) return 'media_item';
     if (/^\/medialibs\/\d+\/?$/.test(pathname)) return 'media_library';
     if (/^\/downloads\/downloading\/?$/.test(pathname)) return 'active_downloads';

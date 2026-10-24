@@ -102,6 +102,19 @@ export type AssistantPageContext =
       };
     }
   | {
+      page_type: 'workflow_jobs';
+      route: string;
+      selected_job: { job_id: number; workflow_id: number } | null;
+      filters: {
+        name: string;
+        state: FlowJob['state'] | null;
+        trigger: FlowJob['trigger'] | null;
+        ordering: string;
+        page_num: number;
+        page_size: number;
+      };
+    }
+  | {
       page_type: 'workflow_designer';
       route: string;
       resource_id: number;
@@ -164,7 +177,14 @@ export type AssistantStoredContext =
  * A registered internal page offered by the navigation tool.
  */
 export type AssistantDestination = {
-  page: 'workflows' | 'workflow_designer' | 'media_library' | 'media_item' | 'active_downloads' | 'completed_downloads';
+  page:
+    | 'workflows'
+    | 'workflow_jobs'
+    | 'workflow_designer'
+    | 'media_library'
+    | 'media_item'
+    | 'active_downloads'
+    | 'completed_downloads';
   resource_id?: number | null;
 };
 

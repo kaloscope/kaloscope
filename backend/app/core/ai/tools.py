@@ -32,6 +32,7 @@ from app.core.ai.queries import (
     media_libraries,
     value_page,
     workflow_details,
+    workflow_jobs,
     workflow_list,
     workflow_logs,
 )
@@ -40,11 +41,13 @@ from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.models.assistant import (
     DOWNLOAD_PATHS,
     MEDIA_PATH,
+    WORKFLOW_JOBS_PATH,
     WORKFLOW_PATH,
     AssistantToolCall,
     AssistantTurn,
     DownloadOrdering,
     ResourceID,
+    WorkflowJobOrdering,
     WorkflowOrdering,
     media_resource,
 )
@@ -56,6 +59,9 @@ from app.models.flow import (
     GraphQuery,
     GraphState,
     GraphWrite,
+    JobQuery,
+    JobState,
+    JobTrigger,
 )
 from app.models.mcp import NodeTypesResult
 from app.models.media import MediaQuery
@@ -115,6 +121,17 @@ class WorkflowList(ToolArguments):
     ordering: WorkflowOrdering = ""
     page_num: int = Field(default=1, ge=1, strict=True)
     page_size: int = Field(default=10, ge=1, le=100, strict=True)
+
+
+class WorkflowJobList(ToolArguments):
+    """Bound schedule queries using the existing page filters and sort fields."""
+
+    name: str | None = Field(default=None, max_length=255)
+    state: Annotated[JobState, plain_enum(JobState)] | None = None
+    trigger: Annotated[JobTrigger, plain_enum(JobTrigger)] | None = None
+    ordering: WorkflowJobOrdering = ""
+    page_num: int = Field(default=1, ge=1, strict=True)
+    page_size: int = Field(default=10, ge=1, le=25, strict=True)
 
 
 class WorkflowID(ToolArguments):
@@ -249,6 +266,7 @@ class NavigationTarget(ToolArguments):
 
     page: Literal[
         "workflows",
+        "workflow_jobs",
         "workflow_designer",
         "media_library",
         "media_item",
@@ -267,7 +285,9 @@ class NavigationTarget(ToolArguments):
         Raises:
             ValueError: If the resource does not match the destination type.
         """
-        listed = self.page == "workflows" or self.page in DOWNLOAD_PATHS
+        listed = (
+            self.page in {"workflows", "workflow_jobs"} or self.page in DOWNLOAD_PATHS
+        )
         if listed != (self.resource_id is None):
             raise ValueError("Resource does not match the destination")
         return self
@@ -295,67 +315,52 @@ class AssistantTool:
 TOOLS = (
     AssistantTool(
         "list_workflows",
-        "List accessible workflows with pagination. Use returned IDs for details; "
-        "never guess IDs. No graph definitions are included.",
+        "Page accessible workflow metadata without graphs. "
+        "Use returned IDs for details.",
         WorkflowList,
     ),
     AssistantTool(
         "get_workflow",
-        "Read compact saved workflow facts and an exact graph base reference. "
-        "Use read_workflow_snapshot for original fields. Unsaved "
-        "edits belong to page snapshots.",
+        "Read saved workflow facts and a graph base reference. "
+        "Read original fields with read_workflow_snapshot; "
+        "unsaved edits use page snapshots.",
         WorkflowID,
     ),
     AssistantTool(
         "list_node_types",
-        "List a compact node catalog, or read fields and handles "
-        "for an exact node_type."
-        "Read exact schemas before editing fields or constructing nodes.",
+        "List a node catalog; specify node_type for exact fields/handles. "
+        "Read exact schemas before building or editing nodes.",
         NodeQuery,
     ),
     AssistantTool(
         "get_workflow_logs",
-        "Read compact execution facts, exact output counts, errors and small samples. "
-        "output_count_path identifies the counted array (root or items); "
-        "null counts are unknown, not zero. "
-        "Use read_workflow_log for paginated output or full exception text. "
-        "Logged failures describe the workflow, not this tool.",
+        "Read execution facts, exact output counts, errors and samples. "
+        "Page full output/errors with read_workflow_log. Logged failures "
+        "describe the workflow, not this tool.",
         WorkflowLogQuery,
     ),
     AssistantTool(
         "validate_workflow",
-        "Validate the full graph by workflow_id, draft_version and "
-        "optional snapshot_id."
-        "Use the captured page snapshot for unsaved edits. Never "
-        "regenerate the document."
-        "This checks structure and fields plus separate static entry-path readiness; "
-        "neither valid nor ready proves successful execution.",
+        "Validate an exact graph base; use the page snapshot for unsaved edits. "
+        "Checks structure/fields and static entry-path readiness, never execution.",
         WorkflowValidation,
         admin=True,
     ),
     AssistantTool(
         "preview_workflow_draft",
-        "Apply bounded changes to an exact base and preview "
-        "against its saved draft_version."
-        "Use snapshot_id for captured unsaved edits; changes=[] "
-        "previews the unchanged base."
-        "Never regenerate unchanged nodes or scripts. On an editable designer, "
-        "the app displays the final successful preview directly on that canvas, "
-        "then the user keeps and saves it or reverts it. Use this only when asked "
-        "to change the canvas. For subsequent edits in this turn, use the latest "
-        "proposal_snapshot_id as snapshot_id. You cannot save or publish. "
-        "On conflict, ask the user to revert, load the latest draft and request "
-        "a new edit. changed_paths are exact element-relative JSON "
-        "Pointers with omission counts; validation includes static readiness only.",
+        "Apply requested edits to an exact base; changes=[] previews it unchanged. "
+        "Use the page snapshot, then the latest proposal_snapshot_id for more edits. "
+        "The final preview updates the editable canvas for Keep/Revert. Never saves "
+        "or publishes. On conflict, ask the user to revert, load the latest draft "
+        "and request a new edit. Elsewhere previews are reference only.",
         WorkflowPreview,
         admin=True,
     ),
     AssistantTool(
         CREATE_TOOL,
-        "Create one empty, unpublished workflow draft from a unique name, "
-        "category and purpose. Repeated calls and retries of this request return "
-        "the same workflow (replayed=true). On name_already_exists nothing was "
-        "created.",
+        "Create one empty unpublished draft with a unique name, category and purpose. "
+        "Repeated calls/retries return it (replayed=true). "
+        "name_already_exists creates nothing.",
         WorkflowCreate,
         admin=True,
     ),
@@ -374,10 +379,9 @@ TOOLS = (
     ),
     AssistantTool(
         "read_conversation_history",
-        "Read a turn's text and original tool records with turn_id, or one tool "
-        "with tool_call_id (turn_id optional). Omit both for the index (page with "
-        "before). Paginate originals with offset/limit; source_facts are summaries, "
-        "not the original field values.",
+        "Read originals by turn_id or tool_call_id; omit both for an index paged "
+        "with before. Page originals with offset/limit. source_facts are summaries, "
+        "not original values.",
         HistoryQuery,
     ),
     AssistantTool(
@@ -396,10 +400,9 @@ TOOLS = (
     ),
     AssistantTool(
         "get_media_item",
-        "Read an accessible item: summary facts, metadata state/preview and a "
-        "children sample. Page larger values with section metadata (optional "
-        "field) or children. offset/limit count items, or characters for text; "
-        "use limit=2000 for long text fields. Nothing is scanned, scraped or played.",
+        "Read item facts, metadata state/preview and a child sample. Page section "
+        "metadata (optional field) or children with offset/limit: items, or characters "
+        "for text (use limit=2000). No scanning, scraping or playback.",
         MediaItemQuery,
     ),
     AssistantTool(
@@ -417,12 +420,18 @@ TOOLS = (
         DownloadDetails,
     ),
     AssistantTool(
+        "list_workflow_jobs",
+        "Page accessible schedules by workflow name; default newest first. "
+        "job_id differs from workflow_id. Times/cron use UTC. "
+        "running means enabled, not executing. repeatable allows "
+        "concurrent identical parameters; recoverable enables recovery, neither "
+        "sets timing. Never infer next run or success; read workflow logs.",
+        WorkflowJobList,
+    ),
+    AssistantTool(
         "navigate",
-        "Offer a button to open an existing page: workflows, workflow_designer, "
-        "media_library, media_item, active_downloads or completed_downloads. "
-        "The designer and media pages require an accessible ID from page context "
-        "or tools. The user decides whether to open it and confirms leaving "
-        "unsaved edits. This does not modify data.",
+        "Offer a page button; the user opens it with unsaved-edit checks. "
+        "Designer/media pages require an accessible resource_id; list pages omit it.",
         NavigationTarget,
     ),
 )
@@ -595,6 +604,8 @@ async def execute_tool(
                     result = NavigationResult(
                         target=args, path=DOWNLOAD_PATHS[args.page]
                     )
+                case NavigationTarget(page="workflow_jobs"):
+                    result = NavigationResult(target=args, path=WORKFLOW_JOBS_PATH)
                 case NavigationTarget():
                     path = WORKFLOW_PATH
                     if args.resource_id is not None:
@@ -629,6 +640,8 @@ async def execute_tool(
                     result = await create_workflow(args, conversation_id, call_id, user)
                 case WorkflowList():
                     result = await workflow_list(GraphQuery(**args.model_dump()), user)
+                case WorkflowJobList():
+                    result = await workflow_jobs(JobQuery(**args.model_dump()), user)
                 case LogDetailQuery():
                     result = await log_detail(**args.model_dump(), user=user)
                 case WorkflowLogQuery():

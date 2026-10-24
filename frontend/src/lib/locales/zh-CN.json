@@ -1113,6 +1113,7 @@
     },
     "pages": {
       "workflows": "工作流列表",
+      "workflow_jobs": "工作流计划",
       "workflow_designer": "工作流设计器",
       "media_library": "媒体库",
       "media_item": "媒体详情",
@@ -1122,6 +1123,7 @@
     },
     "tools": {
       "list_workflows": "查找工作流",
+      "list_workflow_jobs": "查找工作流计划",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_logs": "读取运行日志",

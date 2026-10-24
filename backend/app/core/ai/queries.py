@@ -9,11 +9,11 @@ from app.core.dl.driver import DownloadState
 from app.core.exceptions import NotFoundException
 from app.core.media.watcher import LibWatcher
 from app.models.download import Downloader, DownloadQuery, DownloadTask
-from app.models.flow import FlowLog, GraphDocument, GraphQuery
+from app.models.flow import FlowLog, GraphDocument, GraphQuery, JobQuery, JobTrigger
 from app.models.media import MediaItem, MediaQuery
 from app.models.user import UserInfo
 from app.services.download import DownloadTaskService
-from app.services.flow import FlowGraphService
+from app.services.flow import FlowGraphService, FlowJobService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps
 
@@ -104,6 +104,67 @@ async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
                 "published_node_count": len(item.get("node_types", [])),
             }
             for item in page["items"]
+        ],
+    }
+
+
+async def workflow_jobs(query: JobQuery, user: UserInfo) -> dict:
+    """Page accessible schedules without consulting or changing the scheduler.
+
+    Args:
+        query: Workflow name, activation state, trigger, ordering, and pagination.
+        user: Account whose workflow permissions the service applies.
+
+    Returns:
+        Applied filters, exact counts and continuation, distinct schedule/workflow
+        identities, and only the timing fields used by each trigger. Times use UTC;
+        activation, concurrency and recovery settings do not prove execution.
+    """
+    page = await FlowJobService.list_jobs(query, user)
+    timing_fields = {
+        JobTrigger.DATE: ("run_date",),
+        JobTrigger.CRON: ("cron_expr",),
+        JobTrigger.INTERVAL: (
+            "interval_num",
+            "interval_unit",
+            "interval_start",
+            "interval_end",
+        ),
+    }
+    return {
+        "filters": {
+            "name": query.name or None,
+            "state": query.state,
+            "trigger": query.trigger,
+            "ordering": query.ordering or "",
+        },
+        "total": page["total"],
+        "page_num": query.page_num,
+        "page_size": query.page_size,
+        "page_counts": {"returned": len(page["items"])},
+        "next_page_num": (
+            query.page_num + 1
+            if query.page_num * query.page_size < page["total"]
+            else None
+        ),
+        "timezone": "UTC",
+        "items": [
+            {
+                "job_id": job["id"],
+                "workflow_id": job["graph_id"],
+                "workflow_name": job["graph_name"],
+                **{
+                    key: job[key]
+                    for key in (
+                        "state",
+                        "trigger",
+                        "repeatable",
+                        "recoverable",
+                        *timing_fields[job["trigger"]],
+                    )
+                },
+            }
+            for job in page["items"]
         ],
     }
 

@@ -604,6 +604,10 @@ class AssistantService:
                         resource_ids.extend(
                             item["id"] for item in result["data"]["items"]
                         )
+                    if result["ok"] and call.function.name == "list_workflow_jobs":
+                        resource_ids.extend(
+                            item["workflow_id"] for item in result["data"]["items"]
+                        )
                 except (ValueError, TypeError, AttributeError):
                     pass
                 await AssistantSessionService.record_resources(turn, resource_ids)
