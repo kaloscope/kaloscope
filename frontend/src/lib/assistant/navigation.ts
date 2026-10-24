@@ -1,6 +1,7 @@
 import type { AssistantDestination, AssistantToolResult } from '$lib/types';
 
 export const workflowPath = '/settings/workflows/graphs';
+export const workflowJobsPath = '/settings/workflows/schedules';
 export const mediaPath = '/medialibs';
 export const downloadPaths = {
   active_downloads: '/downloads/downloading',
@@ -31,6 +32,9 @@ export function assistantDestination(
   const id = target.resource_id;
   if (target.page === 'workflows') {
     return id == null && path === workflowPath ? { path, target } : null;
+  }
+  if (target.page === 'workflow_jobs') {
+    return id == null && path === workflowJobsPath ? { path, target } : null;
   }
   if (target.page === 'active_downloads' || target.page === 'completed_downloads') {
     const expected = downloadPaths[target.page];

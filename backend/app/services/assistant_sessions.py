@@ -27,7 +27,7 @@ from app.models.assistant import (
     WorkflowDesignerContext,
     media_resource,
 )
-from app.models.flow import GraphDocument
+from app.models.flow import FlowJob, GraphDocument
 from app.models.user import UserInfo
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
@@ -406,7 +406,8 @@ class AssistantSessionService:
 
         Raises:
             KaloscopeException: If the request is active or duplicated.
-            BadRequestException: If snapshot metadata or selected nodes do not match.
+            BadRequestException: If a snapshot, selected node, or schedule reference
+                does not match its workflow.
             NotFoundException: If a retry references another conversation.
         """
         conversation = await cls.owned(conversation_id, user)
@@ -423,9 +424,17 @@ class AssistantSessionService:
                 resource_ids = [media_resource(context["resource_id"])]
             elif context["page_type"] == "media_item":
                 resource_ids = [media_resource(context["library_id"])]
+            elif context["page_type"] == "workflow_jobs" and context["selected_job"]:
+                resource_ids = [context["selected_job"]["workflow_id"]]
             # download pages show shared tasks, so they add nothing to recheck
             if not await cls.allowed(resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
+            if context["page_type"] == "workflow_jobs" and context["selected_job"]:
+                selected = context["selected_job"]
+                if not await FlowJob.filter(
+                    id=selected["job_id"], graph_id=selected["workflow_id"]
+                ).exists():
+                    raise BadRequestException
         async with in_transaction():
             claimed = await AssistantConversation.filter(
                 id=conversation_id, user_id=user.id, active_request=None

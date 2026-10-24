@@ -14,13 +14,20 @@ from tortoise.fields import (
 
 from app.models.ai import AIModelSelection
 from app.models.base import TortoiseModel
-from app.models.flow import GraphCategory, GraphDocument, GraphState
+from app.models.flow import (
+    GraphCategory,
+    GraphDocument,
+    GraphState,
+    JobState,
+    JobTrigger,
+)
 from app.utils.json import dumps
 
 MAX_PROMPT_BYTES = 128 * 1024
 MAX_PAGE_CONTEXT_BYTES = 128 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024
 WORKFLOW_PATH = "/settings/workflows/graphs"
+WORKFLOW_JOBS_PATH = "/settings/workflows/schedules"
 MEDIA_PATH = "/medialibs"
 # the download pages split shared tasks into active and completed views
 DOWNLOAD_PATHS = {
@@ -29,6 +36,17 @@ DOWNLOAD_PATHS = {
 }
 type ResourceID = Annotated[int, Field(gt=0, le=2**53 - 1, strict=True)]
 type DownloadOrdering = Literal["", "name", "-name", "downloader_id", "-downloader_id"]
+type WorkflowJobOrdering = Literal[
+    "",
+    "graph__name",
+    "-graph__name",
+    "trigger",
+    "-trigger",
+    "updated_at",
+    "-updated_at",
+    "state",
+    "-state",
+]
 type WorkflowOrdering = Literal[
     "",
     "name",
@@ -229,12 +247,40 @@ class DownloadListContext(ContextModel):
         return self
 
 
+class WorkflowJobFilters(ContextModel):
+    """Describe the filters and pagination of the displayed schedules."""
+
+    name: str = Field(default="", max_length=255)
+    state: Annotated[JobState, Field(strict=False)] | None = None
+    trigger: Annotated[JobTrigger, Field(strict=False)] | None = None
+    ordering: WorkflowJobOrdering = ""
+    page_num: int = Field(default=1, ge=1)
+    page_size: int = Field(default=15, ge=1, le=100)
+
+
+class WorkflowJobSelection(ContextModel):
+    """Keep a selected schedule distinct from its associated workflow."""
+
+    job_id: ResourceID
+    workflow_id: ResourceID
+
+
+class WorkflowJobsContext(ContextModel):
+    """Identify the displayed schedules and the page's existing selection."""
+
+    page_type: Literal["workflow_jobs"]
+    route: Literal["/settings/workflows/schedules"]
+    selected_job: WorkflowJobSelection | None = None
+    filters: WorkflowJobFilters = Field(default_factory=WorkflowJobFilters)
+
+
 type AssistantPageContext = Annotated[
     WorkflowListContext
     | WorkflowDesignerContext
     | MediaLibraryContext
     | MediaItemContext
-    | DownloadListContext,
+    | DownloadListContext
+    | WorkflowJobsContext,
     Field(discriminator="page_type"),
 ]
 

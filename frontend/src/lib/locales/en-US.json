@@ -1113,6 +1113,7 @@
     },
     "pages": {
       "workflows": "Workflows",
+      "workflow_jobs": "Workflow Schedules",
       "workflow_designer": "Workflow Designer",
       "media_library": "Media Library",
       "media_item": "Media Details",
@@ -1122,6 +1123,7 @@
     },
     "tools": {
       "list_workflows": "Find Workflows",
+      "list_workflow_jobs": "Find Workflow Schedules",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_logs": "Read Run Logs",

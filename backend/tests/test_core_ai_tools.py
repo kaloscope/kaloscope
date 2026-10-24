@@ -101,6 +101,7 @@ def test_grants():
 
     assert read_names == {
         "list_workflows",
+        "list_workflow_jobs",
         "get_workflow",
         "get_workflow_logs",
         "read_workflow_log",

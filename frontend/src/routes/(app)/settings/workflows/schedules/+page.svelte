@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '$lib/api';
+  import { registerAssistantContext } from '$lib/assistant/context';
+  import { workflowJobsPath } from '$lib/assistant/navigation';
   import {
     Badge,
     Button,
@@ -17,9 +19,9 @@
   import { createLoading, createSortField } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { FlowJob, OptionValue, Page, Resp } from '$lib/types';
+  import type { AssistantPageContext, FlowJob, OptionValue, Page, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
 
   let jobs: FlowJob[] = $state([]);
   let jobName: string = $state('');
@@ -36,6 +38,9 @@
   const ordering = createSortField();
   const loading = createLoading();
 
+  // retain the filters of the displayed results, independently of unsubmitted input
+  let displayed: Extract<AssistantPageContext, { page_type: 'workflow_jobs' }>['filters'] | null = null;
+
   /**
    * Search for flow jobs.
    *
@@ -51,16 +56,21 @@
       }
       retryCount = 0;
     }
+    const filters = {
+      name: jobName,
+      state: jobState as FlowJob['state'] | null,
+      trigger: jobTrigger as FlowJob['trigger'] | null,
+      ordering: $ordering,
+      page_num: page,
+      page_size: size
+    };
     loading.start();
     api
       .get('flow/job/list', {
         searchParams: {
-          page_num: page,
-          page_size: size,
-          ordering: $ordering,
-          trigger: jobTrigger ?? '',
-          state: jobState ?? '',
-          name: jobName
+          ...filters,
+          trigger: filters.trigger ?? '',
+          state: filters.state ?? ''
         }
       })
       .json<Resp<Page<FlowJob>>>()
@@ -69,6 +79,7 @@
         pagination.size = size;
         pagination.total = data.total;
         jobs = data.items;
+        displayed = filters;
         // if any job is pending, retry search after some time
         if (jobs.some((job) => !JobState[job.state]) && retryCount < 5) {
           retryTimer = setTimeout(
@@ -152,6 +163,19 @@
     $ordering; // eslint-disable-line
     untrack(() => search());
   });
+
+  onMount(() =>
+    registerAssistantContext(() => {
+      if (!displayed) return null;
+      const current = jobs.find((job) => job.id === selected?.id);
+      return {
+        page_type: 'workflow_jobs',
+        route: workflowJobsPath,
+        filters: { ...displayed },
+        selected_job: current ? { job_id: current.id, workflow_id: current.graph_id } : null
+      };
+    })
+  );
 </script>
 
 <DataView dvh loading={$loading} data={jobs}>
