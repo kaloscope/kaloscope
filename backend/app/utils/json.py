@@ -41,33 +41,40 @@ dumps = partial(orjson.dumps, default=default)
 loads = orjson.loads
 
 
-def try_loads(string: str, *, with_comments: bool = False) -> JSONType:
-    """Try to deserializes a JSON string into a Python object.
+def loads_jsonc(string: str) -> JSONType:
+    """Parse JSON with comments and trailing commas while retaining parse errors.
 
     Args:
-        string: The JSON string to deserialize.
-        with_comments: Whether to support comments in the JSON string. Defaults to
-            `False`.
+        string: JSONC document to parse.
 
     Returns:
-        Deserialized Python object if successful, None otherwise.
+        Parsed JSON value, including explicit `null` as `None`.
+
+    Raises:
+        orjson.JSONDecodeError: If the document is invalid.
+    """
+    string = COMMENTS_PATTERN.sub(
+        lambda m: "" if (s := m.group(0)).startswith("/") else s, string
+    )
+    string = TRAILING_COMMAS_PATTERN.sub(
+        lambda m: m.group(1) if (s := m.group(0)).startswith(",") else s, string
+    )
+    return loads(string)
+
+
+def try_loads(string: str, *, with_comments: bool = False) -> JSONType:
+    """Parse a JSON value, returning `None` for invalid input or explicit null.
+
+    Args:
+        string: JSON document to parse.
+        with_comments: Whether to allow comments and trailing commas.
+
+    Returns:
+        Parsed value, or `None` if parsing fails.
     """
 
-    # https://code.visualstudio.com/docs/languages/json#_json-with-comments
-    if with_comments:
-        # remove comments
-        string = COMMENTS_PATTERN.sub(
-            lambda m: "" if (s := m.group(0)).startswith("/") else s,
-            string,
-        )
-        # remove trailing commas
-        string = TRAILING_COMMAS_PATTERN.sub(
-            lambda m: m.group(1) if (s := m.group(0)).startswith(",") else s,
-            string,
-        )
-
     try:
-        return loads(string)
+        return loads_jsonc(string) if with_comments else loads(string)
     except orjson.JSONDecodeError:
         logger.debug(
             f"Failed to deserialize the JSON string: {Colors.RED}%s{Colors.END}", string

@@ -79,23 +79,25 @@ class HTTPNode(Node):
     )
 
     @classmethod
-    async def execute(cls, *, node_data: dict[str, Any], context: Context, **kwargs):
-        """Send the configured request and merge its rendered response.
+    def prepare_request(
+        cls, node_data: dict[str, Any], context: dict, *, sandboxed: bool = False
+    ) -> dict[str, Any]:
+        """Render and encode a request for execution or an isolated probe.
 
         Args:
-            node_data: Configured fields and mutable node state.
-            context: Shared variables and storage for this flow run.
-            **kwargs: Unused execution arguments supplied by the flow engine.
+            node_data: HTTP node fields, with omitted fields using their defaults.
+            context: Variables explicitly available to this request.
+            sandboxed: Whether to restrict Python access in templates.
 
-        Raises:
-            KaloscopeException: If the HTTP request fails.
+        Returns:
+            Arguments accepted by the HTTPX client, including cache extensions.
         """
         method = cast(HttpMethod, str(cls.method.extract(node_data)))
-        url = cls.url.extract(node_data, context=context)
+        url = render(cls.url.extract(node_data), context, sandboxed=sandboxed)
         timeout = cls.timeout.extract(node_data)
 
         # request headers
-        headers = cls.headers.extract(node_data, context=context)
+        headers = render(cls.headers.extract(node_data), context, sandboxed=sandboxed)
         headers = httpx.Headers(
             [
                 (k, v)
@@ -127,7 +129,7 @@ class HTTPNode(Node):
 
         # request body
         binary, form, json = None, None, None
-        if body := cls.body.extract(node_data, context=context):
+        if body := render(cls.body.extract(node_data), context, sandboxed=sandboxed):
             if (obj := try_loads(body, with_comments=True)) is not None:
                 content_type = headers.get("content-type", "").lower()
                 if "application/x-www-form-urlencoded" in content_type:
@@ -138,48 +140,92 @@ class HTTPNode(Node):
             if json is None and form is None:
                 binary = body.encode(ENCODING)
 
-        # make the request
+        return {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "content": binary,
+            "data": form,
+            "json": json,
+            "timeout": timeout,
+            "extensions": extensions,
+        }
+
+    @classmethod
+    async def send_request(
+        cls,
+        options: dict[str, Any],
+        client: str,
+        httpx_client: httpx.AsyncClient | None,
+        curl_client: AsyncSession | None,
+        *,
+        stream: bool = False,
+    ) -> Any:
+        """Send prepared arguments through the selected workflow HTTP client.
+
+        Args:
+            options: Arguments returned by `prepare_request`.
+            client: Registered client selection.
+            httpx_client: HTTPX client, required when selected.
+            curl_client: Curl client, required when selected.
+            stream: Whether the caller will consume and close a bounded stream.
+
+        Returns:
+            Client response with the same formatter-facing attributes as execution.
+        """
+        if client == "curl_cffi":
+            return await curl_client.request(
+                options["method"],
+                options["url"],
+                headers=[
+                    (key, value)
+                    for key, value in options["headers"].multi_items()
+                    if key.lower() not in _IMPERSONATION_HEADERS
+                ],
+                data=options["content"]
+                if options["content"] is not None
+                else options["data"],
+                json=options["json"],
+                timeout=options["timeout"],
+                proxy=await resolve_proxy(options["url"]),
+                impersonate="chrome",
+                stream=stream,
+            )
+        if stream:
+            return await httpx_client.send(
+                httpx_client.build_request(**options), stream=True
+            )
+        return await httpx_client.request(**options)
+
+    @classmethod
+    async def execute(cls, *, node_data: dict[str, Any], context: Context, **kwargs):
+        """Send the configured request and merge its rendered response.
+
+        Args:
+            node_data: Configured fields and mutable node state.
+            context: Shared variables and storage for this flow run.
+            **kwargs: Unused execution arguments supplied by the flow engine.
+
+        Raises:
+            KaloscopeException: If the HTTP request fails.
+        """
+        options = cls.prepare_request(node_data, context._context)
         app_ctx = Sanic.get_app().ctx
         try:
-            if cls.client.extract(node_data) == "curl_cffi":
-                # use curl_cffi client
-                curl_client: AsyncSession = app_ctx.curl_cffi
-                response = await curl_client.request(
-                    method,
-                    url,
-                    headers=[
-                        (key, value)
-                        for key, value in headers.multi_items()
-                        if key.lower() not in _IMPERSONATION_HEADERS
-                    ],
-                    data=cast(
-                        dict[str, str] | bytes | None,
-                        binary if binary is not None else form,
-                    ),
-                    json=cast(dict[str, Any] | list[Any] | None, json),
-                    timeout=timeout,
-                    proxy=await resolve_proxy(url),
-                    impersonate="chrome",
+            response = await cls.send_request(
+                options,
+                cls.client.extract(node_data),
+                getattr(app_ctx, "httpx", None),
+                getattr(app_ctx, "curl_cffi", None),
+            )
+            if isinstance(response, httpx.Response) and response.extensions.get(
+                "hishel_from_cache"
+            ):
+                logger.debug(
+                    'HTTP Response: served from cache "%s %s"',
+                    response.http_version,
+                    response.status_code,
                 )
-            else:
-                # use HTTPX client
-                httpx_client: httpx.AsyncClient = app_ctx.httpx
-                response = await httpx_client.request(
-                    method,
-                    url,
-                    headers=headers,
-                    content=binary,
-                    data=form,
-                    json=json,
-                    timeout=timeout,
-                    extensions=extensions,
-                )
-                if response.extensions.get("hishel_from_cache"):
-                    logger.debug(
-                        'HTTP Response: served from cache "%s %s"',
-                        response.http_version,
-                        response.status_code,
-                    )
 
             formatter = cls.formatter.extract(node_data)
             # merge the rendered response into context
@@ -189,5 +235,7 @@ class HTTPNode(Node):
             if isinstance((obj := try_loads(rendered, with_comments=True)), dict):
                 context.update(obj)
         except (httpx.RequestError, RequestException) as e:
-            logger.error("An error occurred while requesting %s.", url, exc_info=True)
+            logger.error(
+                "An error occurred while requesting %s.", options["url"], exc_info=True
+            )
             raise KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED) from e

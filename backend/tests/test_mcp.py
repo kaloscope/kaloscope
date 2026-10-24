@@ -56,7 +56,9 @@ from app.models.mcp import (
 )
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
 from app.models.user import PermType, User, UserInfo, UserPermission, UserRole
+from app.models.workflow_authoring import TemplateValidation
 from app.routes.mcp import dispatch
+from app.services import workflow_authoring as authoring
 from app.services.ai import AIProviderService
 from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
 from app.services.mcp import MCPAccessTokenService
@@ -217,6 +219,8 @@ def test_protocol(mode):
                 "get_workflow",
                 "list_node_types",
                 "get_workflow_reference",
+                "probe_http_request",
+                "validate_workflow_template",
                 "get_workflow_logs",
                 "list_media_libraries",
                 "list_media_items",
@@ -239,10 +243,16 @@ def test_protocol(mode):
                     "create_workflow_draft",
                     "save_workflow_draft",
                     "restore_workflow_draft",
+                    "probe_http_request",
                 }
                 assert tool.annotations.read_only_hint is (not writes)
                 assert tool.annotations.destructive_hint is (
-                    tool.name in {"save_workflow_draft", "restore_workflow_draft"}
+                    tool.name
+                    in {
+                        "save_workflow_draft",
+                        "restore_workflow_draft",
+                        "probe_http_request",
+                    }
                 )
                 assert tool.annotations.idempotent_hint is (not writes)
                 assert (
@@ -304,7 +314,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 18
+            assert len(response_json(response)["result"]["tools"]) == 20
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )
@@ -1255,6 +1265,78 @@ def test_node_knowledge(monkeypatch):
                         assert example["readonly"]
             assert counts == [
                 await model.all().count() for model in (FlowGraph, FlowJob, FlowLog)
+            ]
+            execute.assert_not_awaited()
+            complete.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_authoring_tools(monkeypatch):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"items": [{"id": "one"}], "total": 3})
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+    execute = AsyncMock(
+        side_effect=AssertionError("Authoring tools cannot execute workflows")
+    )
+    complete = AsyncMock(side_effect=AssertionError("Authoring tools cannot call AI"))
+    monkeypatch.setattr(FlowEngine, "execute", execute)
+    monkeypatch.setattr(AIProviderService, "complete", complete)
+
+    async def run():
+        async with application() as app:
+            counts = [
+                await model.all().count()
+                for model in (FlowGraph, FlowJob, FlowLog, DownloadTask)
+            ]
+            fixture = {
+                "template": "{{ items|length }}",
+                "context": {"items": [1, 2]},
+                "mode": "expression",
+            }
+            result = await call(
+                app, "validate_workflow_template", {"validation": fixture}
+            )
+            assert result["structuredContent"] == authoring.validate_workflow_template(
+                TemplateValidation(**fixture)
+            ).model_dump(mode="json")
+
+            probe = {
+                "probe": {
+                    "request": {"url": "https://example.test/search"},
+                    "formatter": '{"items":'
+                    '{{ response.text|jsonpath_all("$.items[*]")|tojson }}}',
+                }
+            }
+            for name in ("reader", "admin"):
+                result = await call(app, "probe_http_request", probe, token=name)
+                assert result["isError"]
+                assert "read-only" in result["content"][0]["text"]
+                identity = app.shared_ctx.sessions[name]
+                issued = await MCPAccessTokenService.create(
+                    identity.id,
+                    MCPAccessTokenCreate(name="probe", scope=MCPTokenScope.READ_WRITE),
+                )
+                result = await call(
+                    app, "probe_http_request", probe, token=issued["token"]
+                )
+                if name == "reader":
+                    assert result["isError"]
+                else:
+                    assert result["structuredContent"]["formatted"]["value"] == {
+                        "items": [{"id": "one"}]
+                    }
+                    assert result["structuredContent"]["body_complete"]
+            assert len(requests) == 1
+            assert counts == [
+                await model.all().count()
+                for model in (FlowGraph, FlowJob, FlowLog, DownloadTask)
             ]
             execute.assert_not_awaited()
             complete.assert_not_awaited()

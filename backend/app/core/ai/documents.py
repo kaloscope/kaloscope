@@ -41,9 +41,8 @@ class AddNode(ContextModel):
     op: Literal["add_node"]
     node: GraphNode = Field(
         description=(
-            'Set type to "node" and data.$schema to the exact registered node_type '
-            '(for example, "http"). Put the authored fields beside $schema inside '
-            "data, not at the node root. Read list_node_types for field definitions."
+            'type="node"; data.$schema=registered node_type (e.g. "http"). '
+            "Authored fields belong inside data. Read list_node_types first."
         )
     )
 

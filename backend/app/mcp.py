@@ -55,10 +55,22 @@ from app.models.mcp import (
 )
 from app.models.media import MediaQuery
 from app.models.user import UserInfo
+from app.models.workflow_authoring import (
+    HTTPProbe,
+    HTTPProbeResult,
+    TemplateResult,
+    TemplateValidation,
+)
 from app.services.ai import AIProviderService
 from app.services.download import DownloadTaskService
 from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.workflow_authoring import (
+    probe_http_request as probe_request,
+)
+from app.services.workflow_authoring import (
+    validate_workflow_template as validate_template,
+)
 from app.utils.json import dumps, loads
 
 _ResourceID = Annotated[int, Field(gt=0, strict=True)]
@@ -88,6 +100,7 @@ _READ_TOOLS = frozenset(
         "get_workflow",
         "list_node_types",
         "get_workflow_reference",
+        "validate_workflow_template",
         "get_workflow_logs",
         "list_media_libraries",
         "list_media_items",
@@ -102,7 +115,12 @@ _READ_TOOLS = frozenset(
     }
 )
 _WRITE_TOOLS = frozenset(
-    {"create_workflow_draft", "save_workflow_draft", "restore_workflow_draft"}
+    {
+        "create_workflow_draft",
+        "save_workflow_draft",
+        "restore_workflow_draft",
+        "probe_http_request",
+    }
 )
 DRAFT_WRITE = ToolAnnotations(
     read_only_hint=False,
@@ -217,6 +235,8 @@ def create_server() -> MCPServer:
         instructions=(
             "Kaloscope access defaults to read-only. Read-write tokens also allow "
             "administrators to create, save, and restore drafts. "
+            "HTTP probes also require administrator/read-write access and send real "
+            "requests only when the user asks. "
             "List resources before reading their details; "
             "inspect node schemas and logs to diagnose workflows. Access follows the "
             "account's permissions; AI provider settings require an administrator. "
@@ -558,6 +578,61 @@ def create_server() -> MCPServer:
         return WorkflowDetails.model_validate(
             await _read(FlowGraphService.get_details(workflow_id, _user(ctx)))
         )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=False,
+            open_world_hint=True,
+        )
+    )
+    async def probe_http_request(
+        ctx: Context,
+        probe: Annotated[
+            HTTPProbe,
+            Field(
+                description="Explicit request, fixtures and optional HTTP formatter."
+            ),
+        ],
+    ) -> HTTPProbeResult:
+        """Send a user-requested GET/HEAD/POST with disposable cookies and no cache.
+
+        Args:
+            ctx: Authenticated request context.
+            probe: Request using HTTP node encoding, without implicit credentials.
+
+        Returns:
+            Status, final URL, selected headers, a 2000-character sample and explicit
+            completeness flags. Optional object extraction runs before clipping,
+            within a 256 KiB body cap. No retry or workflow execution is performed.
+        """
+        return HTTPProbeResult.model_validate(
+            await _read(probe_request(probe, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def validate_workflow_template(
+        ctx: Context,
+        validation: Annotated[
+            TemplateValidation,
+            Field(description="Template, fixtures, output mode and strictness."),
+        ],
+    ) -> TemplateResult:
+        """Validate supplied fixtures with project Jinja filters, without running nodes.
+
+        Args:
+            ctx: Authenticated request context.
+            validation: Text/native-expression or JSONC/object/array evaluation.
+
+        Returns:
+            JSON-compatible value or errors. Strict mode rejects undefined values;
+            Python internals and mutation methods are blocked. No global context,
+            account cookies or workflow state is loaded or changed. Explicit
+            filesystem tests retain their normal path checks.
+        """
+        _user(ctx)
+        return validate_template(validation)
 
     @server.tool(annotations=READ_ONLY)
     async def get_workflow_reference(

@@ -67,8 +67,13 @@ from app.models.flow import (
 from app.models.mcp import NodeTypesResult
 from app.models.media import MediaQuery
 from app.models.user import UserInfo, UserRole
+from app.models.workflow_authoring import HTTPProbe, TemplateValidation
 from app.services.flow import FlowGraphService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.workflow_authoring import (
+    probe_http_request,
+    validate_workflow_template,
+)
 from app.utils.json import dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
@@ -341,6 +346,20 @@ TOOLS = (
         ReferenceQuery,
     ),
     AssistantTool(
+        "probe_http_request",
+        "Probe user-requested HTTP with node encoding; disposable cookies, "
+        "no retry/cache. "
+        "2000-char sample; formatter extracts an object before clipping (256 KiB cap).",
+        HTTPProbe,
+        admin=True,
+    ),
+    AssistantTool(
+        "validate_workflow_template",
+        "Check Jinja fixtures: expression=native, json/object/array=JSONC; "
+        "strict rejects undefined. No nodes execute; Python internals blocked.",
+        TemplateValidation,
+    ),
+    AssistantTool(
         "get_workflow_logs",
         "Read execution counts/errors/samples; page originals with read_workflow_log. "
         "Logged failures concern the workflow, not this tool.",
@@ -357,7 +376,7 @@ TOOLS = (
         "preview_workflow_draft",
         "Preview exact-base edits; changes=[] reads unchanged. Designer: Keep/Revert; "
         "elsewhere reference only. Never saves/publishes. On conflict, revert and "
-        "load the latest draft before editing.",
+        "load the latest draft before editing. Remove edges before their nodes.",
         WorkflowPreview,
         admin=True,
     ),
@@ -387,52 +406,47 @@ TOOLS = (
     ),
     AssistantTool(
         "list_media_libraries",
-        "List accessible media libraries: type, scan state and bound ingest "
-        "workflows. Reading starts no scan.",
+        "List accessible libraries: type, scan state, ingest bindings. No scan.",
         MediaLibraryList,
     ),
     AssistantTool(
         "list_media_items",
-        "Page visible media in library page order by library_id and title keyword "
-        "(omit keyword for all titles). "
-        "Without path only top-level works are listed. total counts all matches; "
-        "page_counts covers this page.",
+        "Page visible media in library order; keyword filters titles (omit for all). "
+        "No path=top-level works. total=all matches; page_counts=this page.",
         MediaItemList,
     ),
     AssistantTool(
         "get_media_item",
-        "Read item facts, metadata state/preview and a child sample. Page section "
-        "metadata (optional field) or children with offset/limit: items, or characters "
-        "for text (use limit=2000). No scanning, scraping or playback.",
+        "Read item facts, metadata and child samples. Page metadata/children via "
+        "offset/limit (items; text characters, limit=2000). No scan/scrape/playback.",
         MediaItemQuery,
     ),
     AssistantTool(
         "list_download_tasks",
-        "List shared stored tasks; active excludes completed. A 50-row page N "
-        "is pages 2N-1 and 2N here. Only state=completed means complete; "
-        "submit_unknown is unconfirmed. Read details/errors with get_download_task.",
+        "Page shared stored tasks; active excludes completed. UI 50-row page N="
+        "2N-1/2N here. completed=complete; submit_unknown=unconfirmed. "
+        "Details/errors: get_download_task.",
         DownloadList,
     ),
     AssistantTool(
         "get_download_task",
-        "Read a selected/task ID: stored status, sizes (bytes), speeds (bytes/s), "
-        "progress (0-100), update time and error. Null is unknown. Error offset/limit "
-        "are characters; follow next_offset. Nothing is polled or controlled.",
+        "Read stored task status, bytes, bytes/s, progress 0-100, update time/error. "
+        "Null=unknown. Error pages: character offset/limit, next_offset. "
+        "No polling/control.",
         DownloadDetails,
     ),
     AssistantTool(
         "list_workflow_jobs",
-        "Page accessible schedules by workflow name; default newest first. "
-        "job_id differs from workflow_id. Times/cron use UTC. "
-        "running means enabled, not executing. repeatable allows "
-        "concurrent identical parameters; recoverable enables recovery, neither "
-        "sets timing. Never infer next run or success; read workflow logs.",
+        "Page schedules by workflow name; newest first. job_id != workflow_id. "
+        "Times/cron UTC. running=enabled, not executing; "
+        "repeatable allows concurrent identical parameters; recoverable=recovery, "
+        "neither sets timing. Never infer next run or success; use workflow logs.",
         WorkflowJobList,
     ),
     AssistantTool(
         "navigate",
-        "Offer a page button; the user opens it with unsaved-edit checks. "
-        "Designer/media pages require an accessible resource_id; list pages omit it.",
+        "Offer a user-clicked page button with unsaved-edit checks. "
+        "Designer/media: accessible resource_id; lists: omit it.",
         NavigationTarget,
     ),
 )
@@ -455,24 +469,36 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
     }
 
 
-def compact_schema(value: Any) -> Any:
+def compact_schema(value: Any, definitions: dict | None = None) -> Any:
     """Drop generated schema annotations that cost context without guiding calls.
 
     Generated titles repeat property names, discriminator mappings repeat each
     variant's constant `op`, resource IDs repeat the JavaScript safe-integer bound,
-    constant values imply their type, and null defaults restate that an optional
-    field may be omitted. Other constraints, defaults and descriptions remain,
-    and execution still validates against the complete argument models.
+    constant values imply their type, nullable primitive unions can share one
+    type list, and the recursive `JSONType` accepts every JSON value. Null defaults
+    restate that an optional field may be omitted. Small or singly referenced
+    definitions can be inlined. Object definition summaries repeat the named
+    operations and fields; field descriptions and enum meanings remain. Execution
+    validates against the complete argument models with every constraint intact.
 
     Args:
         value: JSON schema node generated by Pydantic.
+        definitions: Nonrecursive definitions selected for inline expansion.
 
     Returns:
         An equivalent schema node for the model request.
     """
     if isinstance(value, dict):
-        return {
-            key: compact_schema(item)
+        if value == {"$ref": "#/$defs/JSONType"}:
+            return {}
+        name = value.get("$ref", "").removeprefix("#/$defs/")
+        if definitions and name in definitions:
+            value = {
+                **definitions[name],
+                **{key: item for key, item in value.items() if key != "$ref"},
+            }
+        result = {
+            key: compact_schema(item, definitions)
             for key, item in value.items()
             # property schemas are dicts, so fields with these names are kept
             if not (key == "title" and isinstance(item, str))
@@ -481,8 +507,36 @@ def compact_schema(value: Any) -> Any:
             and not (key == "maximum" and item == SAFE_INTEGER)
             and not (key == "default" and item is None)
         }
+        if "$defs" in result:
+            result["$defs"] = {
+                key: {
+                    field: description
+                    for field, description in item.items()
+                    if field != "description"
+                }
+                if item.get("type") == "object"
+                else item
+                for key, item in result["$defs"].items()
+                if key != "JSONType" and key not in (definitions or {})
+            }
+            if not result["$defs"]:
+                result.pop("$defs")
+        variants = result.get("anyOf")
+        if (
+            isinstance(variants, list)
+            and len(variants) == 2
+            and variants[1] == {"type": "null"}
+            and isinstance(variants[0].get("type"), str)
+        ):
+            nullable = variants[0]
+            result.pop("anyOf")
+            result.update(nullable)
+            result["type"] = [nullable["type"], "null"]
+            if "enum" in nullable:
+                result["enum"] = [*nullable["enum"], None]
+        return result
     if isinstance(value, list):
-        return [compact_schema(item) for item in value]
+        return [compact_schema(item, definitions) for item in value]
     return value
 
 
@@ -501,6 +555,14 @@ def tool_schemas(user: UserInfo) -> list[ChatCompletionFunctionToolParam]:
     for tool in available_tools(user).values():
         parameters = compact_schema(tool.arguments.model_json_schema())
         parameters.pop("description", None)
+        encoded = dumps(parameters)
+        definitions = {
+            name: value
+            for name, value in parameters.get("$defs", {}).items()
+            if value.get("type") in {"string", "integer", "number", "boolean"}
+            or encoded.count(dumps(f"#/$defs/{name}")) == 1
+        }
+        parameters = compact_schema(parameters, definitions)
         schemas.append(
             {
                 "type": "function",
@@ -779,6 +841,10 @@ async def execute_tool(
                     )
                 case ReferenceQuery():
                     result = get_workflow_reference(args.topic)
+                case HTTPProbe():
+                    result = await probe_http_request(args, user)
+                case TemplateValidation():
+                    result = validate_workflow_template(args)
                 case NodeQuery():
                     schemas = FlowGraphService.get_node_schemas(
                         args.category, args.node_type

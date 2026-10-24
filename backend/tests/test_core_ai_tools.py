@@ -110,6 +110,7 @@ def test_grants():
         "read_conversation_history",
         "list_node_types",
         "get_workflow_reference",
+        "validate_workflow_template",
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
@@ -121,6 +122,7 @@ def test_grants():
         "validate_workflow",
         "preview_workflow_draft",
         "create_workflow_draft",
+        "probe_http_request",
     }
     assert all("save" not in name and "publish" not in name for name in admin_names)
     # creation accepts metadata only; generated content goes through canvas edits
@@ -140,26 +142,23 @@ def test_compact_schemas():
     assert '"default": null' not in encoded
     assert all("description" not in schema for schema in schemas.values())
     # categories are documented once; other tools list their values only
-    assert "description" in schemas["create_workflow_draft"]["$defs"]["GraphCategory"]
+    assert "description" in schemas["create_workflow_draft"]["properties"]["category"]
     assert all(
         "description" not in definition
         for name in ("list_workflows", "list_node_types", "list_download_tasks")
-        for definition in schemas[name].get("$defs", {}).values()
+        for key, definition in schemas[name]["properties"].items()
+        if key in {"category", "ordering"}
     )
-    state = schemas["list_workflows"]["properties"]["state"]["anyOf"][0]
-    assert state["enum"] == ["draft", "modified", "published"]
+    state = schemas["list_workflows"]["properties"]["state"]
+    assert state["type"] == ["string", "null"]
+    assert state["enum"] == ["draft", "modified", "published", None]
     assert "Not execution status" in state["description"]
     workflow_id = schemas["get_workflow"]["properties"]["workflow_id"]
     assert schemas["get_workflow"]["required"] == ["workflow_id"]
-    assert schemas["get_workflow"]["$defs"]["ResourceID"]["exclusiveMinimum"] == 0
-    assert workflow_id == {"$ref": "#/$defs/ResourceID"}
-    edits = schemas["preview_workflow_draft"]["$defs"]
-    operations = {
-        edit["properties"]["op"]["const"]
-        for edit in edits.values()
-        if "op" in edit.get("properties", {})
-    }
-    assert operations == {
+    assert workflow_id == {"exclusiveMinimum": 0, "type": "integer"}
+    edits = schemas["preview_workflow_draft"]["properties"]["changes"]["items"]["oneOf"]
+    operations = {edit["properties"]["op"]["const"]: edit for edit in edits}
+    assert set(operations) == {
         "set_field",
         "remove_field",
         "add_node",
@@ -168,7 +167,8 @@ def test_compact_schemas():
         "add_edge",
         "remove_edge",
     }
-    assert edits["SetField"]["properties"]["field_id"]["pattern"] == "^[^$].*$"
+    assert operations["set_field"]["properties"]["field_id"]["pattern"] == "^[^$].*$"
+    assert "data.$schema" in operations["add_node"]["properties"]["node"]["description"]
     assert schemas["list_media_items"]["properties"]["page_size"]["maximum"] == 50
 
 
@@ -474,6 +474,72 @@ def test_compact_property_names():
     }
 
     assert tools.compact_schema(schema) == schema
+
+
+@pytest.mark.parametrize(
+    "value", [None, "draft", "published", "unknown", 0, False, [], {}]
+)
+def test_compact_nullable(value):
+    original = {
+        "anyOf": [{"type": "string", "enum": ["draft", "published"]}, {"type": "null"}]
+    }
+    compact = tools.compact_schema(original)
+
+    assert Draft202012Validator(compact).is_valid(value) == Draft202012Validator(
+        original
+    ).is_valid(value)
+
+
+@pytest.mark.parametrize(
+    "value", [None, False, 0, 1.5, "text", [], {}, {"nested": [None, {"x": True}]}]
+)
+def test_compact_json_values(value):
+    original = tools.WorkflowPreview.model_json_schema()
+    compact = next(
+        item["function"]["parameters"]
+        for item in tools.tool_schemas(ADMIN)
+        if item["function"]["name"] == "preview_workflow_draft"
+    )
+    document = {
+        "workflow_id": 1,
+        "draft_version": 0,
+        "changes": [
+            {"op": "set_field", "node_id": "http", "field_id": "body", "value": value}
+        ],
+    }
+
+    assert Draft202012Validator(original).is_valid(document)
+    assert Draft202012Validator(compact).is_valid(document)
+    document["changes"][0]["field_id"] = "$schema"
+    assert not Draft202012Validator(original).is_valid(document)
+    assert not Draft202012Validator(compact).is_valid(document)
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("get_workflow", {"workflow_id": 0}),
+        ("get_workflow", {"workflow_id": 1, "unknown": True}),
+        ("list_workflows", {"category": None}),
+        ("list_workflows", {"category": "indexer", "ordering": "-name"}),
+        ("list_workflows", {"ordering": "unknown"}),
+        ("create_workflow_draft", {"name": "X", "category": "bad", "description": "X"}),
+        ("probe_http_request", {"request": {"url": "https://example.test"}}),
+        ("probe_http_request", {"request": {"url": "", "timeout": 11}}),
+        ("validate_workflow_template", {"template": "{}", "mode": "unknown"}),
+    ],
+)
+def test_compact_arguments(name, data):
+    original = tools.available_tools(ADMIN)[name].arguments.model_json_schema()
+    compact = next(
+        item["function"]["parameters"]
+        for item in tools.tool_schemas(ADMIN)
+        if item["function"]["name"] == name
+    )
+
+    assert Draft202012Validator(compact).is_valid(data) == Draft202012Validator(
+        original
+    ).is_valid(data)
 
 
 def test_node_schema():
