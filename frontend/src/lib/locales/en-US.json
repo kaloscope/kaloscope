@@ -1114,6 +1114,8 @@
     "pages": {
       "workflows": "Workflows",
       "workflow_designer": "Workflow Designer",
+      "media_library": "Media Library",
+      "media_item": "Media Details",
       "other": "No Page Context"
     },
     "tools": {
@@ -1127,7 +1129,10 @@
       "navigate": "Suggest Page",
       "read_workflow_log": "Read log details",
       "read_workflow_snapshot": "Read graph snapshot",
-      "read_conversation_history": "Read original conversation"
+      "read_conversation_history": "Read original conversation",
+      "list_media_libraries": "Find Media Libraries",
+      "list_media_items": "Find Media",
+      "get_media_item": "Read Media Details"
     },
     "tool_status": {
       "running": "Running",

@@ -16,7 +16,7 @@ from app.models.assistant import (
     AssistantTurn,
 )
 from app.models.user import UserInfo
-from app.services.assistant_sessions import AssistantSessionService
+from app.services.assistant_sessions import AssistantSessionService, resource_order
 from app.utils.json import dumps, loads
 
 DEFAULT_INPUT_TOKENS = 32000
@@ -266,7 +266,9 @@ async def prepare_context(
                 records.append(record)
                 rendered[record.id] = await turn_messages(record)
                 resources.update(record.resource_ids)
-        await AssistantSessionService.record_resources(turn, sorted(resources))
+        await AssistantSessionService.record_resources(
+            turn, sorted(resources, key=resource_order)
+        )
 
     while has_more and not records:
         await load_page()
@@ -489,7 +491,8 @@ async def prepare_context(
                     resource_id
                     for record in batch
                     for resource_id in record.resource_ids
-                }
+                },
+                key=resource_order,
             )
             through = batch[-1].id
             updated = await AssistantConversation.filter(

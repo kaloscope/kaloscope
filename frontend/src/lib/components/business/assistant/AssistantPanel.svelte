@@ -64,6 +64,8 @@
     const pathname = page.url.pathname;
     if (/\/graphs\/(r\/)?\d+\/?$/.test(pathname)) return 'workflow_designer';
     if (/\/workflows\/graphs\/?$/.test(pathname)) return 'workflows';
+    if (/^\/medialibs\/\d+\/\d+\/?$/.test(pathname)) return 'media_item';
+    if (/^\/medialibs\/\d+\/?$/.test(pathname)) return 'media_library';
     return 'other';
   });
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');
@@ -289,6 +291,8 @@
     const parts = [$_(`assistant.pages.${context.page_type}`)];
     if (context.page_type === 'workflow_designer') {
       parts.push(`#${context.resource_id}`, $_(context.unsaved ? 'assistant.unsaved' : 'assistant.saved'));
+    } else if (context.page_type === 'media_library' || context.page_type === 'media_item') {
+      parts.push(`#${context.resource_id}`);
     }
     return parts.join(' · ');
   }
@@ -311,7 +315,7 @@
   afterNavigate(({ from, to }) => {
     if ($assistant.open && restoreAfterNavigation) composer?.focus({ preventScroll: true });
     restoreAfterNavigation = false;
-    if (from?.url.pathname !== to?.url.pathname) releaseAssistantHandoff(page.url.pathname);
+    if (from?.url && to?.url && from.url.pathname !== to.url.pathname) releaseAssistantHandoff(to.url.pathname);
   });
 
   onMount(() => {

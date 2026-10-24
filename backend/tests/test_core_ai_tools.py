@@ -107,6 +107,9 @@ def test_grants():
         "read_workflow_snapshot",
         "read_conversation_history",
         "list_node_types",
+        "list_media_libraries",
+        "list_media_items",
+        "get_media_item",
         "navigate",
     }
     assert admin_names - read_names == {
@@ -117,6 +120,35 @@ def test_grants():
     assert all("save" not in name and "publish" not in name for name in admin_names)
     # creation accepts metadata only; generated content goes through canvas edits
     assert set(tools.WorkflowCreate.model_fields) == {"name", "category", "description"}
+
+
+def test_compact_schemas():
+    encoded = json.dumps(tools.tool_schemas(ADMIN))
+    schemas = {
+        tool["function"]["name"]: tool["function"]["parameters"]
+        for tool in json.loads(encoded)
+    }
+
+    assert '"title": "' not in encoded
+    assert '"discriminator"' not in encoded
+    assert all("description" not in schema for schema in schemas.values())
+    edits = schemas["preview_workflow_draft"]["$defs"]
+    operations = {
+        edit["properties"]["op"]["const"]
+        for edit in edits.values()
+        if "op" in edit.get("properties", {})
+    }
+    assert operations == {
+        "set_field",
+        "remove_field",
+        "add_node",
+        "remove_node",
+        "move_node",
+        "add_edge",
+        "remove_edge",
+    }
+    assert edits["SetField"]["properties"]["field_id"]["pattern"] == "^[^$].*$"
+    assert schemas["list_media_items"]["properties"]["page_size"]["maximum"] == 50
 
 
 @pytest.mark.parametrize(
@@ -273,6 +305,8 @@ def test_list_ordering(ordering, expected):
         {"page": "workflow_designer", "resource_id": True},
         {"page": "workflow_designer", "resource_id": 2**53},
         {"page": "workflow_logs", "resource_id": 1},
+        {"page": "media_library"},
+        {"page": "media_item", "resource_id": "1"},
     ],
 )
 def test_invalid_navigation(arguments):

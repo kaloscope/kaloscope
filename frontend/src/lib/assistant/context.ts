@@ -66,7 +66,10 @@ export function captureAssistantContext(route: string): AssistantPageContext | n
     if (encoder.encode(metadata).length > 128 * 1024) throw new Error('assistant_context_limit');
     return JSON.parse(json) as AssistantPageContext;
   }
-  if (/^\/settings\/workflows\/graphs(?:\/(?:r\/)?[1-9]\d*)?\/?$/.test(route)) {
+  if (
+    /^\/settings\/workflows\/graphs(?:\/(?:r\/)?[1-9]\d*)?\/?$/.test(route) ||
+    /^\/medialibs\/[1-9]\d*(?:\/[1-9]\d*)?\/?$/.test(route)
+  ) {
     throw new Error('assistant_context_invalid');
   }
   return null;

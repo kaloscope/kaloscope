@@ -1406,6 +1406,30 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         return libraries
 
     @classmethod
+    async def get_accessible(cls, id: int, user: UserInfo) -> MediaLib:
+        """Load a library within the account's library permissions.
+
+        Args:
+            id: Requested library ID.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            Library accessible to the user.
+
+        Raises:
+            NotFoundException: If the library does not exist.
+            ForbiddenException: If the user cannot access the library.
+        """
+        library = await MediaLib.get_or_none(id=id)
+        if library is None:
+            raise NotFoundException
+        if user.role != UserRole.ADMIN and (
+            user.perms is None or id not in user.perms.media_lib_ids
+        ):
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        return library
+
+    @classmethod
     @atomic()
     async def update_priorities(cls, ids: list):
         """Update media library priorities.

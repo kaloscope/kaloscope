@@ -20,7 +20,12 @@ from openai import (
 )
 
 from app.core.ai.history import budgets, context_size, prepare_context
-from app.core.ai.tools import CREATE_TOOL, execute_tool, tool_schemas
+from app.core.ai.tools import (
+    CREATE_TOOL,
+    execute_tool,
+    media_resources,
+    tool_schemas,
+)
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.network import NetworkTransport
 from app.models.ai import AIModelSelection, AIProvider, AIProviderPreset
@@ -61,6 +66,9 @@ When building, use provided values or defaults without reconfirming. Leave
 missing credentials, accounts, paths or URLs empty; list required configuration.
 Place new nodes left to right, spacing columns at least 800 canvas pixels and
 branch rows 600; allow more for wider/taller fields. Preserve existing positions.
+
+Media tools read saved library indexes only; never claim scans, scraping,
+playback or downloads. Empty, missing and denied results differ.
 
 Use page context or authorized tools for IDs; never invent IDs, versions or
 fields. Read registered schemas before constructing nodes: type="node",
@@ -565,11 +573,17 @@ class AssistantService:
                     if result["ok"] and isinstance(arguments.get("workflow_id"), int):
                         resource_ids.append(arguments["workflow_id"])
                     if result["ok"] and call.function.name == "navigate":
-                        target_id = result["data"].get("target", {}).get("resource_id")
-                        if target_id:
-                            resource_ids.append(target_id)
+                        target = result["data"].get("target", {})
+                        if target.get("page") == "workflow_designer":
+                            resource_ids.append(target["resource_id"])
                     if result["ok"] and call.function.name == CREATE_TOOL:
                         resource_ids.append(result["data"]["workflow_id"])
+                    if result["ok"]:
+                        resource_ids.extend(
+                            media_resources(
+                                call.function.name, arguments, result["data"]
+                            )
+                        )
                     if (
                         result["ok"]
                         and call.function.name == "read_conversation_history"

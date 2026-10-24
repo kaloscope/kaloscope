@@ -8,6 +8,7 @@
   import { beforeNavigate, replaceState } from '$app/navigation';
   import { page } from '$app/state';
   import { api, getCurrentRole } from '$lib/api';
+  import { registerAssistantContext } from '$lib/assistant/context';
   import {
     alert,
     Alerts,
@@ -45,7 +46,7 @@
   } from '$lib/types';
   import { buildStreamUrl, mediaTitle } from '$lib/utils/media';
   import { isHTTPError } from 'ky';
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
 
   // the loading state
@@ -617,10 +618,11 @@
    * Get media item details by ID.
    *
    * @param id - Media item ID.
-   * @return The media item details.
+   * @param signal - Optional cancellation when leaving the current item.
+   * @returns The media item details.
    */
-  async function getDetails(id: number): Promise<MediaItem> {
-    const resp = await api.get(`media/${id}`).json<Resp<MediaItem>>();
+  async function getDetails(id: number, signal?: AbortSignal): Promise<MediaItem> {
+    const resp = await api.get(`media/${id}`, { signal }).json<Resp<MediaItem>>();
     return resp.data;
   }
 
@@ -633,8 +635,10 @@
     if (_media?.id === item.id) {
       return;
     }
+    const parentId = media?.id;
     try {
       const data = await getDetails(item.id);
+      if (media?.id !== parentId) return;
       _media = data;
       _meta = data.metadata ?? null;
     } catch (error) {
@@ -713,43 +717,77 @@
   });
   onDestroy(closeReader);
 
-  // load user and media details before retrieving saved history
-  onMount(() => {
-    active = true;
-    const historyController = new AbortController();
-    loading.start();
-    Promise.all([getDetails(Number(page.params.item_id)), getCurrentRole()])
-      .then(([data]) => {
-        if (!active) return;
-        media = data;
-        meta = data.metadata ?? null;
-        // consume the dashboard reading action so refresh and forward show the details
-        const resume = page.state.resumeReading;
-        if (resume) {
-          replaceState('', { ...page.state, resumeReading: false });
-        }
-        if (data.media_type === 'video') {
-          void loadWatchHistory();
-        } else if (resume) {
-          read();
-        } else {
-          void getReadingHistory(data.id, historyController.signal)
-            .then((history) => {
-              if (active) hasReadingHistory = !!history;
-            })
-            .catch(() => {});
-        }
-        if (data.media_type === 'text') void loadTextChapters();
-      })
-      .finally(() => {
-        loading.end();
-      });
-    return () => {
-      active = false;
-      watchController?.abort();
-      historyController.abort();
-      chaptersController?.abort();
-    };
+  // identify the route's work and, while it is shown, the selected episode or chapter
+  onMount(() =>
+    registerAssistantContext(() => {
+      const itemId = Number(page.params.item_id);
+      const libraryId = Number(page.params.lib_id);
+      if (media?.id !== itemId || media.lib?.id !== libraryId) {
+        return null;
+      }
+      return {
+        page_type: 'media_item',
+        route: page.url.pathname.replace(/\/$/, ''),
+        resource_id: itemId,
+        library_id: libraryId,
+        selected_id: _media?.id ?? null
+      };
+    })
+  );
+
+  // reload reused detail pages and cancel requests belonging to the previous item
+  $effect(() => {
+    const itemId = Number(page.params.item_id);
+    return untrack(() => {
+      active = true;
+      const controller = new AbortController();
+      media = null;
+      meta = null;
+      _media = null;
+      _meta = null;
+      watchHistory = null;
+      hasReadingHistory = false;
+      textChapters = [];
+      textVersion = undefined;
+      chaptersError = null;
+      playing = false;
+      loading.start();
+      Promise.all([getDetails(itemId, controller.signal), getCurrentRole()])
+        .then(([data]) => {
+          if (controller.signal.aborted) return;
+          media = data;
+          meta = data.metadata ?? null;
+          // consume the dashboard reading action so refresh and forward show the details
+          const resume = page.state.resumeReading;
+          if (resume) {
+            replaceState('', { ...page.state, resumeReading: false });
+          }
+          if (data.media_type === 'video') {
+            void loadWatchHistory();
+          } else if (resume) {
+            read();
+          } else {
+            void getReadingHistory(data.id, controller.signal)
+              .then((history) => {
+                if (!controller.signal.aborted) hasReadingHistory = !!history;
+              })
+              .catch(() => {});
+          }
+          if (data.media_type === 'text') void loadTextChapters();
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) console.error(error);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) loading.end();
+        });
+      return () => {
+        active = false;
+        watchController?.abort();
+        controller.abort();
+        chaptersController?.abort();
+      };
+    });
   });
 </script>
 
@@ -758,8 +796,13 @@
     if (document.visibilityState === 'hidden') saveProgress();
   }}
   onclick={(event) => {
-    // clear the selected child media item when clicking outside
-    if (!(event.target as Element).closest('.media-part')) {
+    // keep the selected item while opening or using the assistant
+    const keepSelection = event
+      .composedPath()
+      .some(
+        (target) => target instanceof Element && target.matches('.media-part, #assistant-panel, #assistant-trigger')
+      );
+    if (!keepSelection) {
       _media = null;
       _meta = null;
     }

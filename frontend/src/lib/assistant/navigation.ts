@@ -1,6 +1,7 @@
 import type { AssistantDestination, AssistantToolResult } from '$lib/types';
 
 export const workflowPath = '/settings/workflows/graphs';
+export const mediaPath = '/medialibs';
 
 /**
  * Resolve a successful navigation or creation result against the application's route registry.
@@ -23,18 +24,19 @@ export function assistantDestination(
     path = result.data.editor_path;
   }
   if (!target) return null;
-  let paths: string[];
-  if (target.page === 'workflows' && target.resource_id == null) {
-    paths = [workflowPath];
-  } else if (
-    target.page === 'workflow_designer' &&
-    typeof target.resource_id === 'number' &&
-    Number.isSafeInteger(target.resource_id) &&
-    target.resource_id > 0
-  ) {
-    paths = [`${workflowPath}/${target.resource_id}`];
-    if (result.name === 'navigate') paths.push(`${workflowPath}/r/${target.resource_id}`);
-  } else return null;
-  const match = paths.find((item) => item === path);
-  return match ? { path: match, target } : null;
+  const id = target.resource_id;
+  if (target.page === 'workflows') {
+    return id == null && path === workflowPath ? { path, target } : null;
+  }
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0 || typeof path !== 'string') return null;
+  let valid = false;
+  if (target.page === 'workflow_designer') {
+    valid = path === `${workflowPath}/${id}` || (result.name === 'navigate' && path === `${workflowPath}/r/${id}`);
+  } else if (target.page === 'media_library') {
+    valid = path === `${mediaPath}/${id}`;
+  } else if (target.page === 'media_item') {
+    // the server resolves the item's own library into the path
+    valid = new RegExp(`^${mediaPath}/[1-9]\\d*/${id}$`).test(path);
+  }
+  return valid ? { path, target } : null;
 }
