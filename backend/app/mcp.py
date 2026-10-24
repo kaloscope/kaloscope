@@ -246,6 +246,11 @@ def create_server() -> MCPServer:
             "user, then save only changes the user requested or accepted, using "
             "the returned draft version. "
             "Drafts can be incomplete; they are never automatically published or run. "
+            "For JSON indexers or HTML movie scrapers, read the json_indexer or "
+            "movie_scraper reference. Validate supplied samples using search/details/"
+            "movie modes, correct field errors and recheck before previewing. "
+            "Use the exact tested templates; stop after two unsuccessful repairs "
+            "and report missing evidence. Validation is not execution. "
             "No tool publishes, executes, downloads, scans, deletes workflows, "
             "or calls an AI model. "
             "For invalid arguments, correct the reported fields before retrying. "
@@ -623,13 +628,16 @@ def create_server() -> MCPServer:
 
         Args:
             ctx: Authenticated request context.
-            validation: Text/native-expression or JSONC/object/array evaluation.
+            validation: Text/expression, JSONC, or search/details/movie output check.
 
         Returns:
             JSON-compatible value or errors. Strict mode rejects undefined values;
             Python internals and mutation methods are blocked. No global context,
             account cookies or workflow state is loaded or changed. Explicit
             filesystem tests retain their normal path checks.
+            Business modes return field issues and sample limitations; repair the
+            template and recheck without inventing missing source data. They retain
+            the parsed value without coercion, and omit duplicate rendered text.
         """
         _user(ctx)
         return validate_template(validation)
@@ -638,15 +646,15 @@ def create_server() -> MCPServer:
     async def get_workflow_reference(
         ctx: Context,
         topic: Annotated[
-            Literal["context", "templates"],
-            Field(description="Read `context` passing rules or `templates` functions."),
+            Literal["context", "templates", "json_indexer", "movie_scraper"],
+            Field(description="Context/functions or JSON indexer/HTML movie recipes."),
         ],
     ) -> WorkflowReference:
         """Read shared workflow authoring rules without executing anything.
 
         Args:
             ctx: Authenticated request context supplied by the server.
-            topic: Context passing rules or project-specific template functions.
+            topic: Context, template functions, or a supported authoring recipe.
 
         Returns:
             Complete English reference. Read exact node schemas separately with
@@ -672,6 +680,13 @@ def create_server() -> MCPServer:
                 "all types. This is not a node instance ID or class name."
             ),
         ] = None,
+        include_examples: Annotated[
+            bool,
+            Field(
+                description="Include read-only examples; false keeps "
+                "editable fields/handles."
+            ),
+        ] = True,
     ) -> NodeTypesResult:
         """Read node purpose, fields, handles and complete English examples.
 
@@ -679,6 +694,8 @@ def create_server() -> MCPServer:
             ctx: Authenticated HTTP request context, supplied by the server.
             category: Filter nodes usable in this category; `None` includes all nodes.
             node_type: Exact node type, such as `ai`; `None` includes every type.
+            include_examples: Include full read-only examples by default; `False`
+                returns editable fields and handles for compact recipe authoring.
 
         Returns:
             Node schemas keyed by designer palette group, such as `general`; an
@@ -691,7 +708,13 @@ def create_server() -> MCPServer:
         """
         _user(ctx)
         return NodeTypesResult.model_validate(
-            loads(dumps(FlowGraphService.get_node_schemas(category, node_type)))
+            loads(
+                dumps(
+                    FlowGraphService.get_node_schemas(
+                        category, node_type, include_examples=include_examples
+                    )
+                )
+            )
         )
 
     @server.tool(annotations=READ_ONLY)

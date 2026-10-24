@@ -2,6 +2,7 @@ import base64
 import io
 import zipfile
 from collections.abc import Mapping
+from dataclasses import replace
 from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal
@@ -316,19 +317,34 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
 
     @classmethod
     def get_node_schemas(
-        cls, category: GraphCategory | None = None, node_type: str | None = None
+        cls,
+        category: GraphCategory | None = None,
+        node_type: str | None = None,
+        *,
+        include_examples: bool = True,
     ) -> dict[str, list[NodeSchema]]:
         """Group node schemas available to a workflow category.
 
         Args:
             category: Workflow category; `None` includes all categories.
             node_type: Exact node type; `None` includes all node types.
+            include_examples: Include read-only example fields; `False` keeps the
+                editable contract while leaving full examples available on demand.
 
         Returns:
             Schemas ordered and grouped as in the workflow designer.
         """
         schemas = [
             schema
+            if include_examples
+            else replace(
+                schema,
+                fields=[
+                    field
+                    for field in schema.fields
+                    if not getattr(field, "readonly", False)
+                ],
+            )
             for schema in Node.schemas
             if (not category or not schema.categories or category in schema.categories)
             and (node_type is None or schema.node_type == node_type)

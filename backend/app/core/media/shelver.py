@@ -252,23 +252,7 @@ async def _write_nfo(
     async with aiofiles.open(tmpl_path, encoding=ENCODING) as f:
         template = await f.read()
 
-    try:
-        if not isinstance(data.get("title"), str) or not data["title"].strip():
-            raise ContentError("invalid_metadata")
-        for name in ("year", "season"):
-            _nfo_integer(name, data.get(name))
-        rendered = render(template, context=data)
-        _, invalid = _parse_nfo_data(
-            LibType.MOVIE if nfo_type == NFOType.MOVIE else LibType.TV_SHOW,
-            rendered.encode(ENCODING),
-            str(path),
-        )
-        if invalid:
-            raise ContentError("invalid_metadata")
-    except ContentError:
-        raise
-    except (TemplateError, TypeError, ValueError) as error:
-        raise ContentError("invalid_metadata") from error
+    rendered = render_nfo(nfo_type, template, data)
 
     temporary = path.with_name(f".nfo-{uuid4().hex}.tmp")
     cancelled = False
@@ -298,6 +282,40 @@ async def _write_nfo(
                 exc_info=True,
             )
     return True
+
+
+def render_nfo(nfo_type: str, template: str, data: dict) -> str:
+    """Render and read back NFO metadata without touching a destination file.
+
+    Args:
+        nfo_type: Video template type used to select the metadata parser.
+        template: Bundled NFO template text.
+        data: Candidate fields supplied to the template.
+
+    Returns:
+        Valid XML text ready for publication or fixture validation.
+
+    Raises:
+        ContentError: If the candidate or rendered metadata is unusable.
+    """
+    try:
+        if not isinstance(data.get("title"), str) or not data["title"].strip():
+            raise ContentError("invalid_metadata")
+        for name in ("year", "season"):
+            _nfo_integer(name, data.get(name))
+        rendered = render(template, context=data)
+        _, invalid = _parse_nfo_data(
+            LibType.MOVIE if nfo_type == NFOType.MOVIE else LibType.TV_SHOW,
+            rendered.encode(ENCODING),
+            "",
+        )
+        if invalid:
+            raise ContentError("invalid_metadata")
+        return rendered
+    except ContentError:
+        raise
+    except (TemplateError, TypeError, ValueError) as error:
+        raise ContentError("invalid_metadata") from error
 
 
 def _nfo_integer(name: str, value: Any) -> int | None:

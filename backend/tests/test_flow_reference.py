@@ -241,7 +241,9 @@ def test_script_examples(monkeypatch, language):
     assert ctx["count"] == 2
 
 
-@pytest.mark.parametrize("topic", ["context", "templates"])
+@pytest.mark.parametrize(
+    "topic", ["context", "templates", "json_indexer", "movie_scraper"]
+)
 def test_reference_budget(monkeypatch, topic):
     execute = AsyncMock(
         side_effect=AssertionError("Knowledge reads must not execute workflows")
