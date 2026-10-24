@@ -2,6 +2,10 @@ import type { AssistantDestination, AssistantToolResult } from '$lib/types';
 
 export const workflowPath = '/settings/workflows/graphs';
 export const mediaPath = '/medialibs';
+export const downloadPaths = {
+  active_downloads: '/downloads/downloading',
+  completed_downloads: '/downloads/completed'
+} as const;
 
 /**
  * Resolve a successful navigation or creation result against the application's route registry.
@@ -27,6 +31,10 @@ export function assistantDestination(
   const id = target.resource_id;
   if (target.page === 'workflows') {
     return id == null && path === workflowPath ? { path, target } : null;
+  }
+  if (target.page === 'active_downloads' || target.page === 'completed_downloads') {
+    const expected = downloadPaths[target.page];
+    return id == null && path === expected ? { path: expected, target } : null;
   }
   if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0 || typeof path !== 'string') return null;
   let valid = false;

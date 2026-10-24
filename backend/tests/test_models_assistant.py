@@ -155,6 +155,19 @@ def test_invalid_snapshot_upload(canvas):
             "library_id": 2,
             "selected_id": 9,
         },
+        {
+            "page_type": "active_downloads",
+            "route": "/downloads/downloading",
+            "selected_ids": [3, 4],
+            "filters": {
+                "name": "ubuntu",
+                "downloader_id": 2,
+                "ordering": "-downloader_id",
+                "page_num": 2,
+                "page_size": 50,
+            },
+        },
+        {"page_type": "completed_downloads", "route": "/downloads/completed"},
     ],
 )
 def test_page_context(context):
@@ -238,6 +251,28 @@ def test_invalid_context(patch):
             "library_id": 2,
         },
         {"page_type": "media_item", "route": "/medialibs/7", "resource_id": 7},
+        {"page_type": "active_downloads", "route": "/downloads/completed"},
+        {"page_type": "completed_downloads", "route": "/downloads/plans"},
+        {
+            "page_type": "active_downloads",
+            "route": "/downloads/downloading",
+            "filters": {"ordering": "magnet_link"},
+        },
+        {
+            "page_type": "active_downloads",
+            "route": "/downloads/downloading",
+            "filters": {"states": ["completed"]},
+        },
+        {
+            "page_type": "completed_downloads",
+            "route": "/downloads/completed",
+            "filters": {"downloader_id": 0},
+        },
+        {
+            "page_type": "completed_downloads",
+            "route": "/downloads/completed",
+            "selected_ids": list(range(1, 102)),
+        },
         {
             "page_type": "media_item",
             "route": "/medialibs/2/7",

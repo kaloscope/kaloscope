@@ -15,6 +15,7 @@ from tortoise import Tortoise, timezone
 from app.core.ai import history, tools
 from app.core.ai.documents import GraphProposal, apply_changes, tool_facts
 from app.core.ai.queries import workflow_list
+from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
     KaloscopeException,
@@ -31,6 +32,7 @@ from app.models.assistant import (
     AssistantTurnRequest,
     ConversationCreate,
 )
+from app.models.download import Downloader, DownloadTask
 from app.models.flow import FlowGraph, FlowLog, GraphDocument, GraphNode, GraphQuery
 from app.models.media import MediaItem, MediaLib
 from app.models.user import Permissions, User, UserInfo, UserRole
@@ -2358,6 +2360,174 @@ def test_media_context(monkeypatch):
                     conversation["id"], request("stale", context=library_context), owner
                 )
             assert rejected.value.status_code == 403
+
+    asyncio.run(run())
+
+
+def test_download_context(monkeypatch):
+    monkeypatch.setattr(
+        KaloscopeConfig, "_config", SimpleNamespace(secret_key_enabled=False)
+    )
+    streams = []
+
+    def handler(upstream):
+        streams.append(loads(upstream.content))
+        if len(streams) == 1:
+            current = streams[0]["messages"][-2]["content"]
+            filters = loads(current.split("\n", 1)[1])["filters"]
+            # a 50-row page maps to two 25-row tool pages
+            arguments = {"scope": "active", **filters, "page_size": 25}
+            delta = call_delta("list_download_tasks", dumps(arguments).decode())
+            return response(
+                [
+                    chunk({"role": "assistant", "tool_calls": [delta]}),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        return response([chunk({"role": "assistant", "content": "Done"}, "stop")])
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        async with database() as (owner, _):
+            downloader = await Downloader.create(
+                name="Alpha",
+                config="driver: rpc\nname: Alpha\nprotocol: http\nhost: localhost\n"
+                "port: 9000\nmethods:\n  list:\n    get: /tasks\n",
+                priority=1,
+            )
+            for name, state in (("Ubuntu ISO", "downloading"), ("Done", "completed")):
+                await DownloadTask.create(
+                    downloader=downloader, name=name, dir="/downloads", state=state
+                )
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            context = {
+                "page_type": "active_downloads",
+                "route": "/downloads/downloading",
+                "selected_ids": [1],
+                "filters": {
+                    "name": "ubuntu",
+                    "downloader_id": downloader.id,
+                    "ordering": "-name",
+                    "page_num": 1,
+                    "page_size": 50,
+                },
+            }
+
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request("downloads", context=context), owner
+                )
+            ]
+
+            assert events[-1].event == "done"
+            result = next(item.data for item in events if item.event == "tool_result")
+            assert result["data"]["total"] == 1
+            assert result["data"]["items"][0]["name"] == "Ubuntu ISO"
+            turn = await AssistantTurn.get(request_id="downloads")
+            # shared download visibility adds no resource to recheck later
+            assert turn.resource_ids == []
+            assert turn.context == context
+            owner.role, owner.perms = UserRole.USER, Permissions()
+            history = (await Sessions.turns(conversation["id"], owner))["items"]
+            assert history[0]["content"] == "Done"
+            assert history[0]["context"] == context
+
+    asyncio.run(run())
+
+
+def test_download_details_budget(monkeypatch):
+    monkeypatch.setattr(
+        KaloscopeConfig, "_config", SimpleNamespace(secret_key_enabled=False)
+    )
+    streams = []
+    names = [f"下载验收 {index:02}" for index in range(1, 10)]
+    error = "合成重试记录，不代表最终原因。" * 40 + "最终原因：目标目录不存在。"
+    task_id = None
+
+    def handler(upstream):
+        body = loads(upstream.content)
+        assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
+        assert body.get("stream") is True
+        streams.append(body)
+        if len(streams) < 3:
+            name, args = (
+                (
+                    "list_download_tasks",
+                    {"name": "下载验收", "scope": "active", "page_size": 25},
+                )
+                if len(streams) == 1
+                else ("get_download_task", {"task_id": task_id})
+            )
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [call_delta(name, dumps(args).decode())],
+                        }
+                    ),
+                    chunk(finish="tool_calls"),
+                ]
+            )
+        results = [
+            loads(message["content"])
+            for message in body["messages"]
+            if message["role"] == "tool"
+        ]
+        listing, detail = [result["data"] for result in results]
+        assert listing["filters"]["name"] == "下载验收"
+        assert listing["total"] == 9
+        assert {item["name"] for item in listing["items"]} == set(names)
+        assert detail["error"]["data"] == error
+        return response(
+            [
+                chunk(
+                    {
+                        "role": "assistant",
+                        "content": "Read all nine tasks and the final error.",
+                    },
+                    "stop",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+
+    async def run():
+        nonlocal task_id
+        async with database() as (owner, _):
+            downloader = await Downloader.create(
+                name="Review",
+                config="driver: rpc\nname: Review\nprotocol: http\nhost: localhost\n"
+                "port: 9\nmethods: {}\n",
+                priority=1,
+            )
+            for name in names:
+                task = await DownloadTask.create(
+                    downloader=downloader,
+                    name=name,
+                    dir="/downloads",
+                    state="error",
+                    error_msg=error,
+                )
+            task_id = task.id
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request("download-details"), owner
+                )
+            ]
+
+            assert events[-1].event == "done", events[-1]
+            assert len(streams) == 3
 
     asyncio.run(run())
 

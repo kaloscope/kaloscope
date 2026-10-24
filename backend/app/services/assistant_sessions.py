@@ -421,8 +421,9 @@ class AssistantSessionService:
                 resource_ids = [context["resource_id"]]
             elif context["page_type"] == "media_library":
                 resource_ids = [media_resource(context["resource_id"])]
-            else:
+            elif context["page_type"] == "media_item":
                 resource_ids = [media_resource(context["library_id"])]
+            # download pages show shared tasks, so they add nothing to recheck
             if not await cls.allowed(resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
         async with in_transaction():

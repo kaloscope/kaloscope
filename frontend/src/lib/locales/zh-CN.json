@@ -1116,6 +1116,8 @@
       "workflow_designer": "工作流设计器",
       "media_library": "媒体库",
       "media_item": "媒体详情",
+      "active_downloads": "正在下载",
+      "completed_downloads": "已完成下载",
       "other": "无页面上下文"
     },
     "tools": {
@@ -1132,7 +1134,9 @@
       "read_conversation_history": "读取对话记录",
       "list_media_libraries": "查找媒体库",
       "list_media_items": "查找媒体",
-      "get_media_item": "读取媒体详情"
+      "get_media_item": "读取媒体详情",
+      "list_download_tasks": "查找下载任务",
+      "get_download_task": "读取下载详情"
     },
     "tool_status": {
       "running": "执行中",

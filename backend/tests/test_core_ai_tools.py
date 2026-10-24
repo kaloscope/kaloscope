@@ -110,6 +110,8 @@ def test_grants():
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
+        "list_download_tasks",
+        "get_download_task",
         "navigate",
     }
     assert admin_names - read_names == {
@@ -131,7 +133,23 @@ def test_compact_schemas():
 
     assert '"title": "' not in encoded
     assert '"discriminator"' not in encoded
+    assert str(2**53 - 1) not in encoded
+    assert '"default": null' not in encoded
     assert all("description" not in schema for schema in schemas.values())
+    # categories are documented once; other tools list their values only
+    assert "description" in schemas["create_workflow_draft"]["$defs"]["GraphCategory"]
+    assert all(
+        "description" not in definition
+        for name in ("list_workflows", "list_node_types", "list_download_tasks")
+        for definition in schemas[name].get("$defs", {}).values()
+    )
+    state = schemas["list_workflows"]["properties"]["state"]["anyOf"][0]
+    assert state["enum"] == ["draft", "modified", "published"]
+    assert "Not execution status" in state["description"]
+    workflow_id = schemas["get_workflow"]["properties"]["workflow_id"]
+    assert schemas["get_workflow"]["required"] == ["workflow_id"]
+    assert schemas["get_workflow"]["$defs"]["ResourceID"]["exclusiveMinimum"] == 0
+    assert workflow_id == {"$ref": "#/$defs/ResourceID"}
     edits = schemas["preview_workflow_draft"]["$defs"]
     operations = {
         edit["properties"]["op"]["const"]
