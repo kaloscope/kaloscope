@@ -81,11 +81,12 @@ def _openlist_runner(downloader, driver):
     """
     runner = cast(Any, object.__new__(syncer.DLSyncer))
     runner._app = SimpleNamespace(
+        add_task=lambda task: task.close(),
         shared_ctx=SimpleNamespace(
             dl_task_actions={},
             dl_sync_fast=SimpleNamespace(is_set=lambda: True),
             dl_sync_requested=threading.Event(),
-        )
+        ),
     )
     runner._last_sync_tasks = datetime.now()
     runner._last_check_plans = datetime.now()
@@ -232,7 +233,8 @@ def test_future_work(monkeypatch, deadline):
 def test_notification_during_sync(monkeypatch):
     runner = cast(Any, object.__new__(syncer.DLSyncer))
     runner._app = SimpleNamespace(
-        shared_ctx=SimpleNamespace(dl_sync_requested=threading.Event())
+        add_task=lambda task: task.close(),
+        shared_ctx=SimpleNamespace(dl_sync_requested=threading.Event()),
     )
     runner._last_sync_tasks = datetime.now()
     runner._last_check_plans = datetime.now()
@@ -291,12 +293,16 @@ def test_idle_plans(monkeypatch):
         syncer, "DownloadTask", SimpleNamespace(filter=AsyncMock(return_value=[]))
     )
     monkeypatch.setattr(syncer.asyncio, "sleep", pause)
-    monkeypatch.setattr(syncer, "check_download_plans", lambda: "plans")
+    monkeypatch.setattr(
+        syncer,
+        "check_download_plans",
+        lambda *, first_only=False: "first" if first_only else "plans",
+    )
 
     asyncio.run(runner.interval())
 
     assert scans == [1, 1]
-    assert scheduled == ["plans"]
+    assert scheduled == ["first", "plans"]
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -1006,11 +1012,12 @@ def test_fast_sync(monkeypatch):
 
     runner = cast(Any, object.__new__(syncer.DLSyncer))
     runner._app = SimpleNamespace(
+        add_task=lambda task: task.close(),
         shared_ctx=SimpleNamespace(
             dl_sync_fast=SimpleNamespace(is_set=lambda: True),
             dl_task_actions={},
             dl_sync_requested=threading.Event(),
-        )
+        ),
     )
     runner._last_sync_tasks = datetime.now()
     runner._last_check_plans = datetime.now()
@@ -1084,11 +1091,12 @@ def test_cleanup_retry(monkeypatch):
             driver.client = cast(OpenListClient, client)
             runner = cast(Any, object.__new__(syncer.DLSyncer))
             runner._app = SimpleNamespace(
+                add_task=lambda task: task.close(),
                 shared_ctx=SimpleNamespace(
                     dl_sync_fast=SimpleNamespace(is_set=lambda: True),
                     dl_task_actions={},
                     dl_sync_requested=threading.Event(),
-                )
+                ),
             )
             runner._last_sync_tasks = datetime.now()
             runner._last_check_plans = datetime.now()
@@ -1189,9 +1197,10 @@ def test_actions():
             driver = ActionDriver()
             runner = cast(Any, object.__new__(syncer.DLSyncer))
             runner._app = SimpleNamespace(
+                add_task=lambda task: task.close(),
                 shared_ctx=SimpleNamespace(
                     dl_task_actions=actions, dl_sync_requested=threading.Event()
-                )
+                ),
             )
             runner._drivers = {downloader.id: (downloader.config, driver)}
             requested = (

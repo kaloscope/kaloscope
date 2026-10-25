@@ -159,4 +159,14 @@ class Migration(migrations.Migration):
             name='draft_version',
             field=fields.IntField(default=0, db_default=0),
         ),
+        ops.AddField(
+            model_name='DownloadPlan',
+            name='creation_key',
+            field=fields.CharField(null=True, unique=True, max_length=64),
+        ),
+        ops.AddField(
+            model_name='DownloadPlan',
+            name='creation_receipt',
+            field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
+        ),
     ]

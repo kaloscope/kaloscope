@@ -4,6 +4,9 @@
     DownloadDir,
     Downloader,
     DownloadPlan,
+    DownloadPlanCreation,
+    DownloadPlanCreateResult,
+    DownloadPlanSettings,
     Filter,
     FlowGraph,
     IndexerConfig,
@@ -32,6 +35,8 @@
     sub_pattern: string | null;
     sub_repl: string | null;
     onsave: (result: DownloadPlan) => void;
+    creationRequestId: string;
+    oncreated: (result: DownloadPlanCreation) => void;
   }>;
 </script>
 
@@ -43,7 +48,9 @@
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { isHTTPError } from 'ky';
   import { onMount } from 'svelte';
+  import { v4 as uuidv4 } from 'uuid';
 
   let {
     id,
@@ -62,7 +69,9 @@
     transfer_method = null,
     sub_pattern = DEFAULT_SUB_PATTERN,
     sub_repl = DEFAULT_SUB_REPL,
-    onsave
+    onsave,
+    creationRequestId = uuidv4(),
+    oncreated
   }: PlanEditorProps = $props();
 
   // the modal dialog and file tree instance
@@ -70,8 +79,22 @@
   let fileTree: FileTree;
   /**
    * Restore the current plan settings before opening the editor.
+   *
+   * @returns A promise that resolves after recovering a saved request or opening the form.
    */
-  export const showModal = () => {
+  export const showModal = async () => {
+    transfer_lib_id ??= 0;
+    if (!id && oncreated) {
+      const { data } = await api
+        .get(`download/plan/request/${creationRequestId}`)
+        .json<Resp<DownloadPlanCreateResult>>();
+      if (data.created) {
+        attempted = null;
+        creationFailed = false;
+        oncreated(data);
+        return;
+      }
+    }
     if (id) {
       graphOptions = [{ value: graph_id, label: graph_name! }];
       configure(graph_id);
@@ -98,6 +121,9 @@
   // the media libraries and transfer options
   let mediaLibs: MediaLib[] = $state([]);
   let supportsHardlink: boolean = $state(true);
+  let attempted: { request_id: string; plan: DownloadPlanSettings } | null = $state(null);
+  let creationFailed = $state(false);
+  let issues: { path: string; message: string }[] = $state([]);
 
   // the loading state and form schema
   const loading = createLoading();
@@ -173,53 +199,86 @@
 
   /**
    * Save or update the download plan.
+   *
+   * @returns A promise that resolves after saving or displaying recovery options.
    */
-  function upsert() {
+  async function upsert() {
+    if ($loading !== null) return;
     loading.start();
-    api
-      .post('download/plan/upsert', {
-        json: {
-          id,
-          graph_id,
-          downloader_id,
-          dir: directory?.path || dir,
-          keyword,
-          filters,
-          interval_num,
-          interval_start: interval_start || null,
-          interval_end: interval_end || null,
-          batch_limit,
-          total_limit: total_limit || null,
-          transfer_lib_id: transfer_lib_id || null,
-          transfer_method: transfer_lib_id ? transfer_method : null,
-          sub_pattern: transfer_lib_id ? sub_pattern : null,
-          sub_repl: transfer_lib_id ? sub_repl : null
+    try {
+      const settings: DownloadPlanSettings = {
+        graph_id: graph_id!,
+        downloader_id: downloader_id!,
+        dir: directory?.path || dir,
+        keyword,
+        filters,
+        interval_num,
+        interval_start: interval_start ? new Date(interval_start).toISOString() : null,
+        interval_end: interval_end ? new Date(interval_end).toISOString() : null,
+        batch_limit,
+        total_limit: total_limit || null,
+        transfer_lib_id: transfer_lib_id || null,
+        transfer_method: transfer_lib_id ? transfer_method : null,
+        sub_pattern: transfer_lib_id ? sub_pattern : null,
+        sub_repl: transfer_lib_id ? sub_repl : null
+      };
+      issues = [];
+      creationFailed = false;
+      let saved: DownloadPlan;
+      if (id) {
+        const { data } = await api
+          .post('download/plan/upsert', { json: { id, ...settings } })
+          .json<Resp<DownloadPlan>>();
+        saved = data;
+      } else {
+        const recovery = attempted
+          ? await api.get(`download/plan/request/${creationRequestId}`).json<Resp<DownloadPlanCreateResult>>()
+          : null;
+        attempted ??= { request_id: creationRequestId, plan: settings };
+        const { data } = recovery?.data.created
+          ? recovery
+          : await api.post('download/plan/create', { json: attempted }).json<Resp<DownloadPlanCreateResult>>();
+        if (!data.created) {
+          issues = data.issues ?? [];
+          attempted = null;
+          return;
         }
-      })
-      .json<Resp<DownloadPlan>>()
-      .then(({ data }) => {
-        modal.close();
-        onsave?.(data);
-        // reset the form
-        if (!id) {
-          setTimeout(() => {
-            keyword = '';
-            filters = null;
-            interval_num = 1;
-            interval_start = null;
-            interval_end = null;
-            batch_limit = 10;
-            total_limit = null;
-            transfer_lib_id = 0;
-            transfer_method = supportsHardlink ? 'hardlink' : 'symlink';
-            sub_pattern = DEFAULT_SUB_PATTERN;
-            sub_repl = DEFAULT_SUB_REPL;
-            resources = [];
-            abortController?.abort();
-          }, 200);
-        }
-      })
-      .finally(() => loading.end());
+        saved = data.plan;
+        oncreated?.(data);
+        attempted = null;
+      }
+      modal.close();
+      onsave?.(saved);
+      // reset the form
+      if (!id && !oncreated) {
+        setTimeout(() => {
+          creationRequestId = uuidv4();
+          keyword = '';
+          filters = null;
+          interval_num = 1;
+          interval_start = null;
+          interval_end = null;
+          batch_limit = 10;
+          total_limit = null;
+          transfer_lib_id = 0;
+          transfer_method = supportsHardlink ? 'hardlink' : 'symlink';
+          sub_pattern = DEFAULT_SUB_PATTERN;
+          sub_repl = DEFAULT_SUB_REPL;
+          resources = [];
+          abortController?.abort();
+        }, 200);
+      }
+    } catch (error) {
+      const rejected =
+        isHTTPError(error) &&
+        error.response.status >= 400 &&
+        error.response.status < 500 &&
+        ![408, 409, 429].includes(error.response.status);
+      if (rejected) attempted = null;
+      creationFailed = !id && !rejected;
+    } finally {
+      loading.end();
+    }
   }
 
   onMount(() => {
@@ -240,7 +299,7 @@
           graphOptions = data.items
             .filter((g) => g.node_types.includes('search_start') && !g.only_preview)
             .map((g) => ({ value: g.id, label: g.name }));
-          graph_id = graphOptions[0]?.value as number | undefined;
+          graph_id ??= graphOptions[0]?.value as number | undefined;
           configure(graph_id);
         });
     }
@@ -272,7 +331,7 @@
       mediaLibs = _mediaLibs;
       supportsHardlink = _platform !== 'win32';
       // set the initial values
-      if (!directory) {
+      if (!directory && !dir) {
         directory = _directories[0] || null;
       }
       if (!downloader_id) {
@@ -298,7 +357,19 @@
       upsert();
     }}
   >
-    <fieldset class="fieldset">
+    {#if !id}
+      <p class="mb-3 text-sm">{$_('assistant.plan.creation_behavior')}</p>
+      <p class="mb-3 text-sm text-base-content/70">{$_('assistant.plan.validation_scope')}</p>
+    {/if}
+    {#if creationFailed}
+      <p class="mb-3 text-sm text-error" role="alert">{$_('assistant.plan.creation_unknown')}</p>
+    {/if}
+    {#if issues.length}
+      <ul class="mb-3 list-inside list-disc text-sm text-error" role="alert">
+        {#each issues as issue, index (index)}<li>{issue.path}: {issue.message}</li>{/each}
+      </ul>
+    {/if}
+    <fieldset class="fieldset" disabled={$loading !== null || !!attempted}>
       <!-- graph selection and preview -->
       <Label required>{$_('field.graph')}</Label>
       <div class="flex gap-2">
@@ -479,7 +550,7 @@
         class="btn btn-submit"
         disabled={$loading !== null || !graph_id || !downloader_id || (keywordRequired && !keyword.trim())}
       >
-        {$_('message.confirm')}
+        {$_(creationFailed ? 'assistant.plan.recover' : id ? 'message.confirm' : 'assistant.plan.create')}
         {#if $loading}
           <span class="loading loading-xs loading-dots"></span>
         {/if}

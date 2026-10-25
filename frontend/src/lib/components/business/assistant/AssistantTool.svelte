@@ -3,7 +3,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
-  const { tool, unsaved = false }: { tool: AssistantTool; unsaved?: boolean } = $props();
+  const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
   const statusIcon = $derived.by(() => {
     if (tool.status === 'complete') return icons.checkmark;
     if (tool.status === 'error') return icons.warning;
@@ -81,5 +81,15 @@
   {@const { name, workflow_id, replayed } = tool.result.data}
   <p class="ml-8 text-xs leading-5 text-base-content/60">
     {$_(replayed ? 'assistant.create.replayed' : 'assistant.create.created', [String(name), Number(workflow_id)])}
+  </p>
+{/if}
+{#if onplan && tool.name === 'validate_download_plan' && tool.result?.ok && tool.result.data?.valid}
+  <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={onplan}>
+    {$_('assistant.plan.review')}
+  </button>
+{/if}
+{#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.created}
+  <p class="ml-8 text-xs leading-5 text-base-content/60">
+    {$_('assistant.plan.created', Number(tool.result.data.plan_id))}
   </p>
 {/if}

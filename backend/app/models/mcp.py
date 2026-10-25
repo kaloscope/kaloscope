@@ -132,6 +132,47 @@ class PageResult[T](ItemsResult[T]):
     total: int = Field(ge=0, description="Total matching records before pagination.")
 
 
+class PlanOptionsResult(Result):
+    """Read published search configuration and safe downloader choices."""
+
+    workflow_id: int
+    workflow_name: str
+    published: bool
+    search: dict[str, JSONType] | None
+    only_preview: bool
+    downloaders: dict[str, JSONType]
+    directories: list[str]
+    interval_unit: Literal["hours"]
+    timezone: Literal["UTC"]
+
+
+class PlanValidationResult(Result):
+    """Describe explicit validation without running the indexer or downloader."""
+
+    valid: bool
+    request_id: str
+    workflow_id: int
+    workflow_name: str
+    plan: dict[str, JSONType]
+    issues: list[dict[str, str]]
+    warnings: list[str]
+    first_execution: Literal["scheduled", "queued_after_creation"]
+    interval_unit: Literal["hours"]
+    timezone: Literal["UTC"]
+
+
+class PlanCreationResult(Result):
+    """Describe creation or field errors and recorded first-attempt facts."""
+
+    created: bool
+    workflow_id: int
+    workflow_name: str
+    plan: dict[str, JSONType]
+    plan_id: int | None = None
+    replayed: bool = False
+    first_execution: dict[str, JSONType] | Literal["scheduled", "queued_after_creation"]
+
+
 class RecordResult(Result):
     """Preserve record IDs and timestamps already encoded by the shared JSON utility."""
 

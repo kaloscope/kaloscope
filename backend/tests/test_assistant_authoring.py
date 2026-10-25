@@ -101,7 +101,8 @@ def recipe_nodes(movie):
 
 @pytest.mark.parametrize("movie", [False, True], ids=["json-indexer", "html-movie"])
 @pytest.mark.parametrize("verbose", [False, True], ids=["short", "compacted"])
-def test_generate_and_repair(monkeypatch, movie, verbose):
+@pytest.mark.parametrize("read_back", [False, True], ids=["reference", "read-back"])
+def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
     streams = []
     network = []
     base = {}
@@ -187,6 +188,8 @@ def test_generate_and_repair(monkeypatch, movie, verbose):
                 ("list_node_types", {"node_type": name, "include_examples": False})
                 for name in names
             ]
+            if read_back:
+                calls.append(("get_workflow", {"workflow_id": base["workflow_id"]}))
         elif step == 4:
             names = {tool["function"]["name"] for tool in body["tools"]}
             assert "preview_workflow_draft" in names

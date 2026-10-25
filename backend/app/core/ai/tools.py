@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
+from uuid import UUID
 
 from openai.types.chat import ChatCompletionFunctionToolParam
 from pydantic import (
@@ -52,7 +53,7 @@ from app.models.assistant import (
     WorkflowOrdering,
     media_resource,
 )
-from app.models.download import DownloadQuery
+from app.models.download import DownloadPlanCheck, DownloadPlanCreate, DownloadQuery
 from app.models.flow import (
     GraphCategory,
     GraphDocument,
@@ -68,6 +69,7 @@ from app.models.mcp import NodeTypesResult
 from app.models.media import MediaQuery
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
+from app.services.download import DownloadPlanService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.workflow_authoring import (
@@ -158,6 +160,20 @@ class NodeQuery(ToolArguments):
     category: CategoryValue | None = None
     node_type: str | None = Field(default=None, min_length=1, max_length=255)
     include_examples: bool = True
+
+
+class PlanOptions(ToolArguments):
+    """Read published search settings and paginated downloader choices."""
+
+    workflow_id: int = Field(gt=0)
+    page_num: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=50)
+
+
+class PlanID(ToolArguments):
+    """Read one download plan and its recorded first-attempt outcome."""
+
+    plan_id: int = Field(gt=0)
 
 
 class ReferenceQuery(ToolArguments):
@@ -273,6 +289,12 @@ class DownloadDetails(ToolArguments):
     limit: int = Field(default=2000, ge=1, le=2000, strict=True)
 
 
+class PlanCreate(ToolArguments):
+    """Create settings retained by successful validation in this conversation."""
+
+    request_id: UUID
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
@@ -284,6 +306,7 @@ class NavigationTarget(ToolArguments):
         "media_item",
         "active_downloads",
         "completed_downloads",
+        "download_plans",
     ]
     resource_id: ResourceID | None = None
 
@@ -298,7 +321,8 @@ class NavigationTarget(ToolArguments):
             ValueError: If the resource does not match the destination type.
         """
         listed = (
-            self.page in {"workflows", "workflow_jobs"} or self.page in DOWNLOAD_PATHS
+            self.page in {"workflows", "workflow_jobs", "download_plans"}
+            or self.page in DOWNLOAD_PATHS
         )
         if listed != (self.resource_id is None):
             raise ValueError("Resource does not match the destination")
@@ -325,6 +349,30 @@ class AssistantTool:
 
 
 TOOLS = (
+    AssistantTool(
+        "get_download_plan_options",
+        "Read published indexer filters/downloaders; unlock plan validation/creation.",
+        PlanOptions,
+        admin=True,
+    ),
+    AssistantTool(
+        "validate_download_plan",
+        "Check plan/sample without execution; return editor settings/request_id.",
+        DownloadPlanCheck,
+        admin=True,
+    ),
+    AssistantTool(
+        "create_download_plan",
+        "Create validated settings only when authorized; reuse request_id. "
+        "Active plans queue real search/downloads; future starts wait.",
+        PlanCreate,
+        admin=True,
+    ),
+    AssistantTool(
+        "get_download_plan",
+        "Read plan and first-attempt outcome; not live download success.",
+        PlanID,
+    ),
     AssistantTool(
         "list_workflows",
         "Page accessible workflow metadata/IDs without graphs.",
@@ -462,8 +510,8 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
         user: Authenticated account with current resource permissions.
 
     Returns:
-        Read and preview tools, plus empty draft creation for editors; no tool
-        saves canvas content, publishes, executes workflows, or changes media.
+        Read and preview tools, plus draft and download-plan creation for editors.
+        Canvas saves, publication and direct workflow execution remain user actions.
     """
     return {
         tool.name: tool
@@ -544,7 +592,7 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
 
 
 def tool_schemas(
-    user: UserInfo, *, authoring: bool = False
+    user: UserInfo, *, authoring: bool = False, plan_authoring: bool = False
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -552,6 +600,7 @@ def tool_schemas(
         user: Account whose tool catalog is being requested.
         authoring: Focus this recipe turn on workflow construction. Other tools
             return next turn; this changes model context, never authorization.
+        plan_authoring: Expose plan tools after reading the source workflows.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -560,6 +609,17 @@ def tool_schemas(
     """
     schemas = []
     for tool in available_tools(user).values():
+        if (
+            tool.name
+            in {
+                "get_download_plan_options",
+                "validate_download_plan",
+                "create_download_plan",
+                "get_download_plan",
+            }
+            and not plan_authoring
+        ):
+            continue
         if authoring and tool.name not in {
             "list_workflows",
             "get_workflow",
@@ -672,6 +732,16 @@ async def execute_tool(
     try:
         async with asyncio.timeout(TOOL_TIMEOUT):
             match args:
+                case PlanOptions():
+                    result = await DownloadPlanService.authoring_options(
+                        **args.model_dump(), user=user
+                    )
+                case DownloadPlanCheck():
+                    result = await DownloadPlanService.validate_creation(args, user)
+                case PlanCreate():
+                    result = await create_plan(args, conversation_id, call_id, user)
+                case PlanID():
+                    result = await DownloadPlanService.get_creation(args.plan_id, user)
                 case NavigationTarget(page="media_library", resource_id=int(lib_id)):
                     library = await MediaLibService.get_accessible(lib_id, user)
                     result = NavigationResult(
@@ -692,6 +762,8 @@ async def execute_tool(
                     )
                 case NavigationTarget(page="workflow_jobs"):
                     result = NavigationResult(target=args, path=WORKFLOW_JOBS_PATH)
+                case NavigationTarget(page="download_plans"):
+                    result = NavigationResult(target=args, path="/downloads/plans")
                 case NavigationTarget():
                     path = WORKFLOW_PATH
                     if args.resource_id is not None:
@@ -997,6 +1069,80 @@ async def resolve_document(
         return snapshot.document
     FlowGraphService._check_version(graph, reference.draft_version)
     return graph.draft or {"nodes": [], "edges": []}
+
+
+async def create_plan(
+    args: PlanCreate, conversation_id: int, call_id: str, user: UserInfo
+) -> dict:
+    """Recover a plan across retries and create only a reviewed request identity.
+
+    Args:
+        args: Request ID returned by validation in this conversation.
+        conversation_id: Server-owned conversation.
+        call_id: Server-owned call record.
+        user: Current account whose administrator rights are checked by the service.
+
+    Returns:
+        Shared creation result, replaying the first committed plan in this request.
+
+    Raises:
+        NotFoundException: If the call or validation record is unavailable.
+    """
+    import hashlib
+
+    from app.models.download import DownloadPlan
+
+    call = await AssistantToolCall.get_or_none(
+        call_id=call_id, turn__conversation_id=conversation_id
+    )
+    if call is None:
+        raise NotFoundException
+    turn_ids = []
+    turn_id = call.turn_id
+    while turn_id is not None and turn_id not in turn_ids:
+        turn_ids.append(turn_id)
+        turn = await AssistantTurn.get_or_none(
+            id=turn_id, conversation_id=conversation_id
+        )
+        turn_id = turn.retry_of if turn else None
+    for earlier in (
+        await AssistantToolCall.filter(
+            turn_id__in=turn_ids, name="create_download_plan"
+        )
+        .exclude(id=call.id)
+        .order_by("id")
+    ):
+        try:
+            request = PlanCreate.model_validate_json(earlier.arguments)
+        except ValidationError:
+            continue
+        key = hashlib.sha256(f"{user.id}:{request.request_id}".encode()).hexdigest()
+        plan = await DownloadPlan.get_or_none(creation_key=key)
+        if plan is not None:
+            return await DownloadPlanService.creation_result(plan, user, replayed=True)
+    records = (
+        await AssistantToolCall.filter(
+            turn__conversation_id=conversation_id,
+            name="validate_download_plan",
+            status="complete",
+        )
+        .order_by("-id")
+        .limit(30)
+    )
+    for record in records:
+        data = (record.result or {}).get("data") or {}
+        if data.get("valid") and data.get("request_id") == str(args.request_id):
+            # an editor may already have created this reviewed proposal
+            key = hashlib.sha256(f"{user.id}:{args.request_id}".encode()).hexdigest()
+            plan = await DownloadPlan.get_or_none(creation_key=key)
+            if plan is not None:
+                return await DownloadPlanService.creation_result(
+                    plan, user, replayed=True
+                )
+            return await DownloadPlanService.create_once(
+                DownloadPlanCreate(request_id=args.request_id, plan=data["plan"]), user
+            )
+    raise NotFoundException
 
 
 async def create_workflow(

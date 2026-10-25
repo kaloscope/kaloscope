@@ -21,7 +21,12 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.flow.reference import get_workflow_reference as read_workflow_reference
-from app.models.download import DownloadQuery, DownloadState
+from app.models.download import (
+    DownloadPlanCheck,
+    DownloadPlanCreate,
+    DownloadQuery,
+    DownloadState,
+)
 from app.models.flow import (
     GraphCategory,
     GraphDocument,
@@ -44,6 +49,9 @@ from app.models.mcp import (
     MediaResult,
     NodeTypesResult,
     PageResult,
+    PlanCreationResult,
+    PlanOptionsResult,
+    PlanValidationResult,
     ProviderResult,
     WorkflowDetails,
     WorkflowDraftResult,
@@ -62,7 +70,7 @@ from app.models.workflow_authoring import (
     TemplateValidation,
 )
 from app.services.ai import AIProviderService
-from app.services.download import DownloadTaskService
+from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.workflow_authoring import (
@@ -96,6 +104,9 @@ READ_ONLY = ToolAnnotations(
 
 _READ_TOOLS = frozenset(
     {
+        "get_download_plan_options",
+        "validate_download_plan",
+        "get_download_plan",
         "list_workflows",
         "get_workflow",
         "list_node_types",
@@ -116,6 +127,7 @@ _READ_TOOLS = frozenset(
 )
 _WRITE_TOOLS = frozenset(
     {
+        "create_download_plan",
         "create_workflow_draft",
         "save_workflow_draft",
         "restore_workflow_draft",
@@ -237,6 +249,11 @@ def create_server() -> MCPServer:
             "administrators to create, save, and restore drafts. "
             "HTTP probes also require administrator/read-write access and send real "
             "requests only when the user asks. "
+            "Download plans use published indexers: read options, validate settings, "
+            "and create only on explicit user authorization with a stable request_id. "
+            "Active plans queue real search/downloads immediately; future starts wait. "
+            "Retry the same request_id and settings to recover the same plan; read its "
+            "first-attempt outcome separately. Creation is not download success. "
             "List resources before reading their details; "
             "inspect node schemas and logs to diagnose workflows. Access follows the "
             "account's permissions; AI provider settings require an administrator. "
@@ -251,7 +268,8 @@ def create_server() -> MCPServer:
             "movie modes, correct field errors and recheck before previewing. "
             "Use the exact tested templates; stop after two unsuccessful repairs "
             "and report missing evidence. Validation is not execution. "
-            "No tool publishes, executes, downloads, scans, deletes workflows, "
+            "Except authorized download-plan execution, no tool publishes, "
+            "executes, downloads, scans, deletes workflows, "
             "or calls an AI model. "
             "For invalid arguments, correct the reported fields before retrying. "
             "For HTTP 401, ask the user to generate a new MCP access token and "
@@ -266,6 +284,106 @@ def create_server() -> MCPServer:
             "repeating the same call."
         ),
     )
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_download_plan_options(
+        ctx: Context,
+        workflow_id: Annotated[
+            _ResourceID, Field(description="Published indexer workflow ID.")
+        ],
+        page_num: _PageNumber = 1,
+        page_size: Annotated[
+            int, Field(ge=1, le=50, description="Downloader choices per page.")
+        ] = 20,
+    ) -> PlanOptionsResult:
+        """Read published search fields and safe downloader choices without probes.
+
+        Args:
+            ctx: Authenticated request context.
+            workflow_id: Published indexer identity.
+            page_num: One-based downloader page.
+            page_size: Maximum downloader choices.
+
+        Returns:
+            Settings and safe identities; no credentials or network execution.
+        """
+        return PlanOptionsResult.model_validate(
+            await _read(
+                DownloadPlanService.authoring_options(
+                    workflow_id, _user(ctx), page_num, page_size
+                )
+            )
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def validate_download_plan(
+        ctx: Context,
+        validation: Annotated[
+            DownloadPlanCheck,
+            Field(description="Settings and optional search sample; no execution."),
+        ],
+    ) -> PlanValidationResult:
+        """Check settings and supply a stable request ID for review and creation.
+
+        Args:
+            ctx: Authenticated administrator context.
+            validation: Final settings and optional sample, using UTC-aware times.
+
+        Returns:
+            Located issues, editor settings and first-execution behavior.
+        """
+        return PlanValidationResult.model_validate(
+            await _read(DownloadPlanService.validate_creation(validation, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def create_download_plan(
+        ctx: Context,
+        creation: Annotated[
+            DownloadPlanCreate,
+            Field(description="Final settings; reuse request_id on every retry."),
+        ],
+    ) -> PlanCreationResult:
+        """Create one plan; active plans queue real search and download submissions.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            creation: Stable request identity and user-authorized settings.
+
+        Returns:
+            Existing or newly created plan and its first-attempt state. No execution
+            is repeated by a replay; use get_download_plan to read later outcomes.
+        """
+        return PlanCreationResult.model_validate(
+            await _read(DownloadPlanService.create_once(creation, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_download_plan(
+        ctx: Context,
+        plan_id: Annotated[
+            _ResourceID, Field(description="Plan ID, not its workflow ID.")
+        ],
+    ) -> PlanCreationResult:
+        """Read a plan and its stored first-attempt outcome under current permissions.
+
+        Args:
+            ctx: Authenticated request context.
+            plan_id: Plan identity returned by creation.
+
+        Returns:
+            Current settings and execution facts; submission is not download success.
+        """
+        return PlanCreationResult.model_validate(
+            await _read(DownloadPlanService.get_creation(plan_id, _user(ctx)))
+        )
 
     @server.tool(annotations=READ_ONLY)
     async def validate_workflow(

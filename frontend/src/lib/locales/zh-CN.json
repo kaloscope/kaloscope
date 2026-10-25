@@ -1015,7 +1015,8 @@
     "assistant_canvas_changed": "画布已变化，请基于当前画布重新发送请求",
     "assistant_canvas_wait_save": "请确认保存结果后再离开画布",
     "assistant_canvas_already_saved": "草稿已保存，修改已保留",
-    "assistant_canvas_already_reverted": "修改此前已撤回，未保存"
+    "assistant_canvas_already_reverted": "修改此前已撤回，未保存",
+    "download_plan_request_conflict": "此请求已按其他配置创建计划，请重新打开原计划预览以恢复结果。"
   },
   "ai": {
     "custom": "自定义提供商",
@@ -1119,7 +1120,8 @@
       "media_item": "媒体详情",
       "active_downloads": "正在下载",
       "completed_downloads": "已完成下载",
-      "other": "无页面上下文"
+      "other": "无页面上下文",
+      "download_plans": "下载计划"
     },
     "tools": {
       "list_workflows": "查找工作流",
@@ -1141,7 +1143,11 @@
       "list_media_items": "查找媒体",
       "get_media_item": "读取媒体详情",
       "list_download_tasks": "查找下载任务",
-      "get_download_task": "读取下载详情"
+      "get_download_task": "读取下载详情",
+      "get_download_plan_options": "读取下载计划选项",
+      "validate_download_plan": "校验下载计划",
+      "create_download_plan": "创建下载计划",
+      "get_download_plan": "读取下载计划"
     },
     "tool_status": {
       "running": "执行中",
@@ -1204,6 +1210,24 @@
       "record": "画布修改记录，不会自动重新应用",
       "leave_title": "离开当前画布？",
       "leave_message": "助手修改将被撤回，此前未保存的手工编辑仍会提示保存"
+    },
+    "plan": {
+      "review": "检查并创建计划",
+      "create": "创建并开始调度",
+      "recover": "恢复创建结果",
+      "created": "已创建下载计划 #{0}。",
+      "creation_behavior": "创建后会尽快搜索并添加下载任务。若设置未来开始时间，则到期后由每小时检查触发首轮；之后按小时间隔执行。此处显示本地时间，保存时转换为 UTC。不会发布索引器。",
+      "creation_unknown": "暂时无法确认创建结果。请保留当前配置并恢复原请求，不会重复创建计划。",
+      "first": {
+        "queued": "首轮已排队",
+        "waiting": "等待满足调度条件",
+        "unconfirmed": "首轮已开始，最终结果待确认",
+        "completed": "首轮已结束，下载可能仍在进行",
+        "partial": "首轮部分失败",
+        "failed": "首轮失败，后续间隔可能重试",
+        "unavailable": "暂无首轮执行记录"
+      },
+      "validation_scope": "校验只检查配置，不证明当前有可下载结果。更改关键词或筛选条件，或点击搜索，都会执行索引器预览。"
     }
   }
 }

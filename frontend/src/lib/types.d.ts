@@ -184,7 +184,8 @@ export type AssistantDestination = {
     | 'media_library'
     | 'media_item'
     | 'active_downloads'
-    | 'completed_downloads';
+    | 'completed_downloads'
+    | 'download_plans';
   resource_id?: number | null;
 };
 
@@ -907,12 +908,58 @@ export type DownloadPlan = {
   total_count: number;
   last_exec: string | null;
   running: boolean;
+  first_execution?: { status: string; added?: number; errors?: number; uncertain?: number };
 
   // transfer options
   transfer_lib_id: number | null;
   transfer_method: keyof typeof TransferMethod | null;
   sub_pattern: string | null;
   sub_repl: string | null;
+};
+
+/** Final editable settings shared by plan validation and creation. */
+export type DownloadPlanSettings = Pick<
+  DownloadPlan,
+  | 'graph_id'
+  | 'downloader_id'
+  | 'dir'
+  | 'keyword'
+  | 'filters'
+  | 'interval_num'
+  | 'interval_start'
+  | 'interval_end'
+  | 'batch_limit'
+  | 'total_limit'
+  | 'transfer_lib_id'
+  | 'transfer_method'
+  | 'sub_pattern'
+  | 'sub_repl'
+>;
+
+/** Observed creation result; a submitted task is not a completed download. */
+export type DownloadPlanCreation = {
+  created: true;
+  plan_id: number;
+  workflow_id: number;
+  plan: DownloadPlan;
+  replayed?: boolean;
+  first_execution: { status: string; added?: number; errors?: number; uncertain?: number };
+};
+
+/** Validation errors leave the editor available for corrections. */
+export type DownloadPlanCreateResult =
+  | DownloadPlanCreation
+  | {
+      created: false;
+      issues: { path: string; message: string }[];
+    };
+
+/** A validated proposal that can be opened in the existing plan editor. */
+export type DownloadPlanPreview = {
+  valid: boolean;
+  request_id: string;
+  workflow_name: string;
+  plan: DownloadPlanSettings;
 };
 
 /**

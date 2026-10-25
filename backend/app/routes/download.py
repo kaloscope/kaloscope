@@ -24,6 +24,8 @@ from app.models.download import (
     Downloader,
     DownloaderUpsert,
     DownloadPlan,
+    DownloadPlanCheck,
+    DownloadPlanCreate,
     DownloadPlanQuery,
     DownloadPlanUpsert,
     DownloadQuery,
@@ -179,18 +181,26 @@ async def delete_downloaders(_, body: IDs) -> HTTPResponse:
 
 
 @download.get("/plan/list")
+@authorize()
 @validate(query=DownloadPlanQuery)
-async def list_plans(_, query: DownloadPlanQuery) -> HTTPResponse:
-    """List the download plans.
+async def list_plans(request: Request, query: DownloadPlanQuery) -> HTTPResponse:
+    """List plans within current workflow and transfer-library permissions.
 
     Args:
-        _: Unused request.
+        request: Authenticated request with current resource permissions.
         query: Query filters and options.
 
     Returns:
         Response containing the requested data.
     """
     queries = []
+    user = request.ctx.user
+    if user.role != UserRole.ADMIN:
+        queries.append(Q(graph_id__in=user.perms.indexer_ids if user.perms else []))
+        queries.append(
+            Q(transfer_lib_id=None)
+            | Q(transfer_lib_id__in=user.perms.media_lib_ids if user.perms else [])
+        )
     if query.graph_id:
         queries.append(Q(graph_id=query.graph_id))
     if query.keyword:
@@ -200,12 +210,81 @@ async def list_plans(_, query: DownloadPlanQuery) -> HTTPResponse:
     # attach the graph name and running status for each plan
     graph_ids = {job.graph_id for job in page.items}
     graphs = {g.id: g for g in await FlowGraph.filter(id__in=graph_ids)}
-    for plan in result["items"]:
+    for plan, record in zip(result["items"], page.items, strict=True):
         graph = graphs.get(plan["graph_id"])
         plan["graph_name"] = graph.name if graph else None
         published = graph.state != GraphState.DRAFT if graph else False
         plan["running"] = published and not plan["inactive"]
+        if record.creation_receipt:
+            first = record.creation_receipt["first_execution"]
+            plan["first_execution"] = (
+                {"status": "waiting"}
+                if first["status"] == "queued" and not plan["running"]
+                else first
+            )
     return json(result)
+
+
+@download.post("/plan/validate")
+@authorize(role=UserRole.ADMIN)
+@validate(json=DownloadPlanCheck)
+async def validate_plan(request: Request, body: DownloadPlanCheck) -> HTTPResponse:
+    """Validate a plan without executing the indexer or downloader.
+
+    Args:
+        request: Authenticated administrator request.
+        body: Proposed settings and optional sample.
+
+    Returns:
+        Shared validation result for the existing editor.
+    """
+    return json(await DownloadPlanService.validate_creation(body, request.ctx.user))
+
+
+@download.post("/plan/create")
+@authorize(role=UserRole.ADMIN)
+@validate(json=DownloadPlanCreate)
+async def create_plan(request: Request, body: DownloadPlanCreate) -> HTTPResponse:
+    """Create once and queue the authorized first attempt without waiting for it.
+
+    Args:
+        request: Authenticated administrator request.
+        body: Stable request identity and final settings.
+
+    Returns:
+        Created or replayed plan, or field validation errors.
+    """
+    return json(await DownloadPlanService.create_once(body, request.ctx.user))
+
+
+@download.get("/plan/<id:int>")
+@authorize()
+async def get_plan(request: Request, id: int) -> HTTPResponse:
+    """Read a plan and its stored first-attempt result.
+
+    Args:
+        request: Authenticated request with current workflow permissions.
+        id: Plan identity.
+
+    Returns:
+        Shared permission-checked plan result.
+    """
+    return json(await DownloadPlanService.get_creation(id, request.ctx.user))
+
+
+@download.get("/plan/request/<request_id:uuid>")
+@authorize(role=UserRole.ADMIN)
+async def find_plan(request: Request, request_id) -> HTTPResponse:
+    """Recover the current account's plan after an uncertain editor response.
+
+    Args:
+        request: Authenticated administrator request.
+        request_id: Original creation identity parsed from the route.
+
+    Returns:
+        The committed plan or a negative creation result.
+    """
+    return json(await DownloadPlanService.find_creation(request_id, request.ctx.user))
 
 
 @download.post("/plan/upsert")

@@ -1,11 +1,17 @@
+import hashlib
 import shutil
 from contextlib import nullcontext
 from dataclasses import replace
+from datetime import UTC
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from uuid import UUID, uuid4
 
 import aiofiles
+import orjson
 from tortoise import timezone
+from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Q
 from tortoise.functions import Count, Sum
 from tortoise.queryset import QuerySet
@@ -33,13 +39,22 @@ from app.core.dl.syncer import (
     resolve_details,
     submission_lock,
 )
-from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.exceptions import (
+    BadRequestException,
+    ErrorCode,
+    KaloscopeException,
+    NotFoundException,
+)
+from app.core.flow.nodes.base import start_config
+from app.core.flow.outputs import check_output
 from app.models.download import (
     DownloadAdd,
     DownloadDir,
     Downloader,
     DownloaderUpsert,
     DownloadPlan,
+    DownloadPlanCheck,
+    DownloadPlanCreate,
     DownloadPlanUpsert,
     DownloadQuery,
     DownloadState,
@@ -48,11 +63,20 @@ from app.models.download import (
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
 )
+from app.models.flow import GraphCategory, GraphState
+from app.models.user import UserInfo
 from app.services.base import BaseService
+from app.services.flow import FlowGraphService
+from app.services.media import MediaLibService
 from app.utils.bittorrent import (
     decode_torrent,
+    get_magnet_hash,
+    get_magnet_hash_v2,
+    is_info_hash,
+    is_info_hash_v2,
     standardize_magnet,
 )
+from app.utils.json import dumps
 
 
 class DownloaderService(BaseService[Downloader], model=Downloader):
@@ -806,6 +830,418 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
 class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
     """Manage persisted automated download plans."""
+
+    @classmethod
+    async def authoring_options(
+        cls, workflow_id: int, user: UserInfo, page_num: int = 1, page_size: int = 20
+    ) -> dict:
+        """Read published search settings and a page of safe downloader choices.
+
+        Args:
+            workflow_id: Indexer selected from existing workflow queries.
+            user: Current account with workflow permissions.
+            page_num: One-based downloader page.
+            page_size: Number of downloader choices, at most 50.
+
+        Returns:
+            Published settings, downloader capabilities and recent directories.
+            Credentials, driver probes and search execution are excluded.
+        """
+        FlowGraphService.require_editor(user)
+        graph = await FlowGraphService.get_accessible(workflow_id, user)
+        page = await Downloader.page(
+            page_num=page_num, page_size=min(page_size, 50), ordering="priority"
+        )
+        downloaders = []
+        for downloader in page.items:
+            driver = load_driver(decrypt_config(downloader.config))
+            downloaders.append(
+                {
+                    "id": downloader.id,
+                    "name": downloader.name,
+                    "source_types": sorted(driver.source_types),
+                }
+            )
+            await driver.close()
+        return {
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "published": graph.state != GraphState.DRAFT and bool(graph.definition),
+            "search": (await start_config(graph, "search"))["search"],
+            "only_preview": graph.only_preview(),
+            "downloaders": {
+                "items": downloaders,
+                "total": page.total,
+                "page_num": page_num,
+                "page_size": min(page_size, 50),
+                "has_more": page_num * min(page_size, 50) < page.total,
+            },
+            "directories": await DownloadDir.all()
+            .order_by("-last_used")
+            .limit(3)
+            .values_list("path", flat=True),
+            "interval_unit": "hours",
+            "timezone": "UTC",
+            "creation_rules": "Validate, review in the editor, then create only "
+            "when explicitly authorized using the validation request_id. Reuse this "
+            "ID on retries. Active plans queue real search/downloads; future starts "
+            "wait for the hourly check. One plan per request. Use get_download_plan "
+            "for first-attempt facts, not live download success.",
+        }
+
+    @classmethod
+    async def validate_creation(cls, body: DownloadPlanCheck, user: UserInfo) -> dict:
+        """Check a plan against the published indexer without executing it.
+
+        Args:
+            body: Editor fields and optional explicit search-result sample.
+            user: Current account; creation requires the same administrator role.
+
+        Returns:
+            Located issues, normalized editor data and first-execution semantics.
+
+        Raises:
+            ForbiddenException: If the account cannot create plans or read resources.
+            NotFoundException: If the selected workflow does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        plan = body.plan
+        graph = await FlowGraphService.get_accessible(plan.graph_id, user)
+        issues = []
+        warnings = [
+            "Configuration and supplied samples only; no search, HTTP request "
+            "or download was executed."
+        ]
+        if (
+            graph.category != GraphCategory.INDEXER
+            or graph.state == GraphState.DRAFT
+            or not graph.definition
+        ):
+            issues.append(
+                {
+                    "path": "graph_id",
+                    "message": "Select an indexer with a published definition.",
+                }
+            )
+        search = (await start_config(graph, "search"))["search"]
+        if search is None or graph.only_preview():
+            issues.append(
+                {
+                    "path": "graph_id",
+                    "message": "Published indexer needs a downloadable search entry.",
+                }
+            )
+        if not plan.dir.strip():
+            issues.append({"path": "dir", "message": "Supply a download directory."})
+        keyword = (search or {}).get("keyword") or {}
+        configured = (search or {}).get("filters") or {}
+        if not isinstance(keyword, dict) or not isinstance(configured, dict):
+            issues.append(
+                {
+                    "path": "graph_id",
+                    "message": "Published keyword/filters must be mappings.",
+                }
+            )
+            keyword, configured = {}, {}
+        if keyword.get("required") and not plan.keyword.strip():
+            issues.append(
+                {"path": "keyword", "message": "This indexer requires a keyword."}
+            )
+        for key, value in (plan.filters or {}).items():
+            if (
+                key.startswith("$")
+                or key in {"keyword", "page_num", "page_size"}
+                or key not in configured
+            ):
+                issues.append(
+                    {
+                        "path": f"filters.{key}",
+                        "message": "Use declared filters, not reserved inputs.",
+                    }
+                )
+                continue
+            field = configured[key] if isinstance(configured[key], dict) else {}
+            values = value if isinstance(value, list) else [value]
+            if not field.get("type") or any(
+                not isinstance(item, (str, int, float, bool)) for item in values
+            ):
+                issues.append(
+                    {
+                        "path": f"filters.{key}",
+                        "message": "Match the declared filter's value type.",
+                    }
+                )
+            elif field.get("type") in {"checkbox", "calendar-range"} and not isinstance(
+                value, list
+            ):
+                issues.append(
+                    {
+                        "path": f"filters.{key}",
+                        "message": "Checkbox and date-range values must be arrays.",
+                    }
+                )
+            elif field.get("type") not in {"checkbox", "calendar-range"} and isinstance(
+                value, list
+            ):
+                issues.append(
+                    {
+                        "path": f"filters.{key}",
+                        "message": "This filter accepts one value.",
+                    }
+                )
+            elif field.get("options") and any(
+                str(item) not in field["options"] for item in values
+            ):
+                issues.append(
+                    {"path": f"filters.{key}", "message": "Select a declared option."}
+                )
+            elif field.get("type") == "calendar-range" and len(values) != 2:
+                issues.append(
+                    {"path": f"filters.{key}", "message": "Supply start and end dates."}
+                )
+        for field in ("interval_start", "interval_end"):
+            value = getattr(plan, field)
+            if value is not None and value.tzinfo is None:
+                issues.append(
+                    {
+                        "path": field,
+                        "message": "Include a timezone offset; storage uses UTC.",
+                    }
+                )
+        now = timezone.now()
+        if plan.interval_end and plan.interval_end.tzinfo and plan.interval_end <= now:
+            issues.append(
+                {"path": "interval_end", "message": "End time must be in the future."}
+            )
+        downloader = await Downloader.get_or_none(id=plan.downloader_id)
+        source_types = frozenset()
+        if downloader is None:
+            issues.append(
+                {"path": "downloader_id", "message": "Select an existing downloader."}
+            )
+        else:
+            driver = load_driver(decrypt_config(downloader.config))
+            source_types = driver.source_types
+            if (
+                DownloadSource.MAGNET not in source_types
+                and DownloadSource.TORRENT not in source_types
+            ):
+                issues.append(
+                    {
+                        "path": "downloader_id",
+                        "message": "Download plans need magnet or torrent support.",
+                    }
+                )
+            await driver.close()
+        if plan.transfer_lib_id:
+            await MediaLibService.get_accessible(plan.transfer_lib_id, user)
+            if plan.transfer_method is None:
+                issues.append(
+                    {
+                        "path": "transfer_method",
+                        "message": "Choose a transfer method for the library.",
+                    }
+                )
+        if body.sample is not None:
+            errors, _ = check_output(
+                "search", body.sample, {"page_num": 1, "page_size": plan.batch_limit}
+            )
+            issues.extend(
+                {"path": f"sample.{error.path}", "message": error.message}
+                for error in errors
+            )
+            for index, item in enumerate(
+                body.sample.get("items", [])
+                if isinstance(body.sample.get("items"), list)
+                else []
+            ):
+                link = item.get("link") if isinstance(item, dict) else None
+                if isinstance(link, str):
+                    link = link.strip()
+                valid = isinstance(link, str) and (
+                    is_info_hash(link)
+                    or is_info_hash_v2(link)
+                    or (
+                        link.startswith("magnet:")
+                        and (get_magnet_hash(link) or get_magnet_hash_v2(link))
+                    )
+                )
+                if valid and downloader and DownloadSource.MAGNET not in source_types:
+                    issues.append(
+                        {
+                            "path": f"sample.items.{index}.link",
+                            "message": "Downloader cannot submit magnet/hash links.",
+                        }
+                    )
+                try:
+                    url = urlsplit(link) if isinstance(link, str) else None
+                except ValueError:
+                    url = None
+                if url and url.scheme in {"http", "https"} and url.netloc:
+                    warnings.append(
+                        "HTTP links require real torrent content; the sample "
+                        "does not prove that content or reachability."
+                    )
+                    valid = True
+                if not valid:
+                    issues.append(
+                        {
+                            "path": f"sample.items.{index}.link",
+                            "message": "Use a magnet, BT hash or HTTP(S) torrent URL.",
+                        }
+                    )
+        else:
+            warnings.append(
+                "No search sample supplied; downloadable links are unchecked."
+            )
+        data = plan.model_dump(mode="json", exclude={"id"})
+        for field in ("interval_start", "interval_end"):
+            value = getattr(plan, field)
+            if value is not None and value.tzinfo is not None:
+                data[field] = value.astimezone(UTC).isoformat()
+        return {
+            "valid": not issues,
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "request_id": str(uuid4()),
+            "plan": data,
+            "issues": issues[:12],
+            "warnings": list(dict.fromkeys(warnings))[:4],
+            "first_execution": "scheduled"
+            if plan.interval_start
+            and plan.interval_start.tzinfo
+            and plan.interval_start > now
+            else "queued_after_creation",
+            "interval_unit": "hours",
+            "timezone": "UTC",
+        }
+
+    @classmethod
+    async def creation_result(
+        cls, plan: DownloadPlan, user: UserInfo, *, replayed: bool = False
+    ) -> dict:
+        """Describe a persisted plan and its durable first-attempt receipt.
+
+        Args:
+            plan: Existing plan to describe.
+            user: Current account whose workflow permissions are rechecked.
+            replayed: Whether this is a repeated creation request.
+
+        Returns:
+            Current fields and first-attempt state, never download success.
+        """
+        graph = await FlowGraphService.get_accessible(plan.graph_id, user)
+        if plan.transfer_lib_id:
+            await MediaLibService.get_accessible(plan.transfer_lib_id, user)
+        receipt = plan.creation_receipt or {}
+        first_execution = receipt.get("first_execution", {"status": "unavailable"})
+        if first_execution["status"] == "queued" and (
+            plan.inactive() or graph.state == GraphState.DRAFT
+        ):
+            first_execution = {"status": "waiting"}
+        data = await cls.dump(plan)
+        data.update(
+            graph_name=graph.name,
+            running=graph.state != GraphState.DRAFT and not plan.inactive(),
+            first_execution=first_execution,
+        )
+        return {
+            "created": True,
+            "plan_id": plan.id,
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "replayed": replayed,
+            "plan": data,
+            "first_execution": first_execution,
+            "path": "/downloads/plans",
+        }
+
+    @classmethod
+    async def create_once(cls, body: DownloadPlanCreate, user: UserInfo) -> dict:
+        """Persist one authorized plan and notify the existing download synchronizer.
+
+        Args:
+            body: Stable request ID and final editor settings.
+            user: Current administrator; identity never comes from the request body.
+
+        Returns:
+            Validation errors or the same plan on every retry. First execution is
+            durable queued work; creation does not wait for remote download requests.
+
+        Raises:
+            ForbiddenException: If the account cannot create plans.
+            BadRequestException: If one request ID is reused with different settings.
+        """
+        FlowGraphService.require_editor(user)
+        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        values = body.plan.model_dump(exclude={"id"})
+        for field in ("interval_start", "interval_end"):
+            if values[field] is not None and values[field].tzinfo is not None:
+                values[field] = values[field].astimezone(UTC)
+        digest = hashlib.sha256(dumps(values, option=orjson.OPT_SORT_KEYS)).hexdigest()
+        existing = await DownloadPlan.get_or_none(creation_key=key)
+        if existing is not None:
+            if existing.creation_receipt["digest"] != digest:
+                raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_REQUEST_CONFLICT)
+            return await cls.creation_result(existing, user, replayed=True)
+        validation = await cls.validate_creation(
+            DownloadPlanCheck(plan=body.plan), user
+        )
+        if not validation["valid"]:
+            return {"created": False, **validation}
+        try:
+            plan = await DownloadPlan.create(
+                **values,
+                creation_key=key,
+                creation_receipt={
+                    "digest": digest,
+                    "first_execution": {"status": "queued"},
+                },
+            )
+        except IntegrityError:
+            # a concurrent request committed the durable identity first
+            if not await DownloadPlan.filter(creation_key=key).exists():
+                raise
+            return await cls.create_once(body, user)
+        notify_download_changes()
+        return await cls.creation_result(plan, user)
+
+    @classmethod
+    async def get_creation(cls, plan_id: int, user: UserInfo) -> dict:
+        """Read a plan's current configuration and first-attempt outcome.
+
+        Args:
+            plan_id: Plan identity, distinct from its workflow ID.
+            user: Current account with workflow access.
+
+        Returns:
+            Permission-checked creation and execution facts.
+
+        Raises:
+            NotFoundException: If the plan no longer exists.
+        """
+        plan = await DownloadPlan.get_or_none(id=plan_id)
+        if plan is None:
+            raise NotFoundException
+        return await cls.creation_result(plan, user)
+
+    @classmethod
+    async def find_creation(cls, request_id: UUID, user: UserInfo) -> dict:
+        """Recover an editor submission using its account-scoped request identity.
+
+        Args:
+            request_id: Original validation or editor request ID.
+            user: Current administrator reopening the editor.
+
+        Returns:
+            The existing plan, or `created: false` when no creation was committed.
+        """
+        FlowGraphService.require_editor(user)
+        key = hashlib.sha256(f"{user.id}:{request_id}".encode()).hexdigest()
+        plan = await DownloadPlan.get_or_none(creation_key=key)
+        if plan is None:
+            return {"created": False}
+        return await cls.creation_result(plan, user, replayed=True)
 
     @classmethod
     async def upsert(cls, obj: DownloadPlanUpsert) -> DownloadPlan:
