@@ -876,6 +876,9 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (!tool || tool.status !== 'running') throw new Error('assistant_stream_invalid');
           tool.result = event.data;
           tool.status = event.data.ok ? 'complete' : 'error';
+          if (tool.name === 'create_download_plan' && event.data.ok && event.data.data?.created) {
+            window.dispatchEvent(new Event('download-plan-created'));
+          }
           break;
         }
         case 'done':

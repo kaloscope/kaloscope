@@ -17,10 +17,13 @@
     type AssistantTool as Tool,
     type AssistantTurn
   } from '$lib/assistant/session';
-  import { Button, Dropdown, Select } from '$lib/components';
+  import { Button, Dropdown, PlanEditor, Select } from '$lib/components';
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { user } from '$lib/stores';
+  import type { DownloadPlanCreation, DownloadPlanPreview } from '$lib/types';
+  import { toDatetimeLocal } from '$lib/utils/datetime';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
   import AssistantHistory from './AssistantHistory.svelte';
@@ -39,10 +42,20 @@
   let lastScrollTop = 0;
   let menuHeight = $state('16rem');
   let navigationFailure: string | null = $state(null);
+  let planEditor: PlanEditor | undefined = $state();
+  let planPreview: DownloadPlanPreview | null = $state(null);
+  let planConversationId: number | undefined = $state();
+  let createdPlan: DownloadPlanCreation | null = $state(null);
   let viewportHeight: number | undefined = $state();
   let position: { x: number; y: number } | null = $state(null);
   let drag: { x: number; y: number; left: number; top: number } | null = null;
   const turns = $derived($assistant.turns);
+  $effect(() => {
+    if (planConversationId !== $assistant.conversation?.id) {
+      planPreview = null;
+      createdPlan = null;
+    }
+  });
   const input = $derived($assistant.input);
   const lastTurn = $derived(turns.at(-1));
   const isOpen = $derived($assistant.open);
@@ -69,6 +82,7 @@
     if (/^\/medialibs\/\d+\/?$/.test(pathname)) return 'media_library';
     if (/^\/downloads\/downloading\/?$/.test(pathname)) return 'active_downloads';
     if (/^\/downloads\/completed\/?$/.test(pathname)) return 'completed_downloads';
+    if (/^\/downloads\/plans\/?$/.test(pathname)) return 'download_plans';
     return 'other';
   });
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');
@@ -237,6 +251,29 @@
       await goto(path);
     } catch {
       navigationFailure = turn;
+    }
+  }
+
+  /**
+   * Open validated settings in the existing editor without searching or creating.
+   *
+   * @param tool - Successful validation whose request identity is reused on save.
+   * @returns A promise that resolves when the editor is open.
+   */
+  async function reviewPlan(tool: Tool): Promise<void> {
+    if (!tool.result?.ok || !tool.result.data?.valid) return;
+    if (planPreview?.request_id !== tool.result.data.request_id) {
+      planPreview = null;
+      await tick();
+      planPreview = tool.result.data as unknown as DownloadPlanPreview;
+      planConversationId = $assistant.conversation?.id;
+      createdPlan = null;
+      await tick();
+    }
+    try {
+      await planEditor?.showModal();
+    } catch {
+      // the shared API client displays the recovery lookup error
     }
   }
 
@@ -484,6 +521,9 @@
                       <AssistantTool
                         {tool}
                         unsaved={turn.context?.page_type === 'workflow_designer' && turn.context.unsaved}
+                        onplan={$user?.role === 'admin' && !$assistant.busy && !$assistantCanvas && !$assistantRestoring
+                          ? () => reviewPlan(tool)
+                          : undefined}
                       />
                     </li>
                   {/each}
@@ -527,6 +567,21 @@
     </ol>
 
     <footer class="relative shrink-0 rounded-b-box px-2 pb-2">
+      {#if createdPlan && lastTurn}
+        <p class="mb-2 px-2 text-sm" role="status">
+          {$_('assistant.plan.created', createdPlan.plan_id)}
+          {$_(`assistant.plan.first.${createdPlan.first_execution.status}`)}
+          {#if currentPage !== 'download_plans'}
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onclick={() => navigate('/downloads/plans', lastTurn.id)}
+            >
+              {$_('action.open', $_('assistant.pages.download_plans'))}
+            </button>
+          {/if}
+        </p>
+      {/if}
       {#if !following && turns.length}
         <button
           type="button"
@@ -719,6 +774,21 @@
       {$assistant.busy ? $_('assistant.generating') : lastTurn ? $_(`assistant.status.${lastTurn.status}`) : ''}
     </span>
   </div>
+{/if}
+
+{#if planPreview && $user?.role === 'admin'}
+  <PlanEditor
+    bind:this={planEditor}
+    {...planPreview.plan}
+    graph_name={planPreview.workflow_name}
+    interval_start={toDatetimeLocal(planPreview.plan.interval_start)}
+    interval_end={toDatetimeLocal(planPreview.plan.interval_end)}
+    creationRequestId={planPreview.request_id}
+    oncreated={(result) => {
+      createdPlan = result;
+      window.dispatchEvent(new Event('download-plan-created'));
+    }}
+  />
 {/if}
 
 <style>

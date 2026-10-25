@@ -2,6 +2,7 @@ import type { AssistantDestination, AssistantToolResult } from '$lib/types';
 
 export const workflowPath = '/settings/workflows/graphs';
 export const workflowJobsPath = '/settings/workflows/schedules';
+export const downloadPlansPath = '/downloads/plans';
 export const mediaPath = '/medialibs';
 export const downloadPaths = {
   active_downloads: '/downloads/downloading',
@@ -27,6 +28,9 @@ export function assistantDestination(
     // a newly created draft opens only in its editable designer
     target = { page: 'workflow_designer', resource_id: result.data.workflow_id as number };
     path = result.data.editor_path;
+  } else if ((result.name === 'create_download_plan' || result.name === 'get_download_plan') && result.data.created) {
+    target = { page: 'download_plans' };
+    path = result.data.path;
   }
   if (!target) return null;
   const id = target.resource_id;
@@ -35,6 +39,9 @@ export function assistantDestination(
   }
   if (target.page === 'workflow_jobs') {
     return id == null && path === workflowJobsPath ? { path, target } : null;
+  }
+  if (target.page === 'download_plans') {
+    return id == null && path === downloadPlansPath ? { path, target } : null;
   }
   if (target.page === 'active_downloads' || target.page === 'completed_downloads') {
     const expected = downloadPaths[target.page];

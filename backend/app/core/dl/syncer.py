@@ -422,6 +422,7 @@ class DLSyncer:
                 if self._sync_requested.is_set():
                     self._sync_requested.clear()
                     refresh = True
+                check_new_plans = refresh
                 processed_action = False
                 if refresh or (
                     next_deletion is not None and next_deletion <= timezone.now()
@@ -484,6 +485,8 @@ class DLSyncer:
                 if hours >= 1:
                     self._last_check_plans = now
                     self._app.add_task(check_download_plans())
+                elif check_new_plans:
+                    self._app.add_task(check_download_plans(first_only=True))
 
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
@@ -1115,57 +1118,109 @@ async def transfer_files(
         )
 
 
-async def check_download_plans():
-    """Check the download plans and add new download tasks if needed."""
+async def check_download_plans(*, first_only: bool = False):
+    """Run due plans and recover first attempts queued by confirmed creation.
+
+    Args:
+        first_only: Check only durable first attempts after a change notification.
+            Normal hourly checks also process these attempts after a restart.
+    """
 
     # get all plans whose graph is published and interval has elapsed
     now = f"julianday('{timezone.now().isoformat(sep=' ')}')"
     last = "julianday(IFNULL(last_exec, download_plan.created_at))"
+    pending = Q(creation_key__not_isnull=True, last_exec=None)
+    due = pending if first_only else pending | Q(elapsed_hours__gte=F("interval_num"))
     plans = await DownloadPlan.annotate(
         elapsed_hours=RawSQL(f"({now} - {last}) * 24")
     ).filter(
-        elapsed_hours__gte=F("interval_num"),
+        due,
         graph__state__not=GraphState.DRAFT,
     )
     plans = [p for p in plans if not p.inactive()]
     if not plans:
         return
 
-    # load the drivers of the associated download clients
     drivers: dict[int, DownloaderDriver] = {}
-    for downloader_id in {plan.downloader_id for plan in plans}:
-        try:
-            downloader = await Downloader.get(id=downloader_id)
-            driver = load_driver(decrypt_config(downloader.config))
-            if not driver.supports_version or (await driver.version()):
+    try:
+        # load the drivers of the associated download clients
+        for downloader_id in {plan.downloader_id for plan in plans}:
+            try:
+                downloader = await Downloader.get(id=downloader_id)
+                driver = load_driver(decrypt_config(downloader.config))
                 drivers[downloader_id] = driver
-        except Exception:
-            logger.error(
-                "Failed to probe download plan driver: %s",
-                downloader_id,
-                exc_info=True,
-            )
+                if driver.supports_version and not await driver.version():
+                    await drivers.pop(downloader_id).close()
+            except Exception:
+                failed = drivers.pop(downloader_id, None)
+                if failed is not None:
+                    await failed.close()
+                logger.error(
+                    "Failed to probe download plan driver: %s",
+                    downloader_id,
+                    exc_info=True,
+                )
 
-    # execute each eligible plan with the corresponding driver
-    for plan in plans:
-        if plan.downloader_id not in drivers:
-            continue
-        driver = drivers[plan.downloader_id]
-        try:
-            await execute_download_plan(plan, driver)
-        except Exception:
-            logger.error("Failed to execute download plan: %s", plan.id, exc_info=True)
+        # execute each eligible plan with the corresponding driver
+        for plan in plans:
+            initial = plan.creation_key is not None and plan.last_exec is None
+            receipt = plan.creation_receipt or {}
+            if initial:
+                receipt = {**receipt, "first_execution": {"status": "unconfirmed"}}
+                claimed = await DownloadPlan.filter(id=plan.id, last_exec=None).update(
+                    last_exec=timezone.now(), creation_receipt=receipt
+                )
+                if not claimed:
+                    continue
+            if plan.downloader_id not in drivers:
+                if initial:
+                    await DownloadPlan.filter(id=plan.id).update(
+                        creation_receipt={
+                            **receipt,
+                            "first_execution": {
+                                "status": "failed",
+                                "added": 0,
+                                "errors": 1,
+                            },
+                        }
+                    )
+                continue
+            driver = drivers[plan.downloader_id]
+            try:
+                outcome = await execute_download_plan(plan, driver)
+                if initial:
+                    await DownloadPlan.filter(id=plan.id).update(
+                        creation_receipt={**receipt, "first_execution": outcome}
+                    )
+            except Exception:
+                logger.error(
+                    "Failed to execute download plan: %s", plan.id, exc_info=True
+                )
+                if initial:
+                    await DownloadPlan.filter(id=plan.id).update(
+                        creation_receipt={
+                            **receipt,
+                            "first_execution": {"status": "unconfirmed"},
+                        }
+                    )
+    finally:
+        for driver in drivers.values():
+            await driver.close()
 
 
 async def execute_download_plan(
     plan: DownloadPlan, driver: DownloaderDriver | None = None
-):
+) -> dict:
     """Execute a single download plan.
 
     Args:
         plan: Download plan.
         driver: Driver of the associated downloader. `None` loads the plan's
             configured driver.
+
+    Returns:
+        Attempt counts and a completion/partial/failure state. Added tasks are
+        local submissions, not completed downloads; uncertain submissions are explicit.
     """
     # load the driver if not provided
     if driver is None:
@@ -1179,6 +1234,8 @@ async def execute_download_plan(
     engine: FlowEngine = Sanic.get_app().ctx.flow_engine
     page_num = 1
     seen_links: set[str] = set()
+    errors = 0
+    uncertain = 0
 
     async def _record_history(magnet: MagnetLink):
         """Record the magnet link in the download plan history.
@@ -1232,7 +1289,13 @@ async def execute_download_plan(
         )
 
     async def _magnet_links() -> list[MagnetLink] | None:
-        """Get magnet links from the graph execution result of the download plan."""
+        """Get magnet links from the graph execution result of the download plan.
+
+        Returns:
+            New links, an empty list when all links are already known, or `None`
+            at the end of pagination or after a recorded search failure.
+        """
+        nonlocal errors
         # prepare the boot parameters for graph execution
         bootparams = {
             "$start": "search_start",
@@ -1258,6 +1321,7 @@ async def execute_download_plan(
                 raise ValueError("invalid graph execution result")
             except Exception:
                 if attempt == retries - 1:
+                    errors += 1
                     logger.error(
                         "Failed to execute graph for plan %s after %d attempts",
                         plan.id,
@@ -1267,6 +1331,10 @@ async def execute_download_plan(
                     return None
                 await asyncio.sleep(2**attempt * 5)
 
+        errors += sum(
+            not isinstance(item, dict) or not isinstance(item.get("link"), str)
+            for item in items
+        )
         # detect non-paginated API by checking for duplicate links on page > 1
         links = list(
             dict.fromkeys(
@@ -1288,6 +1356,7 @@ async def execute_download_plan(
             # check if the link is a valid magnet/hash
             magnet = await standardize_magnet(link)
             if magnet is None:
+                errors += 1
                 continue
             magnets.append(magnet)
 
@@ -1355,6 +1424,7 @@ async def execute_download_plan(
                 break
             page_num += 1
         except Exception:
+            errors += 1
             logger.error(
                 "Failed to get magnet links for plan %s on page %d",
                 plan.id,
@@ -1389,12 +1459,15 @@ async def execute_download_plan(
                 sub_pattern=plan.sub_pattern,
                 sub_repl=plan.sub_repl,
             )
-            await DownloadTaskService.add_request(
+            task = await DownloadTaskService.add_request(
                 plan.downloader_id,
                 driver,
                 request,
             )
+            if task.state in {DownloadState.SUBMIT_UNKNOWN, DownloadState.SUBMITTING}:
+                uncertain += 1
         except Exception:
+            errors += 1
             logger.error(
                 "Failed to add download task for plan %s, hashes: v1=%s, v2=%s",
                 plan.id,
@@ -1411,3 +1484,15 @@ async def execute_download_plan(
     await DownloadPlan.filter(id=plan.id).update(
         total_count=plan.total_count + task_count, last_exec=timezone.now()
     )
+    return {
+        "status": "unconfirmed"
+        if uncertain
+        else "partial"
+        if errors and task_count
+        else "failed"
+        if errors
+        else "completed",
+        "added": task_count,
+        "errors": errors,
+        "uncertain": uncertain,
+    }

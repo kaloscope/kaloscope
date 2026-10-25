@@ -1015,7 +1015,8 @@
     "assistant_canvas_changed": "The canvas changed. Send a new request using the current canvas.",
     "assistant_canvas_wait_save": "Check the save result before leaving the canvas.",
     "assistant_canvas_already_saved": "The draft had already been saved, so the changes were kept.",
-    "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved."
+    "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved.",
+    "download_plan_request_conflict": "This request already created a plan with different settings. Reopen the reviewed plan to recover it."
   },
   "ai": {
     "custom": "Custom provider",
@@ -1119,7 +1120,8 @@
       "media_item": "Media Details",
       "active_downloads": "Downloading",
       "completed_downloads": "Completed Downloads",
-      "other": "No Page Context"
+      "other": "No Page Context",
+      "download_plans": "Download Plans"
     },
     "tools": {
       "list_workflows": "Find Workflows",
@@ -1141,7 +1143,11 @@
       "list_media_items": "Find Media",
       "get_media_item": "Read Media Details",
       "list_download_tasks": "Find Download Tasks",
-      "get_download_task": "Read Download Details"
+      "get_download_task": "Read Download Details",
+      "get_download_plan_options": "Read Plan Options",
+      "validate_download_plan": "Validate Download Plan",
+      "create_download_plan": "Create Download Plan",
+      "get_download_plan": "Read Download Plan"
     },
     "tool_status": {
       "running": "Running",
@@ -1204,6 +1210,24 @@
       "record": "Canvas edit record. Changes are never reapplied automatically.",
       "leave_title": "Leave this canvas?",
       "leave_message": "Assistant changes will be reverted. Earlier unsaved manual edits still prompt you to save."
+    },
+    "plan": {
+      "review": "Review and create plan",
+      "create": "Create and schedule",
+      "recover": "Recover creation result",
+      "created": "Download plan #{0} was created. ",
+      "creation_behavior": "Creation queues a real search and download attempt promptly. A future start waits for the hourly schedule check; later attempts follow the interval in hours. Times shown here use your local timezone and are stored in UTC. This does not publish the indexer.",
+      "creation_unknown": "The creation result could not be confirmed. Keep these settings and recover the original request; it will not create a second plan.",
+      "first": {
+        "queued": "First attempt queued",
+        "waiting": "Waiting for scheduling conditions",
+        "unconfirmed": "First attempt started; final result unconfirmed",
+        "completed": "First attempt finished; downloads may still be running",
+        "partial": "First attempt partially failed",
+        "failed": "First attempt failed; next interval may retry",
+        "unavailable": "No first-attempt record"
+      },
+      "validation_scope": "Validation checks settings only; it does not prove downloadable results exist. Changing keywords or filters, or clicking Search, runs an indexer preview."
     }
   }
 }

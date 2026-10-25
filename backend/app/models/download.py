@@ -1,9 +1,11 @@
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from typing import Any, Self, cast
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     FutureDatetime,
     NonNegativeInt,
@@ -43,6 +45,8 @@ from app.utils.disk import format_bytes
 
 # -------------------- Enumerations --------------------
 class TransferMethod(StrEnum):
+    """Transfer completed files by hardlink, symlink, move or copy."""
+
     HARDLINK = auto()
     SYMLINK = auto()
     MOVE = auto()
@@ -117,6 +121,9 @@ class DownloadDir(TortoiseModel):
 
 
 class DownloadPlan(TortoiseModel):
+    # durable creation receipt; existing plans keep their original scheduling behavior
+    creation_key = CharField(max_length=64, unique=True, null=True)
+    creation_receipt = JSONField[dict[str, Any] | None](null=True)
     graph_id: int
     graph: ForeignKeyRelation[FlowGraph] = ForeignKeyField(
         "models.FlowGraph", related_name="plans", db_index=True
@@ -167,7 +174,14 @@ class DownloadPlan(TortoiseModel):
         ordering = ["-created_at"]
 
     class PydanticMeta:
-        exclude = ("graph", "downloader", "transfer_lib", "histories")
+        exclude = (
+            "graph",
+            "downloader",
+            "transfer_lib",
+            "histories",
+            "creation_key",
+            "creation_receipt",
+        )
         computed = ("inactive",)
 
 
@@ -414,7 +428,56 @@ class DownloadPlanUpsert(BaseModel):
         if (
             self.interval_start is not None
             and self.interval_end is not None
+            and (self.interval_start.tzinfo is None)
+            == (self.interval_end.tzinfo is None)
             and self.interval_start >= self.interval_end
         ):
             raise ValueError("interval_start must be before interval_end")
         return self
+
+
+class DownloadPlanSettings(DownloadPlanUpsert):
+    """Describe a new plan using the existing editor's fields.
+
+    Expiry is checked when creating, after looking up an idempotent replay, so an
+    old request can still recover a previously created plan.
+    """
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    id: None = None
+    interval_end: datetime | None = None
+
+
+class DownloadPlanCheck(BaseModel):
+    """Check explicit plan settings and an optional search-result fixture."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    plan: DownloadPlanSettings
+    sample: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional page-1 search result; page_size=batch_limit.",
+    )
+
+    @model_validator(mode="after")
+    def bound_input(self) -> Self:
+        """Bound settings and fixtures before processing them.
+
+        Returns:
+            The validated request.
+
+        Raises:
+            ValueError: If the input exceeds 32 KiB.
+        """
+        from app.utils.json import dumps
+
+        if len(dumps(self.model_dump(mode="json"))) > 32768:
+            raise ValueError("Plan input exceeds 32 KiB")
+        return self
+
+
+class DownloadPlanCreate(BaseModel):
+    """Create once using a stable client request ID; active plans run promptly."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    request_id: UUID
+    plan: DownloadPlanSettings

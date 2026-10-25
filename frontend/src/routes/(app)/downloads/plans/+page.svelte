@@ -16,6 +16,7 @@
   import { createLoading, createSortField } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { user } from '$lib/stores';
   import type { DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { onMount, tick, untrack } from 'svelte';
@@ -79,6 +80,8 @@
   });
 
   onMount(() => {
+    const refresh = () => search();
+    window.addEventListener('download-plan-created', refresh);
     api
       .get('flow/graph/list', {
         searchParams: [
@@ -94,6 +97,7 @@
         const items = data.items;
         graphs = items.filter((g) => g.node_types.includes('search_start') && !g.only_preview);
       });
+    return () => window.removeEventListener('download-plan-created', refresh);
   });
 </script>
 
@@ -109,12 +113,14 @@
     <Search label={$_('field.keyword')} bind:value={keyword} onsearch={() => search()} />
   {/snippet}
   {#snippet actions()}
-    <Button
-      size="md"
-      icon={icons.addCircle}
-      text={$_('action.add', $_('entity.plan'))}
-      onclick={() => creator?.showModal()}
-    />
+    {#if $user?.role === 'admin'}
+      <Button
+        size="md"
+        icon={icons.addCircle}
+        text={$_('action.add', $_('entity.plan'))}
+        onclick={() => creator?.showModal()}
+      />
+    {/if}
   {/snippet}
   {#snippet header()}
     <HCell width={['15%', '50%']} text={$_('field.graph')} sort={ordering.bind('graph__name')} />
@@ -123,7 +129,7 @@
     <HCell width={['20%', null]} text={$_('field.last_exec')} sort={ordering.bind('last_exec')} />
     <HCell width={['15%', null]} text={$_('field.total_count')} />
     <HCell width={['10%', '4rem']} text={$_('field.status')} />
-    <HCell actions />
+    {#if $user?.role === 'admin'}<HCell actions />{/if}
   {/snippet}
   {#snippet row(plan)}
     <Cell>
@@ -134,48 +140,57 @@
     </Cell>
     <Cell text={plan.keyword} />
     <Cell text={$_('field.every', `${plan.interval_num} ${$_('duration.hours').toLowerCase()}`)} />
-    <Cell text={$dateTime(plan.last_exec)} />
+    <Cell>
+      <div>
+        <div>{$dateTime(plan.last_exec)}</div>
+        {#if plan.first_execution}
+          <p class="mt-1 text-xs text-base-content/60">{$_(`assistant.plan.first.${plan.first_execution.status}`)}</p>
+        {/if}
+      </div>
+    </Cell>
     <Cell text={`${plan.total_count}${plan.total_limit ? ` / ${plan.total_limit}` : ''}`} />
     <Cell>
       <Status rate={plan.running ? 1 : null} class="px-2" />
     </Cell>
-    <Cell
-      actions={[
-        {
-          icon: icons.edit,
-          text: $_('action.edit', $_('entity.plan')),
-          onclick: () => {
-            selected = plan;
-            tick().then(() => updater?.showModal());
+    {#if $user?.role === 'admin'}<Cell
+        actions={[
+          {
+            icon: icons.edit,
+            text: $_('action.edit', $_('entity.plan')),
+            onclick: () => {
+              selected = plan;
+              tick().then(() => updater?.showModal());
+            }
+          },
+          {
+            icon: icons.deleteDismiss,
+            text: $_('action.delete', $_('entity.plan')),
+            onclick: () => {
+              confirm({
+                icon: icons.deleteDismiss,
+                title: `${$_('action.delete', $_('entity.plan'))} [${plan.id}]`,
+                onconfirm: () => del(plan.id)
+              });
+            }
           }
-        },
-        {
-          icon: icons.deleteDismiss,
-          text: $_('action.delete', $_('entity.plan')),
-          onclick: () => {
-            confirm({
-              icon: icons.deleteDismiss,
-              title: `${$_('action.delete', $_('entity.plan'))} [${plan.id}]`,
-              onconfirm: () => del(plan.id)
-            });
-          }
-        }
-      ]}
-    />
+        ]}
+      />{/if}
   {/snippet}
   {#snippet paginator(disabled)}
     <Paginator {disabled} {...pagination} />
   {/snippet}
 </DataView>
 
-<PlanEditor bind:this={creator} onsave={() => search()} />
+{#if $user?.role === 'admin'}
+  <PlanEditor bind:this={creator} onsave={() => search()} />
 
-{#if selected}
-  <PlanEditor
-    bind:this={updater}
-    {...selected}
-    interval_start={toDatetimeLocal(selected.interval_start)}
-    interval_end={toDatetimeLocal(selected.interval_end)}
-    onsave={() => search(pagination.current)}
-  />
+  {#if selected}
+    <PlanEditor
+      bind:this={updater}
+      {...selected}
+      interval_start={toDatetimeLocal(selected.interval_start)}
+      interval_end={toDatetimeLocal(selected.interval_end)}
+      onsave={() => search(pagination.current)}
+    />
+  {/if}
 {/if}
