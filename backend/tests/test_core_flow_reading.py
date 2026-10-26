@@ -33,7 +33,7 @@ from app.models.media import (
     MediaItem,
     MediaLib,
 )
-from app.models.user import UserRole
+from app.models.user import PermType, User, UserPermission, UserRole
 from app.routes.flow import flow as flow_blueprint
 from app.services.media import MediaItemService
 from app.utils import json
@@ -300,6 +300,11 @@ def test_ingest_execution_mode(role, category):
             graph = await FlowGraph.create(
                 name="Execution", category=category, state=GraphState.PUBLISHED
             )
+            user = await User.create(username="runner", password="unused", role=role)
+            if role != UserRole.ADMIN and category == GraphCategory.INDEXER:
+                await UserPermission.create(
+                    user=user, rel_type=PermType.INDEXER, rel_id=graph.id
+                )
             engine = SimpleNamespace(execute=AsyncMock(return_value=[]))
             original_dumps = BaseHTTPResponse._dumps
             app = Sanic(
@@ -314,7 +319,7 @@ def test_ingest_execution_mode(role, category):
             app.error_handler.add(Exception, error_handler)
             app.register_middleware(
                 lambda request: setattr(
-                    request.ctx, "user", SimpleNamespace(role=role)
+                    request.ctx, "user", SimpleNamespace(id=user.id, role=role)
                 ),
                 "request",
             )
@@ -331,7 +336,7 @@ def test_ingest_execution_mode(role, category):
             finally:
                 Sanic.unregister_app(app)
                 BaseHTTPResponse._dumps = original_dumps
-            if category == GraphCategory.INGEST and role != UserRole.ADMIN:
+            if category != GraphCategory.INDEXER and role != UserRole.ADMIN:
                 assert response.status_code == 403
                 engine.execute.assert_not_awaited()
             else:

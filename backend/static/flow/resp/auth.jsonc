@@ -2,6 +2,7 @@
 // OUTPUT: Stored as $retval. A nonempty name also persists workflow-local $auth.
 // With a nonempty name, expires_in is consumed from both $retval and $auth.
 // An empty name leaves cached login unchanged. Token is optional for cookie login.
+// Return {"name": ""} for a failed login; HTTP 200 alone is not success.
 {
   "name": "Demo Reader", // string, authenticated display name
   "token": "example-session-token", // optional string, never include real credentials here

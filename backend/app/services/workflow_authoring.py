@@ -3,10 +3,11 @@
 import asyncio
 import json
 import re
+from collections.abc import Iterable
 from contextlib import AsyncExitStack, suppress
 from copy import copy
-from http.cookiejar import CookieJar
-from urllib.parse import quote
+from http.cookiejar import Cookie, CookieJar
+from urllib.parse import quote, urlencode
 
 import httpx
 import orjson
@@ -20,14 +21,15 @@ from app.core.exceptions import ForbiddenException
 from app.core.flow.context import AUTH_KEY
 from app.core.flow.nodes.base import start_config
 from app.core.flow.nodes.general.http import HTTPNode
-from app.core.flow.outputs import check_output
+from app.core.flow.outputs import check_auth, check_output
 from app.core.network import NetworkTransport
 from app.core.renderer import render
-from app.models.flow import GraphCategory
+from app.models.flow import FlowGraph, GraphCategory
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import (
     HTTPProbe,
     HTTPProbeResult,
+    HTTPRequest,
     TemplateResult,
     TemplateValidation,
 )
@@ -37,7 +39,86 @@ from app.utils.json import dumps, loads_jsonc
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_SAMPLE_CHARS = 2000
 MAX_RENDER_BYTES = 8000
-RESPONSE_HEADERS = {"content-type", "content-length", "retry-after", "last-modified"}
+RESPONSE_HEADERS = {
+    "content-type",
+    "content-length",
+    "retry-after",
+    "last-modified",
+    "location",
+}
+# shorter cookie values are preferences such as `lang=en`; redacting them corrupts text
+MIN_COOKIE_SECRET_CHARS = 8
+# a literal scheme and host at the start of an HTTP node URL template
+LITERAL_ORIGIN = re.compile(r"\s*https?://([^/?#\s{}]+)(?=[/?#\s]|$)", re.IGNORECASE)
+
+
+class ProbeCookieJar(CookieJar):
+    """Hold one probe's cookies and remember every value seen for redaction."""
+
+    def __init__(self):
+        """Start an empty disposable jar."""
+        super().__init__()
+        # name, value and HttpOnly flag of every cookie copied, stored or received
+        self.seen: set[tuple[str, str, bool]] = set()
+
+    def set_cookie(self, cookie: Cookie):
+        """Store a copied or received cookie and remember its value.
+
+        Args:
+            cookie: Cookie set by either HTTP client, including replaced values.
+        """
+        if cookie.value:
+            # HTTPX keeps the attribute as sent; curl_cffi records `http_only`
+            http_only = (
+                cookie.has_nonstandard_attr("HttpOnly")
+                or cookie.get_nonstandard_attr("http_only") == "True"
+            )
+            self.seen.add((cookie.name, cookie.value, http_only))
+        super().set_cookie(cookie)
+
+    def extract_cookies(self, response, request):
+        """Remember each HTTPX response's cookies, including rejected ones.
+
+        Args:
+            response: Response adapter exposing raw headers through `info()`.
+            request: Request adapter used by the cookie policy.
+        """
+        self.record(response.info().get_all("Set-Cookie") or [])
+        super().extract_cookies(response, request)
+
+    def record(self, headers: Iterable[str]):
+        """Remember the values carried by raw `Set-Cookie` headers.
+
+        Args:
+            headers: Header values such as `sid=value; Path=/`.
+        """
+        for header in headers:
+            pair, *attributes = header.split(";")
+            name, separator, value = pair.partition("=")
+            name, value = name.strip(), value.strip()
+            if separator and value:
+                http_only = any(
+                    item.strip().lower() == "httponly" for item in attributes
+                )
+                self.seen.add((name, value, http_only))
+                if len(value) > 2 and value[0] == value[-1] == '"':
+                    self.seen.add((name, value[1:-1], http_only))
+
+    def secrets(self, session: str | None) -> set[str]:
+        """Select the seen cookie values that may authenticate a request.
+
+        Args:
+            session: Cookie name the source indexer configures as its login session.
+
+        Returns:
+            Values of that session cookie and of HttpOnly cookies at any length, plus
+            every other value of at least eight characters.
+        """
+        return {
+            value
+            for name, value, http_only in self.seen
+            if http_only or name == session or len(value) >= MIN_COOKIE_SECRET_CHARS
+        }
 
 
 def validate_workflow_template(
@@ -47,7 +128,8 @@ def validate_workflow_template(
 
     Args:
         args: Template, supplied context, output form and undefined-value policy.
-            Business modes check end-node output against supplied fixtures only.
+            Business modes check end-node output against supplied fixtures only;
+            `auth` also checks the supplied `auth_start` configuration.
         response: Detached probe response for HTTP formatter evaluation only.
             The probe redacts formatter errors before clipping their messages.
 
@@ -76,10 +158,13 @@ def validate_workflow_template(
             return TemplateResult(valid=False, error="Expected a JSON object.")
         if args.mode == "array" and not isinstance(value, list):
             return TemplateResult(valid=False, error="Expected a JSON array.")
-        business = args.mode in {"search", "details", "movie"}
-        issues, warnings = (
-            check_output(args.mode, value, args.context) if business else ([], [])
-        )
+        business = args.mode in {"search", "details", "movie", "auth"}
+        issues, warnings, outcome = [], [], None
+        if args.mode == "auth":
+            # the input model requires config for this mode
+            issues, warnings, outcome = check_auth(value, args.config or "")
+        elif business:
+            issues, warnings = check_output(args.mode, value, args.context)
         result = TemplateResult(
             valid=not issues,
             rendered=None if business else rendered,
@@ -87,6 +172,7 @@ def validate_workflow_template(
             value_type=type(value).__name__,
             issues=issues,
             warnings=warnings,
+            outcome=outcome,
             error="Correct the reported output fields and validate again."
             if issues
             else None,
@@ -126,10 +212,15 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
         Observed status, final URL, selected headers and a bounded text sample.
         Optional extraction uses the complete bounded body before sample clipping.
         Non-2xx responses remain HTTP observations, not transport failures. An
-        explicit indexer reuses its unexpired `$auth` and a snapshot of the cookie
-        jar used by HTTP nodes. Normal cookie domain/path rules still apply.
-        Response cookies remain local and persistent caching is bypassed. Known
-        authentication values are redacted from the returned observation.
+        explicit indexer supplies a snapshot of the cookie jar used by HTTP nodes,
+        where normal cookie domain/path rules still apply, and its unexpired
+        `$auth` only when the prepared request targets a host written in its
+        published HTTP node URLs; such requests do not follow redirects. A request
+        reading `$auth` for another host is refused before sending. Response
+        cookies remain local and persistent caching is bypassed. Saved
+        authentication strings, the indexer's configured session cookie and HttpOnly
+        cookies at any length, and other saved or received cookie values of at
+        least eight characters are redacted, with or without an indexer.
 
     Raises:
         ForbiddenException: If the account cannot author or access the workflow.
@@ -138,8 +229,8 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
     if user.role != UserRole.ADMIN:
         raise ForbiddenException
     context = args.context
-    cookies = CookieJar()
-    auth = None
+    cookies = ProbeCookieJar()
+    auth = session = auth_hosts = None
     if args.workflow_id is not None:
         graph = await FlowGraphService.get_accessible(args.workflow_id, user)
         if graph.category != GraphCategory.INDEXER:
@@ -160,45 +251,89 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
             for cookie in saved_cookies:
                 if not cookie.is_expired():
                     cookies.set_cookie(copy(cookie))
-        if auth is not None:
-            # boot parameters also override stored variables during workflow execution
+        if isinstance(session_cookie := config.get("cookie"), dict):
+            session = session_cookie.get("name")
+        # boot parameters also override stored variables during workflow execution
+        if auth is not None and AUTH_KEY not in context:
             context = {AUTH_KEY: auth, **context}
+            auth_hosts = _request_hosts(graph)
 
-    secrets = {cookie.value for cookie in cookies if cookie.value}
-    result = await _probe_http_request(args, context, cookies)
-    if args.workflow_id is not None:
-        secrets.update(cookie.value for cookie in cookies if cookie.value)
+    result = await _probe_http_request(args, context, cookies, auth_hosts=auth_hosts)
+    secrets = cookies.secrets(session)
 
-        def collect(value):
-            """Collect stored authentication strings for result redaction.
+    def collect(value):
+        """Collect stored authentication strings for result redaction.
 
-            Args:
-                value: Authentication field, including nested objects and arrays.
-            """
-            if isinstance(value, str) and value:
-                secrets.add(value)
-            elif isinstance(value, dict):
-                for item in value.values():
-                    collect(item)
-            elif isinstance(value, list):
-                for item in value:
-                    collect(item)
+        Args:
+            value: Authentication field, including nested objects and arrays.
+        """
+        if isinstance(value, str) and value:
+            secrets.add(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
 
-        collect({key: value for key, value in (auth or {}).items() if key != "name"})
-        secrets |= (
-            {quote(value, safe="") for value in secrets}
-            | {
-                json.dumps(value, ensure_ascii=ascii_only)[1:-1]
-                for value in secrets
-                for ascii_only in (False, True)
-            }
-            | {
-                str(htmlsafe_json_dumps(value, ensure_ascii=ascii_only))[1:-1]
-                for value in secrets
-                for ascii_only in (False, True)
-            }
-        )
+    collect({key: value for key, value in (auth or {}).items() if key != "name"})
+    secrets |= (
+        {quote(value, safe="") for value in secrets}
+        | {
+            json.dumps(value, ensure_ascii=ascii_only)[1:-1]
+            for value in secrets
+            for ascii_only in (False, True)
+        }
+        | {
+            str(htmlsafe_json_dumps(value, ensure_ascii=ascii_only))[1:-1]
+            for value in secrets
+            for ascii_only in (False, True)
+        }
+    )
     return _redact_probe_result(result, secrets)
+
+
+def _request_hosts(graph: FlowGraph) -> set[str]:
+    """Collect hosts that the indexer's published HTTP nodes write literally.
+
+    Args:
+        graph: Source indexer whose saved login may be borrowed.
+
+    Returns:
+        Normalized hosts from URL templates starting with a literal HTTP(S) origin.
+        URLs whose host is templated are skipped, so their login is never borrowed.
+    """
+    hosts = set()
+    nodes = (graph.definition or {}).get("nodes")
+    for node in nodes if isinstance(nodes, list) else []:
+        data = node.get("data") if isinstance(node, dict) else None
+        if not isinstance(data, dict) or data.get("$schema") != "http":
+            continue
+        url = data.get("url")
+        if isinstance(url, str) and (match := LITERAL_ORIGIN.match(url)):
+            with suppress(httpx.InvalidURL):
+                hosts.add(httpx.URL(f"http://{match[1]}").host)
+    return hosts
+
+
+def _reads_auth(request: HTTPRequest) -> bool:
+    """Check whether a probe's request templates refer to saved login.
+
+    Args:
+        request: URL, header and body templates that will be sent.
+
+    Returns:
+        Whether any of them names `$auth`.
+    """
+    return any(
+        AUTH_KEY in text
+        for text in (
+            request.url,
+            request.body,
+            *request.headers,
+            *request.headers.values(),
+        )
+    )
 
 
 def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProbeResult:
@@ -263,15 +398,54 @@ def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProb
     return result
 
 
+def _body_size(options: dict, client: str) -> int:
+    """Measure a prepared request body as the selected client encodes it.
+
+    Args:
+        options: Arguments returned by `HTTPNode.prepare_request`.
+        client: Selected workflow HTTP client.
+
+    Returns:
+        Size in bytes of the raw, JSON or form-encoded body sent on the wire.
+    """
+    if options["content"] is not None:
+        return len(options["content"])
+    if options["json"] is not None:
+        # curl_cffi escapes non-ASCII JSON while HTTPX sends UTF-8
+        return len(
+            json.dumps(
+                options["json"],
+                separators=(",", ":"),
+                ensure_ascii=client == "curl_cffi",
+            ).encode()
+        )
+    if options["data"] is not None:
+        if client == "curl_cffi":
+            return len(urlencode(options["data"]))
+        return len(
+            httpx.Request("POST", "http://body.invalid", data=options["data"]).read()
+        )
+    return 0
+
+
 async def _probe_http_request(
-    args: HTTPProbe, context: dict, cookies: CookieJar
+    args: HTTPProbe,
+    context: dict,
+    cookies: ProbeCookieJar,
+    *,
+    auth_hosts: set[str] | None = None,
 ) -> HTTPProbeResult:
     """Send a bounded request without modifying the source authentication.
 
     Args:
         args: Explicit request and optional formatter.
         context: Request fixtures merged with any selected authentication.
-        cookies: Disposable cookie snapshot, updated only within this call.
+        cookies: Disposable cookie snapshot, updated only within this call; it also
+            records every received cookie value for redaction.
+        auth_hosts: Hosts that may receive the borrowed `$auth` in `context`, or
+            `None` when no saved login is borrowed. The request is prepared once and
+            that exact request is checked and sent; with the login it follows no
+            redirects, so a 3xx response and its `location` are returned instead.
 
     Returns:
         HTTP observation using the bounded body before redaction and sample clipping,
@@ -283,6 +457,20 @@ async def _probe_http_request(
     ]
     try:
         options = HTTPNode.prepare_request(node_data, context, sandboxed=True)
+        if auth_hosts is not None and httpx.URL(options["url"]).host not in auth_hosts:
+            if _reads_auth(args.request):
+                return HTTPProbeResult(
+                    error=f"Workflow {args.workflow_id}'s saved login is only sent "
+                    "to hosts in its HTTP node URLs: "
+                    + (", ".join(sorted(auth_hosts)[:5]) or "none written literally")
+                    + ". Remove $auth or omit workflow_id for other hosts."
+                )
+            # nothing names the borrowed login, so send this host a request without it
+            context = {key: value for key, value in context.items() if key != AUTH_KEY}
+            options = HTTPNode.prepare_request(node_data, context, sandboxed=True)
+            auth_hosts = None
+        # a redirect could carry the borrowed login to another host
+        follow = auth_hosts is None
         url = httpx.URL(options["url"])
         if url.scheme not in {"http", "https"} or not url.host or url.userinfo:
             return HTTPProbeResult(
@@ -291,7 +479,7 @@ async def _probe_http_request(
         size = len(str(url).encode()) + sum(
             len(key) + len(value) for key, value in options["headers"].raw
         )
-        size += len(options["content"] or dumps([options["data"], options["json"]]))
+        size += _body_size(options, args.request.client)
         if size > 65536:
             return HTTPProbeResult(error="Rendered request exceeds 64 KiB.")
         async with asyncio.timeout(args.request.timeout), AsyncExitStack() as stack:
@@ -300,7 +488,7 @@ async def _probe_http_request(
                 http_client = await stack.enter_async_context(
                     httpx.AsyncClient(
                         transport=NetworkTransport(http2=True),
-                        follow_redirects=True,
+                        follow_redirects=follow,
                         max_redirects=5,
                         cookies=cookies,
                     )
@@ -308,7 +496,7 @@ async def _probe_http_request(
             else:
                 curl_client = await stack.enter_async_context(
                     AsyncSession(
-                        allow_redirects=True,
+                        allow_redirects=follow,
                         max_redirects=5,
                         trust_env=False,
                         cookies=cookies,
@@ -351,6 +539,8 @@ async def _probe_http_request(
                 request=httpx.Request(options["method"], str(response.url)),
             )
             sample.headers = httpx.Headers(response.headers.raw)
+            # the formatter can read final headers, including cookies the jar rejected
+            cookies.record(sample.headers.get_list("set-cookie"))
             result = HTTPProbeResult(
                 status_code=response.status_code,
                 url=str(response.url),

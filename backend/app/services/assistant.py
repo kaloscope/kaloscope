@@ -567,7 +567,8 @@ class AssistantService:
                 if (
                     result["ok"]
                     and call.function.name == "get_workflow_reference"
-                    and result["data"].get("topic") in {"json_indexer", "movie_scraper"}
+                    and result["data"].get("topic")
+                    in {"json_indexer", "indexer_auth", "movie_scraper"}
                 ):
                     # keep full domain catalogs for ordinary turns, focus recipe builds
                     workflow_authoring = True

@@ -92,7 +92,9 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
         """Apply matching DNS and proxy rules before sending a request.
 
         Args:
-            request: HTTP request to route; DNS rules may replace its host.
+            request: HTTP request to route. DNS rules send a copy addressed to the
+                resolved IP, so the caller's URL keeps its hostname for redirects
+                and cookie scope.
 
         Returns:
             HTTP response from the selected transport.
@@ -102,6 +104,7 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
         logger.debug("Handling request for URL: %s", url)
 
         # step 1: DNS resolution
+        routed = request
         if not ip_address(host):
             dns_rules = (
                 await URLRule.filter(secure_dns=True)
@@ -120,10 +123,15 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
                 ip = await self._resolve_host(host, resolvers)
                 if ip is not None:
                     logger.debug("Resolved '%s' -> '%s' via secure DNS", host, ip)
-                    request.url = request.url.copy_with(host=ip)
-                    # preserve original hostname for Host header and TLS SNI
-                    request.headers["host"] = host
-                    request.extensions["sni_hostname"] = host
+                    routed = httpx.Request(
+                        request.method,
+                        request.url.copy_with(host=ip),
+                        headers=request.headers,
+                        stream=request.stream,
+                        # preserve original hostname for Host header and TLS SNI
+                        extensions={**request.extensions, "sni_hostname": host},
+                    )
+                    routed.headers["host"] = host
 
         # step 2: proxy routing
         proxy_rules = (
@@ -138,13 +146,13 @@ class NetworkTransport(httpx.AsyncHTTPTransport):
                 proxy_rule.pattern,
                 proxy.name,
             )
-            if proxy.protocol == ProxyProtocol.HTTP and request.url.host != host:
+            if proxy.protocol == ProxyProtocol.HTTP and routed.url.host != host:
                 # for HTTP proxies, ensure we use the original hostname in the URL
-                request.url = request.url.copy_with(host=host)
-            return await self._proxy_request(proxy, request)
+                routed.url = routed.url.copy_with(host=host)
+            return await self._proxy_request(proxy, routed)
 
         # use the default transport if no proxy rules match
-        return await super().handle_async_request(request)
+        return await super().handle_async_request(routed)
 
     def _match(self, url: str, rules: list[URLRule]) -> URLRule | None:
         """Find the first URL rule that matches the given URL.

@@ -211,6 +211,20 @@ def test_empty_search_page(total, number, valid):
         assert result.issues[0].path == "items"
 
 
+@pytest.mark.parametrize(
+    ("pages", "number", "valid"),
+    [(3, 1, False), (3, 3, False), (3, 4, True), (1, 1, True), (0, 1, True)],
+)
+def test_empty_counted_page(pages, number, valid):
+    result = check(
+        {"totalPages": pages, "items": []}, "search", page_num=number, page_size=1
+    )
+
+    assert result.valid is valid
+    if not valid:
+        assert result.issues[0].path == "items"
+
+
 def test_blank_image_addresses():
     result = check(
         {
@@ -452,7 +466,7 @@ def test_movie_metadata(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("topic", ["json_indexer", "movie_scraper"])
+@pytest.mark.parametrize("topic", ["json_indexer", "indexer_auth", "movie_scraper"])
 def test_recipe_guidance(topic):
     guide = get_workflow_reference(topic).content
     assert guide.isascii()

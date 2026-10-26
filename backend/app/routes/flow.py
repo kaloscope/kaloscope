@@ -133,6 +133,7 @@ async def list_templates(_, query: TmplQuery) -> HTTPResponse:
 
 
 @flow.post("/tmpl/<id:int>/ref")
+@authorize(role=UserRole.ADMIN)
 @validate(json=GraphBasics)
 async def reference_template(_, id: int, body: GraphBasics) -> HTTPResponse:
     """Reference a template to create a new flow graph.
@@ -149,6 +150,7 @@ async def reference_template(_, id: int, body: GraphBasics) -> HTTPResponse:
 
 
 @flow.post("/tmpl/<id:int>/copy")
+@authorize(role=UserRole.ADMIN)
 @validate(json=GraphBasics)
 async def copy_template(_, id: int, body: GraphBasics) -> HTTPResponse:
     """Copy a template to create a new flow graph.
@@ -333,6 +335,7 @@ async def retract_graph(_, id: int) -> HTTPResponse:
 
 
 @flow.post("/graph/<id:int>/execute")
+@authorize()
 async def execute_graph(request: Request, id: int) -> HTTPResponse:
     """Execute the flow graph.
 
@@ -342,12 +345,25 @@ async def execute_graph(request: Request, id: int) -> HTTPResponse:
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        ForbiddenException: If an ordinary account runs a missing or non-indexer
+            workflow, an indexer outside its permissions (including indexer login),
+            or resumes a saved run.
     """
     engine: FlowEngine = request.app.ctx.flow_engine
     bootparams: dict = request.json or {}
-    if await FlowGraph.filter(id=id, category=GraphCategory.INGEST).exists():
-        if request.ctx.user.role != UserRole.ADMIN:
-            raise ForbiddenException
+    user: UserInfo = request.ctx.user
+    category = await FlowGraph.filter(id=id).values_list("category", flat=True)
+    if GraphCategory.INDEXER in category:
+        # indexer entries, including login, share the indexer read permissions
+        await FlowGraphService.get_accessible(id, user)
+    elif user.role != UserRole.ADMIN:
+        raise ForbiddenException
+    if user.role != UserRole.ADMIN and bootparams.get("recovery_id") is not None:
+        # recovery resumes a saved run and its successors from any workflow
+        raise ForbiddenException
+    if GraphCategory.INGEST in category:
         # interactive ingest execution only previews reading metadata candidates
         bootparams[MANUAL_KEY] = True
     kwargs = {
@@ -385,6 +401,7 @@ async def delete_graphs(_, body: IDs) -> HTTPResponse:
 
 
 @flow.post("/graph/export")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def export_graphs(_, body: IDs) -> HTTPResponse:
     """Export the flow graphs as a zip file.
@@ -395,6 +412,9 @@ async def export_graphs(_, body: IDs) -> HTTPResponse:
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        KaloscopeException: If none of the requested graphs is published.
     """
     zip = await FlowGraphService.export_graphs(body.ids)
     if zip is None:
@@ -410,6 +430,7 @@ async def export_graphs(_, body: IDs) -> HTTPResponse:
 
 
 @flow.post("/graph/import")
+@authorize(role=UserRole.ADMIN)
 @validate(form=GraphImport)
 async def import_graphs(_, body: GraphImport) -> HTTPResponse:
     """Import the flow graphs from a zip file.
@@ -420,6 +441,9 @@ async def import_graphs(_, body: GraphImport) -> HTTPResponse:
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        KaloscopeException: If the archive cannot be read or imported.
     """
     try:
         return json(await FlowGraphService.import_graphs(body.zip))
@@ -445,44 +469,64 @@ async def get_node_schemas(_, query: GraphQuery) -> HTTPResponse:
 
 
 @flow.get("/indexer/<id:int>/config")
-async def get_indexer_config(_, id: int) -> HTTPResponse:
+@authorize()
+async def get_indexer_config(request: Request, id: int) -> HTTPResponse:
     """Get configuration of the indexer flow.
 
     Args:
-        _: Unused request.
+        request: Incoming request with the authenticated user's permissions.
         id: Graph ID.
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        NotFoundException: If the indexer does not exist.
+        ForbiddenException: If the user cannot access the indexer.
     """
+    await FlowGraphService.get_accessible(id, request.ctx.user)
     return json(await start_config(id, "auth", "search", "board", "details"))
 
 
 @flow.get("/indexer/<id:int>/auth")
+@authorize()
 async def get_indexer_auth(request: Request, id: int) -> HTTPResponse:
-    """Get authentication of the indexer flow.
+    """Get the login status of the indexer flow.
 
     Args:
-        request: Incoming request with session and application context.
+        request: Incoming request with session, permissions and application context.
         id: Graph ID.
 
     Returns:
-        Response containing the requested data.
+        Logged-in display name, an empty name for a configured cookie session, or
+        `None`. Tokens and other saved login fields are never returned.
+
+    Raises:
+        NotFoundException: If the indexer does not exist.
+        ForbiddenException: If the user cannot access the indexer.
     """
-    return json(await FlowGraphService.indexer_auth(id, request.app.ctx.cookies))
+    await FlowGraphService.get_accessible(id, request.ctx.user)
+    auth = await FlowGraphService.indexer_auth(id, request.app.ctx.cookies)
+    return json(None if auth is None else {"name": auth.get("name")})
 
 
 @flow.post("/indexer/<id:int>/logout")
+@authorize()
 async def indexer_logout(request: Request, id: int) -> HTTPResponse:
     """Clear the indexer authentication state.
 
     Args:
-        request: Incoming request with session and application context.
+        request: Incoming request with session, permissions and application context.
         id: Graph ID.
 
     Returns:
         Empty response on success.
+
+    Raises:
+        NotFoundException: If the indexer does not exist.
+        ForbiddenException: If the user cannot access the indexer.
     """
+    await FlowGraphService.get_accessible(id, request.ctx.user)
     # delete the auth variable
     await FlowVariable.filter(graph_id=id, key=AUTH_KEY).delete()
     # delete the auth cookie
@@ -579,6 +623,7 @@ async def upsert_job(_, body: JobUpsert) -> HTTPResponse:
 
 
 @flow.post("/job/<id:int>/pause")
+@authorize(role=UserRole.ADMIN)
 async def pause_job(request: Request, id: int) -> HTTPResponse:
     """Pause the job.
 
@@ -595,6 +640,7 @@ async def pause_job(request: Request, id: int) -> HTTPResponse:
 
 
 @flow.post("/job/<id:int>/resume")
+@authorize(role=UserRole.ADMIN)
 async def resume_job(request: Request, id: int) -> HTTPResponse:
     """Resume the job.
 
@@ -604,6 +650,9 @@ async def resume_job(request: Request, id: int) -> HTTPResponse:
 
     Returns:
         Empty response on success.
+
+    Raises:
+        KaloscopeException: If the job's workflow is not published.
     """
     job = await FlowJob.get(id=id)
     graph = await FlowGraph.get_or_none(id=job.graph_id, state__not=GraphState.DRAFT)

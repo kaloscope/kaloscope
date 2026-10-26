@@ -267,8 +267,10 @@ def create_server() -> MCPServer:
             "the returned draft version. "
             "Drafts can be incomplete; they are never automatically published or run. "
             "For JSON indexers or HTML movie scrapers, read the json_indexer or "
-            "movie_scraper reference. Validate supplied samples using search/details/"
-            "movie modes, correct field errors and recheck before previewing. "
+            "movie_scraper reference; indexer login also needs indexer_auth. "
+            "Validate supplied samples using search/details/movie/auth modes "
+            "(auth with the auth_start config), correct field errors and recheck "
+            "before previewing. "
             "Use the exact tested templates; stop after two unsuccessful repairs "
             "and report missing evidence. Validation is not execution. "
             "Except authorized download-plan execution, no tool publishes, "
@@ -766,17 +768,21 @@ def create_server() -> MCPServer:
         Args:
             ctx: Authenticated request context.
             probe: Request using HTTP node encoding. `workflow_id` explicitly
-                selects an accessible indexer's saved cookies and `$auth`; otherwise
-                only supplied fixtures are available. Missing required login asks
-                the user to log in on the indexer's search page first. Templates read
+                selects an accessible indexer's saved cookies and, only for hosts
+                written in its HTTP node URLs, its `$auth`; requests reading `$auth`
+                for other hosts are refused, and requests carrying it return a 3xx
+                and its `location` instead of following redirects. Otherwise only
+                supplied fixtures are available. Missing required login asks the
+                user to log in on the indexer's search page first. Templates read
                 the token with `{{ var('$auth').token }}`, as HTTP nodes do.
 
         Returns:
             Status, final URL, selected headers, a 2000-character sample and explicit
             completeness flags. Optional object extraction runs before clipping,
-            within a 256 KiB body cap. Known credential values are redacted. Cookie
-            changes stay within this call; no login, retry, persistent caching or
-            workflow execution is performed.
+            within a 256 KiB body cap. Saved and received credential values are
+            redacted, including the indexer's session cookie and HttpOnly cookies
+            at any length. Cookie changes stay within this call; no login, retry,
+            persistent caching or workflow execution is performed.
         """
         return HTTPProbeResult.model_validate(
             await _read(probe_request(probe, _user(ctx)))
@@ -794,7 +800,8 @@ def create_server() -> MCPServer:
 
         Args:
             ctx: Authenticated request context.
-            validation: Text/expression, JSONC, or search/details/movie output check.
+            validation: Text/expression, JSONC, or search/details/movie/auth output
+                check. `auth` also requires the exact `auth_start` config.
 
         Returns:
             JSON-compatible value or errors. Strict mode rejects undefined values;
@@ -804,6 +811,8 @@ def create_server() -> MCPServer:
             Business modes return field issues and sample limitations; repair the
             template and recheck without inventing missing source data. They retain
             the parsed value without coercion, and omit duplicate rendered text.
+            A valid `auth` result reports whether login succeeds (`authenticated`,
+            saving `$auth`) or fails (`unauthenticated`); nothing is saved here.
         """
         _user(ctx)
         return validate_template(validation)
@@ -812,8 +821,13 @@ def create_server() -> MCPServer:
     async def get_workflow_reference(
         ctx: Context,
         topic: Annotated[
-            Literal["context", "templates", "json_indexer", "movie_scraper"],
-            Field(description="Context/functions or JSON indexer/HTML movie recipes."),
+            Literal[
+                "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+            ],
+            Field(
+                description="Context/functions or JSON indexer, indexer login or "
+                "HTML movie recipes."
+            ),
         ],
     ) -> WorkflowReference:
         """Read shared workflow authoring rules without executing anything.
