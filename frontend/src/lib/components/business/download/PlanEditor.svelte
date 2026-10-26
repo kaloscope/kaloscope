@@ -121,7 +121,7 @@
   // the media libraries and transfer options
   let mediaLibs: MediaLib[] = $state([]);
   let supportsHardlink: boolean = $state(true);
-  let attempted: { request_id: string; plan: DownloadPlanSettings } | null = $state(null);
+  let attempted: { request_id: string; plan: DownloadPlanSettings; confirmed: true } | null = $state(null);
   let creationFailed = $state(false);
   let issues: { path: string; message: string }[] = $state([]);
 
@@ -234,7 +234,7 @@
         const recovery = attempted
           ? await api.get(`download/plan/request/${creationRequestId}`).json<Resp<DownloadPlanCreateResult>>()
           : null;
-        attempted ??= { request_id: creationRequestId, plan: settings };
+        attempted ??= { request_id: creationRequestId, plan: settings, confirmed: true };
         const { data } = recovery?.data.created
           ? recovery
           : await api.post('download/plan/create', { json: attempted }).json<Resp<DownloadPlanCreateResult>>();
@@ -357,10 +357,6 @@
       upsert();
     }}
   >
-    {#if !id}
-      <p class="mb-3 text-sm">{$_('assistant.plan.creation_behavior')}</p>
-      <p class="mb-3 text-sm text-base-content/70">{$_('assistant.plan.validation_scope')}</p>
-    {/if}
     {#if creationFailed}
       <p class="mb-3 text-sm text-error" role="alert">{$_('assistant.plan.creation_unknown')}</p>
     {/if}

@@ -1,14 +1,11 @@
 import asyncio
-import os
 from datetime import datetime
-from pathlib import Path
 
 from sanic import Blueprint, HTTPResponse, Request, empty, json
 from sanic.log import logger
 from sanic_ext import validate
 from tortoise.expressions import Q
 
-from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
 from app.core.decorators import authorize
 from app.core.dl.config import load_driver
@@ -36,6 +33,7 @@ from app.services.download import (
     DownloaderService,
     DownloadPlanService,
     DownloadTaskService,
+    default_download_directory,
 )
 from app.utils.bittorrent import standardize_magnet
 from app.utils.disk import disk_usage
@@ -333,33 +331,9 @@ async def list_directories(_) -> HTTPResponse:
     """
     directories = await DownloadDir.all().order_by("-last_used").limit(3).values("path")
     if not directories:
-        # check if the path is readable
-        def readable(p: Path) -> bool:
-            """Check whether a download directory can be read.
-
-            Args:
-                p: Candidate download directory.
-
-            Returns:
-                Whether the path is a readable directory.
-            """
-            try:
-                return p.is_dir() and os.access(p, os.R_OK)
-            except OSError:
-                return False
-
-        # find the first readable path from the candidates
-        path = None
-        for p in [Path("/downloads"), Path.home() / "Downloads"]:
-            if readable(p):
-                path = p
-                break
-
-        # if no readable path is found, use the workspace downloads directory
-        if path is None:
-            path = Path(KaloscopeConfig.get()._workspace) / "downloads"
-            if not path.exists():
-                path.mkdir(parents=True, exist_ok=True)
+        path = default_download_directory()
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
 
         directories = [{"path": str(path.resolve())}]
 

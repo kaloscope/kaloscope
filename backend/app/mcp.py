@@ -26,6 +26,7 @@ from app.models.download import (
     DownloadPlanCreate,
     DownloadQuery,
     DownloadState,
+    IndexerSearch,
 )
 from app.models.flow import (
     GraphCategory,
@@ -42,6 +43,7 @@ from app.models.flow import (
 )
 from app.models.mcp import (
     DownloadResult,
+    IndexerSearchResult,
     ItemsResult,
     LibraryStatus,
     MCPTokenScope,
@@ -127,6 +129,7 @@ _READ_TOOLS = frozenset(
 )
 _WRITE_TOOLS = frozenset(
     {
+        "search_indexer",
         "create_download_plan",
         "create_workflow_draft",
         "save_workflow_draft",
@@ -315,6 +318,40 @@ def create_server() -> MCPServer:
             )
         )
 
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=False,
+            open_world_hint=True,
+        )
+    )
+    async def search_indexer(
+        ctx: Context,
+        search: Annotated[
+            IndexerSearch,
+            Field(description="Selected published indexer and explicit search inputs."),
+        ],
+    ) -> IndexerSearchResult:
+        """Search the user's selected published indexer before reviewing plan settings.
+
+        Retain the requested keyword. Read get_download_plan_options for declared
+        filters, explicit defaults and the shared creation sequence. Re-search
+        changed inputs; empty results require revision or explicit agreement to wait.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            search: Selected indexer and explicit keyword, filters and page.
+
+        Returns:
+            Bounded metadata and reported pagination, or a distinct failure status.
+            Runs the existing search workflow with a ten-second timeout, including
+            its HTTP/log/cache effects; creates no plan or download task.
+        """
+        return IndexerSearchResult.model_validate(
+            await _read(DownloadPlanService.search_indexer(search, _user(ctx)))
+        )
+
     @server.tool(annotations=READ_ONLY)
     async def validate_download_plan(
         ctx: Context,
@@ -348,7 +385,12 @@ def create_server() -> MCPServer:
         ctx: Context,
         creation: Annotated[
             DownloadPlanCreate,
-            Field(description="Final settings; reuse request_id on every retry."),
+            Field(
+                description=(
+                    "Show all final settings/defaults, wait for user approval, then "
+                    "set confirmed=true. Reuse request_id on retries."
+                )
+            ),
         ],
     ) -> PlanCreationResult:
         """Create one plan; active plans queue real search and download submissions.

@@ -952,6 +952,7 @@ export type DownloadPlanCreateResult =
   | {
       created: false;
       issues: { path: string; message: string }[];
+      confirmation_required?: boolean;
     };
 
 /** A validated proposal that can be opened in the existing plan editor. */

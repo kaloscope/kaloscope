@@ -791,9 +791,9 @@
         "http_headers": "请求头",
         "http_body": "请求体",
         "request": "请求",
-        "request_example": "输入说明与示例",
+        "request_example": "输入说明",
         "response": "响应",
-        "response_example": "输出说明与示例",
+        "response_example": "输出说明",
         "bootparams": "启动参数",
         "formatter": "格式化",
         "config": "配置",
@@ -1016,7 +1016,7 @@
     "assistant_canvas_wait_save": "请确认保存结果后再离开画布",
     "assistant_canvas_already_saved": "草稿已保存，修改已保留",
     "assistant_canvas_already_reverted": "修改此前已撤回，未保存",
-    "download_plan_request_conflict": "此请求已按其他配置创建计划，请重新打开原计划预览以恢复结果。"
+    "download_plan_request_conflict": "计划已按其他配置创建，请重新打开原预览恢复结果"
   },
   "ai": {
     "custom": "自定义提供商",
@@ -1086,9 +1086,9 @@
     "navigation_cancelled": "未打开目标页面",
     "create": {
       "created": "已创建空白草稿“{0}”（#{1}），未发布或执行",
-      "replayed": "已使用本次创建的空白草稿“{0}”（#{1}）",
+      "replayed": "继续使用草稿“{0}”（#{1}）",
       "opening": "正在打开草稿 #{0}...",
-      "blocked": "未打开草稿 #{0}，请打开后继续编辑",
+      "blocked": "请打开草稿 #{0} 继续编辑",
       "prompt": "根据用途在当前画布上搭建工作流，并列出需要补充的配置"
     },
     "errors": {
@@ -1114,7 +1114,7 @@
     },
     "pages": {
       "workflows": "工作流列表",
-      "workflow_jobs": "工作流计划",
+      "workflow_jobs": "定时调度",
       "workflow_designer": "工作流设计器",
       "media_library": "媒体库",
       "media_item": "媒体详情",
@@ -1125,12 +1125,12 @@
     },
     "tools": {
       "list_workflows": "查找工作流",
-      "list_workflow_jobs": "查找工作流计划",
+      "list_workflow_jobs": "查找定时任务",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
       "probe_http_request": "探测 HTTP 请求",
-      "validate_workflow_template": "验证模板",
+      "validate_workflow_template": "校验模板",
       "get_workflow_logs": "读取运行日志",
       "validate_workflow": "校验工作流",
       "preview_workflow_draft": "调整画布草稿",
@@ -1144,10 +1144,11 @@
       "get_media_item": "读取媒体详情",
       "list_download_tasks": "查找下载任务",
       "get_download_task": "读取下载详情",
-      "get_download_plan_options": "读取下载计划选项",
+      "get_download_plan_options": "读取计划选项",
       "validate_download_plan": "校验下载计划",
       "create_download_plan": "创建下载计划",
-      "get_download_plan": "读取下载计划"
+      "get_download_plan": "读取下载计划",
+      "search_indexer": "搜索索引器"
     },
     "tool_status": {
       "running": "执行中",
@@ -1196,7 +1197,7 @@
       "changes": "{0} 项调整",
       "issues": "{0} 条提示待检查",
       "unsaved": "尚未保存",
-      "unsaved_empty": "尚未保存，撤回后恢复为空白草稿",
+      "unsaved_empty": "尚未保存，撤回后恢复空白草稿",
       "revert": "撤回",
       "keep": "保留并保存草稿",
       "check_save": "查询保存结果",
@@ -1212,22 +1213,29 @@
       "leave_message": "助手修改将被撤回，此前未保存的手工编辑仍会提示保存"
     },
     "plan": {
-      "review": "检查并创建计划",
-      "create": "创建并开始调度",
+      "review": "检查计划",
+      "create": "创建计划",
       "recover": "恢复创建结果",
-      "created": "已创建下载计划 #{0}。",
-      "creation_behavior": "创建后会尽快搜索并添加下载任务。若设置未来开始时间，则到期后由每小时检查触发首轮；之后按小时间隔执行。此处显示本地时间，保存时转换为 UTC。不会发布索引器。",
-      "creation_unknown": "暂时无法确认创建结果。请保留当前配置并恢复原请求，不会重复创建计划。",
+      "created": "已创建下载计划 #{0}",
+      "creation_unknown": "创建结果待确认，请保留当前配置并恢复结果，不会重复创建",
       "first": {
         "queued": "首轮已排队",
-        "waiting": "等待满足调度条件",
-        "unconfirmed": "首轮已开始，最终结果待确认",
-        "completed": "首轮已结束，下载可能仍在进行",
+        "waiting": "等待调度条件",
+        "unconfirmed": "首轮已开始，结果待确认",
+        "completed": "首轮已结束，下载可能未完成",
         "partial": "首轮部分失败",
-        "failed": "首轮失败，后续间隔可能重试",
-        "unavailable": "暂无首轮执行记录"
+        "failed": "首轮失败，后续可能重试",
+        "unavailable": "暂无首轮记录"
       },
-      "validation_scope": "校验只检查配置，不证明当前有可下载结果。更改关键词或筛选条件，或点击搜索，都会执行索引器预览。"
+      "confirmation_required": "请确认全部配置及默认值后再创建",
+      "search_preview": "预览 {0} 个资源，未创建计划或下载任务",
+      "search_empty": "暂无匹配资源，请调整条件或确认等待后续资源",
+      "search_truncated": "部分内容已省略，可减少每页条数或前往搜索页面查看",
+      "search_login_required": "请先在索引器搜索页面登录后重试，勿在对话中发送凭据",
+      "search_timeout": "搜索超时，请查看工作流日志后再重试",
+      "search_failed": "搜索失败，未创建计划，请查看工作流日志",
+      "search_invalid_input": "搜索条件有误，请展开工具详情查看",
+      "search_invalid_output": "搜索结果有误，请查看工具详情和工作流日志"
     }
   }
 }

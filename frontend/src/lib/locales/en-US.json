@@ -791,9 +791,9 @@
         "http_headers": "Headers",
         "http_body": "Body",
         "request": "Request",
-        "request_example": "Input Guide & Example",
+        "request_example": "Input Guide",
         "response": "Response",
-        "response_example": "Output Guide & Example",
+        "response_example": "Output Guide",
         "bootparams": "Boot Parameters",
         "formatter": "Formatter",
         "config": "Configuration",
@@ -1016,7 +1016,7 @@
     "assistant_canvas_wait_save": "Check the save result before leaving the canvas.",
     "assistant_canvas_already_saved": "The draft had already been saved, so the changes were kept.",
     "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved.",
-    "download_plan_request_conflict": "This request already created a plan with different settings. Reopen the reviewed plan to recover it."
+    "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it."
   },
   "ai": {
     "custom": "Custom provider",
@@ -1085,10 +1085,10 @@
     "tool_failed": "The tool failed. Try again.",
     "navigation_cancelled": "The destination page wasn't opened.",
     "create": {
-      "created": "Created empty draft “{0}” #{1}. Nothing was published or run.",
-      "replayed": "Reused empty draft “{0}” #{1} created for this request.",
-      "opening": "Opening empty draft #{0}…",
-      "blocked": "Empty draft #{0} wasn't opened. Open it to continue building.",
+      "created": "Created empty draft “{0}” (#{1}); unpublished and not run.",
+      "replayed": "Reusing draft “{0}” (#{1})",
+      "opening": "Opening draft #{0}...",
+      "blocked": "Open draft #{0} to continue editing.",
       "prompt": "Build this new workflow on the canvas from its purpose. List any configuration I still need to provide."
     },
     "errors": {
@@ -1114,7 +1114,7 @@
     },
     "pages": {
       "workflows": "Workflows",
-      "workflow_jobs": "Workflow Schedules",
+      "workflow_jobs": "Schedules",
       "workflow_designer": "Workflow Designer",
       "media_library": "Media Library",
       "media_item": "Media Details",
@@ -1125,7 +1125,7 @@
     },
     "tools": {
       "list_workflows": "Find Workflows",
-      "list_workflow_jobs": "Find Workflow Schedules",
+      "list_workflow_jobs": "Find Scheduled Jobs",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_reference": "Read Workflow Reference",
@@ -1134,7 +1134,7 @@
       "get_workflow_logs": "Read Run Logs",
       "validate_workflow": "Validate Workflow",
       "preview_workflow_draft": "Edit canvas draft",
-      "create_workflow_draft": "Create workflow draft",
+      "create_workflow_draft": "Create Workflow Draft",
       "navigate": "Suggest Page",
       "read_workflow_log": "Read log details",
       "read_workflow_snapshot": "Read graph snapshot",
@@ -1147,7 +1147,8 @@
       "get_download_plan_options": "Read Plan Options",
       "validate_download_plan": "Validate Download Plan",
       "create_download_plan": "Create Download Plan",
-      "get_download_plan": "Read Download Plan"
+      "get_download_plan": "Read Download Plan",
+      "search_indexer": "Search Indexer"
     },
     "tool_status": {
       "running": "Running",
@@ -1175,8 +1176,8 @@
     "select_loaded": "Select all loaded",
     "delete_chats": "Delete ({0})",
     "delete_chats_confirm": "Delete {0} selected conversations?",
-    "delete_chats_warning": "Selected conversations, messages, tool records, and snapshots will be permanently deleted. This cannot be undone.",
-    "delete_chats_limit": "Select no more than {0} conversations at a time.",
+    "delete_chats_warning": "Selected conversations and all records will be deleted. This cannot be undone.",
+    "delete_chats_limit": "Select up to {0} conversations at a time.",
     "chats_deleted": "Deleted {0} conversations",
     "no_history": "No saved conversations yet",
     "load_older": "Load older records",
@@ -1196,7 +1197,7 @@
       "changes": "{0, plural, one {# change} other {# changes}}",
       "issues": "{0, plural, one {# note to check} other {# notes to check}}",
       "unsaved": "Not saved yet",
-      "unsaved_empty": "Not saved yet. Revert restores the empty draft.",
+      "unsaved_empty": "Unsaved; reverting restores the empty draft.",
       "revert": "Revert",
       "keep": "Keep and save draft",
       "check_save": "Check save status",
@@ -1212,22 +1213,29 @@
       "leave_message": "Assistant changes will be reverted. Earlier unsaved manual edits still prompt you to save."
     },
     "plan": {
-      "review": "Review and create plan",
-      "create": "Create and schedule",
-      "recover": "Recover creation result",
-      "created": "Download plan #{0} was created. ",
-      "creation_behavior": "Creation queues a real search and download attempt promptly. A future start waits for the hourly schedule check; later attempts follow the interval in hours. Times shown here use your local timezone and are stored in UTC. This does not publish the indexer.",
-      "creation_unknown": "The creation result could not be confirmed. Keep these settings and recover the original request; it will not create a second plan.",
+      "review": "Review Plan",
+      "create": "Create Plan",
+      "recover": "Recover Creation Result",
+      "created": "Download plan #{0} created",
+      "creation_unknown": "Creation result unknown. Keep these settings and recover the result to avoid duplicates.",
       "first": {
         "queued": "First attempt queued",
-        "waiting": "Waiting for scheduling conditions",
-        "unconfirmed": "First attempt started; final result unconfirmed",
-        "completed": "First attempt finished; downloads may still be running",
+        "waiting": "Waiting for schedule conditions",
+        "unconfirmed": "First attempt started; result unconfirmed",
+        "completed": "First attempt finished; downloads may be incomplete",
         "partial": "First attempt partially failed",
-        "failed": "First attempt failed; next interval may retry",
+        "failed": "First attempt failed; may retry later",
         "unavailable": "No first-attempt record"
       },
-      "validation_scope": "Validation checks settings only; it does not prove downloadable results exist. Changing keywords or filters, or clicking Search, runs an indexer preview."
+      "confirmation_required": "Confirm all settings and defaults before creating.",
+      "search_preview": "Preview: {0} resources; no plan or downloads created.",
+      "search_empty": "No matches. Adjust the search or confirm waiting for future results.",
+      "search_truncated": "Preview shortened. Use a smaller page or open Search.",
+      "search_login_required": "Log in on the indexer's search page and retry. Never send credentials in chat.",
+      "search_timeout": "Search timed out. Check workflow logs before retrying.",
+      "search_failed": "Search failed; no plan created. Check workflow logs.",
+      "search_invalid_input": "Invalid search settings. Expand tool details.",
+      "search_invalid_output": "Invalid search result. Check tool details and workflow logs."
     }
   }
 }

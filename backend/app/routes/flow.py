@@ -1,5 +1,3 @@
-import time
-
 from sanic import Blueprint, HTTPResponse, Request, empty, json, raw, text
 from sanic.log import logger
 from sanic_ext import validate
@@ -471,24 +469,7 @@ async def get_indexer_auth(request: Request, id: int) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    now = time.time()
-    # check the auth variable
-    var = await FlowVariable.get_or_none(
-        Q(graph_id=id, key=AUTH_KEY) & (Q(expires__gte=now) | Q(expires__isnull=True))
-    )
-    if var is not None and isinstance(var.value, dict) and "name" in var.value:
-        return json(var.value)
-    # check the auth cookie
-    config = await start_config(id, "auth")
-    cookie = config.get("auth", {}).get("cookie")
-    if isinstance(cookie, dict) and (domain := cookie.get("domain")):
-        cookies: SQLiteCookieJar = request.app.ctx.cookies
-        _cookie = cookies.get_cookie(
-            domain=domain, path=cookie.get("path"), name=cookie.get("name")
-        )
-        if _cookie is not None:
-            return json({"name": ""})
-    return json(None)
+    return json(await FlowGraphService.indexer_auth(id, request.app.ctx.cookies))
 
 
 @flow.post("/indexer/<id:int>/logout")

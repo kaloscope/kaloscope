@@ -193,7 +193,7 @@ def test_session_independence(monkeypatch):
             session_expiry = app.shared_ctx.sessions["reader"].expire_at
             response = await rpc(http, issued["token"])
             assert response.status_code == 200
-            assert len(response.json()["result"]["tools"]) == 24
+            assert len(response.json()["result"]["tools"]) == 25
             assert "set-cookie" not in response.headers
             assert app.shared_ctx.sessions["reader"].expire_at == session_expiry
             assert issued["token"] not in app.shared_ctx.sessions
