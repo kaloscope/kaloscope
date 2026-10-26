@@ -48,6 +48,7 @@ from app.models.mcp import (
     DownloadResult,
     IndexerSearchResult,
     ItemsResult,
+    LibraryIngestionResult,
     LibraryStatus,
     MCPTokenScope,
     MediaDetails,
@@ -114,6 +115,7 @@ _READ_TOOLS = frozenset(
         "validate_download_plan",
         "get_download_plan",
         "list_download_plans",
+        "get_library_ingestion",
         "list_workflows",
         "get_workflow",
         "list_node_types",
@@ -264,7 +266,8 @@ def create_server() -> MCPServer:
             "first-attempt outcome separately. Creation is not download success. "
             "Before validating, check list_media_items and list_download_plans (all "
             "indexers) for possible overlaps; matches are advisory evidence for the "
-            "user's final decision. "
+            "user's final decision. For movie library ingestion, follow "
+            "get_library_ingestion; creation binds the reviewed workflow first. "
             "List resources before reading their details; "
             "inspect node schemas and logs to diagnose workflows. Access follows the "
             "account's permissions; AI provider settings require an administrator. "
@@ -407,11 +410,16 @@ def create_server() -> MCPServer:
 
         Args:
             ctx: Administrator context with a read-write token.
-            creation: Stable request identity and user-authorized settings.
+            creation: Stable request identity and user-authorized settings. Include
+                validation's `ingestion` workflow ID and revision to reuse or append
+                that movie library binding before the plan is created.
 
         Returns:
             Existing or newly created plan and its first-attempt state. No execution
             is repeated by a replay; use get_download_plan to read later outcomes.
+            With ingestion, `ingestion.binding` is `reused`/`added`, or `conflict`/
+            `invalid` with no plan; `plan_error` means the binding was kept and a
+            retry with the same request ID reuses it.
         """
         return PlanCreationResult.model_validate(
             await _read(DownloadPlanService.create_once(creation, _user(ctx)))
@@ -435,6 +443,30 @@ def create_server() -> MCPServer:
         """
         return PlanCreationResult.model_validate(
             await _read(DownloadPlanService.get_creation(plan_id, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_library_ingestion(
+        ctx: Context,
+        library_id: Annotated[
+            _ResourceID,
+            Field(description="Movie library that receives transferred downloads."),
+        ],
+    ) -> LibraryIngestionResult:
+        """Inspect a library's ingestion bindings before planning automatic ingestion.
+
+        Args:
+            ctx: Administrator request context.
+            library_id: Transfer library from `list_media_libraries`.
+
+        Returns:
+            Stored bindings in run order, including unpublished ones, with
+            `executable` and `movie_output` facts, the binding `revision`, published
+            movie ingestion workflows, unpublished ingestion workflows, the
+            library-wide binding scope and setup rules. Nothing is changed.
+        """
+        return LibraryIngestionResult.model_validate(
+            await _read(MediaLibService.ingestion_bindings(library_id, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)

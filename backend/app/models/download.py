@@ -477,6 +477,10 @@ class DownloadPlanCheck(BaseModel):
         default=None,
         description="Optional page-1 search result; page_size=batch_limit.",
     )
+    ingest_workflow_id: PositiveInt | None = Field(
+        default=None,
+        description="Movie ingestion workflow for the transfer library.",
+    )
 
     @model_validator(mode="after")
     def bound_input(self) -> Self:
@@ -495,12 +499,26 @@ class DownloadPlanCheck(BaseModel):
         return self
 
 
+class IngestionBinding(BaseModel):
+    """Identify a reviewed movie ingestion binding for the transfer library."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    workflow_id: PositiveInt = Field(description="Reviewed ingestion workflow ID.")
+    revision: str = Field(
+        max_length=64, description="Binding `revision` returned by validation."
+    )
+
+
 class DownloadPlanCreate(BaseModel):
     """Create once using a stable client request ID; active plans run promptly."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
     plan: DownloadPlanSettings
+    ingestion: IngestionBinding | None = Field(
+        default=None,
+        description="Validation's ingestion review; binds it before creating.",
+    )
     confirmed: bool = Field(
         default=False,
         description="True only after the user approves these final settings.",

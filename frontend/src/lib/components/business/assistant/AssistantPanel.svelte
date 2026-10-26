@@ -255,13 +255,14 @@
   }
 
   /**
-   * Open validated settings in the existing editor without searching or creating.
+   * Open plain plan settings in the existing editor without searching or creating.
+   * Keep ingestion reviews in the conversation so their binding is confirmed together.
    *
    * @param tool - Successful validation whose request identity is reused on save.
    * @returns A promise that resolves when the editor is open.
    */
   async function reviewPlan(tool: Tool): Promise<void> {
-    if (!tool.result?.ok || !tool.result.data?.valid) return;
+    if (!tool.result?.ok || !tool.result.data?.valid || tool.result.data.ingestion) return;
     if (planPreview?.request_id !== tool.result.data.request_id) {
       planPreview = null;
       await tick();

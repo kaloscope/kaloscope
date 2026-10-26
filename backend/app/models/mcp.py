@@ -186,6 +186,20 @@ class PlanCreationResult(Result):
     first_execution: dict[str, JSONType] | Literal["scheduled", "queued_after_creation"]
 
 
+class LibraryIngestionResult(Result):
+    """Describe a library's ordered bindings and usable movie ingestion workflows."""
+
+    library_id: int
+    library_name: str
+    supported: bool
+    bindings: list[dict[str, JSONType]]
+    binding_count: int
+    revision: str
+    movie_workflows: list[dict[str, JSONType]]
+    unpublished_workflows: list[dict[str, JSONType]]
+    scope: str
+
+
 class PlanListResult(Result):
     """Page accessible plans with applied filters, exact totals and compact facts."""
 
