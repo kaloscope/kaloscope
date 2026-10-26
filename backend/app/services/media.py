@@ -25,7 +25,7 @@ from filelock import AsyncFileLock, FileLock, Timeout
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
-from tortoise.exceptions import DoesNotExist
+from tortoise.exceptions import DoesNotExist, IntegrityError
 from tortoise.expressions import F, Q, RawSQL
 from tortoise.transactions import atomic, in_transaction
 
@@ -51,7 +51,14 @@ from app.core.media.organizer import (
     organize_items,
     recover_organizing,
 )
-from app.models.flow import FlowInstance, FlowTrigger, GraphCategory, GraphRef
+from app.models.flow import (
+    FlowGraph,
+    FlowInstance,
+    FlowTrigger,
+    GraphCategory,
+    GraphRef,
+    GraphState,
+)
 from app.models.media import (
     ContentChapter,
     EpubContent,
@@ -81,7 +88,7 @@ from app.models.user import (
     UserRole,
 )
 from app.services.base import BaseService
-from app.services.flow import FlowTriggerService
+from app.services.flow import FlowGraphService, FlowTriggerService
 from app.utils.asyncio import write_in_thread
 from app.utils.disk import delete_path, file_state, original_file_info, rename_exclusive
 from app.utils.text import natural_key
@@ -1371,6 +1378,94 @@ def _publish_index(item: MediaItem, staging: Path, version: str, states: _Source
             raise ContentError("content_not_ready") from error
 
 
+INGESTION_SCOPE = (
+    "A binding runs for every new item in this library's normal ingestion, not "
+    "only this plan's downloads."
+)
+INGESTION_RULES = (
+    "Movie libraries only. Reuse a binding with movie_output or choose a "
+    "movie_workflows entry; unpublished workflows never run. If none fits, ask "
+    "only for missing source details, build one with the movie_scraper recipe "
+    "(create_workflow_draft), keep the pending plan settings in this conversation "
+    "and resume after the user saves and publishes it. Validate the plan with "
+    "ingest_workflow_id and show library, transfer method, workflow, reuse/add, "
+    "scope and first execution before confirmation. Creation binds first, then "
+    "creates the plan; report each outcome and retry the same request_id. Do not "
+    "wait for downloads or ingestion; later progress comes from task, log and "
+    "media reads."
+)
+
+
+def movie_output(definition: dict | None) -> bool:
+    """Check whether a saved definition leads from ingestion to movie metadata.
+
+    Args:
+        definition: Published nodes and edges, or `None` when unpublished.
+
+    Returns:
+        Whether edges connect an `ingest_start` node to a `movie` node.
+    """
+    nodes = (definition or {}).get("nodes")
+    edges = (definition or {}).get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return False
+    types = {
+        node.get("id"): (node.get("data") or {}).get("$schema")
+        for node in nodes
+        if isinstance(node, dict)
+    }
+    pending = [node_id for node_id, kind in types.items() if kind == "ingest_start"]
+    seen = set(pending)
+    while pending:
+        current = pending.pop()
+        if types.get(current) == "movie":
+            return True
+        for edge in edges:
+            if not isinstance(edge, dict) or edge.get("source") != current:
+                continue
+            if (target := edge.get("target")) not in seen:
+                seen.add(target)
+                pending.append(target)
+    return False
+
+
+def _binding_revision(rows: list[FlowTrigger]) -> str:
+    """Fingerprint a library's stored bindings, order and execution settings.
+
+    Args:
+        rows: Stored ingest bindings in priority order.
+
+    Returns:
+        Stable digest that changes when any binding is added, removed or edited.
+    """
+    values = [[row.graph_id, row.priority, row.asynchronous] for row in rows]
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+
+def _binding_fact(row: FlowTrigger) -> dict[str, Any]:
+    """Describe one stored binding, separating configuration from executability.
+
+    Args:
+        row: Stored binding with its workflow loaded.
+
+    Returns:
+        Workflow identity, order and execution settings, whether normal ingestion
+        runs it now and whether its published definition produces movie metadata.
+    """
+    graph = row.graph
+    executable = graph.category == GraphCategory.INGEST and graph.state != (
+        GraphState.DRAFT
+    )
+    return {
+        "workflow_id": graph.id,
+        "workflow_name": graph.name,
+        "order": row.priority,
+        "asynchronous": row.asynchronous,
+        "executable": executable,
+        "movie_output": executable and movie_output(graph.definition),
+    }
+
+
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
     """The service class for all media library related operations."""
 
@@ -1428,6 +1523,193 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         ):
             raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
         return library
+
+    @classmethod
+    async def ingestion_bindings(cls, lib_id: int, user: UserInfo) -> dict[str, Any]:
+        """Inspect a library's ingestion bindings and usable movie workflows.
+
+        Args:
+            lib_id: Library that would receive transferred downloads.
+            user: Current administrator; bindings are workflow configuration.
+
+        Returns:
+            Stored bindings in order (including unpublished ones), the binding
+            `revision`, published movie ingestion workflows, unpublished ingestion
+            workflows, the binding scope and setup rules. Nothing is changed.
+
+        Raises:
+            ForbiddenException: If the account cannot configure workflows or read
+                the library.
+            NotFoundException: If the library does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        lib = await cls.get_accessible(lib_id, user)
+        rows = (
+            await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=lib.id)
+            .order_by("priority")
+            .select_related("graph")
+        )
+        bound = {row.graph_id for row in rows}
+        workflows = await FlowGraph.filter(category=GraphCategory.INGEST).order_by(
+            "name"
+        )
+        published = [
+            {"workflow_id": graph.id, "workflow_name": graph.name}
+            for graph in workflows
+            if graph.state != GraphState.DRAFT
+            and graph.id not in bound
+            and movie_output(graph.definition)
+        ]
+        unpublished = [
+            {"workflow_id": graph.id, "workflow_name": graph.name}
+            for graph in workflows
+            if graph.state == GraphState.DRAFT
+        ]
+        return {
+            "library_id": lib.id,
+            "library_name": lib.name,
+            "lib_type": lib.lib_type,
+            "supported": lib.lib_type == LibType.MOVIE,
+            "bindings": [_binding_fact(row) for row in rows[:10]],
+            "binding_count": len(rows),
+            "revision": _binding_revision(rows),
+            "movie_workflows": published[:10],
+            "movie_workflow_count": len(published),
+            "unpublished_workflows": unpublished[:10],
+            "unpublished_count": len(unpublished),
+            "scope": INGESTION_SCOPE,
+            "rules": INGESTION_RULES,
+        }
+
+    @classmethod
+    async def ingestion_check(
+        cls, lib_id: int, workflow_id: int, user: UserInfo
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        """Check a movie library and workflow for a plan's ingestion binding.
+
+        Args:
+            lib_id: Transfer library of the plan.
+            workflow_id: Ingestion workflow that should process its new items.
+            user: Current administrator.
+
+        Returns:
+            Located issues and a review naming the library, workflow, whether the
+            binding is reused or added, the stored bindings, their `revision` and
+            the library-wide scope. Nothing is changed.
+
+        Raises:
+            ForbiddenException: If the account cannot configure workflows or read
+                the library or workflow.
+            NotFoundException: If the library or workflow does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        lib = await cls.get_accessible(lib_id, user)
+        graph = await FlowGraphService.get_accessible(workflow_id, user)
+        rows = (
+            await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=lib.id)
+            .order_by("priority")
+            .select_related("graph")
+        )
+        issues = []
+        if lib.lib_type != LibType.MOVIE:
+            issues.append(
+                {
+                    "path": "transfer_lib_id",
+                    "message": "Ingestion setup supports movie libraries only.",
+                }
+            )
+        if graph.category != GraphCategory.INGEST:
+            message = "Choose an ingest workflow."
+        elif graph.state == GraphState.DRAFT or not graph.definition:
+            message = "Publish this workflow first; drafts never run."
+        elif not movie_output(graph.definition):
+            message = "Its published definition must connect ingest_start to movie."
+        else:
+            message = None
+        if message:
+            issues.append({"path": "ingest_workflow_id", "message": message})
+        return issues, {
+            "library_id": lib.id,
+            "library_name": lib.name,
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "binding": "reuse"
+            if any(row.graph_id == graph.id for row in rows)
+            else "add",
+            "bindings": [_binding_fact(row) for row in rows[:10]],
+            "binding_count": len(rows),
+            "revision": _binding_revision(rows),
+            "scope": INGESTION_SCOPE,
+        }
+
+    @classmethod
+    async def ensure_ingestion(
+        cls, lib_id: int, workflow_id: int, revision: str, user: UserInfo
+    ) -> dict[str, Any]:
+        """Reuse or append a reviewed movie binding without changing other bindings.
+
+        Args:
+            lib_id: Transfer library of the plan.
+            workflow_id: Reviewed ingestion workflow.
+            revision: Binding revision shown in the reviewed validation.
+            user: Current administrator; permissions and settings are rechecked.
+
+        Returns:
+            The current review with `binding` set to `reused` or `added`, or to
+            `invalid` with located issues or `conflict` when the stored bindings
+            changed since review; failures change nothing.
+
+        Raises:
+            ForbiddenException: If the account cannot configure workflows or read
+                the library or workflow.
+            NotFoundException: If the library or workflow no longer exists.
+        """
+        outcome = "conflict"
+        try:
+            async with in_transaction():
+                issues, review = await cls.ingestion_check(lib_id, workflow_id, user)
+                if issues:
+                    return {**review, "binding": "invalid", "issues": issues}
+                rows = await FlowTrigger.filter(rel_id=lib_id).order_by("priority")
+                stored = [row for row in rows if row.category == GraphCategory.INGEST]
+                selected = next(
+                    (row for row in stored if row.graph_id == workflow_id), None
+                )
+                if _binding_revision(stored) == revision:
+                    if selected:
+                        outcome = "reused"
+                    else:
+                        await FlowTrigger.create(
+                            category=GraphCategory.INGEST,
+                            rel_id=lib_id,
+                            graph_id=workflow_id,
+                            priority=max((row.priority for row in rows), default=0) + 1,
+                        )
+                        outcome = "added"
+                elif selected and not selected.asynchronous:
+                    # a retry may see exactly the append approved by this review
+                    previous = [row for row in stored if row.id != selected.id]
+                    last_priority = max(
+                        (row.priority for row in rows if row.id != selected.id),
+                        default=0,
+                    )
+                    if (
+                        _binding_revision(previous) == revision
+                        and selected.priority == last_priority + 1
+                    ):
+                        outcome = "reused"
+        except IntegrityError:
+            # another binding won the priority; require a fresh review
+            pass
+        _, review = await cls.ingestion_check(lib_id, workflow_id, user)
+        if outcome == "conflict":
+            return {
+                **review,
+                "binding": "conflict",
+                "message": "Library bindings changed after review; nothing was "
+                "changed. Validate again and show the current bindings.",
+            }
+        return {**review, "binding": outcome}
 
     @classmethod
     @atomic()

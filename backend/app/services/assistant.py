@@ -350,6 +350,7 @@ class AssistantService:
         schemas = tool_schemas(user)
         workflow_authoring = False
         plan_authoring = False
+        ingestion_authoring = False
         current_context = turn.context
         # only a server-confirmed editable designer receives saveable direct edits
         canvas = (
@@ -547,6 +548,7 @@ class AssistantService:
                     and result["ok"]
                     and (
                         call.function.name == "get_download_plan_options"
+                        or call.function.name == "get_library_ingestion"
                         or (
                             call.function.name == "list_workflows"
                             and any(
@@ -561,9 +563,17 @@ class AssistantService:
                         )
                     )
                 ):
-                    plan_authoring |= call.function.name == "get_download_plan_options"
+                    plan_authoring |= call.function.name in {
+                        "get_download_plan_options",
+                        "get_library_ingestion",
+                    }
+                    if call.function.name == "get_library_ingestion":
+                        ingestion_authoring = result["data"]["supported"]
                     schemas = tool_schemas(
-                        user, plan_authoring=True, plan_only=plan_authoring
+                        user,
+                        plan_authoring=True,
+                        plan_only=plan_authoring,
+                        ingestion=ingestion_authoring,
                     )
                 if (
                     result["ok"]
@@ -606,6 +616,29 @@ class AssistantService:
                             )
                             if library_id:
                                 resource_ids.append(f"media_lib:{library_id}")
+                        if call.function.name == "get_library_ingestion" or (
+                            call.function.name
+                            in {
+                                "validate_download_plan",
+                                "create_download_plan",
+                                "get_download_plan",
+                            }
+                            and result["data"].get("ingestion")
+                        ):
+                            # ingestion reviews reveal the library and its workflows
+                            review = result["data"].get("ingestion") or result["data"]
+                            resource_ids.append(media_resource(review["library_id"]))
+                            resource_ids.extend(
+                                item["workflow_id"]
+                                for key in (
+                                    "bindings",
+                                    "movie_workflows",
+                                    "unpublished_workflows",
+                                )
+                                for item in review.get(key, [])
+                            )
+                            if review.get("workflow_id"):
+                                resource_ids.append(review["workflow_id"])
                         resource_ids.extend(
                             media_resources(
                                 call.function.name, arguments, result["data"]

@@ -83,7 +83,7 @@
     {$_(replayed ? 'assistant.create.replayed' : 'assistant.create.created', [String(name), Number(workflow_id)])}
   </p>
 {/if}
-{#if onplan && tool.name === 'validate_download_plan' && tool.result?.ok && tool.result.data?.valid}
+{#if onplan && tool.name === 'validate_download_plan' && tool.result?.ok && tool.result.data?.valid && !tool.result.data.ingestion}
   <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={onplan}>
     {$_('assistant.plan.review')}
   </button>

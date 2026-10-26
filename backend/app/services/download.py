@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import os
 import shutil
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC
 from pathlib import Path
@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import aiofiles
 import orjson
 from sanic import Sanic
+from sanic.log import logger
 from tortoise import timezone
 from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Q
@@ -1123,8 +1124,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "if needed. Never invent or promise undeclared filters (year/group/"
                 "season/episode); keyword alternatives require a new search. Re-search "
                 "changed search inputs. Empty results need revised inputs or explicit "
-                "agreement to wait for future resources. Validate and show ALL final "
-                "settings/defaults and possible overlaps; the user may view them "
+                "agreement to wait for future resources. For ingestion into a movie "
+                "transfer library, follow get_library_ingestion rules. Validate and "
+                "show ALL final settings/defaults and possible overlaps; the user may "
+                "view them "
                 "(navigate, get_download_plan) or confirm another plan. Never reject "
                 "creation or change existing plans because of an overlap. Wait for "
                 "user confirmation before creation. Set confirmed=true only after that "
@@ -1306,6 +1309,20 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                         "message": "Choose a transfer method for the library.",
                     }
                 )
+        ingestion = None
+        if body.ingest_workflow_id is not None:
+            if plan.transfer_lib_id:
+                found, ingestion = await MediaLibService.ingestion_check(
+                    plan.transfer_lib_id, body.ingest_workflow_id, user
+                )
+                issues.extend(found)
+            else:
+                issues.append(
+                    {
+                        "path": "transfer_lib_id",
+                        "message": "Choose the movie library that ingests downloads.",
+                    }
+                )
         if body.sample is not None:
             errors, _ = check_output(
                 "search", body.sample, {"page_num": 1, "page_size": plan.batch_limit}
@@ -1378,6 +1395,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             else "queued_after_creation",
             "interval_unit": "hours",
             "timezone": "UTC",
+            **({"ingestion": ingestion} if ingestion else {}),
         }
 
     @classmethod
@@ -1392,7 +1410,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             replayed: Whether this is a repeated creation request.
 
         Returns:
-            Current fields and first-attempt state, never download success.
+            Current fields and first-attempt state, never download success. The
+            recorded ingestion choice is rechecked for administrators; ordinary
+            readers do not receive workflow configuration.
         """
         graph = await FlowGraphService.get_accessible(plan.graph_id, user)
         if plan.transfer_lib_id:
@@ -1409,7 +1429,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             running=graph.state != GraphState.DRAFT and not plan.inactive(),
             first_execution=first_execution,
         )
-        return {
+        result = {
             "created": True,
             "plan_id": plan.id,
             "workflow_id": graph.id,
@@ -1419,6 +1439,22 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             "first_execution": first_execution,
             "path": "/downloads/plans",
         }
+        if (
+            user.role == UserRole.ADMIN
+            and plan.transfer_lib_id
+            and (workflow_id := receipt.get("ingest_workflow_id"))
+        ):
+            with suppress(NotFoundException):
+                _, review = await MediaLibService.ingestion_check(
+                    plan.transfer_lib_id, workflow_id, user
+                )
+                result["ingestion"] = {
+                    **review,
+                    "binding": "configured"
+                    if review["binding"] == "reuse"
+                    else "missing",
+                }
+        return result
 
     @classmethod
     async def create_once(cls, body: DownloadPlanCreate, user: UserInfo) -> dict:
@@ -1431,7 +1467,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         Returns:
             Validation errors, an unconfirmed preview, or the same plan on every
             retry. First execution is durable queued work; creation does not wait
-            for remote download requests.
+            for remote download requests. A reviewed `ingestion` binding is reused
+            or appended before the plan exists; a binding conflict or failure
+            creates no plan, and a plan failure after binding reports both outcomes
+            so a retry with the same request ID reuses the binding.
 
         Raises:
             ForbiddenException: If the account cannot create plans.
@@ -1443,20 +1482,37 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         for field in ("interval_start", "interval_end"):
             if values[field] is not None and values[field].tzinfo is not None:
                 values[field] = values[field].astimezone(UTC)
-        digest = hashlib.sha256(dumps(values, option=orjson.OPT_SORT_KEYS)).hexdigest()
+        workflow_id = body.ingestion.workflow_id if body.ingestion else None
+        # requests without ingestion keep their original receipt digest
+        identity = values if workflow_id is None else {**values, "ingest": workflow_id}
+        digest = hashlib.sha256(
+            dumps(identity, option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()
         existing = await DownloadPlan.get_or_none(creation_key=key)
         if existing is not None:
             if existing.creation_receipt["digest"] != digest:
                 raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_REQUEST_CONFLICT)
             return await cls.creation_result(existing, user, replayed=True)
         validation = await cls.validate_creation(
-            DownloadPlanCheck(plan=body.plan), user
+            DownloadPlanCheck(plan=body.plan, ingest_workflow_id=workflow_id), user
         )
         validation["request_id"] = str(body.request_id)
         if not validation["valid"]:
             return {"created": False, **validation}
         if not body.confirmed:
             return {"created": False, "confirmation_required": True, **validation}
+        binding = None
+        if body.ingestion is not None and body.plan.transfer_lib_id:
+            # prepare the library before the new plan can queue its first attempt
+            binding = await MediaLibService.ensure_ingestion(
+                body.plan.transfer_lib_id,
+                body.ingestion.workflow_id,
+                body.ingestion.revision,
+                user,
+            )
+            validation["ingestion"] = binding
+            if binding["binding"] not in {"added", "reused"}:
+                return {"created": False, **validation, "valid": False}
         try:
             plan = await DownloadPlan.create(
                 **values,
@@ -1464,15 +1520,30 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 creation_receipt={
                     "digest": digest,
                     "first_execution": {"status": "queued"},
+                    **({"ingest_workflow_id": workflow_id} if workflow_id else {}),
                 },
             )
-        except IntegrityError:
-            # a concurrent request committed the durable identity first
-            if not await DownloadPlan.filter(creation_key=key).exists():
+        except Exception as error:
+            if (
+                isinstance(error, IntegrityError)
+                and await DownloadPlan.filter(creation_key=key).exists()
+            ):
+                # a concurrent request committed the durable identity first
+                return await cls.create_once(body, user)
+            if binding is None:
                 raise
-            return await cls.create_once(body, user)
+            logger.exception("Plan creation failed after its ingestion binding")
+            return {
+                "created": False,
+                **validation,
+                "plan_error": "The library binding was kept but the plan was not "
+                "created; retry with the same request_id.",
+            }
         notify_download_changes()
-        return await cls.creation_result(plan, user)
+        result = await cls.creation_result(plan, user)
+        if binding is not None:
+            result["ingestion"] = binding
+        return result
 
     @classmethod
     async def get_creation(cls, plan_id: int, user: UserInfo) -> dict:

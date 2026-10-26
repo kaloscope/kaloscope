@@ -1149,6 +1149,7 @@
       "create_download_plan": "Create Download Plan",
       "get_download_plan": "Read Download Plan",
       "list_download_plans": "Find Download Plans",
+      "get_library_ingestion": "Read Library Ingestion",
       "search_indexer": "Search Indexer"
     },
     "tool_status": {

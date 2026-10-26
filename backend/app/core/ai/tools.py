@@ -184,6 +184,12 @@ class PlanID(ToolArguments):
     plan_id: int = Field(gt=0)
 
 
+class LibraryIngestion(ToolArguments):
+    """Inspect one library's ingestion bindings before planning automatic ingestion."""
+
+    library_id: ResourceID
+
+
 class PlanList(ToolArguments):
     """Page accessible plans with the plan page's filters and sort fields."""
 
@@ -404,6 +410,13 @@ TOOLS = (
         "get_download_plan",
         "Read plan and first-attempt outcome; not live download success.",
         PlanID,
+    ),
+    AssistantTool(
+        "get_library_ingestion",
+        "Read a transfer library's ingestion bindings, movie workflows and setup "
+        "rules; no changes. Bindings apply to the whole library.",
+        LibraryIngestion,
+        admin=True,
     ),
     AssistantTool(
         "list_download_plans",
@@ -635,6 +648,7 @@ def tool_schemas(
     authoring: bool = False,
     plan_authoring: bool = False,
     plan_only: bool = False,
+    ingestion: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -644,6 +658,7 @@ def tool_schemas(
             return next turn; this changes model context, never authorization.
         plan_authoring: Expose plan tools after reading the source workflows.
         plan_only: Focus a selected indexer's plan conversation on relevant tools.
+        ingestion: Allow A1 scraper creation after inspecting a movie library.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -659,24 +674,34 @@ def tool_schemas(
             "create_download_plan",
             "get_download_plan",
             "list_download_plans",
+            "get_library_ingestion",
         } and not (plan_authoring or plan_only):
             continue
-        if plan_only and tool.name not in {
-            "list_workflows",
-            "get_workflow",
-            "get_download_plan_options",
-            "search_indexer",
-            "validate_download_plan",
-            "create_download_plan",
-            "get_download_plan",
-            "list_download_plans",
-            "list_media_libraries",
-            "list_media_items",
-            "get_workflow_logs",
-            "read_workflow_log",
-            "read_conversation_history",
-            "navigate",
-        }:
+        if (
+            plan_only
+            and tool.name
+            not in {
+                "list_workflows",
+                "get_workflow",
+                "get_download_plan_options",
+                "search_indexer",
+                "validate_download_plan",
+                "create_download_plan",
+                "get_download_plan",
+                "list_download_plans",
+                "get_library_ingestion",
+                "list_media_libraries",
+                "list_media_items",
+                "get_workflow_logs",
+                "read_workflow_log",
+                "read_conversation_history",
+                "navigate",
+            }
+            and not (
+                ingestion
+                and tool.name in {"create_workflow_draft", "get_workflow_reference"}
+            )
+        ):
             continue
         if authoring and tool.name not in {
             "list_workflows",
@@ -809,6 +834,10 @@ async def execute_tool(
                     result = await create_plan(args, conversation_id, call_id, user)
                 case PlanID():
                     result = await DownloadPlanService.get_creation(args.plan_id, user)
+                case LibraryIngestion():
+                    result = await MediaLibService.ingestion_bindings(
+                        args.library_id, user
+                    )
                 case PlanList():
                     result = await download_plans(
                         DownloadPlanQuery(
@@ -1232,10 +1261,18 @@ async def create_plan(
                         "creating."
                     ),
                 }
+            review = data.get("ingestion")
             return await DownloadPlanService.create_once(
                 DownloadPlanCreate(
                     request_id=args.request_id,
                     plan=data["plan"],
+                    # the reviewed binding is applied with the plan it was shown for
+                    ingestion={
+                        "workflow_id": review["workflow_id"],
+                        "revision": review["revision"],
+                    }
+                    if review
+                    else None,
                     confirmed=args.confirmed,
                 ),
                 user,
