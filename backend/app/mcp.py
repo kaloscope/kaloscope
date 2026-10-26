@@ -761,16 +761,22 @@ def create_server() -> MCPServer:
             ),
         ],
     ) -> HTTPProbeResult:
-        """Send a user-requested GET/HEAD/POST with disposable cookies and no cache.
+        """Probe GET/HEAD/POST with optional saved indexer authentication.
 
         Args:
             ctx: Authenticated request context.
-            probe: Request using HTTP node encoding, without implicit credentials.
+            probe: Request using HTTP node encoding. `workflow_id` explicitly
+                selects an accessible indexer's saved cookies and `$auth`; otherwise
+                only supplied fixtures are available. Missing required login asks
+                the user to log in on the indexer's search page first. Templates read
+                the token with `{{ var('$auth').token }}`, as HTTP nodes do.
 
         Returns:
             Status, final URL, selected headers, a 2000-character sample and explicit
             completeness flags. Optional object extraction runs before clipping,
-            within a 256 KiB body cap. No retry or workflow execution is performed.
+            within a 256 KiB body cap. Known credential values are redacted. Cookie
+            changes stay within this call; no login, retry, persistent caching or
+            workflow execution is performed.
         """
         return HTTPProbeResult.model_validate(
             await _read(probe_request(probe, _user(ctx)))

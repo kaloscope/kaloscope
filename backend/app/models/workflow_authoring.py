@@ -8,7 +8,7 @@ from app.utils.json import dumps
 
 
 class AuthoringInput(BaseModel):
-    """Accept explicit fixtures without loading workflow or account secrets."""
+    """Bound explicit authoring inputs before accessing application state."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
@@ -39,11 +39,12 @@ class HTTPRequest(AuthoringInput):
 
 
 class HTTPProbe(AuthoringInput):
-    """Probe one explicit endpoint with disposable cookies and supplied fixtures."""
+    """Probe explicit inputs, optionally reusing an indexer's saved login state."""
 
     request: HTTPRequest
     context: dict[str, Any] = Field(default_factory=dict)
     formatter: str | None = Field(default=None, max_length=8192)
+    workflow_id: int | None = Field(default=None, gt=0, strict=True)
 
 
 class TemplateValidation(AuthoringInput):
@@ -96,4 +97,9 @@ class HTTPProbeResult(BaseModel):
         description="Whether text is only a sample, even if the full body was read.",
     )
     formatted: TemplateResult | None = None
+    redacted: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        description="Known saved credential values were hidden.",
+    )
     error: str | None = None

@@ -8,4 +8,4 @@ Updates deep-merge objects, append new list elements, and replace scalars. Branc
 
 Example: `{"keyword":"cats"}` -> variables `{"query": {{ keyword|tojson }}}` -> HTTP URL `https://example.test/search?q={{ query|quote }}` -> formatter `{"items": {{ response.text|jsonpath_all('$.items[*]')|tojson }}}` -> search response `{"total": {{ items|length }}, "items": {{ items|tojson }}}`. For pagination, use the upstream total instead.
 
-`$start`: entry; `$manual`: manual run; `$retval`: output; `$auth`: cached login. Scripts can copy reserved keys for ordinary templates; condition/loop raw lookup accepts `{{ $auth.token }}`. `$index`/`$output` are internal state.
+`$start`: entry; `$manual`: manual run; `$retval`: output; `$auth`: cached login. Templates use `{{ var('$auth').token }}`; condition/loop raw lookup also accepts `{{ $auth.token }}`. Scripts can copy keys. `$index`/`$output` are internal state.

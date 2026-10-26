@@ -2,6 +2,7 @@
 
 import asyncio
 import gzip
+from http.cookiejar import CookieJar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -48,6 +49,13 @@ def evaluate(template, **kwargs):
         ("{{ count > 1 }}", "expression", {"count": 0}, False),
         ("{{ items }}", "expression", {"items": []}, []),
         ("{{ $auth.token }}", "expression", {"$auth": {"token": "fixture"}}, "fixture"),
+        (
+            "Bearer {{ var('$auth').token }}",
+            "text",
+            {"$auth": {"token": "fixture"}},
+            "Bearer fixture",
+        ),
+        ("{{ var('missing', {}) }}", "expression", {}, {}),
         ("// value\nnull", "json", {}, None),
         ("false", "json", {}, False),
         ("0", "json", {}, 0),
@@ -121,7 +129,10 @@ def test_template_errors(template, kwargs, error):
         {"request": {"url": "https://example.test", "timeout": 11}},
         {"request": {"url": "https://example.test", "timeout": True}},
         {"request": {"url": "https://example.test"}, "context": {"x": "x" * 65536}},
-        {"request": {"url": "https://example.test"}, "workflow_id": 1},
+        {"request": {"url": "https://example.test"}, "workflow_id": 0},
+        {"request": {"url": "https://example.test"}, "workflow_id": "1"},
+        {"request": {"url": "https://example.test"}, "workflow_id": 1.0},
+        {"request": {"url": "https://example.test"}, "workflow_id": True},
     ],
 )
 def test_probe_arguments(data):
@@ -600,6 +611,8 @@ def test_curl_request(monkeypatch):
 
     class Client:
         def __init__(self, **kwargs):
+            cookies = kwargs.pop("cookies")
+            assert isinstance(cookies, CookieJar) and len(cookies) == 0
             assert kwargs == {
                 "allow_redirects": True,
                 "max_redirects": 5,

@@ -2,6 +2,7 @@
 
 JSONC example: `{"title": {{ title|tojson }}}`. Fields render text; condition/loop expressions preserve types. Missing values may be empty or raise; AI prompts are strict.
 
+- `var(name, default=None)`: read context, including reserved keys: `{{ var('$auth').token }}`. Does not load saved state.
 - `jsonpath_first(expr)` / `jsonpath_all(expr)`: JSON text/object -> first match or null / list.
 - `xpath_first(expr)` / `xpath_all(expr)`: HTML/XML, namespaces removed; same forms, also scalars. `/text()` or `/@href` extracts text.
 - `regex_first(expr)` / `regex_all(expr)`: first capture or null / matches (tuples for multiple captures). Parentheses required for first; DOTALL/MULTILINE.
