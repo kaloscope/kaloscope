@@ -414,9 +414,8 @@ TOOLS = (
     ),
     AssistantTool(
         "probe_http_request",
-        "Probe user-requested HTTP with node encoding; disposable cookies, "
-        "no retry/cache. "
-        "2000-char sample; formatter extracts an object before clipping (256 KiB cap).",
+        "HTTP-node probe; workflow_id reuses login. No login/cache/retry/save. "
+        "2000-char sample; object extraction <=256KiB; known secrets hidden.",
         HTTPProbe,
         admin=True,
     ),

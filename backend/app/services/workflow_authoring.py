@@ -1,19 +1,29 @@
 """Probe explicit HTTP inputs and validate templates without running workflows."""
 
 import asyncio
+import json
+import re
 from contextlib import AsyncExitStack, suppress
+from copy import copy
+from http.cookiejar import CookieJar
+from urllib.parse import quote
 
 import httpx
 import orjson
 from curl_cffi import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 from jinja2 import TemplateError
+from jinja2.utils import htmlsafe_json_dumps
+from sanic import Sanic
 
 from app.core.exceptions import ForbiddenException
+from app.core.flow.context import AUTH_KEY
+from app.core.flow.nodes.base import start_config
 from app.core.flow.nodes.general.http import HTTPNode
 from app.core.flow.outputs import check_output
 from app.core.network import NetworkTransport
 from app.core.renderer import render
+from app.models.flow import GraphCategory
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import (
     HTTPProbe,
@@ -21,6 +31,7 @@ from app.models.workflow_authoring import (
     TemplateResult,
     TemplateValidation,
 )
+from app.services.flow import FlowGraphService
 from app.utils.json import dumps, loads_jsonc
 
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -38,6 +49,7 @@ def validate_workflow_template(
         args: Template, supplied context, output form and undefined-value policy.
             Business modes check end-node output against supplied fixtures only.
         response: Detached probe response for HTTP formatter evaluation only.
+            The probe redacts formatter errors before clipping their messages.
 
     Returns:
         Bounded JSON-compatible result or evaluation error. No workflow, script,
@@ -94,37 +106,183 @@ def validate_workflow_template(
             )
         return result
     except Exception as exc:
+        message = str(exc)
         return TemplateResult(
             valid=False,
-            error=f"{type(exc).__name__}: {str(exc)[:300]}",
+            error=f"{type(exc).__name__}: "
+            + (message if response is not None else message[:300]),
             line=getattr(exc, "lineno", None),
         )
 
 
 async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult:
-    """Send one explicitly requested HTTP probe with disposable client state.
+    """Probe explicit inputs using optional saved indexer authentication.
 
     Args:
-        args: Request fields, explicit fixtures and optional HTTP formatter.
+        args: Request fields, fixtures, formatter and optional source indexer.
         user: Current account; only administrators can send server-side probes.
 
     Returns:
         Observed status, final URL, selected headers and a bounded text sample.
         Optional extraction uses the complete bounded body before sample clipping.
-        Non-2xx responses remain HTTP observations, not transport failures. Cookies
-        remain local to this call; probes bypass persistent response caching.
+        Non-2xx responses remain HTTP observations, not transport failures. An
+        explicit indexer reuses its unexpired `$auth` and a snapshot of the cookie
+        jar used by HTTP nodes. Normal cookie domain/path rules still apply.
+        Response cookies remain local and persistent caching is bypassed. Known
+        authentication values are redacted from the returned observation.
 
     Raises:
-        ForbiddenException: If the account cannot author workflows.
+        ForbiddenException: If the account cannot author or access the workflow.
+        NotFoundException: If the selected workflow no longer exists.
     """
     if user.role != UserRole.ADMIN:
         raise ForbiddenException
+    context = args.context
+    cookies = CookieJar()
+    auth = None
+    if args.workflow_id is not None:
+        graph = await FlowGraphService.get_accessible(args.workflow_id, user)
+        if graph.category != GraphCategory.INDEXER:
+            return HTTPProbeResult(error="Select an indexer to reuse its login state.")
+        saved_cookies = getattr(Sanic.get_app().ctx, "cookies", None)
+        auth = await FlowGraphService.indexer_auth(graph.id)
+        config = (await start_config(graph, "auth"))["auth"] or {}
+        if (
+            (config.get("login") or {}).get("required")
+            and auth is None
+            and await FlowGraphService.indexer_auth(graph.id, saved_cookies) is None
+        ):
+            return HTTPProbeResult(
+                error="Indexer login is missing or expired. "
+                "Log in on its search page, then retry."
+            )
+        if saved_cookies is not None:
+            for cookie in saved_cookies:
+                if not cookie.is_expired():
+                    cookies.set_cookie(copy(cookie))
+        if auth is not None:
+            # boot parameters also override stored variables during workflow execution
+            context = {AUTH_KEY: auth, **context}
+
+    secrets = {cookie.value for cookie in cookies if cookie.value}
+    result = await _probe_http_request(args, context, cookies)
+    if args.workflow_id is not None:
+        secrets.update(cookie.value for cookie in cookies if cookie.value)
+
+        def collect(value):
+            """Collect stored authentication strings for result redaction.
+
+            Args:
+                value: Authentication field, including nested objects and arrays.
+            """
+            if isinstance(value, str) and value:
+                secrets.add(value)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect({key: value for key, value in (auth or {}).items() if key != "name"})
+        secrets |= (
+            {quote(value, safe="") for value in secrets}
+            | {
+                json.dumps(value, ensure_ascii=ascii_only)[1:-1]
+                for value in secrets
+                for ascii_only in (False, True)
+            }
+            | {
+                str(htmlsafe_json_dumps(value, ensure_ascii=ascii_only))[1:-1]
+                for value in secrets
+                for ascii_only in (False, True)
+            }
+        )
+    return _redact_probe_result(result, secrets)
+
+
+def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProbeResult:
+    """Hide known saved credentials before clipping returned HTTP observations.
+
+    Args:
+        result: Probe observation, including optional formatter output.
+        secrets: Stored or received cookie values and authentication strings.
+
+    Returns:
+        Bounded observation with literal and encoded credential values replaced.
+        Redaction does not claim to recognize arbitrary transformed credentials.
+    """
+    pattern = (
+        re.compile(
+            "|".join(
+                re.escape(value) for value in sorted(secrets, key=len, reverse=True)
+            )
+        )
+        if secrets
+        else None
+    )
+
+    def redact(value):
+        """Replace credential strings inside a JSON-compatible value.
+
+        Args:
+            value: Text, object, array or scalar returned by the probe.
+
+        Returns:
+            Value with known credential strings replaced.
+        """
+        if pattern is None:
+            return value
+        if isinstance(value, str):
+            redacted = pattern.sub("[redacted]", value)
+            result.redacted |= redacted != value
+            return redacted
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            return {redact(key): redact(item) for key, item in value.items()}
+        return value
+
+    result.url = redact(result.url)
+    result.text = redact(result.text)
+    if len(result.text) > MAX_SAMPLE_CHARS:
+        result.text = result.text[:MAX_SAMPLE_CHARS]
+        result.text_truncated = True
+    result.headers = {key: value[:512] for key, value in redact(result.headers).items()}
+    result.error = redact(result.error)
+    if result.formatted is not None:
+        result.formatted.rendered = redact(result.formatted.rendered)
+        result.formatted.value = redact(result.formatted.value)
+        result.formatted.error = redact(result.formatted.error)
+        if result.formatted.error is not None:
+            result.formatted.error = result.formatted.error[:300]
+        if len(dumps(result.formatted.model_dump())) > MAX_RENDER_BYTES:
+            result.formatted = TemplateResult(
+                valid=False, error="Redacted extraction exceeds 8000 bytes."
+            )
+    return result
+
+
+async def _probe_http_request(
+    args: HTTPProbe, context: dict, cookies: CookieJar
+) -> HTTPProbeResult:
+    """Send a bounded request without modifying the source authentication.
+
+    Args:
+        args: Explicit request and optional formatter.
+        context: Request fixtures merged with any selected authentication.
+        cookies: Disposable cookie snapshot, updated only within this call.
+
+    Returns:
+        HTTP observation using the bounded body before redaction and sample clipping,
+        or a bounded request/formatter error.
+    """
     node_data = args.request.model_dump()
     node_data["headers"] = [
         {"key": key, "value": value} for key, value in args.request.headers.items()
     ]
     try:
-        options = HTTPNode.prepare_request(node_data, args.context, sandboxed=True)
+        options = HTTPNode.prepare_request(node_data, context, sandboxed=True)
         url = httpx.URL(options["url"])
         if url.scheme not in {"http", "https"} or not url.host or url.userinfo:
             return HTTPProbeResult(
@@ -144,11 +302,17 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
                         transport=NetworkTransport(http2=True),
                         follow_redirects=True,
                         max_redirects=5,
+                        cookies=cookies,
                     )
                 )
             else:
                 curl_client = await stack.enter_async_context(
-                    AsyncSession(allow_redirects=True, max_redirects=5, trust_env=False)
+                    AsyncSession(
+                        allow_redirects=True,
+                        max_redirects=5,
+                        trust_env=False,
+                        cookies=cookies,
+                    )
                 )
             response = await HTTPNode.send_request(
                 options, args.request.client, http_client, curl_client, stream=True
@@ -191,11 +355,11 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
                 status_code=response.status_code,
                 url=str(response.url),
                 headers={
-                    key.lower(): value[:512]
+                    key.lower(): value
                     for key, value in response.headers.items()
                     if key.lower() in RESPONSE_HEADERS
                 },
-                text=sample.text[:MAX_SAMPLE_CHARS],
+                text=sample.text,
                 bytes_read=count,
                 body_complete=complete,
                 text_truncated=not complete or len(sample.text) > MAX_SAMPLE_CHARS,
@@ -207,9 +371,8 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
                         error="Response incomplete; extraction was not evaluated.",
                     )
                 else:
-                    # only this response and explicit fixtures enter the formatter
                     validation = TemplateValidation(
-                        template=args.formatter, mode="object", context=args.context
+                        template=args.formatter, mode="object", context=context
                     )
                     result.formatted = validate_workflow_template(
                         validation, response=sample

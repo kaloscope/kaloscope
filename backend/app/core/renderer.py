@@ -662,6 +662,24 @@ def is_dir(path: Any) -> bool:
 ENV.tests["file"] = jinja2.pass_context(lambda _, path: is_file(path))
 ENV.tests["dir"] = jinja2.pass_context(lambda _, path: is_dir(path))
 
+
+@jinja2.pass_context
+def var(context: jinja2.runtime.Context, name: str, default: Any = None) -> Any:
+    """Read a named context variable, including reserved workflow keys.
+
+    Args:
+        context: Current Jinja context, supplied by the renderer.
+        name: Variable name, such as `$auth`.
+        default: Value returned when the variable is absent.
+
+    Returns:
+        Existing context value or the supplied default. No stored state is loaded.
+    """
+    return context.get(name, default)
+
+
+ENV.globals["var"] = var
+
 # authoring tools share filters and syntax, but cannot traverse Python internals
 SANDBOX_ENV = ImmutableSandboxedEnvironment(
     trim_blocks=ENV.trim_blocks,
@@ -670,6 +688,7 @@ SANDBOX_ENV = ImmutableSandboxedEnvironment(
 )
 SANDBOX_ENV.filters.update(ENV.filters)
 SANDBOX_ENV.tests.update(ENV.tests)
+SANDBOX_ENV.globals.update(ENV.globals)
 SANDBOX_ENV.policies = ENV.policies.copy()
 SANDBOX_STRICT_ENV = SANDBOX_ENV.overlay(
     undefined=jinja2.StrictUndefined, finalize=STRICT_ENV.finalize
