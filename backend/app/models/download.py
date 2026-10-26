@@ -481,3 +481,34 @@ class DownloadPlanCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
     plan: DownloadPlanSettings
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves these final settings.",
+    )
+
+
+class IndexerSearch(BaseModel):
+    """Search one selected published indexer without submitting downloads."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    workflow_id: PositiveInt
+    keyword: str = Field(max_length=4096)
+    filters: dict[str, Any] | None = None
+    page_num: PositiveInt = 1
+    page_size: int = Field(default=5, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def bound_input(self) -> Self:
+        """Bound the explicit search inputs.
+
+        Returns:
+            The validated search request.
+
+        Raises:
+            ValueError: If the request exceeds 8 KiB.
+        """
+        from app.utils.json import dumps
+
+        if len(dumps(self.model_dump(mode="json"))) > 8192:
+            raise ValueError("Search input exceeds 8 KiB")
+        return self

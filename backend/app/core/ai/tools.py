@@ -53,7 +53,12 @@ from app.models.assistant import (
     WorkflowOrdering,
     media_resource,
 )
-from app.models.download import DownloadPlanCheck, DownloadPlanCreate, DownloadQuery
+from app.models.download import (
+    DownloadPlanCheck,
+    DownloadPlanCreate,
+    DownloadQuery,
+    IndexerSearch,
+)
 from app.models.flow import (
     GraphCategory,
     GraphDocument,
@@ -293,6 +298,10 @@ class PlanCreate(ToolArguments):
     """Create settings retained by successful validation in this conversation."""
 
     request_id: UUID
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves these final settings.",
+    )
 
 
 class NavigationTarget(ToolArguments):
@@ -350,6 +359,13 @@ class AssistantTool:
 
 TOOLS = (
     AssistantTool(
+        "search_indexer",
+        "Run selected published search (10s/page<=20); metadata only, no "
+        "downloads. Requires user indexer choice.",
+        IndexerSearch,
+        admin=True,
+    ),
+    AssistantTool(
         "get_download_plan_options",
         "Read published indexer filters/downloaders; unlock plan validation/creation.",
         PlanOptions,
@@ -363,7 +379,8 @@ TOOLS = (
     ),
     AssistantTool(
         "create_download_plan",
-        "Create validated settings only when authorized; reuse request_id. "
+        "Create a prior turn's reviewed settings after final user "
+        "confirmation; reuse request_id. "
         "Active plans queue real search/downloads; future starts wait.",
         PlanCreate,
         admin=True,
@@ -592,7 +609,11 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
 
 
 def tool_schemas(
-    user: UserInfo, *, authoring: bool = False, plan_authoring: bool = False
+    user: UserInfo,
+    *,
+    authoring: bool = False,
+    plan_authoring: bool = False,
+    plan_only: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -601,6 +622,7 @@ def tool_schemas(
         authoring: Focus this recipe turn on workflow construction. Other tools
             return next turn; this changes model context, never authorization.
         plan_authoring: Expose plan tools after reading the source workflows.
+        plan_only: Focus a selected indexer's plan conversation on relevant tools.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -609,16 +631,28 @@ def tool_schemas(
     """
     schemas = []
     for tool in available_tools(user).values():
-        if (
-            tool.name
-            in {
-                "get_download_plan_options",
-                "validate_download_plan",
-                "create_download_plan",
-                "get_download_plan",
-            }
-            and not plan_authoring
-        ):
+        if tool.name in {
+            "search_indexer",
+            "get_download_plan_options",
+            "validate_download_plan",
+            "create_download_plan",
+            "get_download_plan",
+        } and not (plan_authoring or plan_only):
+            continue
+        if plan_only and tool.name not in {
+            "list_workflows",
+            "get_workflow",
+            "get_download_plan_options",
+            "search_indexer",
+            "validate_download_plan",
+            "create_download_plan",
+            "get_download_plan",
+            "list_media_libraries",
+            "get_workflow_logs",
+            "read_workflow_log",
+            "read_conversation_history",
+            "navigate",
+        }:
             continue
         if authoring and tool.name not in {
             "list_workflows",
@@ -732,6 +766,8 @@ async def execute_tool(
     try:
         async with asyncio.timeout(TOOL_TIMEOUT):
             match args:
+                case IndexerSearch():
+                    result = await DownloadPlanService.search_indexer(args, user)
                 case PlanOptions():
                     result = await DownloadPlanService.authoring_options(
                         **args.model_dump(), user=user
@@ -1077,7 +1113,7 @@ async def create_plan(
     """Recover a plan across retries and create only a reviewed request identity.
 
     Args:
-        args: Request ID returned by validation in this conversation.
+        args: Validated request ID and explicit approval of its final settings.
         conversation_id: Server-owned conversation.
         call_id: Server-owned call record.
         user: Current account whose administrator rights are checked by the service.
@@ -1124,12 +1160,11 @@ async def create_plan(
         await AssistantToolCall.filter(
             turn__conversation_id=conversation_id,
             name="validate_download_plan",
-            status="complete",
         )
         .order_by("-id")
         .limit(30)
     )
-    for record in records:
+    for index, record in enumerate(records):
         data = (record.result or {}).get("data") or {}
         if data.get("valid") and data.get("request_id") == str(args.request_id):
             # an editor may already have created this reviewed proposal
@@ -1139,8 +1174,29 @@ async def create_plan(
                 return await DownloadPlanService.creation_result(
                     plan, user, replayed=True
                 )
+            reviewed_turn = await AssistantTurn.get(id=record.turn_id)
+            if (
+                index
+                or record.turn_id in turn_ids
+                or reviewed_turn.status != "complete"
+            ):
+                return {
+                    **data,
+                    "created": False,
+                    "confirmation_required": True,
+                    "message": (
+                        "Show the latest validated settings and defaults, finish the "
+                        "turn, and wait for the user's final confirmation before "
+                        "creating."
+                    ),
+                }
             return await DownloadPlanService.create_once(
-                DownloadPlanCreate(request_id=args.request_id, plan=data["plan"]), user
+                DownloadPlanCreate(
+                    request_id=args.request_id,
+                    plan=data["plan"],
+                    confirmed=args.confirmed,
+                ),
+                user,
             )
     raise NotFoundException
 

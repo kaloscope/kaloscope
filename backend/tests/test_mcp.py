@@ -235,6 +235,7 @@ def test_protocol(mode):
                 "validate_download_plan",
                 "create_download_plan",
                 "get_download_plan",
+                "search_indexer",
                 "save_workflow_draft",
                 "list_workflow_drafts",
                 "get_workflow_draft",
@@ -249,6 +250,7 @@ def test_protocol(mode):
                     "restore_workflow_draft",
                     "probe_http_request",
                     "create_download_plan",
+                    "search_indexer",
                 }
                 assert tool.annotations.read_only_hint is (not writes)
                 assert tool.annotations.destructive_hint is (
@@ -258,6 +260,7 @@ def test_protocol(mode):
                         "restore_workflow_draft",
                         "probe_http_request",
                         "create_download_plan",
+                        "search_indexer",
                     }
                 )
                 assert tool.annotations.idempotent_hint is (
@@ -322,7 +325,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 24
+            assert len(response_json(response)["result"]["tools"]) == 25
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

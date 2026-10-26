@@ -93,3 +93,19 @@
     {$_('assistant.plan.created', Number(tool.result.data.plan_id))}
   </p>
 {/if}
+{#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.confirmation_required}
+  <p class="ml-8 text-xs leading-5 text-base-content/60">{$_('assistant.plan.confirmation_required')}</p>
+{/if}
+{#if tool.name === 'search_indexer' && tool.result?.ok && tool.result.data}
+  {@const result = tool.result.data}
+  <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
+    {#if result.status === 'ok'}
+      {$_(result.received_count === 0 ? 'assistant.plan.search_empty' : 'assistant.plan.search_preview', [
+        Number(result.returned_count)
+      ])}
+      {#if result.truncated}<span class="block">{$_('assistant.plan.search_truncated')}</span>{/if}
+    {:else}
+      {$_(`assistant.plan.search_${String(result.status)}`, { default: $_('assistant.plan.search_failed') })}
+    {/if}
+  </p>
+{/if}

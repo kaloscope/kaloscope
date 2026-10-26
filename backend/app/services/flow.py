@@ -1,5 +1,6 @@
 import base64
 import io
+import time
 import zipfile
 from collections.abc import Mapping
 from dataclasses import replace
@@ -17,15 +18,17 @@ from tortoise.transactions import atomic
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
+from app.core.cookiejar import SQLiteCookieJar
 from app.core.exceptions import (
     ErrorCode,
     ForbiddenException,
     KaloscopeException,
     NotFoundException,
 )
+from app.core.flow.context import AUTH_KEY
 from app.core.flow.diff import changed_paths
 from app.core.flow.fetcher import fetch_origin, save_icon
-from app.core.flow.nodes.base import Node, NodeSchema
+from app.core.flow.nodes.base import Node, NodeSchema, start_config
 from app.core.flow.validation import (
     comparison_document,
     compress_document,
@@ -39,6 +42,7 @@ from app.models.flow import (
     FlowRepository,
     FlowTemplate,
     FlowTrigger,
+    FlowVariable,
     GraphBasics,
     GraphCategory,
     GraphChange,
@@ -238,7 +242,41 @@ class FlowTemplateService(BaseService[FlowTemplate], model=FlowTemplate):
 
 
 class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
-    """The service class for all flow graph related operations."""
+    """Manage workflows, their published configuration and access rules."""
+
+    @classmethod
+    async def indexer_auth(
+        cls, graph_id: int, cookies: SQLiteCookieJar | None = None
+    ) -> dict | None:
+        """Read the existing indexer login variable or configured cookie.
+
+        Args:
+            graph_id: Indexer whose login state is requested.
+            cookies: Application cookie jar, when available.
+
+        Returns:
+            Cached authentication or a cookie marker, otherwise `None`.
+            Callers must check workflow access before exposing this state.
+        """
+        var = await FlowVariable.get_or_none(
+            Q(graph_id=graph_id, key=AUTH_KEY)
+            & (Q(expires__gte=time.time()) | Q(expires__isnull=True))
+        )
+        if var is not None and isinstance(var.value, dict) and "name" in var.value:
+            return var.value
+        config = (await start_config(graph_id, "auth"))["auth"] or {}
+        cookie = config.get("cookie")
+        if (
+            cookies is not None
+            and isinstance(cookie, dict)
+            and (domain := cookie.get("domain"))
+            and cookies.get_cookie(
+                domain=domain, path=cookie.get("path"), name=cookie.get("name")
+            )
+            is not None
+        ):
+            return {"name": ""}
+        return None
 
     @classmethod
     async def list_graphs(cls, query: GraphQuery, user: UserInfo) -> dict[str, Any]:
@@ -265,6 +303,12 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
         page = await FlowGraph.page(*queries, **query.page_params)
         result = await cls.dump_page(page, exclude={"draft", "definition", "logs"})
         for graph in result["items"]:
+            graph["downloadable_search"] = (
+                graph["category"] == GraphCategory.INDEXER
+                and graph["state"] != GraphState.DRAFT
+                and "search_start" in graph["node_types"]
+                and not graph["only_preview"]
+            )
             if tmpl := graph["tmpl"]:
                 graph["newest_tmpl"] = await FlowTemplateService.get_newest(tmpl)
         return result

@@ -144,6 +144,19 @@ class PlanOptionsResult(Result):
     directories: list[str]
     interval_unit: Literal["hours"]
     timezone: Literal["UTC"]
+    defaults: dict[str, JSONType]
+    creation_rules: str
+
+
+class IndexerSearchResult(Result):
+    """Report a bounded published search, including distinct failure states."""
+
+    workflow_id: int
+    workflow_name: str
+    query: dict[str, JSONType]
+    status: Literal[
+        "ok", "invalid_input", "invalid_output", "login_required", "timeout", "failed"
+    ]
 
 
 class PlanValidationResult(Result):

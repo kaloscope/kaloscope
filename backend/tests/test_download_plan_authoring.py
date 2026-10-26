@@ -80,7 +80,11 @@ def isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(
         KaloscopeConfig,
         "_config",
-        SimpleNamespace(secret_key_enabled=False, workspace={"TEMP": str(tmp_path)}),
+        SimpleNamespace(
+            secret_key_enabled=False,
+            workspace={"TEMP": str(tmp_path)},
+            _workspace=str(tmp_path),
+        ),
     )
     monkeypatch.setattr(
         httpx.AsyncHTTPTransport,
@@ -120,6 +124,7 @@ async def fixture_plan(**overrides):
     body = DownloadPlanCreate.model_validate(
         {
             "request_id": str(uuid4()),
+            "confirmed": True,
             "plan": {
                 "graph_id": graph.id,
                 "downloader_id": downloader.id,
@@ -663,7 +668,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 item["function"]["name"] for item in body["tools"]
             }
             name, args = "validate_download_plan", {"plan": fixture["plan"]}
-        elif step in (4, 5):
+        elif step in (4, 5, 6):
             if step == 4:
                 checked = next(
                     item["data"]
@@ -671,7 +676,24 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                     if item.get("data", {}).get("request_id")
                 )
                 identities.append(checked["request_id"])
-            name, args = "create_download_plan", {"request_id": identities[0]}
+                return response(
+                    [
+                        chunk(
+                            {
+                                "role": "assistant",
+                                "content": "Private plan facts: review and confirm.",
+                            },
+                            "stop",
+                        )
+                    ]
+                )
+            name, args = (
+                "create_download_plan",
+                {
+                    "request_id": identities[0],
+                    "confirmed": True,
+                },
+            )
         else:
             return response(
                 [chunk({"role": "assistant", "content": "Private plan facts"}, "stop")]
@@ -715,6 +737,19 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 async for event in AssistantService.persistent_stream(
                     conversation["id"],
                     request(prompt="Validate and create this download plan."),
+                    owner,
+                )
+            ]
+            assert events[-1].event == "done", events[-1]
+            assert await DownloadPlan.all().count() == 0
+            events += [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"],
+                    request(
+                        "confirmed",
+                        prompt="I confirm the displayed plan and defaults. Create it.",
+                    ),
                     owner,
                 )
             ]
@@ -775,6 +810,12 @@ def test_retry_chain():
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+            proposal = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="proposal",
+                prompt="Review",
+                status="complete",
+            )
             first = await AssistantTurn.create(
                 conversation_id=conversation["id"],
                 request_id="first",
@@ -785,14 +826,16 @@ def test_retry_chain():
                 DownloadPlanCheck(plan=body.plan), owner
             )
             await AssistantToolCall.create(
-                turn_id=first.id,
+                turn_id=proposal.id,
                 call_id="validate",
                 name="validate_download_plan",
                 arguments="{}",
                 status="complete",
                 result={"ok": True, "data": checked},
             )
-            args = dumps({"request_id": checked["request_id"]}).decode()
+            args = dumps(
+                {"request_id": checked["request_id"], "confirmed": True}
+            ).decode()
             await AssistantToolCall.create(
                 turn_id=first.id,
                 call_id="create",

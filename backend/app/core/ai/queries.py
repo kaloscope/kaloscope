@@ -102,6 +102,7 @@ async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
             {
                 **{key: item.get(key) for key in fields},
                 "published_node_count": len(item.get("node_types", [])),
+                "downloadable_search": item.get("downloadable_search", False),
             }
             for item in page["items"]
         ],

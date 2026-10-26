@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+import os
 import shutil
 from contextlib import nullcontext
 from dataclasses import replace
@@ -10,6 +12,7 @@ from uuid import UUID, uuid4
 
 import aiofiles
 import orjson
+from sanic import Sanic
 from tortoise import timezone
 from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Q
@@ -17,6 +20,7 @@ from tortoise.functions import Count, Sum
 from tortoise.queryset import QuerySet
 from tortoise.transactions import atomic, in_transaction
 
+from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
 from app.core.dl.config import (
     decrypt_config,
@@ -60,10 +64,11 @@ from app.models.download import (
     DownloadState,
     DownloadStats,
     DownloadTask,
+    IndexerSearch,
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
 )
-from app.models.flow import GraphCategory, GraphState
+from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.user import UserInfo
 from app.services.base import BaseService
 from app.services.flow import FlowGraphService
@@ -77,6 +82,21 @@ from app.utils.bittorrent import (
     standardize_magnet,
 )
 from app.utils.json import dumps
+
+
+def default_download_directory() -> Path:
+    """Resolve the editor's default directory without creating it.
+
+    Returns:
+        A readable conventional directory or the workspace download path.
+    """
+    for path in (Path("/downloads"), Path.home() / "Downloads"):
+        try:
+            if path.is_dir() and os.access(path, os.R_OK):
+                return path.resolve()
+        except OSError:
+            continue
+    return Path(KaloscopeConfig.get()._workspace) / "downloads"
 
 
 class DownloaderService(BaseService[Downloader], model=Downloader):
@@ -832,6 +852,135 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
     """Manage persisted automated download plans."""
 
     @classmethod
+    async def search_indexer(cls, body: IndexerSearch, user: UserInfo) -> dict:
+        """Preview one published search page using the normal workflow engine.
+
+        Args:
+            body: Selected indexer and explicit, bounded search inputs.
+            user: Current administrator with workflow access.
+
+        Returns:
+            Bounded metadata, reported pagination and validation issues. This runs
+            the indexer, which may make HTTP requests and write workflow logs, but
+            does not create a plan or submit downloads. Failed searches are distinct
+            from valid empty results; omitted fields are not validated samples.
+
+        Raises:
+            ForbiddenException: If the account cannot author plans or read the indexer.
+            NotFoundException: If the indexer does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        graph = await FlowGraphService.get_accessible(body.workflow_id, user)
+        result = {
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "query": body.model_dump(mode="json", exclude={"workflow_id"}),
+        }
+        issues = await cls._search_issues(graph, body.keyword, body.filters)
+        if issues:
+            return {
+                **result,
+                "status": "invalid_input",
+                "issue_count": len(issues),
+                "issues": issues[:10],
+            }
+        app = Sanic.get_app()
+        auth = (await start_config(graph, "auth"))["auth"] or {}
+        if (auth.get("login") or {}).get(
+            "required"
+        ) and await FlowGraphService.indexer_auth(
+            graph.id, getattr(app.ctx, "cookies", None)
+        ) is None:
+            return {
+                **result,
+                "status": "login_required",
+                "message": (
+                    "Log in on the indexer's search page, then retry. Do not send "
+                    "credentials in chat."
+                ),
+            }
+        try:
+            async with asyncio.timeout(10):
+                output = await app.ctx.flow_engine.execute(
+                    graph.id,
+                    {
+                        **(body.filters or {}),
+                        "$start": "search_start",
+                        "keyword": body.keyword,
+                        "page_num": body.page_num,
+                        "page_size": body.page_size,
+                    },
+                    repeatable=True,
+                    recoverable=False,
+                    asynchronous=False,
+                )
+        except TimeoutError:
+            return {
+                **result,
+                "status": "timeout",
+                "message": (
+                    "Search exceeded 10 seconds; no automatic retry. Inspect workflow "
+                    "logs before retrying."
+                ),
+            }
+        except Exception:
+            return {
+                **result,
+                "status": "failed",
+                "message": "Search failed; inspect workflow logs. No plan was created.",
+            }
+        errors, _ = check_output(
+            "search", output, {"page_num": body.page_num, "page_size": body.page_size}
+        )
+        if errors:
+            return {
+                **result,
+                "status": "invalid_output",
+                "issues_truncated": len(errors) > 10,
+                "issues": [error.model_dump() for error in errors[:10]],
+            }
+        items = output["items"]
+        total, pages = output.get("total"), output.get("totalPages")
+        has_more = (
+            body.page_num * body.page_size < total
+            if total is not None
+            else body.page_num < pages
+            if pages is not None
+            else None
+        )
+        result.update(
+            status="ok",
+            total=total,
+            total_pages=pages,
+            has_more=has_more,
+            next_page=body.page_num + 1 if has_more else None,
+            received_count=len(items),
+            items=[],
+            truncated=False,
+            projection=(
+                "Resource metadata only; links and extra fields omitted. This "
+                "preview is not the plan's first attempt or a downloadability check."
+            ),
+        )
+        fields = ("id", "title", "size", "category", "uploader", "uploaded_at", "misc")
+        for item in items[: body.page_size]:
+            projected = {}
+            for key in fields:
+                value = item.get(key)
+                if isinstance(value, str):
+                    projected[key] = value[:256]
+                    if len(value) > 256:
+                        result["truncated"] = True
+            result["items"].append(projected)
+            if len(dumps(result)) > 7500:
+                result["items"].pop()
+                break
+        result["returned_count"] = len(result["items"])
+        result["omitted_count"] = len(items) - result["returned_count"]
+        result["truncated"] |= result["omitted_count"] > 0
+        return result
+
+    @classmethod
     async def authoring_options(
         cls, workflow_id: int, user: UserInfo, page_num: int = 1, page_size: int = 20
     ) -> dict:
@@ -853,8 +1002,14 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             page_num=page_num, page_size=min(page_size, 50), ordering="priority"
         )
         downloaders = []
+        default_downloader = None
         for downloader in page.items:
             driver = load_driver(decrypt_config(downloader.config))
+            supported = bool(
+                driver.source_types & {DownloadSource.MAGNET, DownloadSource.TORRENT}
+            )
+            if default_downloader is None and supported:
+                default_downloader = downloader.id
             downloaders.append(
                 {
                     "id": downloader.id,
@@ -863,6 +1018,14 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 }
             )
             await driver.close()
+        directories = (
+            await DownloadDir.all()
+            .order_by("-last_used")
+            .limit(3)
+            .values_list("path", flat=True)
+        )
+        if not directories:
+            directories = [str(default_download_directory())]
         return {
             "workflow_id": graph.id,
             "workflow_name": graph.name,
@@ -876,42 +1039,59 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "page_size": min(page_size, 50),
                 "has_more": page_num * min(page_size, 50) < page.total,
             },
-            "directories": await DownloadDir.all()
-            .order_by("-last_used")
-            .limit(3)
-            .values_list("path", flat=True),
+            "directories": directories,
+            "downloader_availability": (
+                "Not probed; choices describe configured capabilities."
+            ),
+            "defaults": {
+                "interval_num": 1,
+                "interval_start": None,
+                "interval_end": None,
+                "batch_limit": 1,
+                "total_limit": 1,
+                "downloader_id": default_downloader,
+                "dir": directories[0],
+                "transfer_lib_id": None,
+                "transfer_method": None,
+            },
             "interval_unit": "hours",
             "timezone": "UTC",
-            "creation_rules": "Validate, review in the editor, then create only "
-            "when explicitly authorized using the validation request_id. Reuse this "
-            "ID on retries. Active plans queue real search/downloads; future starts "
-            "wait for the hourly check. One plan per request. Use get_download_plan "
-            "for first-attempt facts, not live download success.",
+            "creation_rules": (
+                "Retain the user's title/keyword and supplied preferences. Ask them to "
+                "choose a downloadable published indexer unless already specified. "
+                "After selection, immediately search_indexer with that keyword. Show "
+                "results, then ask about relevant declared filters (e.g. year/group), "
+                "start/end, interval, per-attempt/total resource counts, downloader, "
+                "directory and optional library transfer together. Show these defaults "
+                "for omitted values; single-title defaults are one resource, not one "
+                "episode. Ask for a total for ongoing/multi-title requests. Resolve a "
+                "missing compatible downloader; list further pages if needed. Never "
+                "invent filters; keyword alternatives require a new search. Re-search "
+                "changed search inputs. Empty results need revised inputs or explicit "
+                "agreement to wait for future resources. Validate and show ALL final "
+                "settings/defaults; wait for user confirmation before creation. Set "
+                "confirmed=true only after that approval; reuse request_id on retries. "
+                "Preview is not the first attempt: creation queues a fresh real search "
+                "and downloads, or waits for a future start/hourly check. Read the "
+                "receipt separately; creation is not download success."
+            ),
         }
 
     @classmethod
-    async def validate_creation(cls, body: DownloadPlanCheck, user: UserInfo) -> dict:
-        """Check a plan against the published indexer without executing it.
+    async def _search_issues(
+        cls, graph: FlowGraph, keyword: str, filters: dict | None
+    ) -> list[dict[str, str]]:
+        """Check published search inputs for both preview and plan creation.
 
         Args:
-            body: Editor fields and optional explicit search-result sample.
-            user: Current account; creation requires the same administrator role.
+            graph: Permission-checked indexer.
+            keyword: Explicit search keyword.
+            filters: Declared filter values, without reserved boot parameters.
 
         Returns:
-            Located issues, normalized editor data and first-execution semantics.
-
-        Raises:
-            ForbiddenException: If the account cannot create plans or read resources.
-            NotFoundException: If the selected workflow does not exist.
+            Located configuration and input issues.
         """
-        FlowGraphService.require_editor(user)
-        plan = body.plan
-        graph = await FlowGraphService.get_accessible(plan.graph_id, user)
         issues = []
-        warnings = [
-            "Configuration and supplied samples only; no search, HTTP request "
-            "or download was executed."
-        ]
         if (
             graph.category != GraphCategory.INDEXER
             or graph.state == GraphState.DRAFT
@@ -931,23 +1111,21 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     "message": "Published indexer needs a downloadable search entry.",
                 }
             )
-        if not plan.dir.strip():
-            issues.append({"path": "dir", "message": "Supply a download directory."})
-        keyword = (search or {}).get("keyword") or {}
+        keyword_config = (search or {}).get("keyword") or {}
         configured = (search or {}).get("filters") or {}
-        if not isinstance(keyword, dict) or not isinstance(configured, dict):
+        if not isinstance(keyword_config, dict) or not isinstance(configured, dict):
             issues.append(
                 {
                     "path": "graph_id",
                     "message": "Published keyword/filters must be mappings.",
                 }
             )
-            keyword, configured = {}, {}
-        if keyword.get("required") and not plan.keyword.strip():
+            keyword_config, configured = {}, {}
+        if keyword_config.get("required") and not keyword.strip():
             issues.append(
                 {"path": "keyword", "message": "This indexer requires a keyword."}
             )
-        for key, value in (plan.filters or {}).items():
+        for key, value in (filters or {}).items():
             if (
                 key.startswith("$")
                 or key in {"keyword", "page_num", "page_size"}
@@ -999,6 +1177,34 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 issues.append(
                     {"path": f"filters.{key}", "message": "Supply start and end dates."}
                 )
+        return issues
+
+    @classmethod
+    async def validate_creation(cls, body: DownloadPlanCheck, user: UserInfo) -> dict:
+        """Check a plan against the published indexer without executing it.
+
+        Args:
+            body: Editor fields and optional explicit search-result sample.
+            user: Current account; creation requires the same administrator role.
+
+        Returns:
+            Located issues, normalized editor data and first-execution semantics.
+
+        Raises:
+            ForbiddenException: If the account cannot create plans or read resources.
+            NotFoundException: If the selected workflow does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        plan = body.plan
+        graph = await FlowGraphService.get_accessible(plan.graph_id, user)
+        issues = []
+        warnings = [
+            "Configuration and supplied samples only; no search, HTTP request "
+            "or download was executed."
+        ]
+        issues.extend(await cls._search_issues(graph, plan.keyword, plan.filters))
+        if not plan.dir.strip():
+            issues.append({"path": "dir", "message": "Supply a download directory."})
         for field in ("interval_start", "interval_end"):
             value = getattr(plan, field)
             if value is not None and value.tzinfo is None:
@@ -1161,12 +1367,13 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         """Persist one authorized plan and notify the existing download synchronizer.
 
         Args:
-            body: Stable request ID and final editor settings.
+            body: Stable request ID, final editor settings and explicit confirmation.
             user: Current administrator; identity never comes from the request body.
 
         Returns:
-            Validation errors or the same plan on every retry. First execution is
-            durable queued work; creation does not wait for remote download requests.
+            Validation errors, an unconfirmed preview, or the same plan on every
+            retry. First execution is durable queued work; creation does not wait
+            for remote download requests.
 
         Raises:
             ForbiddenException: If the account cannot create plans.
@@ -1187,8 +1394,11 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         validation = await cls.validate_creation(
             DownloadPlanCheck(plan=body.plan), user
         )
+        validation["request_id"] = str(body.request_id)
         if not validation["valid"]:
             return {"created": False, **validation}
+        if not body.confirmed:
+            return {"created": False, "confirmation_required": True, **validation}
         try:
             plan = await DownloadPlan.create(
                 **values,

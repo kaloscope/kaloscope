@@ -569,7 +569,7 @@
     <footer class="relative shrink-0 rounded-b-box px-2 pb-2">
       {#if createdPlan && lastTurn}
         <p class="mb-2 px-2 text-sm" role="status">
-          {$_('assistant.plan.created', createdPlan.plan_id)}
+          {$_('assistant.plan.created', createdPlan.plan_id)} ·
           {$_(`assistant.plan.first.${createdPlan.first_execution.status}`)}
           {#if currentPage !== 'download_plans'}
             <button
