@@ -408,39 +408,51 @@ async def start_config(graph: int | FlowGraph, key: str, *keys: str) -> dict[str
         # return `None` if the node data is not found
         if data is None:
             return None
-        # return an empty dictionary if the configuration is not provided
-        config = data.get("config")
-        if not isinstance(config, str) or config.strip() == "":
-            return {}
-        # parse the YAML configuration
-        try:
-            yaml_config = yaml.load(config, Loader=yaml.SafeLoader)
-            if isinstance(yaml_config, dict):
-                # dict key must be str
-                def stringify_keys(obj: Any) -> Any:
-                    """Convert nested mapping keys to strings for configuration use.
-
-                    Args:
-                        obj: Parsed YAML value.
-
-                    Returns:
-                        Value with nested mapping keys converted to strings.
-                    """
-                    if isinstance(obj, dict):
-                        return {str(k): stringify_keys(v) for k, v in obj.items()}
-                    if isinstance(obj, list):
-                        return [stringify_keys(v) for v in obj]
-                    return obj
-
-                return stringify_keys(yaml_config)
-        except yaml.YAMLError:
-            logger.debug(
-                f"Failed to parse the YAML configuration:\n{Colors.RED}%s{Colors.END}",
-                config,
-            )
-        return {}
+        return parse_start_config(data.get("config"))
 
     return {k: load_config(f"{k}_start") for k in (key, *keys)}
+
+
+def parse_start_config(config: Any) -> dict[str, Any]:
+    """Parse a start node's YAML configuration as runtime callers read it.
+
+    Args:
+        config: Raw `config` field value from the start node data.
+
+    Returns:
+        Mapping with string keys. Missing, blank, invalid or non-mapping YAML returns
+        an empty mapping, matching how saved workflows are read.
+    """
+    # return an empty dictionary if the configuration is not provided
+    if not isinstance(config, str) or config.strip() == "":
+        return {}
+    # parse the YAML configuration
+    try:
+        yaml_config = yaml.load(config, Loader=yaml.SafeLoader)
+        if isinstance(yaml_config, dict):
+            # dict key must be str
+            def stringify_keys(obj: Any) -> Any:
+                """Convert nested mapping keys to strings for configuration use.
+
+                Args:
+                    obj: Parsed YAML value.
+
+                Returns:
+                    Value with nested mapping keys converted to strings.
+                """
+                if isinstance(obj, dict):
+                    return {str(k): stringify_keys(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [stringify_keys(v) for v in obj]
+                return obj
+
+            return stringify_keys(yaml_config)
+    except yaml.YAMLError:
+        logger.debug(
+            f"Failed to parse the YAML configuration:\n{Colors.RED}%s{Colors.END}",
+            config,
+        )
+    return {}
 
 
 # create the node register decorators

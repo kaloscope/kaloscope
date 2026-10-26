@@ -1,7 +1,9 @@
 """Tests for HTTP probes using isolated snapshots of saved indexer login state."""
 
 import asyncio
+import itertools
 import json
+import random
 import time
 from http.cookiejar import Cookie
 from threading import RLock
@@ -47,6 +49,7 @@ from tests.test_services_assistant import call_delta, chunk, configure, response
 
 TOKEN = 'saved/token+"secret'
 COOKIE = "saved-cookie-secret"
+READS_AUTH = {"Authorization": "Bearer {{ var('$auth').token }}"}
 
 
 def cookie(value=COOKIE, *, domain="example.test", path="/", expires=None, secure=True):
@@ -106,7 +109,8 @@ async def indexer(*, token=True, expires=None):
         expires: Optional authentication-variable expiry time.
 
     Returns:
-        Saved indexer available to an administrator in the temporary database.
+        Saved indexer available to an administrator in the temporary database. Its
+        HTTP node targets `example.test`, the only host that receives its `$auth`.
     """
     graph = await FlowGraph.create(
         name="Authenticated fixture",
@@ -121,7 +125,14 @@ async def indexer(*, token=True, expires=None):
                         "config": "login: {required: true}\n"
                         "cookie: {domain: example.test, path: /, name: session}",
                     },
-                }
+                },
+                {
+                    "id": "search",
+                    "data": {
+                        "$schema": "http",
+                        "url": "https://example.test/search?page={{ page_num }}",
+                    },
+                },
             ],
             "edges": [],
         },
@@ -525,6 +536,11 @@ def test_curl_snapshot(monkeypatch, saved_session):
             pass
 
     class Client(authoring.AsyncSession):
+        def __init__(self, **kwargs):
+            # a borrowed login must not follow redirects to other hosts
+            assert kwargs["allow_redirects"] is False
+            super().__init__(**kwargs)
+
         async def request(self, method, url, **kwargs):
             sent.append(kwargs)
             assert self.cookies.jar is not saved_session.ctx.cookies
@@ -728,3 +744,267 @@ def test_history_access(monkeypatch, saved_session):
             assert len(streams) == 2
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("url", "headers", "source", "sent_auth"),
+    [
+        ("https://EXAMPLE.test/search", READS_AUTH, None, f"Bearer {TOKEN}"),
+        ("https://other.test/search", READS_AUTH, None, None),
+        ("https://other.test/search", {}, None, ""),
+        ("https://example.test/search", READS_AUTH, "{{ base }}/search", None),
+        ("https://example.test/search", READS_AUTH, "https://{{ host }}/", None),
+    ],
+    ids=["source-host", "other-host", "other-host-unused", "templated", "host-var"],
+)
+def test_auth_hosts(monkeypatch, saved_session, url, headers, source, sent_auth):
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, text="fixture")
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await indexer()
+            if source is not None:
+                definition = graph.definition
+                definition["nodes"][1]["data"]["url"] = source
+                await FlowGraph.filter(id=graph.id).update(definition=definition)
+            return await authoring.probe_http_request(
+                HTTPProbe(
+                    request={"url": url, "headers": headers}, workflow_id=graph.id
+                ),
+                owner,
+            )
+
+    result = asyncio.run(run())
+
+    if sent_auth is None:
+        assert not sent and result.status_code is None
+        assert "only sent to hosts" in result.error and TOKEN not in result.error
+        assert ("example.test" in result.error) is (source is None)
+    else:
+        assert [r.headers.get("authorization", "") for r in sent] == [sent_auth]
+
+
+@pytest.mark.parametrize("selected", [False, True], ids=["anonymous", "indexer"])
+def test_received_cookies(monkeypatch, saved_session, selected):
+    first, second, rejected = "first-session-value", "second-session-value", "x" * 12
+
+    def handler(request):
+        if request.url.path == "/login":
+            return httpx.Response(
+                302,
+                headers={
+                    "location": "/home",
+                    "set-cookie": f"session={first}; Path=/; Secure",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"echo": [first, second, rejected], "lang": "en"},
+            headers=[
+                ("set-cookie", f"session={second}; Path=/; Secure"),
+                ("set-cookie", "lang=en; Path=/"),
+                ("set-cookie", f"tracker={rejected}; Domain=elsewhere.test"),
+            ],
+        )
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            # a saved `$auth` would stop redirects; copied cookies alone follow them
+            graph = await indexer(token=False)
+            return await authoring.probe_http_request(
+                HTTPProbe(
+                    request={"url": "https://example.test/login", "method": "POST"},
+                    formatter='{"data": {{ response.text }}, '
+                    '"cookies": {{ response.headers.get_list("set-cookie")|tojson }}}',
+                    workflow_id=graph.id if selected else None,
+                ),
+                owner,
+            )
+
+    result = asyncio.run(run())
+
+    assert result.status_code == 200 and result.redacted
+    serialized = dumps(result.model_dump()).decode()
+    for secret in (first, second, rejected):
+        assert secret not in serialized
+    assert result.formatted.value["data"] == {
+        "echo": ["[redacted]"] * 3,
+        "lang": "en",
+    }
+    assert "lang=en; Path=/" in result.formatted.value["cookies"]
+    assert saved_session.ctx.cookies.get_cookie("example.test").value == COOKIE
+
+
+@pytest.mark.parametrize("client", ["httpx", "curl_cffi"])
+def test_encoded_size(monkeypatch, client):
+    network = AsyncMock(side_effect=AssertionError("Oversized request was sent"))
+    monkeypatch.setattr(authoring.HTTPNode, "send_request", network)
+
+    async def run():
+        async with database() as (owner, _):
+            return await authoring.probe_http_request(
+                HTTPProbe(
+                    request={
+                        "url": "https://example.test/login",
+                        "method": "POST",
+                        "client": client,
+                        "headers": {
+                            "Content-Type": "application/x-www-form-urlencoded"
+                        },
+                        "body": '{"q": {{ big|tojson }}}',
+                    },
+                    # 24,000 rendered characters encode to 72,000 form bytes
+                    context={"big": "%" * 24000},
+                ),
+                owner,
+            )
+
+    result = asyncio.run(run())
+
+    assert result.error == "Rendered request exceeds 64 KiB."
+    network.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("options", "client", "size"),
+    [
+        ({"json": {"q": "é"}}, "httpx", len('{"q":"é"}'.encode())),
+        ({"json": {"q": "é"}}, "curl_cffi", len('{"q":"\\u00e9"}')),
+        ({"data": {"q": "%", "n": 1}}, "httpx", len("q=%25&n=1")),
+        ({"data": {"q": "%", "n": 1}}, "curl_cffi", len("q=%25&n=1")),
+        ({"content": b"raw"}, "httpx", 3),
+    ],
+)
+def test_body_size(options, client, size):
+    prepared = {"content": None, "data": None, "json": None, **options}
+
+    assert authoring._body_size(prepared, client) == size
+
+
+@pytest.mark.parametrize(
+    ("hosts", "sent_host"),
+    [(["example.test", "outside.test"], "example.test"), (["outside.test"], None)],
+    ids=["allowed-first", "outside-first"],
+)
+def test_single_render(monkeypatch, saved_session, hosts, sent_host):
+    sent = []
+    # alternate hosts on each render, as a nondeterministic template could
+    choices = itertools.cycle(hosts + ["example.test"])
+    monkeypatch.setattr(random, "choice", lambda _: next(choices))
+
+    def handler(request):
+        sent.append((request.url.host, request.headers.get("authorization")))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await indexer()
+            return await authoring.probe_http_request(
+                HTTPProbe(
+                    request={
+                        "url": "https://{{ ['example.test', 'outside.test']|random }}/",
+                        "headers": READS_AUTH,
+                    },
+                    workflow_id=graph.id,
+                ),
+                owner,
+            )
+
+    result = asyncio.run(run())
+
+    if sent_host is None:
+        assert not sent and "only sent to hosts" in result.error
+    else:
+        assert sent == [(sent_host, f"Bearer {TOKEN}")]
+
+
+def test_borrowed_redirect(monkeypatch, saved_session):
+    sent = []
+
+    def handler(request):
+        sent.append((request.url.host, request.headers.get("x-token")))
+        return httpx.Response(307, headers={"location": "https://outside.test/in"})
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await indexer()
+            return await authoring.probe_http_request(
+                HTTPProbe(
+                    request={
+                        "url": "https://example.test/search",
+                        "method": "POST",
+                        "headers": {"X-Token": "{{ var('$auth').token }}"},
+                        "body": "token={{ var('$auth').token|quote('') }}",
+                    },
+                    workflow_id=graph.id,
+                ),
+                owner,
+            )
+
+    result = asyncio.run(run())
+
+    assert sent == [("example.test", TOKEN)]
+    assert result.status_code == 307
+    assert result.headers["location"] == "https://outside.test/in"
+
+
+@pytest.mark.parametrize("selected", [True, False], ids=["configured", "http-only"])
+def test_short_session_cookies(monkeypatch, saved_session, selected):
+    saved_session.ctx.cookies.set_cookie(cookie("abc123"))
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            text=f"sent {request.headers.get('cookie')}; set xyz789 and q1w2",
+            headers=[
+                ("set-cookie", "session=xyz789; Path=/"),
+                ("set-cookie", "sid=q1w2; Path=/; httponly"),
+                ("set-cookie", "lang=en; Path=/"),
+            ],
+        )
+
+    monkeypatch.setattr(
+        authoring, "NetworkTransport", lambda **_: httpx.MockTransport(handler)
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            graph = await indexer()
+            return await authoring.probe_http_request(
+                HTTPProbe(
+                    request={"url": "https://example.test/search"},
+                    formatter='{"cookies": '
+                    '{{ response.headers.get_list("set-cookie")|tojson }}}',
+                    workflow_id=graph.id if selected else None,
+                ),
+                owner,
+            )
+
+    result = asyncio.run(run())
+    serialized = dumps(result.model_dump()).decode()
+
+    assert result.redacted and "q1w2" not in serialized
+    assert "lang=en; Path=/" in result.formatted.value["cookies"]
+    if selected:
+        # the indexer configures `session` as its login cookie
+        assert "abc123" not in serialized and "xyz789" not in serialized

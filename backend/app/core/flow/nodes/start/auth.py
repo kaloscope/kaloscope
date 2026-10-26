@@ -17,12 +17,13 @@ cookie:
 
 @start_node(order=1, icon="key", categories=(GraphCategory.INDEXER,))
 class AuthStartNode(Node):
-    """Start an indexer login request.
+    """Start an indexer password login.
 
-    Input: caller credentials shown in `example` become top-level context variables.
-    `config.login` selects the login UI; `config.cookie` selects saved cookies.
-    Output: unchanged context through `output`; connect to an `auth_end` path.
-    This node does not authenticate by itself."""
+    Input: `username`/`password` from the search-page login form, as in `example`.
+    `config.login` (a mapping) shows that form; `required: true` blocks search until
+    login. `config.cookie` (`domain`/`path`/`name`) names the stored session cookie
+    for login status and expiry. Output: unchanged context; connect `http`, then
+    `auth_end`. It does not authenticate."""
 
     example = CodeField(
         "request_example",

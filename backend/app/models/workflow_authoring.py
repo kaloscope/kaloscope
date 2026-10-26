@@ -53,9 +53,33 @@ class TemplateValidation(AuthoringInput):
     template: str = Field(max_length=8192)
     context: dict[str, Any] = Field(default_factory=dict)
     mode: Literal[
-        "text", "expression", "json", "object", "array", "search", "details", "movie"
+        "text",
+        "expression",
+        "json",
+        "object",
+        "array",
+        "search",
+        "details",
+        "movie",
+        "auth",
     ] = "text"
     strict: bool = False
+    # the exact `auth_start` YAML for mode=auth; recipes and errors explain it
+    config: str | None = None
+
+    @model_validator(mode="after")
+    def check_config(self) -> Self:
+        """Pair authentication output with the start configuration it depends on.
+
+        Returns:
+            Validated input.
+
+        Raises:
+            ValueError: If `config` is missing for `auth` or supplied for another mode.
+        """
+        if (self.mode == "auth") != (self.config is not None):
+            raise ValueError("config is required for mode=auth and only for it")
+        return self
 
 
 class OutputIssue(BaseModel):
@@ -76,6 +100,11 @@ class TemplateResult(BaseModel):
     line: int | None = None
     issues: list[OutputIssue] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    outcome: Literal["authenticated", "unauthenticated"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Valid mode=auth result: whether login succeeds and saves $auth.",
+    )
 
 
 class HTTPProbeResult(BaseModel):

@@ -1,11 +1,15 @@
 """Unit tests for workflow authorization, visibility, and versioned writes."""
 
 import asyncio
+import io
 import json
+import multiprocessing
+import zipfile
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sanic import HTTPResponse, Request, Sanic
@@ -15,6 +19,7 @@ from sanic.response.types import BaseHTTPResponse
 from sanic_ext.exceptions import ValidationError
 from tortoise import Tortoise
 
+from app.core.cookiejar import SQLiteCookieJar
 from app.core.exceptions import (
     ErrorCode,
     ForbiddenException,
@@ -22,7 +27,18 @@ from app.core.exceptions import (
     NotFoundException,
     UnauthorizedException,
 )
-from app.models.flow import FlowGraph, FlowJob, FlowLog, GraphCategory, GraphState
+from app.core.flow.context import AUTH_KEY
+from app.models.flow import (
+    FlowGraph,
+    FlowJob,
+    FlowLog,
+    FlowRepository,
+    FlowTemplate,
+    FlowVariable,
+    GraphCategory,
+    GraphState,
+)
+from app.models.general import GlobalCookie
 from app.models.user import PermType, User, UserPermission, UserRole
 from app.routes import flow as routes
 from app.utils.json import dumps
@@ -112,6 +128,40 @@ def request(user=None, path="/_api/flow/graph/list", body=None):
     return result
 
 
+def upload(user, path, archive):
+    """Create a multipart request carrying a workflow archive as `zip`.
+
+    Args:
+        user: Authenticated account.
+        path: API path.
+        archive: Zip archive contents.
+
+    Returns:
+        Request registered as current, so form models can read its files.
+    """
+    boundary = "flow-route-test"
+    result = Request(
+        url_bytes=path.encode(),
+        headers=Header({"content-type": f"multipart/form-data; boundary={boundary}"}),
+        version="1.1",
+        method="POST",
+        transport=cast(TransportProtocol, None),
+        app=Sanic.get_app("flow-route-test"),
+    )
+    result.body = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="zip"; filename="flows.zip"\r\n'
+            "Content-Type: application/zip\r\n\r\n"
+        ).encode()
+        + archive
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    result.ctx.user = SimpleNamespace(id=user.id, role=user.role, perms=None)
+    Request._current.set(result)
+    return result
+
+
 @pytest.mark.parametrize(
     ("handler", "arguments"),
     [
@@ -120,6 +170,16 @@ def request(user=None, path="/_api/flow/graph/list", body=None):
         (routes.get_graph_logs, {"id": 1}),
         (routes.get_node_schemas, {}),
         (routes.list_jobs, {}),
+        (routes.execute_graph, {"id": 1}),
+        (routes.get_indexer_config, {"id": 1}),
+        (routes.get_indexer_auth, {"id": 1}),
+        (routes.indexer_logout, {"id": 1}),
+        (routes.pause_job, {"id": 1}),
+        (routes.resume_job, {"id": 1}),
+        (routes.reference_template, {"id": 1}),
+        (routes.copy_template, {"id": 1}),
+        (routes.export_graphs, {}),
+        (routes.import_graphs, {}),
     ],
 )
 def test_missing_session(handler, arguments):
@@ -292,5 +352,294 @@ def test_missing(granted):
                     await call_route(handler, request(user), id=9999)
                 assert exc_info.value.status_code == 404
                 assert exc_info.value.message == ErrorCode.NOT_FOUND
+
+    asyncio.run(run())
+
+
+def test_indexer_login_access(application):
+    application.ctx.cookies = SQLiteCookieJar(
+        cast(
+            Sanic,
+            SimpleNamespace(
+                shared_ctx=SimpleNamespace(
+                    cookies={}, cookies_lock=multiprocessing.RLock()
+                )
+            ),
+        )
+    )
+    application.ctx.flow_engine = SimpleNamespace(
+        execute=AsyncMock(return_value={"name": "Intruder"})
+    )
+    login = {"$start": "auth_start", "username": "intruder", "password": "fixture"}
+
+    async def run():
+        async with database():
+            reader = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            indexer = await FlowGraph.create(
+                name="Login",
+                category=GraphCategory.INDEXER,
+                state=GraphState.PUBLISHED,
+                definition={
+                    "nodes": [
+                        {
+                            "id": "auth",
+                            "data": {
+                                "$schema": "auth_start",
+                                "config": "login: {required: true}\n"
+                                "cookie: {domain: .example.test, path: /, name: sid}",
+                            },
+                        }
+                    ],
+                    "edges": [],
+                },
+            )
+            await FlowVariable.create(
+                graph_id=indexer.id,
+                key=AUTH_KEY,
+                value={"name": "Owner", "token": "saved-token"},
+            )
+            await GlobalCookie.create(
+                name="sid", value="saved", domain=".example.test", path="/"
+            )
+            path = f"/_api/flow/graph/{indexer.id}/execute"
+
+            for handler, call in (
+                (routes.get_indexer_config, request(reader)),
+                (routes.get_indexer_auth, request(reader)),
+                (routes.indexer_logout, request(reader, body={})),
+                (routes.execute_graph, request(reader, path, login)),
+            ):
+                with pytest.raises(ForbiddenException) as exc_info:
+                    await call_route(handler, call, id=indexer.id)
+                assert exc_info.value.message == ErrorCode.PERMISSION_DENIED
+            application.ctx.flow_engine.execute.assert_not_awaited()
+            assert (await FlowVariable.get(graph_id=indexer.id)).value == {
+                "name": "Owner",
+                "token": "saved-token",
+            }
+            assert await GlobalCookie.all().count() == 1
+
+            await UserPermission.create(
+                user=reader, rel_type=PermType.INDEXER, rel_id=indexer.id
+            )
+            status = await call_route(
+                routes.get_indexer_auth, request(reader), id=indexer.id
+            )
+            assert response_json(status) == {"name": "Owner"}
+            config = await call_route(
+                routes.get_indexer_config, request(reader), id=indexer.id
+            )
+            assert response_json(config)["auth"]["login"] == {"required": True}
+            executed = await call_route(
+                routes.execute_graph, request(reader, path, login), id=indexer.id
+            )
+            assert response_json(executed) == {"name": "Intruder"}
+            logout = await call_route(
+                routes.indexer_logout, request(reader, body={}), id=indexer.id
+            )
+            assert logout.status == 204
+            assert not await FlowVariable.filter(graph_id=indexer.id).exists()
+            assert await GlobalCookie.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_job_control(application):
+    engine = SimpleNamespace(pause_job=AsyncMock(), resume_job=AsyncMock())
+    application.ctx.flow_engine = engine
+
+    async def run():
+        async with database():
+            reader = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            admin = await User.create(
+                username="admin", password="unused", role=UserRole.ADMIN
+            )
+            indexer = await FlowGraph.create(
+                name="Indexer",
+                category=GraphCategory.INDEXER,
+                state=GraphState.PUBLISHED,
+            )
+            await UserPermission.create(
+                user=reader, rel_type=PermType.INDEXER, rel_id=indexer.id
+            )
+            job = await FlowJob.create(
+                graph=indexer, state="running", trigger="cron", cron_expr="0 8 * * *"
+            )
+            listed = response_json(await call_route(routes.list_jobs, request(reader)))
+            assert [item["id"] for item in listed["items"]] == [job.id]
+
+            for handler in (routes.pause_job, routes.resume_job):
+                with pytest.raises(ForbiddenException) as exc_info:
+                    await call_route(handler, request(reader, body={}), id=job.id)
+                assert exc_info.value.status_code == 403
+            engine.pause_job.assert_not_awaited()
+            engine.resume_job.assert_not_awaited()
+
+            for handler in (routes.pause_job, routes.resume_job):
+                response = await call_route(handler, request(admin, body={}), id=job.id)
+                assert response.status == 204
+            engine.pause_job.assert_awaited_once_with(job.id)
+            engine.resume_job.assert_awaited_once_with(job.id)
+
+    asyncio.run(run())
+
+
+def test_execution_access(application):
+    engine = SimpleNamespace(execute=AsyncMock(return_value=[]))
+    application.ctx.flow_engine = engine
+
+    async def run():
+        async with database():
+            reader = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            admin = await User.create(
+                username="admin", password="unused", role=UserRole.ADMIN
+            )
+            graphs = [
+                await FlowGraph.create(
+                    name=category, category=category, state=GraphState.PUBLISHED
+                )
+                for category in (
+                    GraphCategory.INDEXER,
+                    GraphCategory.INGEST,
+                    GraphCategory.SCHEDULE,
+                )
+            ]
+            indexer, ingest, general = graphs
+            # indexer grants never cover other categories, even with matching IDs
+            for graph in graphs:
+                await UserPermission.create(
+                    user=reader, rel_type=PermType.INDEXER, rel_id=graph.id
+                )
+
+            for graph_id, body in (
+                (ingest.id, {}),
+                (general.id, {}),
+                (9999, {}),
+                (indexer.id, {"recoverable": True, "recovery_id": 1}),
+            ):
+                path = f"/_api/flow/graph/{graph_id}/execute"
+                with pytest.raises(ForbiddenException) as exc_info:
+                    await call_route(
+                        routes.execute_graph, request(reader, path, body), id=graph_id
+                    )
+                assert exc_info.value.message == ErrorCode.FORBIDDEN
+            engine.execute.assert_not_awaited()
+
+            for user, graph_id, body in (
+                (reader, indexer.id, {}),
+                (admin, general.id, {"recovery_id": 1}),
+            ):
+                path = f"/_api/flow/graph/{graph_id}/execute"
+                response = await call_route(
+                    routes.execute_graph, request(user, path, body), id=graph_id
+                )
+                assert response_json(response) == []
+            assert [
+                (call.kwargs["graph_id"], call.kwargs["recovery_id"])
+                for call in engine.execute.await_args_list
+            ] == [(indexer.id, None), (general.id, 1)]
+
+    asyncio.run(run())
+
+
+def test_template_access():
+    async def run():
+        async with database():
+            reader = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            admin = await User.create(
+                username="admin", password="unused", role=UserRole.ADMIN
+            )
+            repo = await FlowRepository.create(
+                repo_name="example/flows", repo_url="https://example.test/flows.git"
+            )
+            tmpl = await FlowTemplate.create(
+                repo=repo,
+                path="search.json",
+                name="Search",
+                category=GraphCategory.INDEXER,
+                revision=1,
+                definition={"nodes": [], "edges": []},
+            )
+            path = f"/_api/flow/tmpl/{tmpl.id}"
+
+            for handler in (routes.reference_template, routes.copy_template):
+                with pytest.raises(ForbiddenException) as exc_info:
+                    await call_route(
+                        handler, request(reader, path, {"name": "Copy"}), id=tmpl.id
+                    )
+                assert exc_info.value.status_code == 403
+            assert not await FlowGraph.exists()
+
+            for handler, name in (
+                (routes.reference_template, "Referenced"),
+                (routes.copy_template, "Copied"),
+            ):
+                await call_route(
+                    handler, request(admin, path, {"name": name}), id=tmpl.id
+                )
+            assert sorted(
+                await FlowGraph.all().values_list("name", "tmpl_id", "editable")
+            ) == [("Copied", None, True), ("Referenced", tmpl.id, False)]
+
+    asyncio.run(run())
+
+
+def test_graph_transfer():
+    async def run():
+        async with database():
+            reader = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            admin = await User.create(
+                username="admin", password="unused", role=UserRole.ADMIN
+            )
+            graph = await FlowGraph.create(
+                name="Shared",
+                category=GraphCategory.INDEXER,
+                state=GraphState.PUBLISHED,
+                revision=1,
+                definition={"nodes": [], "edges": []},
+            )
+            # an indexer grant does not extend to workflow transfer
+            await UserPermission.create(
+                user=reader, rel_type=PermType.INDEXER, rel_id=graph.id
+            )
+            path = "/_api/flow/graph/export"
+
+            with pytest.raises(ForbiddenException) as exc_info:
+                await call_route(
+                    routes.export_graphs, request(reader, path, {"ids": [graph.id]})
+                )
+            assert exc_info.value.status_code == 403
+            exported = await call_route(
+                routes.export_graphs, request(admin, path, {"ids": [graph.id]})
+            )
+            assert exported.body is not None
+            with zipfile.ZipFile(io.BytesIO(exported.body)) as archive:
+                assert archive.namelist() == ["Shared.json"]
+            await graph.delete()
+
+            path = "/_api/flow/graph/import"
+            with pytest.raises(ForbiddenException) as exc_info:
+                await call_route(
+                    routes.import_graphs, upload(reader, path, exported.body)
+                )
+            assert exc_info.value.status_code == 403
+            assert not await FlowGraph.exists()
+            imported = await call_route(
+                routes.import_graphs, upload(admin, path, exported.body)
+            )
+            assert response_json(imported) == 1
+            restored = await FlowGraph.get(name="Shared")
+            assert restored.state == GraphState.DRAFT
+            assert restored.draft == {"nodes": [], "edges": []}
 
     asyncio.run(run())

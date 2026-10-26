@@ -323,7 +323,9 @@ class NodeTypesResult(RootModel[dict[str, list[NodeResult]]]):
 class WorkflowReference(Result):
     """Return one complete, bundled workflow authoring reference."""
 
-    topic: Literal["context", "templates", "json_indexer", "movie_scraper"]
+    topic: Literal[
+        "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+    ]
     content: str = Field(description="Complete English Markdown reference.")
 
 

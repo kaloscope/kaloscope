@@ -1,8 +1,10 @@
 """Check authored indexer and movie results without executing workflow nodes."""
 
+import re
 from datetime import date
 from typing import Annotated, Any, Literal
 
+import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -12,6 +14,7 @@ from pydantic import (
     field_validator,
 )
 
+from app.core.flow.nodes.base import parse_start_config
 from app.core.media.common import ContentError
 from app.core.media.shelver import TEMPLATES_PATH, render_nfo
 from app.models.workflow_authoring import OutputIssue
@@ -160,6 +163,231 @@ class MovieOutput(BaseModel):
         return value
 
 
+class AuthOutput(BaseModel):
+    """Check a successful login result that `auth_end` saves as `$auth`."""
+
+    model_config = ConfigDict(strict=True, extra="allow")
+
+    name: Text
+    token: Text | None = None
+    expires_in: Annotated[int, Field(gt=0)] | None = None
+
+
+def _config_issue(config: str) -> OutputIssue | None:
+    """Report YAML that runtime would ignore, without expanding aliases.
+
+    Args:
+        config: Raw `auth_start` YAML configuration.
+
+    Returns:
+        A located issue for invalid YAML or anchors/aliases, otherwise `None`. Blank
+        configuration is left to the missing-login check.
+    """
+    try:
+        # parse events reference aliases once instead of expanding them like a load
+        for event in yaml.parse(config, Loader=yaml.SafeLoader):
+            if getattr(event, "anchor", None) is not None:
+                return OutputIssue(
+                    path="config", message="Remove YAML anchors and aliases."
+                )
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        line = f" at line {mark.line + 1}" if mark is not None else ""
+        problem = getattr(exc, "problem", None) or "invalid syntax"
+        return OutputIssue(
+            path="config",
+            message=f"Invalid YAML{line}: {problem}; runtime ignores all of it.",
+        )
+    return None
+
+
+def _check_cookie(cookie: Any) -> tuple[list[OutputIssue], list[str], bool]:
+    """Check a configured session cookie against the key cookie jars store.
+
+    Args:
+        cookie: Parsed `config.cookie` value.
+
+    Returns:
+        Located issues, storage warnings and whether a complete cookie identifies the
+        login. Absent cookies and the default block with only `path: /` are inactive.
+    """
+    if cookie is None:
+        return [], [], False
+    if not isinstance(cookie, dict):
+        return (
+            [
+                OutputIssue(
+                    path="config.cookie",
+                    message="Use a mapping with domain, path and name.",
+                )
+            ],
+            [],
+            False,
+        )
+    domain, path, name = (cookie.get(key) for key in ("domain", "path", "name"))
+    if domain in (None, "") and name in (None, "") and path in (None, "", "/"):
+        return [], [], False
+    issues = []
+    if (
+        not isinstance(domain, str)
+        or not domain.strip()
+        or domain != domain.lower()
+        or re.search(r"[\s/]|^[^:]+:\d+$", domain)
+    ):
+        issues.append(
+            OutputIssue(
+                path="config.cookie.domain",
+                message="Use the stored domain: `.d` for `Domain=d`, otherwise the "
+                "lowercase login host without port.",
+            )
+        )
+    if not isinstance(path, str) or not path.startswith("/") or re.search(r"\s", path):
+        issues.append(
+            OutputIssue(
+                path="config.cookie.path",
+                message="Use the stored path: `Path`, otherwise the login URL path "
+                "before its last `/` (`/a/login` -> `/a`, `/login` -> `/`).",
+            )
+        )
+    if not isinstance(name, str) or not re.fullmatch(r"[^\s=;,]+", name):
+        issues.append(
+            OutputIssue(
+                path="config.cookie.name", message="Use the session cookie's name."
+            )
+        )
+    warnings = []
+    if (
+        not issues
+        and isinstance(domain, str)
+        and "." not in domain.strip(".")
+        and ":" not in domain
+    ):
+        host = domain.strip(".")[:100]
+        warnings.append(
+            f"HTTPX stores dotless host {host} as {host}.local; curl_cffi keeps {host}."
+        )
+    return issues, warnings, not issues
+
+
+def check_auth(
+    value: Any, config: str
+) -> tuple[
+    list[OutputIssue], list[str], Literal["authenticated", "unauthenticated"] | None
+]:
+    """Check an `auth_end` result against the `auth_start` configuration it uses.
+
+    Authoring requires an object with a string `name`, an optional nonblank string
+    `token` and positive integer `expires_in` seconds. Legacy runtime saves any
+    truthy name and ignores non-integer `expires_in`; this check does not change it.
+
+    Args:
+        value: Parsed JSONC output of the proposed `auth_end` template.
+        config: Exact `auth_start` YAML configuration, parsed as runtime reads it.
+            Invalid YAML and anchors/aliases are reported instead of being parsed.
+
+    Returns:
+        At most twelve field issues, compact runtime consequences and, when valid,
+        the outcome: `authenticated` replaces workflow-local `$auth`, while
+        `unauthenticated` (empty or absent name) keeps any earlier login. No node
+        runs and no authentication variable or cookie is read or saved.
+    """
+    issues = []
+    config_issue = _config_issue(config)
+    settings = {} if config_issue else parse_start_config(config)
+    login = settings.get("login")
+    if config_issue:
+        issues.append(config_issue)
+    elif not isinstance(login, dict):
+        issues.append(
+            OutputIssue(
+                path="config.login",
+                message="Use a mapping such as {mode: password, required: true} "
+                "to show the login form.",
+            )
+        )
+    else:
+        if login.get("mode") not in (None, "password"):
+            issues.append(
+                OutputIssue(
+                    path="config.login.mode",
+                    message="Only password login is supported.",
+                )
+            )
+        if not isinstance(login.get("required", False), bool):
+            issues.append(
+                OutputIssue(path="config.login.required", message="Use true or false.")
+            )
+    cookie_issues, warnings, cookie_login = _check_cookie(settings.get("cookie"))
+    issues.extend(cookie_issues)
+
+    outcome = None
+    if not isinstance(value, dict):
+        issues.append(
+            OutputIssue(
+                path="$", message='Return an object; use {"name": ""} on failure.'
+            )
+        )
+    elif value.get("name") in (None, ""):
+        if any(value.get(key) not in (None, "") for key in ("token", "expires_in")):
+            issues.append(
+                OutputIssue(
+                    path="name",
+                    message="Empty name discards token/expires_in; map the display "
+                    "name, or omit them for a failed login.",
+                )
+            )
+        else:
+            outcome = "unauthenticated"
+            warnings.append("Failed login: $auth is unchanged; an earlier login stays.")
+            if cookie_login:
+                warnings.append(
+                    "The login page still reports a login while the configured "
+                    "cookie exists; choose a cookie set only after login."
+                )
+    else:
+        try:
+            auth = AuthOutput.model_validate(value)
+        except ValidationError as exc:
+            issues.extend(
+                OutputIssue(
+                    path=".".join(str(part) for part in error["loc"]),
+                    message=error["msg"],
+                )
+                for error in exc.errors(include_input=False, include_url=False)
+            )
+        else:
+            outcome = "authenticated"
+            if auth.token is None and not cookie_login and not config_issue:
+                issues.append(
+                    OutputIssue(
+                        path="token",
+                        message="Map the login token, or configure config.cookie "
+                        "for a cookie session.",
+                    )
+                )
+            if auth.expires_in is not None:
+                warnings.append("$auth expires after expires_in seconds (not saved).")
+            elif cookie_login:
+                warnings.append(
+                    "Without expires_in, $auth copies the configured cookie's saved "
+                    "expiry. Cookies without Expires/Max-Age are not saved: $auth "
+                    "then never expires but the cookie ends on restart."
+                )
+            else:
+                warnings.append(
+                    "Without expires_in or a configured cookie, $auth stays until "
+                    "logout or the next successful login."
+                )
+            warnings.append(
+                "Validate a failure sample too; HTTP 200 alone is not success."
+            )
+    if issues:
+        outcome = None
+    if len(issues) > 12:
+        warnings.insert(0, "Additional field errors omitted; fix these and recheck.")
+    return issues[:12], list(dict.fromkeys(warnings))[:4], outcome
+
+
 def check_output(
     mode: Literal["search", "details", "movie"], value: Any, context: dict
 ) -> tuple[list[OutputIssue], list[str]]:
@@ -244,6 +472,23 @@ def check_output(
                                 message="Cannot precede a nonempty requested page.",
                             )
                         )
+            if (
+                type(number) is int
+                and number > 0
+                and not page.items
+                and page.total is None
+                and page.totalPages is not None
+                # one reported page may describe zero matches
+                and page.totalPages > 1
+                and number <= page.totalPages
+            ):
+                issues.append(
+                    OutputIssue(
+                        path="items",
+                        message="Empty page before the reported totalPages; "
+                        "check item extraction and pagination.",
+                    )
+                )
             if page.total is not None and page.total < len(page.items):
                 issues.append(
                     OutputIssue(

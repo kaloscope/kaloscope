@@ -184,7 +184,9 @@ class PlanID(ToolArguments):
 class ReferenceQuery(ToolArguments):
     """Select a bundled workflow authoring reference."""
 
-    topic: Literal["context", "templates", "json_indexer", "movie_scraper"]
+    topic: Literal[
+        "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+    ]
 
 
 class WorkflowValidation(GraphReference):
@@ -404,12 +406,12 @@ TOOLS = (
     AssistantTool(
         "list_node_types",
         "List nodes; node_type reads fields/handles. include_examples=false omits "
-        "read-only guides; default true includes full examples.",
+        "read-only guides.",
         NodeQuery,
     ),
     AssistantTool(
         "get_workflow_reference",
-        "Read context/templates or json_indexer/movie_scraper authoring recipes.",
+        "Read context/template rules or authoring recipes.",
         ReferenceQuery,
     ),
     AssistantTool(
@@ -421,9 +423,9 @@ TOOLS = (
     ),
     AssistantTool(
         "validate_workflow_template",
-        "Check Jinja fixtures: expression=native, json/object/array=JSONC; "
-        "search/details/movie check business output; fix issues and recheck. "
-        "strict rejects undefined. No nodes execute; Python internals blocked.",
+        "Check Jinja fixtures: expression=native, json/object/array=JSONC, "
+        "search/details/movie/auth=business output. strict rejects undefined. "
+        "No nodes execute; Python internals blocked.",
         TemplateValidation,
     ),
     AssistantTool(
@@ -757,9 +759,16 @@ async def execute_tool(
         return tool_error(ErrorCode.FORBIDDEN, "Use only the tools provided to you.")
     try:
         args = tool.arguments.model_validate_json(arguments)
-    except ValidationError:
+    except ValidationError as exc:
+        # explicit model rules state requirements a schema cannot, such as pairing
+        rules = [
+            error["msg"].removeprefix("Value error, ")[:200]
+            for error in exc.errors(include_input=False, include_url=False)
+            if error["type"] == "value_error"
+        ]
         return tool_error(
-            ErrorCode.BAD_REQUEST, "Correct the arguments to match the tool schema."
+            ErrorCode.BAD_REQUEST,
+            " ".join(["Correct the arguments to match the tool schema.", *rules[:2]]),
         )
 
     try:
