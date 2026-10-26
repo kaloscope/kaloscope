@@ -4,7 +4,6 @@ from datetime import datetime
 from sanic import Blueprint, HTTPResponse, Request, empty, json
 from sanic.log import logger
 from sanic_ext import validate
-from tortoise.expressions import Q
 
 from app.core.constants import ENCODING
 from app.core.decorators import authorize
@@ -27,7 +26,6 @@ from app.models.download import (
     DownloadPlanUpsert,
     DownloadQuery,
 )
-from app.models.flow import FlowGraph, GraphState
 from app.models.user import UserRole
 from app.services.download import (
     DownloaderService,
@@ -191,36 +189,7 @@ async def list_plans(request: Request, query: DownloadPlanQuery) -> HTTPResponse
     Returns:
         Response containing the requested data.
     """
-    queries = []
-    user = request.ctx.user
-    if user.role != UserRole.ADMIN:
-        queries.append(Q(graph_id__in=user.perms.indexer_ids if user.perms else []))
-        queries.append(
-            Q(transfer_lib_id=None)
-            | Q(transfer_lib_id__in=user.perms.media_lib_ids if user.perms else [])
-        )
-    if query.graph_id:
-        queries.append(Q(graph_id=query.graph_id))
-    if query.keyword:
-        queries.append(Q(keyword__icontains=query.keyword))
-    page = await DownloadPlan.page(*queries, **query.page_params)
-    result = await DownloadPlanService.dump_page(page)
-    # attach the graph name and running status for each plan
-    graph_ids = {job.graph_id for job in page.items}
-    graphs = {g.id: g for g in await FlowGraph.filter(id__in=graph_ids)}
-    for plan, record in zip(result["items"], page.items, strict=True):
-        graph = graphs.get(plan["graph_id"])
-        plan["graph_name"] = graph.name if graph else None
-        published = graph.state != GraphState.DRAFT if graph else False
-        plan["running"] = published and not plan["inactive"]
-        if record.creation_receipt:
-            first = record.creation_receipt["first_execution"]
-            plan["first_execution"] = (
-                {"status": "waiting"}
-                if first["status"] == "queued" and not plan["running"]
-                else first
-            )
-    return json(result)
+    return json(await DownloadPlanService.list_plans(query, request.ctx.user))
 
 
 @download.post("/plan/validate")

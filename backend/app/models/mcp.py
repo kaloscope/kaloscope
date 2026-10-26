@@ -186,6 +186,20 @@ class PlanCreationResult(Result):
     first_execution: dict[str, JSONType] | Literal["scheduled", "queued_after_creation"]
 
 
+class PlanListResult(Result):
+    """Page accessible plans with applied filters, exact totals and compact facts."""
+
+    filters: dict[str, JSONType]
+    total: int = Field(ge=0, description="Permission-filtered plans before paging.")
+    page_num: int
+    page_size: int
+    page_counts: dict[str, int]
+    next_page_num: int | None
+    interval_unit: Literal["hours"]
+    timezone: Literal["UTC"]
+    items: list[dict[str, JSONType]]
+
+
 class RecordResult(Result):
     """Preserve record IDs and timestamps already encoded by the shared JSON utility."""
 

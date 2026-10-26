@@ -36,6 +36,17 @@ DOWNLOAD_PATHS = {
 }
 type ResourceID = Annotated[int, Field(gt=0, le=2**53 - 1, strict=True)]
 type DownloadOrdering = Literal["", "name", "-name", "downloader_id", "-downloader_id"]
+type DownloadPlanOrdering = Literal[
+    "",
+    "graph__name",
+    "-graph__name",
+    "keyword",
+    "-keyword",
+    "interval_num",
+    "-interval_num",
+    "last_exec",
+    "-last_exec",
+]
 type WorkflowJobOrdering = Literal[
     "",
     "graph__name",

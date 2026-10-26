@@ -13,6 +13,7 @@ from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
 from pydantic import BaseModel, Field
 from sanic import HTTPResponse, Request, Sanic, raw
 
+from app.core.ai.queries import download_plans
 from app.core.constants import MCP_PATH
 from app.core.exceptions import (
     ErrorCode,
@@ -21,9 +22,11 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.flow.reference import get_workflow_reference as read_workflow_reference
+from app.models.assistant import DownloadPlanOrdering
 from app.models.download import (
     DownloadPlanCheck,
     DownloadPlanCreate,
+    DownloadPlanQuery,
     DownloadQuery,
     DownloadState,
     IndexerSearch,
@@ -52,6 +55,7 @@ from app.models.mcp import (
     NodeTypesResult,
     PageResult,
     PlanCreationResult,
+    PlanListResult,
     PlanOptionsResult,
     PlanValidationResult,
     ProviderResult,
@@ -109,6 +113,7 @@ _READ_TOOLS = frozenset(
         "get_download_plan_options",
         "validate_download_plan",
         "get_download_plan",
+        "list_download_plans",
         "list_workflows",
         "get_workflow",
         "list_node_types",
@@ -257,6 +262,9 @@ def create_server() -> MCPServer:
             "Active plans queue real search/downloads immediately; future starts wait. "
             "Retry the same request_id and settings to recover the same plan; read its "
             "first-attempt outcome separately. Creation is not download success. "
+            "Before validating, check list_media_items and list_download_plans (all "
+            "indexers) for possible overlaps; matches are advisory evidence for the "
+            "user's final decision. "
             "List resources before reading their details; "
             "inspect node schemas and logs to diagnose workflows. Access follows the "
             "account's permissions; AI provider settings require an administrator. "
@@ -427,6 +435,73 @@ def create_server() -> MCPServer:
         """
         return PlanCreationResult.model_validate(
             await _read(DownloadPlanService.get_creation(plan_id, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def list_download_plans(
+        ctx: Context,
+        workflow_id: Annotated[
+            _ResourceID | None,
+            Field(
+                description="Indexer workflow ID; null includes every accessible "
+                "indexer. This is not a plan ID."
+            ),
+        ] = None,
+        keyword: Annotated[
+            str | None,
+            Field(
+                max_length=255,
+                description="Case-insensitive plan keyword substring; null or empty "
+                "skips this filter.",
+            ),
+        ] = None,
+        ordering: Annotated[
+            # inline the literal so its values share this parameter's description
+            DownloadPlanOrdering.__value__,
+            Field(description="Plan page sort field; `-` descends; empty is newest."),
+        ] = "",
+        page_num: _PageNumber = 1,
+        page_size: Annotated[
+            int,
+            Field(
+                ge=1,
+                le=25,
+                strict=True,
+                description="Maximum plans per page, from 1 to 25; defaults to 10.",
+            ),
+        ] = 10,
+    ) -> PlanListResult:
+        """List accessible download plans, for example to check possible overlaps.
+
+        Args:
+            ctx: Authenticated HTTP request context, supplied by the server.
+            workflow_id: Indexer filter; `None` includes all accessible indexers.
+            keyword: Plan keyword substring; `None` matches all plans.
+            ordering: Plan page sort field, descending with a `-` prefix.
+            page_num: One-based page number.
+            page_size: Maximum plans per page, from 1 to 25.
+
+        Returns:
+            Applied filters, the exact permission-filtered `total`, this page's
+            count and continuation, and compact plans. `plan_id` differs from
+            `workflow_id`. `schedule` describes stored settings; `total_count`,
+            `last_exec` and `first_execution` are recorded attempts, not completed
+            downloads. A keyword match only suggests an overlap. Nothing executes
+            or changes; use `get_download_plan` for one plan's full settings.
+        """
+        return PlanListResult.model_validate(
+            await _read(
+                download_plans(
+                    DownloadPlanQuery(
+                        graph_id=workflow_id,
+                        keyword=keyword,
+                        ordering=ordering or None,
+                        page_num=page_num,
+                        page_size=page_size,
+                    ),
+                    _user(ctx),
+                )
+            )
         )
 
     @server.tool(annotations=READ_ONLY)

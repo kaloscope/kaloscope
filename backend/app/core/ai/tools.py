@@ -25,6 +25,7 @@ from app.core.ai.documents import (
     value_summary,
 )
 from app.core.ai.queries import (
+    download_plans,
     download_task_details,
     download_tasks,
     log_detail,
@@ -48,6 +49,7 @@ from app.models.assistant import (
     AssistantToolCall,
     AssistantTurn,
     DownloadOrdering,
+    DownloadPlanOrdering,
     ResourceID,
     WorkflowJobOrdering,
     WorkflowOrdering,
@@ -56,6 +58,7 @@ from app.models.assistant import (
 from app.models.download import (
     DownloadPlanCheck,
     DownloadPlanCreate,
+    DownloadPlanQuery,
     DownloadQuery,
     IndexerSearch,
 )
@@ -179,6 +182,16 @@ class PlanID(ToolArguments):
     """Read one download plan and its recorded first-attempt outcome."""
 
     plan_id: int = Field(gt=0)
+
+
+class PlanList(ToolArguments):
+    """Page accessible plans with the plan page's filters and sort fields."""
+
+    workflow_id: ResourceID | None = None
+    keyword: str | None = Field(default=None, max_length=255)
+    ordering: DownloadPlanOrdering = ""
+    page_num: int = Field(default=1, ge=1, strict=True)
+    page_size: int = Field(default=10, ge=1, le=25, strict=True)
 
 
 class ReferenceQuery(ToolArguments):
@@ -391,6 +404,13 @@ TOOLS = (
         "get_download_plan",
         "Read plan and first-attempt outcome; not live download success.",
         PlanID,
+    ),
+    AssistantTool(
+        "list_download_plans",
+        "Page accessible plans; all indexers unless workflow_id; keyword=substring. "
+        "plan_id != workflow_id. schedule=settings, not execution; total_count/"
+        "last_exec/first_execution=recorded attempts. Full plan: get_download_plan.",
+        PlanList,
     ),
     AssistantTool(
         "list_workflows",
@@ -638,6 +658,7 @@ def tool_schemas(
             "validate_download_plan",
             "create_download_plan",
             "get_download_plan",
+            "list_download_plans",
         } and not (plan_authoring or plan_only):
             continue
         if plan_only and tool.name not in {
@@ -648,7 +669,9 @@ def tool_schemas(
             "validate_download_plan",
             "create_download_plan",
             "get_download_plan",
+            "list_download_plans",
             "list_media_libraries",
+            "list_media_items",
             "get_workflow_logs",
             "read_workflow_log",
             "read_conversation_history",
@@ -786,6 +809,17 @@ async def execute_tool(
                     result = await create_plan(args, conversation_id, call_id, user)
                 case PlanID():
                     result = await DownloadPlanService.get_creation(args.plan_id, user)
+                case PlanList():
+                    result = await download_plans(
+                        DownloadPlanQuery(
+                            graph_id=args.workflow_id,
+                            keyword=args.keyword,
+                            ordering=args.ordering or None,
+                            page_num=args.page_num,
+                            page_size=args.page_size,
+                        ),
+                        user,
+                    )
                 case NavigationTarget(page="media_library", resource_id=int(lib_id)):
                     library = await MediaLibService.get_accessible(lib_id, user)
                     result = NavigationResult(

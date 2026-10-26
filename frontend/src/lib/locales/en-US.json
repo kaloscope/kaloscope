@@ -1148,6 +1148,7 @@
       "validate_download_plan": "Validate Download Plan",
       "create_download_plan": "Create Download Plan",
       "get_download_plan": "Read Download Plan",
+      "list_download_plans": "Find Download Plans",
       "search_indexer": "Search Indexer"
     },
     "tool_status": {

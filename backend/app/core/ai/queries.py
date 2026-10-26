@@ -8,11 +8,16 @@ from app.core.ai.documents import graph_summary, value_summary
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import NotFoundException
 from app.core.media.watcher import LibWatcher
-from app.models.download import Downloader, DownloadQuery, DownloadTask
+from app.models.download import (
+    Downloader,
+    DownloadPlanQuery,
+    DownloadQuery,
+    DownloadTask,
+)
 from app.models.flow import FlowLog, GraphDocument, GraphQuery, JobQuery, JobTrigger
 from app.models.media import MediaItem, MediaQuery
 from app.models.user import UserInfo
-from app.services.download import DownloadTaskService
+from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.flow import FlowGraphService, FlowJobService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps
@@ -625,6 +630,75 @@ async def download_tasks(
         "next_page_num": query.page_num + 1 if more else None,
         "downloaders": sorted(downloaders, key=lambda row: row["id"]),
         "items": items,
+    }
+
+
+PLAN_FIELDS = (
+    "schedule",
+    "interval_num",
+    "interval_start",
+    "interval_end",
+    "batch_limit",
+    "total_limit",
+    "total_count",
+    "last_exec",
+    "downloader_id",
+    "transfer_lib_id",
+    "transfer_method",
+    "created_at",
+)
+
+
+async def download_plans(query: DownloadPlanQuery, user: UserInfo) -> dict:
+    """Page accessible plans with the plan page's filters, ordering and totals.
+
+    Args:
+        query: Indexer, keyword substring, ordering and pagination filters.
+        user: Account whose workflow and transfer-library permissions apply.
+
+    Returns:
+        Applied filters, the exact permission-filtered total, this page's count and
+        continuation, and compact plans. `plan_id` is distinct from `workflow_id`.
+        `schedule` reflects stored settings; `total_count`, `last_exec` and
+        `first_execution` (null when not recorded) are attempt records, not proof
+        of completed downloads. Long keywords, directories and filters are
+        summarized; `get_download_plan` reads one plan in full.
+
+    Raises:
+        NotFoundException: If the requested indexer does not exist.
+        ForbiddenException: If the requested indexer is not accessible.
+    """
+    if query.graph_id:
+        # a missing or inaccessible indexer must not look like one without plans
+        await FlowGraphService.get_accessible(query.graph_id, user)
+    page = await DownloadPlanService.list_plans(query, user)
+    more = query.page_num * query.page_size < page["total"]
+    return {
+        "filters": {
+            "workflow_id": query.graph_id or None,
+            "keyword": query.keyword or None,
+            "ordering": query.ordering or "",
+        },
+        "total": page["total"],
+        "page_num": query.page_num,
+        "page_size": query.page_size,
+        "page_counts": {"returned": len(page["items"])},
+        "next_page_num": query.page_num + 1 if more else None,
+        "interval_unit": "hours",
+        "timezone": "UTC",
+        "items": [
+            {
+                "plan_id": plan["id"],
+                "workflow_id": plan["graph_id"],
+                "workflow_name": plan["graph_name"],
+                "keyword": value_summary(plan["keyword"], limit=256),
+                "filters": value_summary(plan["filters"], limit=300),
+                "dir": value_summary(plan["dir"], limit=256),
+                **{key: plan[key] for key in PLAN_FIELDS},
+                "first_execution": plan.get("first_execution"),
+            }
+            for plan in page["items"]
+        ],
     }
 
 
