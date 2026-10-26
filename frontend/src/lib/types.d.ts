@@ -908,6 +908,8 @@ export type DownloadPlan = {
   total_count: number;
   last_exec: string | null;
   running: boolean;
+  // stored scheduling state from the plan list, not an execution result
+  schedule?: 'active' | 'indexer_unpublished' | 'not_started' | 'ended' | 'limit_reached';
   first_execution?: { status: string; added?: number; errors?: number; uncertain?: number };
 
   // transfer options

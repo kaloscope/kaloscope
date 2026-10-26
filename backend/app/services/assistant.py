@@ -34,6 +34,7 @@ from app.models.assistant import (
     AssistantToolCall,
     AssistantTurn,
     AssistantTurnRequest,
+    media_resource,
 )
 from app.models.user import UserInfo
 from app.services.ai import AIProviderService
@@ -634,6 +635,14 @@ class AssistantService:
                         resource_ids.extend(
                             item["workflow_id"] for item in result["data"]["items"]
                         )
+                    if result["ok"] and call.function.name == "list_download_plans":
+                        # each listed plan reveals its indexer and transfer library
+                        for item in result["data"]["items"]:
+                            resource_ids.append(item["workflow_id"])
+                            if item["transfer_lib_id"]:
+                                resource_ids.append(
+                                    media_resource(item["transfer_lib_id"])
+                                )
                 except (ValueError, TypeError, AttributeError):
                     pass
                 await AssistantSessionService.record_resources(turn, resource_ids)

@@ -59,6 +59,7 @@ from app.models.download import (
     DownloadPlan,
     DownloadPlanCheck,
     DownloadPlanCreate,
+    DownloadPlanQuery,
     DownloadPlanUpsert,
     DownloadQuery,
     DownloadState,
@@ -69,7 +70,7 @@ from app.models.download import (
     OfflineDownloadJob,
 )
 from app.models.flow import FlowGraph, GraphCategory, GraphState
-from app.models.user import UserInfo
+from app.models.user import UserInfo, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
@@ -852,6 +853,53 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
     """Manage persisted automated download plans."""
 
     @classmethod
+    async def list_plans(cls, query: DownloadPlanQuery, user: UserInfo) -> dict:
+        """Page plans within the account's workflow and transfer-library permissions.
+
+        Args:
+            query: Indexer and keyword filters, ordering and pagination from the plan
+                page. A zero or absent indexer ID applies no indexer filter, and the
+                keyword matches plan keywords case-insensitively as a substring.
+            user: Current account with permissions loaded by `authorize`.
+
+        Returns:
+            The exact permission-filtered total and dumped plans with their indexer
+            name, `running` flag, `schedule` state and any recorded first attempt.
+            Scheduling comes from stored settings and never proves that an attempt
+            ran or succeeded.
+        """
+        queries = []
+        if user.role != UserRole.ADMIN:
+            queries.append(Q(graph_id__in=user.perms.indexer_ids if user.perms else []))
+            queries.append(
+                Q(transfer_lib_id=None)
+                | Q(transfer_lib_id__in=user.perms.media_lib_ids if user.perms else [])
+            )
+        if query.graph_id:
+            queries.append(Q(graph_id=query.graph_id))
+        if query.keyword:
+            queries.append(Q(keyword__icontains=query.keyword))
+        page = await DownloadPlan.page(*queries, **query.page_params)
+        result = await cls.dump_page(page)
+        # attach the graph name and running status for each plan
+        graph_ids = {plan.graph_id for plan in page.items}
+        graphs = {g.id: g for g in await FlowGraph.filter(id__in=graph_ids)}
+        for plan, record in zip(result["items"], page.items, strict=True):
+            graph = graphs.get(plan["graph_id"])
+            plan["graph_name"] = graph.name if graph else None
+            published = graph.state != GraphState.DRAFT if graph else False
+            plan["running"] = published and not plan["inactive"]
+            plan["schedule"] = record.schedule_state(published)
+            if record.creation_receipt:
+                first = record.creation_receipt["first_execution"]
+                plan["first_execution"] = (
+                    {"status": "waiting"}
+                    if first["status"] == "queued" and not plan["running"]
+                    else first
+                )
+        return result
+
+    @classmethod
     async def search_indexer(cls, body: IndexerSearch, user: UserInfo) -> dict:
         """Preview one published search page using the normal workflow engine.
 
@@ -1059,18 +1107,28 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             "creation_rules": (
                 "Retain the user's title/keyword and supplied preferences. Ask them to "
                 "choose a downloadable published indexer unless already specified. "
-                "After selection, immediately search_indexer with that keyword. Show "
-                "results, then ask about relevant declared filters (e.g. year/group), "
-                "start/end, interval, per-attempt/total resource counts, downloader, "
-                "directory and optional library transfer together. Show these defaults "
-                "for omitted values; single-title defaults are one resource, not one "
-                "episode. Ask for a total for ongoing/multi-title requests. Resolve a "
-                "missing compatible downloader; list further pages if needed. Never "
-                "invent filters; keyword alternatives require a new search. Re-search "
+                "After selection, immediately search_indexer with that keyword. Then "
+                "check possible overlaps once per title: list_media_items and "
+                "list_download_plans without workflow_id (all indexers) using the core "
+                "title; reuse earlier results. Matches are evidence, not identity: "
+                "compare titles/years/media types/IDs, keep unknowns unknown, and say "
+                "when reads were empty, denied, failed or have more pages. Ask one "
+                "focused question when candidates imply different actions. Show "
+                "results and overlaps, then ask about relevant declared filters (e.g. "
+                "year/group), start/end, interval, per-attempt/total resource counts, "
+                "downloader, directory and optional library transfer together. Show "
+                "these defaults for omitted values; single-title defaults are one "
+                "resource, not one episode. Ask for a total for ongoing/multi-title "
+                "requests. Resolve a missing compatible downloader; list further pages "
+                "if needed. Never invent or promise undeclared filters (year/group/"
+                "season/episode); keyword alternatives require a new search. Re-search "
                 "changed search inputs. Empty results need revised inputs or explicit "
                 "agreement to wait for future resources. Validate and show ALL final "
-                "settings/defaults; wait for user confirmation before creation. Set "
-                "confirmed=true only after that approval; reuse request_id on retries. "
+                "settings/defaults and possible overlaps; the user may view them "
+                "(navigate, get_download_plan) or confirm another plan. Never reject "
+                "creation or change existing plans because of an overlap. Wait for "
+                "user confirmation before creation. Set confirmed=true only after that "
+                "approval; reuse request_id on retries. "
                 "Preview is not the first attempt: creation queues a fresh real search "
                 "and downloads, or waits for a future start/hourly check. Read the "
                 "receipt separately; creation is not download success."

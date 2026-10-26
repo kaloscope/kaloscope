@@ -1148,6 +1148,7 @@
       "validate_download_plan": "校验下载计划",
       "create_download_plan": "创建下载计划",
       "get_download_plan": "读取下载计划",
+      "list_download_plans": "查找下载计划",
       "search_indexer": "搜索索引器"
     },
     "tool_status": {

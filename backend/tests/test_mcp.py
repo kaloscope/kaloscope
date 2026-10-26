@@ -235,6 +235,7 @@ def test_protocol(mode):
                 "validate_download_plan",
                 "create_download_plan",
                 "get_download_plan",
+                "list_download_plans",
                 "search_indexer",
                 "save_workflow_draft",
                 "list_workflow_drafts",
@@ -325,7 +326,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 25
+            assert len(response_json(response)["result"]["tools"]) == 26
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

@@ -169,6 +169,26 @@ class DownloadPlan(TortoiseModel):
             return True
         return self.total_limit is not None and self.total_count >= self.total_limit
 
+    def schedule_state(self, published: bool) -> str:
+        """Name the stored setting that currently allows or blocks scheduling.
+
+        Args:
+            published: Whether the plan's indexer is published rather than a draft.
+
+        Returns:
+            `ended` or `limit_reached` when no further attempts are due,
+            `not_started` or `indexer_unpublished` while scheduling waits, otherwise
+            `active`. This describes configuration, not whether an attempt ran.
+        """
+        now = datetime.now(UTC)
+        if self.interval_end is not None and now > self.interval_end:
+            return "ended"
+        if self.total_limit is not None and self.total_count >= self.total_limit:
+            return "limit_reached"
+        if self.interval_start is not None and now < self.interval_start:
+            return "not_started"
+        return "active" if published else "indexer_unpublished"
+
     class Meta:
         table = "download_plan"
         ordering = ["-created_at"]
