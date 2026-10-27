@@ -204,7 +204,12 @@ class ReferenceQuery(ToolArguments):
     """Select a bundled workflow authoring reference."""
 
     topic: Literal[
-        "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+        "context",
+        "templates",
+        "json_indexer",
+        "html_indexer",
+        "indexer_auth",
+        "movie_scraper",
     ]
 
 

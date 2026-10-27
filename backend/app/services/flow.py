@@ -1128,15 +1128,21 @@ class FlowTriggerService(BaseService[FlowTrigger], model=FlowTrigger):
             )
 
     @classmethod
-    async def get_triggers(cls, category: GraphCategory, rel_id: int) -> list[dict]:
+    async def get_triggers(
+        cls, category: GraphCategory, rel_id: int, *, unpublished: bool = False
+    ) -> list[dict]:
         """Get flow triggers for a specific category and relation ID.
 
         Args:
             category: Graph category to filter the triggers.
             rel_id: Relation ID to filter the triggers.
+            unpublished: Whether to include stored triggers whose workflow is an
+                unpublished draft, for editing. Runtime callers keep the default,
+                so drafts never execute.
 
         Returns:
-            A list of dictionaries containing the flow trigger details.
+            A list of dictionaries containing the flow trigger details in stored
+            order. With `unpublished`, each also has a `published` flag.
         """
         conn = Tortoise.get_connection("default")
         triggers = await conn.execute_query_dict(
@@ -1145,20 +1151,24 @@ class FlowTriggerService(BaseService[FlowTrigger], model=FlowTrigger):
                 t.id,
                 t.graph_id,
                 g.name graph_name,
-                t.asynchronous
+                t.asynchronous,
+                g.state != 'draft' published
             FROM flow_trigger t
             INNER JOIN flow_graph g ON g.id = t.graph_id
             WHERE
-                g.state != 'draft'
+                (? OR g.state != 'draft')
             AND g.category = ?
             AND t.rel_id = ?
             ORDER BY t.priority ASC
             """,
-            [category.value, rel_id],
+            [unpublished, category.value, rel_id],
         )
         for trigger in triggers:
             # convert the asynchronous flag to a boolean
             trigger["asynchronous"] = bool(trigger["asynchronous"])
+            published = bool(trigger.pop("published"))
+            if unpublished:
+                trigger["published"] = published
         return triggers
 
     @classmethod

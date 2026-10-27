@@ -1471,13 +1471,16 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
 
     @classmethod
     async def list_libraries(
-        cls, user: UserInfo, watcher: LibWatcher
+        cls, user: UserInfo, watcher: LibWatcher, *, stored_bindings: bool = False
     ) -> list[dict[str, Any]]:
         """List accessible libraries with their triggers and current scan status.
 
         Args:
             user: Authenticated user with permissions loaded by `authorize`.
             watcher: Library watcher owned by the current application.
+            stored_bindings: Whether administrators also receive bindings to
+                unpublished workflows, flagged by `published`, so the library editor
+                can save them back. Others keep the executable bindings only.
 
         Returns:
             Libraries visible to the account, without starting a scan.
@@ -1493,9 +1496,10 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             ).values_list("lib_id", "payload")
             if (payload or {}).get("state") != "failed"
         }
+        unpublished = stored_bindings and user.role == UserRole.ADMIN
         for lib in libraries:
             lib["triggers"] = await FlowTriggerService.get_triggers(
-                GraphCategory.INGEST, lib["id"]
+                GraphCategory.INGEST, lib["id"], unpublished=unpublished
             )
             lib["scanning"] = watcher.is_scanning(lib["dir"]) or lib["id"] in scanning
         return libraries

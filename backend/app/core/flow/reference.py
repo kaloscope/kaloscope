@@ -8,7 +8,12 @@ from app.models.mcp import WorkflowReference
 
 def get_workflow_reference(
     topic: Literal[
-        "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+        "context",
+        "templates",
+        "json_indexer",
+        "html_indexer",
+        "indexer_auth",
+        "movie_scraper",
     ],
 ) -> WorkflowReference:
     """Read a fixed reference shared by the assistant and MCP.
@@ -23,6 +28,7 @@ def get_workflow_reference(
         "context": "context.md",
         "templates": "templates.md",
         "json_indexer": "json_indexer.md",
+        "html_indexer": "html_indexer.md",
         "indexer_auth": "indexer_auth.md",
         "movie_scraper": "movie_scraper.md",
     }

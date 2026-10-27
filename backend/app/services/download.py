@@ -7,7 +7,6 @@ from dataclasses import replace
 from datetime import UTC
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import aiofiles
@@ -51,7 +50,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.flow.nodes.base import start_config
-from app.core.flow.outputs import check_output
+from app.core.flow.outputs import check_output, download_link_kind
 from app.models.download import (
     DownloadAdd,
     DownloadDir,
@@ -77,10 +76,6 @@ from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
 from app.utils.bittorrent import (
     decode_torrent,
-    get_magnet_hash,
-    get_magnet_hash_v2,
-    is_info_hash,
-    is_info_hash_v2,
     standardize_magnet,
 )
 from app.utils.json import dumps
@@ -1337,33 +1332,25 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 else []
             ):
                 link = item.get("link") if isinstance(item, dict) else None
-                if isinstance(link, str):
-                    link = link.strip()
-                valid = isinstance(link, str) and (
-                    is_info_hash(link)
-                    or is_info_hash_v2(link)
-                    or (
-                        link.startswith("magnet:")
-                        and (get_magnet_hash(link) or get_magnet_hash_v2(link))
-                    )
-                )
-                if valid and downloader and DownloadSource.MAGNET not in source_types:
+                # the authoring search check classifies links the same way
+                kind = download_link_kind(link)
+                valid = kind is not None
+                if (
+                    kind == "hash"
+                    and downloader
+                    and DownloadSource.MAGNET not in source_types
+                ):
                     issues.append(
                         {
                             "path": f"sample.items.{index}.link",
                             "message": "Downloader cannot submit magnet/hash links.",
                         }
                     )
-                try:
-                    url = urlsplit(link) if isinstance(link, str) else None
-                except ValueError:
-                    url = None
-                if url and url.scheme in {"http", "https"} and url.netloc:
+                if kind == "http":
                     warnings.append(
                         "HTTP links require real torrent content; the sample "
                         "does not prove that content or reachability."
                     )
-                    valid = True
                 if not valid:
                     issues.append(
                         {

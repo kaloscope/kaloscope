@@ -72,9 +72,10 @@ async def list_libraries(request: Request) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
+    # the library editor saves back every stored binding it receives
     return json(
         await MediaLibService.list_libraries(
-            request.ctx.user, request.app.ctx.lib_watcher
+            request.ctx.user, request.app.ctx.lib_watcher, stored_bindings=True
         )
     )
 

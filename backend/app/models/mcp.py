@@ -352,7 +352,12 @@ class WorkflowReference(Result):
     """Return one complete, bundled workflow authoring reference."""
 
     topic: Literal[
-        "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+        "context",
+        "templates",
+        "json_indexer",
+        "html_indexer",
+        "indexer_auth",
+        "movie_scraper",
     ]
     content: str = Field(description="Complete English Markdown reference.")
 

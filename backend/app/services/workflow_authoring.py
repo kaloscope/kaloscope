@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from contextlib import AsyncExitStack, suppress
 from copy import copy
 from http.cookiejar import Cookie, CookieJar
+from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -132,6 +133,9 @@ def validate_workflow_template(
             `auth` also checks the supplied `auth_start` configuration.
         response: Detached probe response for HTTP formatter evaluation only.
             The probe redacts formatter errors before clipping their messages.
+            Without it, a `response` fixture object with `text` (and optional
+            `url`, `status_code`, `headers`) becomes a detached response, so
+            formatters using `response.url.join(...)` check supplied page samples.
 
     Returns:
         Bounded JSON-compatible result or evaluation error. No workflow, script,
@@ -139,7 +143,10 @@ def validate_workflow_template(
         Explicit filesystem tests retain their normal path checks. This does not
         validate an entire workflow or prove a remote endpoint works.
     """
+    probed = response is not None
     try:
+        if response is None:
+            response = _sample_response(args.context.get("response"))
         rendered = render(
             args.template,
             {**args.context, "response": response}
@@ -195,10 +202,33 @@ def validate_workflow_template(
         message = str(exc)
         return TemplateResult(
             valid=False,
-            error=f"{type(exc).__name__}: "
-            + (message if response is not None else message[:300]),
+            error=f"{type(exc).__name__}: " + (message if probed else message[:300]),
             line=getattr(exc, "lineno", None),
         )
+
+
+def _sample_response(fixture: Any) -> httpx.Response | None:
+    """Build a detached HTTP response from a supplied page sample.
+
+    Args:
+        fixture: Template fixture value under `response`.
+
+    Returns:
+        Response with the sample's text, status, headers and page URL, or `None`
+        when the fixture is not a page sample. Text is already decoded; headers
+        remain available without decompressing or decoding it again.
+    """
+    if not isinstance(fixture, dict) or not isinstance(fixture.get("text"), str):
+        return None
+    sample = httpx.Response(
+        fixture.get("status_code", 200),
+        text=fixture["text"],
+        request=httpx.Request("GET", fixture.get("url") or "https://sample.invalid/"),
+    )
+    # text fixtures are unicode, not the original compressed or encoded bytes
+    sample.encoding = "utf-8"
+    sample.headers = httpx.Headers(fixture.get("headers") or {})
+    return sample
 
 
 async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult:

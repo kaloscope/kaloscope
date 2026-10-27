@@ -1,0 +1,11 @@
+# HTML download indexer
+
+Category `indexer`: `search_start -> http -> search_end`; if results only link to detail pages, add `http -> loop`, `loop.loop_start -> http`, its `output -> loop.loop_continue`, `loop.output -> search_end`. Context is tight: read only http/loop schemas (include_examples=false); mode=search enforces search_end. Server-rendered HTML, page-number pagination; no JavaScript, crawling, automatic login or CAPTCHA (login: indexer_auth). Need search URL/keyword/page parameters, result selectors, source ID, title and where the download link is; list missing items.
+
+Search http: GET, `quote('')` keyword, observed page parameter from 1-based page_num, httpx client (curl_cffi `response.url` is text). Formatter: `{"status": {{ response.status_code }}, "login": {{ (response.text|xpath_first('//form[@id="login"]') is not none)|tojson }}, "cards": [{% for c in response.text|xpath_all('//li[@class="item"]') %}{% if not loop.first %},{% endif %}{"id": {{ c|xpath_first('./@data-id')|tojson }}, "title": ..., "detail": {{ response.url.join(c|xpath_first('.//a/@href'))|string|tojson }}}{% endfor %}]}`. IDs from source data, never positions.
+
+Detail loop: expression `{{ cards[:page_size] }}`, varname `card`; http GET `{{ card.detail }}`, formatter `{"details": { {{ card.id|tojson }}: {"link": {{ ...magnet or joined .torrent href...|tojson }}}}}`.
+
+search_end: login/error pages `{"error": "login_required"}`/`{"error": "status 503"}` without items (invalid, not empty); else items from `cards[:page_size]` with `"link": (details|default({})).get(card.id, {}).link` or the card's own link; none: `{"items": []}`. Omit total unless stated (page count is not a total).
+
+Validate exact templates: formatters via probe or `response` fixture `{text, url, status_code}`; search_end with mode=search, context `downloads: true`, page_num/page_size: page 1, page 2 with `previous_ids`, empty, login/error, missing-optional and missing/relative-link samples. Links: magnet, BT hash or absolute torrent URL; detail/player pages are not links; shape is not proof. Fix and recheck at most twice; report unresolved selectors/pagination. Preview via Keep/Revert; the user publishes, then plans can search it.
