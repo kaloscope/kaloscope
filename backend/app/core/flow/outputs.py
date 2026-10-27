@@ -3,6 +3,7 @@
 import re
 from datetime import date
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import (
@@ -18,8 +19,45 @@ from app.core.flow.nodes.base import parse_start_config
 from app.core.media.common import ContentError
 from app.core.media.shelver import TEMPLATES_PATH, render_nfo
 from app.models.workflow_authoring import OutputIssue
+from app.utils.bittorrent import (
+    get_magnet_hash,
+    get_magnet_hash_v2,
+    is_info_hash,
+    is_info_hash_v2,
+)
 
 type Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
+
+
+def download_link_kind(link: Any) -> Literal["hash", "http"] | None:
+    """Classify a search result's download link by shape, without contacting it.
+
+    Args:
+        link: Value of a search result's `link` field.
+
+    Returns:
+        `hash` for a BT hash or a magnet carrying one, `http` for an absolute
+        HTTP(S) URL whose torrent content is unproven, otherwise `None`.
+    """
+    if not isinstance(link, str):
+        return None
+    link = link.strip()
+    if (
+        is_info_hash(link)
+        or is_info_hash_v2(link)
+        or (
+            link.startswith("magnet:")
+            and (get_magnet_hash(link) or get_magnet_hash_v2(link))
+        )
+    ):
+        return "hash"
+    try:
+        url = urlsplit(link)
+    except ValueError:
+        return None
+    return "http" if url.scheme in {"http", "https"} and url.netloc else None
+
+
 type Count = Annotated[int, Field(ge=0)]
 
 
@@ -388,6 +426,61 @@ def check_auth(
     return issues[:12], list(dict.fromkeys(warnings))[:4], outcome
 
 
+def _download_issues(
+    page: SearchOutput, context: dict, warnings: list[str]
+) -> list[OutputIssue]:
+    """Check what download plans and pagination need from a search page fixture.
+
+    Args:
+        page: Validated search page.
+        context: Fixtures; `downloads: true` requires a link on every item and
+            `previous_ids` lists the prior page's IDs.
+        warnings: Sample limitations to extend.
+
+    Returns:
+        Located issues for missing or unusable links and unchanged later pages.
+    """
+    issues = []
+    number = context.get("page_num")
+    ids = [item.id for item in page.items]
+    previous = context.get("previous_ids")
+    if isinstance(previous, list) and type(number) is int and number > 1 and ids:
+        repeated = set(ids) & {str(item) for item in previous}
+        if repeated == set(ids):
+            issues.append(
+                OutputIssue(
+                    path="items",
+                    message="Same IDs as the previous page; apply the page parameter.",
+                )
+            )
+        elif repeated:
+            warnings.append("Some IDs repeat the previous page; check pagination.")
+    offset = (number - 1) * len(ids) if type(number) is int and number > 0 else 0
+    if len(ids) > 1 and ids in (
+        [str(index + offset) for index in range(len(ids))],
+        [str(index + offset + 1) for index in range(len(ids))],
+    ):
+        warnings.append("IDs look like positions; use the source's own identifiers.")
+    if context.get("downloads") is not True:
+        return issues
+    for index, item in enumerate(page.items):
+        kind = download_link_kind(item.link)
+        if kind is None:
+            issues.append(
+                OutputIssue(
+                    path=f"items.{index}.link",
+                    message="Map the observed magnet, BT hash or absolute torrent "
+                    "URL; never a detail or playback page.",
+                )
+            )
+        elif kind == "http":
+            warnings.append(
+                "HTTP links are unproven: a detail or player page is not a torrent; "
+                "URL shape does not prove torrent content."
+            )
+    return issues
+
+
 def check_output(
     mode: Literal["search", "details", "movie"], value: Any, context: dict
 ) -> tuple[list[OutputIssue], list[str]]:
@@ -508,6 +601,12 @@ def check_output(
                     "Total is unknown; the page uses simple pagination. "
                     "Do not invent a total."
                 )
+            elif number == 1 and page.items and page.total == len(page.items) == size:
+                warnings.append(
+                    "total equals this full page's count; omit it unless the source "
+                    "reports all matches."
+                )
+            issues.extend(_download_issues(page, context, warnings))
             warnings.append(
                 "One page cannot prove pagination stability or a remote total; "
                 "check first/next/empty samples."

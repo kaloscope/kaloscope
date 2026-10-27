@@ -466,7 +466,9 @@ def test_movie_metadata(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("topic", ["json_indexer", "indexer_auth", "movie_scraper"])
+@pytest.mark.parametrize(
+    "topic", ["json_indexer", "html_indexer", "indexer_auth", "movie_scraper"]
+)
 def test_recipe_guidance(topic):
     guide = get_workflow_reference(topic).content
     assert guide.isascii()

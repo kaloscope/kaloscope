@@ -278,7 +278,8 @@ def create_server() -> MCPServer:
             "the returned draft version. "
             "Drafts can be incomplete; they are never automatically published or run. "
             "For JSON indexers or HTML movie scrapers, read the json_indexer or "
-            "movie_scraper reference; indexer login also needs indexer_auth. "
+            "movie_scraper reference (HTML download indexers: html_indexer); "
+            "indexer login also needs indexer_auth. "
             "Validate supplied samples using search/details/movie/auth modes "
             "(auth with the auth_start config), correct field errors and recheck "
             "before previewing. "
@@ -929,11 +930,16 @@ def create_server() -> MCPServer:
         ctx: Context,
         topic: Annotated[
             Literal[
-                "context", "templates", "json_indexer", "indexer_auth", "movie_scraper"
+                "context",
+                "templates",
+                "json_indexer",
+                "html_indexer",
+                "indexer_auth",
+                "movie_scraper",
             ],
             Field(
-                description="Context/functions or JSON indexer, indexer login or "
-                "HTML movie recipes."
+                description="Context/functions or JSON/HTML indexer, indexer login "
+                "or HTML movie recipes."
             ),
         ],
     ) -> WorkflowReference:

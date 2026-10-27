@@ -91,6 +91,55 @@ def test_template_values(template, mode, context, expected):
 
 
 @pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"content-encoding": "gzip"},
+        {"content-type": "text/html; charset=gbk"},
+        {"content-encoding": "gzip", "content-type": "text/html; charset=gbk"},
+    ],
+)
+def test_decoded_response_fixture(headers):
+    fixture = {
+        "text": "<h1>电影</h1>",
+        "url": "https://example.test/search",
+        "status_code": 200,
+        "headers": headers,
+    }
+    before = dumps(fixture)
+
+    result = evaluate(
+        '{"text": {{ response.text|tojson }}, '
+        '"headers": {{ dict(response.headers)|tojson }}, '
+        '"url": {{ response.url.join("/detail/1")|string|tojson }}}',
+        mode="object",
+        context={"response": fixture},
+    )
+
+    assert result.valid, result
+    assert result.value == {
+        "text": fixture["text"],
+        "headers": headers,
+        "url": "https://example.test/detail/1",
+    }
+    assert dumps(fixture) == before
+
+
+@pytest.mark.parametrize(
+    "fields", [{"url": "https://example.test:invalid/"}, {"headers": {"x-title": 1}}]
+)
+def test_invalid_response_fixture(fields):
+    result = evaluate(
+        "{{ response.text }}",
+        context={"response": {"text": "<h1>Movie</h1>", **fields}},
+    )
+
+    assert not result.valid
+    assert result.error
+    assert result.value is None
+
+
+@pytest.mark.parametrize(
     ("template", "kwargs", "error"),
     [
         ("{{ missing }}", {"strict": True}, "UndefinedError"),

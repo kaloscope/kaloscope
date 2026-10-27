@@ -242,7 +242,15 @@ def test_script_examples(monkeypatch, language):
 
 
 @pytest.mark.parametrize(
-    "topic", ["context", "templates", "json_indexer", "indexer_auth", "movie_scraper"]
+    "topic",
+    [
+        "context",
+        "templates",
+        "json_indexer",
+        "html_indexer",
+        "indexer_auth",
+        "movie_scraper",
+    ],
 )
 def test_reference_budget(monkeypatch, topic):
     execute = AsyncMock(

@@ -66,7 +66,7 @@ Finish so the app opens it and sends the build follow-up. Ask only for missing
 information; use supplied values/defaults. Leave unknown credentials/accounts/
 paths/URLs empty and list them. Layout: columns >=800px, rows >=600; enlarge as needed.
 For JSON indexers/HTML movie scrapers read json_indexer/movie_scraper reference.
-Use include_examples=false for compact schemas; full examples remain available.
+Prefer compact schemas (include_examples=false).
 Fix business output errors and recheck before previewing; never invent source fields.
 Plans: list/read workflows to unlock tools; retain keyword, ask which indexer;
 follow get_download_plan_options.creation_rules.
@@ -579,7 +579,7 @@ class AssistantService:
                     result["ok"]
                     and call.function.name == "get_workflow_reference"
                     and result["data"].get("topic")
-                    in {"json_indexer", "indexer_auth", "movie_scraper"}
+                    in {"json_indexer", "html_indexer", "indexer_auth", "movie_scraper"}
                 ):
                     # keep full domain catalogs for ordinary turns, focus recipe builds
                     workflow_authoring = True

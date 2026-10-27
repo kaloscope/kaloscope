@@ -190,6 +190,10 @@
             width="1.25rem"
           />
           <span class="font-semibold text-surface/80">{trigger.graph_name}</span>
+          {#if trigger.published === false}
+            <!-- stored for later publication; unpublished workflows do not run -->
+            <span class="badge badge-ghost badge-sm">{$_('enum.graph_state.draft')}</span>
+          {/if}
         </div>
         <Button
           icon={trigger.asynchronous ? icons.arrowNarrowDownDashed : icons.arrowNarrowDown}

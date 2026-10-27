@@ -1048,6 +1048,8 @@ export type FlowTrigger = {
   graph_id: number;
   graph_name: string;
   asynchronous: boolean;
+  // false for a stored binding whose workflow is unpublished and does not run
+  published?: boolean;
 };
 
 /**

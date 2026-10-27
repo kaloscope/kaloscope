@@ -1259,6 +1259,7 @@ def test_node_knowledge(monkeypatch):
                 "context",
                 "templates",
                 "json_indexer",
+                "html_indexer",
                 "indexer_auth",
                 "movie_scraper",
             ):
