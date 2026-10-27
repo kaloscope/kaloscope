@@ -1386,13 +1386,13 @@ INGESTION_RULES = (
     "Movie libraries only. Reuse a binding with movie_output or choose a "
     "movie_workflows entry; unpublished workflows never run. If none fits, ask "
     "only for missing source details, build one with the movie_scraper recipe "
-    "(create_workflow_draft), keep the pending plan settings in this conversation "
-    "and resume after the user saves and publishes it. Validate the plan with "
-    "ingest_workflow_id and show library, transfer method, workflow, reuse/add, "
-    "scope and first execution before confirmation. Creation binds first, then "
-    "creates the plan; report each outcome and retry the same request_id. Do not "
-    "wait for downloads or ingestion; later progress comes from task, log and "
-    "media reads."
+    "(create_workflow_draft), keep the pending settings in this conversation and "
+    "resume after the user saves and publishes it. Validate the plan or download "
+    "with ingest_workflow_id and show library, transfer method, workflow, "
+    "reuse/add, scope and first execution before confirmation. Creation binds "
+    "first, then creates it; report each outcome and retry the same request_id. "
+    "Do not wait for downloads or ingestion; later progress comes from task, log "
+    "and media reads."
 )
 
 

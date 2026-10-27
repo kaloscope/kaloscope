@@ -1144,6 +1144,8 @@
       "get_media_item": "读取媒体详情",
       "list_download_tasks": "查找下载任务",
       "get_download_task": "读取下载详情",
+      "validate_download_task": "校验下载任务",
+      "create_download_task": "创建下载任务",
       "get_download_plan_options": "读取计划选项",
       "validate_download_plan": "校验下载计划",
       "create_download_plan": "创建下载计划",

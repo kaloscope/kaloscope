@@ -1144,6 +1144,8 @@
       "get_media_item": "Read Media Details",
       "list_download_tasks": "Find Download Tasks",
       "get_download_task": "Read Download Details",
+      "validate_download_task": "Validate Download Task",
+      "create_download_task": "Create Download Task",
       "get_download_plan_options": "Read Plan Options",
       "validate_download_plan": "Validate Download Plan",
       "create_download_plan": "Create Download Plan",

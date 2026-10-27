@@ -29,6 +29,8 @@ from app.models.download import (
     DownloadPlanQuery,
     DownloadQuery,
     DownloadState,
+    DownloadTaskCheck,
+    DownloadTaskCreate,
     IndexerSearch,
 )
 from app.models.flow import (
@@ -46,6 +48,7 @@ from app.models.flow import (
 )
 from app.models.mcp import (
     DownloadResult,
+    DownloadTaskResult,
     IndexerSearchResult,
     ItemsResult,
     LibraryIngestionResult,
@@ -116,6 +119,7 @@ _READ_TOOLS = frozenset(
         "get_download_plan",
         "list_download_plans",
         "get_library_ingestion",
+        "validate_download_task",
         "list_workflows",
         "get_workflow",
         "list_node_types",
@@ -138,6 +142,7 @@ _WRITE_TOOLS = frozenset(
     {
         "search_indexer",
         "create_download_plan",
+        "create_download_task",
         "create_workflow_draft",
         "save_workflow_draft",
         "restore_workflow_draft",
@@ -268,6 +273,8 @@ def create_server() -> MCPServer:
             "indexers) for possible overlaps; matches are advisory evidence for the "
             "user's final decision. For movie library ingestion, follow "
             "get_library_ingestion; creation binds the reviewed workflow first. "
+            "One-time downloads: search_indexer with sources=true, then "
+            "validate_download_task and confirmed create_download_task. "
             "List resources before reading their details; "
             "inspect node schemas and logs to diagnose workflows. Access follows the "
             "account's permissions; AI provider settings require an administrator. "
@@ -285,8 +292,8 @@ def create_server() -> MCPServer:
             "before previewing. "
             "Use the exact tested templates; stop after two unsuccessful repairs "
             "and report missing evidence. Validation is not execution. "
-            "Except authorized download-plan execution, no tool publishes, "
-            "executes, downloads, scans, deletes workflows, "
+            "Only selected indexer searches and confirmed download operations "
+            "execute; no tool publishes, scans libraries, deletes workflows "
             "or calls an AI model. "
             "For invalid arguments, correct the reported fields before retrying. "
             "For HTTP 401, ask the user to generate a new MCP access token and "
@@ -444,6 +451,75 @@ def create_server() -> MCPServer:
         """
         return PlanCreationResult.model_validate(
             await _read(DownloadPlanService.get_creation(plan_id, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def validate_download_task(
+        ctx: Context,
+        check: Annotated[
+            DownloadTaskCheck,
+            Field(
+                description="One result chosen from search_indexer with sources=true "
+                "and its downloader, directory and optional transfer/ingestion."
+            ),
+        ],
+    ) -> DownloadTaskResult:
+        """Check one chosen search result for a one-time download without submitting.
+
+        Args:
+            ctx: Administrator request context.
+            check: Selected result with its sealed source and download settings.
+
+        Returns:
+            Located issues, the observed title, magnet/torrent kind and content hash,
+            settings, an existing task with the same content and a request ID. A
+            torrent URL may be fetched to identify its content; nothing is created.
+        """
+        return DownloadTaskResult.model_validate(
+            await _read(DownloadTaskService.validate_request(check, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def create_download_task(
+        ctx: Context,
+        creation: Annotated[
+            DownloadTaskCreate,
+            Field(
+                description="Show the result and all settings, wait for approval, "
+                "then set confirmed=true. Reuse request_id on retries."
+            ),
+        ],
+    ) -> DownloadTaskResult:
+        """Submit one reviewed result once; downloading continues in the background.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            creation: Validation's request ID and `info_hash`, the same result and
+                settings, and its optional `ingestion` review.
+
+        Returns:
+            The task ID and stored state (the same task on every retry), `uncertain`
+            for an unconfirmed submission that is never resent, a conflict for a
+            reused request ID, an existing task with the same content, or a kept
+            binding with `submit_error`. It does not wait for download, transfer or
+            ingestion; read those later with task, log and media tools.
+        """
+        return DownloadTaskResult.model_validate(
+            await _read(DownloadTaskService.create_once(creation, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)

@@ -60,6 +60,8 @@ from app.models.download import (
     DownloadPlanCreate,
     DownloadPlanQuery,
     DownloadQuery,
+    DownloadTaskCheck,
+    DownloadTaskCreate,
     IndexerSearch,
 )
 from app.models.flow import (
@@ -77,7 +79,7 @@ from app.models.mcp import NodeTypesResult
 from app.models.media import MediaQuery
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
-from app.services.download import DownloadPlanService
+from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.workflow_authoring import (
@@ -320,6 +322,16 @@ class DownloadDetails(ToolArguments):
     limit: int = Field(default=2000, ge=1, le=2000, strict=True)
 
 
+class TaskCreate(ToolArguments):
+    """Submit a result validated in an earlier turn of this conversation."""
+
+    request_id: UUID
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this result and settings.",
+    )
+
+
 class PlanCreate(ToolArguments):
     """Create settings retained by successful validation in this conversation."""
 
@@ -409,6 +421,20 @@ TOOLS = (
         "confirmation; reuse request_id. "
         "Active plans queue real search/downloads; future starts wait.",
         PlanCreate,
+        admin=True,
+    ),
+    AssistantTool(
+        "validate_download_task",
+        "Check a chosen search result's sealed source and settings for a one-time "
+        "download. No submission.",
+        DownloadTaskCheck,
+        admin=True,
+    ),
+    AssistantTool(
+        "create_download_task",
+        "Submit a prior turn's validated result once after final confirmation; "
+        "reuse request_id. Returns task state without waiting.",
+        TaskCreate,
         admin=True,
     ),
     AssistantTool(
@@ -680,6 +706,8 @@ def tool_schemas(
             "get_download_plan",
             "list_download_plans",
             "get_library_ingestion",
+            "validate_download_task",
+            "create_download_task",
         } and not (plan_authoring or plan_only):
             continue
         if (
@@ -695,6 +723,8 @@ def tool_schemas(
                 "get_download_plan",
                 "list_download_plans",
                 "get_library_ingestion",
+                "validate_download_task",
+                "create_download_task",
                 "list_media_libraries",
                 "list_media_items",
                 "get_workflow_logs",
@@ -843,6 +873,10 @@ async def execute_tool(
                     result = await MediaLibService.ingestion_bindings(
                         args.library_id, user
                     )
+                case DownloadTaskCheck():
+                    result = await DownloadTaskService.validate_request(args, user)
+                case TaskCreate():
+                    result = await create_task(args, conversation_id, call_id, user)
                 case PlanList():
                     result = await download_plans(
                         DownloadPlanQuery(
@@ -1282,6 +1316,71 @@ async def create_plan(
                 ),
                 user,
             )
+    raise NotFoundException
+
+
+async def create_task(
+    args: TaskCreate, conversation_id: int, call_id: str, user: UserInfo
+) -> dict:
+    """Submit a reviewed result once, recovering earlier submissions of the request.
+
+    Args:
+        args: Validated request ID and explicit approval of its result and settings.
+        conversation_id: Server-owned conversation.
+        call_id: Server-owned call record.
+        user: Current account whose administrator rights are checked by the service.
+
+    Returns:
+        Shared submission result; repeated confirmations replay the same task.
+
+    Raises:
+        NotFoundException: If the call or validation record is unavailable.
+    """
+    call = await AssistantToolCall.get_or_none(
+        call_id=call_id, turn__conversation_id=conversation_id
+    )
+    if call is None:
+        raise NotFoundException
+    records = (
+        await AssistantToolCall.filter(
+            turn__conversation_id=conversation_id, name="validate_download_task"
+        )
+        .order_by("-id")
+        .limit(30)
+    )
+    for index, record in enumerate(records):
+        data = (record.result or {}).get("data") or {}
+        if not (data.get("valid") and data.get("request_id") == str(args.request_id)):
+            continue
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        # the service replays a committed request before any other check
+        replayable = index == 0 and (
+            record.turn_id != call.turn_id and reviewed.status == "complete"
+        )
+        checked = DownloadTaskCheck.model_validate_json(record.arguments)
+        review = data.get("ingestion")
+        body = DownloadTaskCreate(
+            request_id=args.request_id,
+            info_hash=data["download"]["info_hash"],
+            **checked.model_dump(exclude={"ingest_workflow_id"}),
+            ingestion={
+                "workflow_id": review["workflow_id"],
+                "revision": review["revision"],
+            }
+            if review
+            else None,
+            confirmed=args.confirmed and replayable,
+        )
+        result = await DownloadTaskService.create_once(body, user)
+        if not replayable and not result.get("created"):
+            return {
+                **result,
+                "created": False,
+                "confirmation_required": True,
+                "message": "Show the latest validated result and settings, finish "
+                "the turn, and wait for the user's final confirmation.",
+            }
+        return result
     raise NotFoundException
 
 

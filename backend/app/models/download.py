@@ -255,6 +255,9 @@ class DownloadTask(TortoiseModel):
     sub_repl = CharField(max_length=4096, null=True)
     transfer_targets = JSONField[dict[str, str] | None](null=True)
     transfer_pending = BooleanField(default=False, db_default=False)
+    # durable identity of a confirmed one-time request; other tasks keep null
+    creation_key = CharField(max_length=64, unique=True, null=True)
+    creation_receipt = JSONField[dict[str, Any] | None](null=True)
     offline_job: BackwardOneToOneRelation["OfflineDownloadJob"]
 
     def ratio(self) -> str:
@@ -301,6 +304,8 @@ class DownloadTask(TortoiseModel):
             "offline_job",
             "transfer_targets",
             "transfer_pending",
+            "creation_key",
+            "creation_receipt",
         )
         computed = ("ratio", "estimate")
 
@@ -525,6 +530,56 @@ class DownloadPlanCreate(BaseModel):
     )
 
 
+class DownloadSelection(BaseModel):
+    """Identify one reviewed search result without exposing its link."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    workflow_id: PositiveInt = Field(description="Indexer that returned the result.")
+    resource_id: str = Field(min_length=1, max_length=256)
+    source: str = Field(
+        max_length=16384, description="Sealed `source` from search_indexer."
+    )
+
+
+class DownloadTaskSettings(BaseModel):
+    """Describe one selected result and where its download should go."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    resource: DownloadSelection
+    downloader_id: PositiveInt
+    dir: str = Field(min_length=1, max_length=4096)
+    transfer_lib_id: PositiveInt | None = None
+    transfer_method: TransferMethod | None = None
+
+
+class DownloadTaskCheck(DownloadTaskSettings):
+    """Check one selected result and its settings without submitting it."""
+
+    ingest_workflow_id: PositiveInt | None = Field(
+        default=None,
+        description="Movie ingestion workflow for the transfer library.",
+    )
+
+
+class DownloadTaskCreate(DownloadTaskSettings):
+    """Submit one reviewed result once using a stable client request ID."""
+
+    request_id: UUID
+    info_hash: str = Field(
+        min_length=1,
+        max_length=68,
+        description="Content hash returned by validate_download_task.",
+    )
+    ingestion: IngestionBinding | None = Field(
+        default=None,
+        description="Validation's ingestion review; binds it before submitting.",
+    )
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this result and settings.",
+    )
+
+
 class IndexerSearch(BaseModel):
     """Search one selected published indexer without submitting downloads."""
 
@@ -534,6 +589,9 @@ class IndexerSearch(BaseModel):
     filters: dict[str, Any] | None = None
     page_num: PositiveInt = 1
     page_size: int = Field(default=5, ge=1, le=20)
+    sources: bool = Field(
+        default=False, description="Add sealed sources for one-time downloads."
+    )
 
     @model_validator(mode="after")
     def bound_input(self) -> Self:
