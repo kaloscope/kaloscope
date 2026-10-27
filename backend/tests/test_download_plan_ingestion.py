@@ -208,19 +208,21 @@ def test_inspect(tmp_path):
             result = await MediaLibService.ingestion_bindings(data.movies.id, owner)
             shows = await MediaLibService.ingestion_bindings(data.shows.id, owner)
 
-            assert result["supported"] and not shows["supported"]
+            assert result["supported"] and shows["supported"]
+            # the TV fixture reaches tv_show only, so it cannot serve episodes
+            assert shows["workflows"] == [] and shows["bindings"] == []
             assert [
                 (b["workflow_id"], b["order"], b["asynchronous"], b["executable"])
                 for b in result["bindings"]
             ] == [(data.tv.id, 1, True, True), (data.draft.id, 2, False, False)]
-            assert not any(b["movie_output"] for b in result["bindings"])
-            assert result["movie_workflows"] == [
+            assert not any(b["compatible"] for b in result["bindings"])
+            assert result["workflows"] == [
                 {"workflow_id": data.movie.id, "workflow_name": "Movie scraper"}
             ]
             assert [w["workflow_id"] for w in result["unpublished_workflows"]] == [
                 data.draft.id
             ]
-            assert "not only this plan" in result["scope"]
+            assert "including future imports" in result["scope"]
             assert "unpublished workflows never run" in result["rules"]
             assert await bindings(data.movies.id) == before
             owner.role = UserRole.USER
@@ -240,7 +242,7 @@ def test_inspect(tmp_path):
         ("draft", {}, "ingest_workflow_id"),
         ("tv", {}, "ingest_workflow_id"),
         ("graph", {}, "ingest_workflow_id"),
-        ("movie", {"transfer_lib_id": "shows"}, "transfer_lib_id"),
+        ("movie", {"transfer_lib_id": "shows"}, "ingest_workflow_id"),
         (
             "movie",
             {"transfer_lib_id": None, "transfer_method": None},
@@ -870,8 +872,8 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
             for result in results:
                 by_name.setdefault(result["name"], []).append(result["data"])
             first, second = by_name["get_library_ingestion"]
-            assert first["movie_workflows"] == [] and first["unpublished_count"] == 1
-            assert [w["workflow_id"] for w in second["movie_workflows"]] == [
+            assert first["workflows"] == [] and first["unpublished_count"] == 1
+            assert [w["workflow_id"] for w in second["workflows"]] == [
                 fixture["workflow_id"]
             ]
             review = by_name["validate_download_plan"][0]["ingestion"]

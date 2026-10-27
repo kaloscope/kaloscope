@@ -484,7 +484,7 @@ class DownloadPlanCheck(BaseModel):
     )
     ingest_workflow_id: PositiveInt | None = Field(
         default=None,
-        description="Movie ingestion workflow for the transfer library.",
+        description="Ingestion workflow for the transfer library.",
     )
 
     @model_validator(mode="after")
@@ -505,7 +505,7 @@ class DownloadPlanCheck(BaseModel):
 
 
 class IngestionBinding(BaseModel):
-    """Identify a reviewed movie ingestion binding for the transfer library."""
+    """Identify a reviewed ingestion binding for the transfer library."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     workflow_id: PositiveInt = Field(description="Reviewed ingestion workflow ID.")
@@ -557,7 +557,7 @@ class DownloadTaskCheck(DownloadTaskSettings):
 
     ingest_workflow_id: PositiveInt | None = Field(
         default=None,
-        description="Movie ingestion workflow for the transfer library.",
+        description="Ingestion workflow for the transfer library.",
     )
 
 

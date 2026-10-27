@@ -190,6 +190,8 @@ def test_shared_examples():
         ("search", "resp/search.jsonc"),
         ("details", "resp/details.jsonc"),
         ("movie", "nfo/movie.jsonc"),
+        ("tv_show", "nfo/tvshow.jsonc"),
+        ("episode", "nfo/episode.jsonc"),
     ):
         text = (Path(__file__).parents[1] / "static/flow" / filename).read_text()
         assert check(loads_jsonc(text), mode).valid
@@ -467,7 +469,8 @@ def test_movie_metadata(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "topic", ["json_indexer", "html_indexer", "indexer_auth", "movie_scraper"]
+    "topic",
+    ["json_indexer", "html_indexer", "indexer_auth", "movie_scraper", "tv_scraper"],
 )
 def test_recipe_guidance(topic):
     guide = get_workflow_reference(topic).content

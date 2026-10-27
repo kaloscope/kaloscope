@@ -22,6 +22,7 @@ from uuid import uuid4
 
 import aiofiles
 from filelock import AsyncFileLock, FileLock, Timeout
+from jinja2 import nodes as jinja_nodes
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
@@ -37,6 +38,7 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
+from app.core.flow.nodes.control.condition import condition_value
 from app.core.media.common import ContentError
 from app.core.media.coordination import (
     index_lock_path,
@@ -51,6 +53,7 @@ from app.core.media.organizer import (
     organize_items,
     recover_organizing,
 )
+from app.core.renderer import SANDBOX_ENV, render
 from app.models.flow import (
     FlowGraph,
     FlowInstance,
@@ -1379,13 +1382,17 @@ def _publish_index(item: MediaItem, staging: Path, version: str, states: _Source
 
 
 INGESTION_SCOPE = (
-    "A binding runs for every new item in this library's normal ingestion, not "
-    "only this plan's downloads."
+    "A binding runs for every new item in this library's normal ingestion, "
+    "including future imports, not only these downloads."
+)
+TV_INGESTION_LAYOUT = (
+    " TV files need series/episode or series/season/episode paths; "
+    "files at the library root are not indexed."
 )
 INGESTION_RULES = (
-    "Movie libraries only. Reuse a binding with movie_output or choose a "
-    "movie_workflows entry; unpublished workflows never run. If none fits, ask "
-    "only for missing source details, build one with the movie_scraper recipe "
+    "Movie and TV libraries. Reuse a compatible binding or choose a workflows "
+    "entry; unpublished workflows never run. If none fits, ask only for missing "
+    "source details, build one with the movie_scraper or tv_scraper recipe "
     "(create_workflow_draft), keep the pending settings in this conversation and "
     "resume after the user saves and publishes it. Validate the plan or download "
     "with ingest_workflow_id and show library, transfer method, workflow, "
@@ -1429,6 +1436,145 @@ def movie_output(definition: dict | None) -> bool:
     return False
 
 
+INGESTION_TYPES = frozenset((LibType.MOVIE, LibType.TV_SHOW))
+_METADATA_NODES = frozenset(("movie", "tv_show", "episode", "novel", "comic"))
+# infer only comparisons and boolean logic over the two known request kinds
+_ROUTE_EXPRESSIONS = (
+    jinja_nodes.Output,
+    jinja_nodes.TemplateData,
+    jinja_nodes.Name,
+    jinja_nodes.Const,
+    jinja_nodes.Compare,
+    jinja_nodes.Operand,
+    jinja_nodes.And,
+    jinja_nodes.Or,
+    jinja_nodes.Not,
+    jinja_nodes.List,
+    jinja_nodes.Tuple,
+)
+
+
+def _condition_branch(expression: Any, nfo_type: str) -> bool | None:
+    """Evaluate simple comparisons over the unchanged request's `nfo_type`.
+
+    Args:
+        expression: Saved `condition.expression` template.
+        nfo_type: Original show or episode request kind.
+
+    Returns:
+        Whether `is_true` is taken, or `None` for other inputs, function/filter
+        calls or unsupported expressions. No sample titles or numbers are assumed.
+    """
+    if not isinstance(expression, str):
+        return None
+    try:
+        tree = SANDBOX_ENV.parse(expression)
+        for node in tree.find_all(jinja_nodes.Node):
+            if not isinstance(node, _ROUTE_EXPRESSIONS) or (
+                isinstance(node, jinja_nodes.Name) and node.name != "nfo_type"
+            ):
+                return None
+        return condition_value(
+            render(expression, {"nfo_type": nfo_type}, raw=True, sandboxed=True)
+        )
+    except Exception:
+        return None
+
+
+def ingest_routes(definition: dict | None, nfo_type: str) -> set[str]:
+    """Collect the metadata nodes one ingestion request can reach.
+
+    Args:
+        definition: Published nodes and edges, or `None` when unpublished.
+        nfo_type: Original show or episode request kind for `ingest_start`.
+
+    Returns:
+        Possible metadata node types. Simple `nfo_type` conditions before any
+        processing node follow the known branch; other conditions follow both.
+    """
+    nodes = (definition or {}).get("nodes")
+    edges = (definition or {}).get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return set()
+    data = {
+        node.get("id"): node.get("data")
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("data"), dict)
+    }
+    pending = [
+        (key, True)
+        for key, item in data.items()
+        if item.get("$schema") == "ingest_start"
+    ]
+    seen, reached = set(pending), set()
+    while pending:
+        current, unchanged = pending.pop()
+        kind = data.get(current, {}).get("$schema")
+        if kind in _METADATA_NODES:
+            reached.add(kind)
+            continue
+        # processing nodes can replace request values, including `nfo_type`
+        unchanged = unchanged and kind in {"ingest_start", "condition"}
+        branch = (
+            _condition_branch(data[current].get("expression"), nfo_type)
+            if kind == "condition" and unchanged
+            else None
+        )
+        for edge in edges:
+            if not isinstance(edge, dict) or edge.get("source") != current:
+                continue
+            if branch is not None and edge.get("sourceHandle") != (
+                "is_true" if branch else "is_false"
+            ):
+                continue
+            if (target := (edge.get("target"), unchanged)) not in seen:
+                seen.add(target)
+                pending.append(target)
+    return reached
+
+
+def tv_route_issue(definition: dict | None) -> str | None:
+    """Explain why a published definition cannot serve a TV library's requests.
+
+    Args:
+        definition: Published nodes and edges, or `None` when unpublished.
+
+    Returns:
+        `None` when the static routes separate shows and episodes; otherwise the
+        first missing or possibly shared route. Scraper execution is not tested.
+    """
+    for target, nfo_type in (
+        ("tv_show", NFOType.TV_SHOW),
+        ("episode", NFOType.EPISODE),
+    ):
+        reached = ingest_routes(definition, nfo_type)
+        if target not in reached:
+            return f"Route nfo_type={nfo_type} requests from ingest_start to {target}."
+        if others := sorted(reached - {target}):
+            return (
+                f"nfo_type={nfo_type} requests may also reach {'/'.join(others)}; "
+                "branch before processing with {{ nfo_type == 'episode' }}."
+            )
+    return None
+
+
+def output_issue(lib_type: LibType, definition: dict | None) -> str | None:
+    """Check whether a published definition produces this library's metadata.
+
+    Args:
+        lib_type: Library whose normal ingestion would run the workflow.
+        definition: Published nodes and edges, or `None` when unpublished.
+
+    Returns:
+        `None` for a compatible workflow, otherwise what its routes lack.
+    """
+    if lib_type == LibType.TV_SHOW:
+        return tv_route_issue(definition)
+    if lib_type == LibType.MOVIE and movie_output(definition):
+        return None
+    return "Its published definition must connect ingest_start to movie."
+
+
 def _binding_revision(rows: list[FlowTrigger]) -> str:
     """Fingerprint a library's stored bindings, order and execution settings.
 
@@ -1442,15 +1588,17 @@ def _binding_revision(rows: list[FlowTrigger]) -> str:
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
-def _binding_fact(row: FlowTrigger) -> dict[str, Any]:
+def _binding_fact(row: FlowTrigger, lib_type: LibType) -> dict[str, Any]:
     """Describe one stored binding, separating configuration from executability.
 
     Args:
         row: Stored binding with its workflow loaded.
+        lib_type: Type of the bound library.
 
     Returns:
         Workflow identity, order and execution settings, whether normal ingestion
-        runs it now and whether its published definition produces movie metadata.
+        runs it now and whether its published definition produces this library's
+        metadata (`compatible`).
     """
     graph = row.graph
     executable = graph.category == GraphCategory.INGEST and graph.state != (
@@ -1462,7 +1610,7 @@ def _binding_fact(row: FlowTrigger) -> dict[str, Any]:
         "order": row.priority,
         "asynchronous": row.asynchronous,
         "executable": executable,
-        "movie_output": executable and movie_output(graph.definition),
+        "compatible": executable and output_issue(lib_type, graph.definition) is None,
     }
 
 
@@ -1530,7 +1678,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
 
     @classmethod
     async def ingestion_bindings(cls, lib_id: int, user: UserInfo) -> dict[str, Any]:
-        """Inspect a library's ingestion bindings and usable movie workflows.
+        """Inspect a library's ingestion bindings and usable metadata workflows.
 
         Args:
             lib_id: Library that would receive transferred downloads.
@@ -1538,8 +1686,9 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
 
         Returns:
             Stored bindings in order (including unpublished ones), the binding
-            `revision`, published movie ingestion workflows, unpublished ingestion
-            workflows, the binding scope and setup rules. Nothing is changed.
+            `revision`, unbound published workflows compatible with the movie or
+            TV library, unpublished ingestion workflows, the binding scope and
+            setup rules. Nothing is changed.
 
         Raises:
             ForbiddenException: If the account cannot configure workflows or read
@@ -1562,7 +1711,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             for graph in workflows
             if graph.state != GraphState.DRAFT
             and graph.id not in bound
-            and movie_output(graph.definition)
+            and output_issue(lib.lib_type, graph.definition) is None
         ]
         unpublished = [
             {"workflow_id": graph.id, "workflow_name": graph.name}
@@ -1573,15 +1722,16 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             "library_id": lib.id,
             "library_name": lib.name,
             "lib_type": lib.lib_type,
-            "supported": lib.lib_type == LibType.MOVIE,
-            "bindings": [_binding_fact(row) for row in rows[:10]],
+            "supported": lib.lib_type in INGESTION_TYPES,
+            "bindings": [_binding_fact(row, lib.lib_type) for row in rows[:10]],
             "binding_count": len(rows),
             "revision": _binding_revision(rows),
-            "movie_workflows": published[:10],
-            "movie_workflow_count": len(published),
+            "workflows": published[:10],
+            "workflow_count": len(published),
             "unpublished_workflows": unpublished[:10],
             "unpublished_count": len(unpublished),
-            "scope": INGESTION_SCOPE,
+            "scope": INGESTION_SCOPE
+            + (TV_INGESTION_LAYOUT if lib.lib_type == LibType.TV_SHOW else ""),
             "rules": INGESTION_RULES,
         }
 
@@ -1589,7 +1739,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
     async def ingestion_check(
         cls, lib_id: int, workflow_id: int, user: UserInfo
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Check a movie library and workflow for a plan's ingestion binding.
+        """Check a movie or TV library and workflow for an ingestion binding.
 
         Args:
             lib_id: Transfer library of the plan.
@@ -1615,19 +1765,19 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             .select_related("graph")
         )
         issues = []
-        if lib.lib_type != LibType.MOVIE:
+        if lib.lib_type not in INGESTION_TYPES:
             issues.append(
                 {
                     "path": "transfer_lib_id",
-                    "message": "Ingestion setup supports movie libraries only.",
+                    "message": "Ingestion setup supports movie and TV libraries only.",
                 }
             )
         if graph.category != GraphCategory.INGEST:
             message = "Choose an ingest workflow."
         elif graph.state == GraphState.DRAFT or not graph.definition:
             message = "Publish this workflow first; drafts never run."
-        elif not movie_output(graph.definition):
-            message = "Its published definition must connect ingest_start to movie."
+        elif lib.lib_type in INGESTION_TYPES:
+            message = output_issue(lib.lib_type, graph.definition)
         else:
             message = None
         if message:
@@ -1635,22 +1785,24 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         return issues, {
             "library_id": lib.id,
             "library_name": lib.name,
+            "lib_type": lib.lib_type,
             "workflow_id": graph.id,
             "workflow_name": graph.name,
             "binding": "reuse"
             if any(row.graph_id == graph.id for row in rows)
             else "add",
-            "bindings": [_binding_fact(row) for row in rows[:10]],
+            "bindings": [_binding_fact(row, lib.lib_type) for row in rows[:10]],
             "binding_count": len(rows),
             "revision": _binding_revision(rows),
-            "scope": INGESTION_SCOPE,
+            "scope": INGESTION_SCOPE
+            + (TV_INGESTION_LAYOUT if lib.lib_type == LibType.TV_SHOW else ""),
         }
 
     @classmethod
     async def ensure_ingestion(
         cls, lib_id: int, workflow_id: int, revision: str, user: UserInfo
     ) -> dict[str, Any]:
-        """Reuse or append a reviewed movie binding without changing other bindings.
+        """Reuse or append a reviewed binding without changing other bindings.
 
         Args:
             lib_id: Transfer library of the plan.

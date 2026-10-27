@@ -549,8 +549,9 @@ def test_ingestion(monkeypatch, tmp_path):
             assert await DownloadTask.all().count() == 1
             task = await DownloadTask.get(id=retried["task_id"])
             assert task.transfer_lib_id == data.movies.id
+            # a movie scraper cannot ingest into the TV library
             assert not shows["valid"]
-            assert "transfer_lib_id" in [issue["path"] for issue in shows["issues"]]
+            assert "ingest_workflow_id" in [i["path"] for i in shows["issues"]]
 
     asyncio.run(run())
 

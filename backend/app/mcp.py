@@ -271,7 +271,7 @@ def create_server() -> MCPServer:
             "first-attempt outcome separately. Creation is not download success. "
             "Before validating, check list_media_items and list_download_plans (all "
             "indexers) for possible overlaps; matches are advisory evidence for the "
-            "user's final decision. For movie library ingestion, follow "
+            "user's final decision. For movie or TV library ingestion, follow "
             "get_library_ingestion; creation binds the reviewed workflow first. "
             "One-time downloads: search_indexer with sources=true, then "
             "validate_download_task and confirmed create_download_task. "
@@ -284,10 +284,12 @@ def create_server() -> MCPServer:
             "user, then save only changes the user requested or accepted, using "
             "the returned draft version. "
             "Drafts can be incomplete; they are never automatically published or run. "
-            "For JSON indexers or HTML movie scrapers, read the json_indexer or "
-            "movie_scraper reference (HTML download indexers: html_indexer); "
+            "For JSON indexers or HTML movie/TV scrapers, read the json_indexer, "
+            "movie_scraper or tv_scraper reference (HTML download indexers: "
+            "html_indexer); "
             "indexer login also needs indexer_auth. "
-            "Validate supplied samples using search/details/movie/auth modes "
+            "Validate supplied samples using search/details/movie/tv_show/episode/auth "
+            "modes "
             "(auth with the auth_start config), correct field errors and recheck "
             "before previewing. "
             "Use the exact tested templates; stop after two unsuccessful repairs "
@@ -420,7 +422,7 @@ def create_server() -> MCPServer:
             ctx: Administrator context with a read-write token.
             creation: Stable request identity and user-authorized settings. Include
                 validation's `ingestion` workflow ID and revision to reuse or append
-                that movie library binding before the plan is created.
+                that library binding before the plan is created.
 
         Returns:
             Existing or newly created plan and its first-attempt state. No execution
@@ -527,7 +529,9 @@ def create_server() -> MCPServer:
         ctx: Context,
         library_id: Annotated[
             _ResourceID,
-            Field(description="Movie library that receives transferred downloads."),
+            Field(
+                description="Movie or TV library that receives transferred downloads."
+            ),
         ],
     ) -> LibraryIngestionResult:
         """Inspect a library's ingestion bindings before planning automatic ingestion.
@@ -538,9 +542,10 @@ def create_server() -> MCPServer:
 
         Returns:
             Stored bindings in run order, including unpublished ones, with
-            `executable` and `movie_output` facts, the binding `revision`, published
-            movie ingestion workflows, unpublished ingestion workflows, the
-            library-wide binding scope and setup rules. Nothing is changed.
+            `executable` and `compatible` facts, the binding `revision`, unbound
+            published workflows compatible with the movie or TV library,
+            unpublished ingestion workflows, the library-wide binding scope and
+            setup rules. Nothing is changed.
         """
         return LibraryIngestionResult.model_validate(
             await _read(MediaLibService.ingestion_bindings(library_id, _user(ctx)))
@@ -984,8 +989,9 @@ def create_server() -> MCPServer:
 
         Args:
             ctx: Authenticated request context.
-            validation: Text/expression, JSONC, or search/details/movie/auth output
-                check. `auth` also requires the exact `auth_start` config.
+            validation: Text/expression, JSONC, or search/details/movie/tv_show/
+                episode/auth output check. `auth` also requires the exact
+                `auth_start` config.
 
         Returns:
             JSON-compatible value or errors. Strict mode rejects undefined values;
@@ -1012,10 +1018,11 @@ def create_server() -> MCPServer:
                 "html_indexer",
                 "indexer_auth",
                 "movie_scraper",
+                "tv_scraper",
             ],
             Field(
                 description="Context/functions or JSON/HTML indexer, indexer login "
-                "or HTML movie recipes."
+                "or HTML movie/TV recipes."
             ),
         ],
     ) -> WorkflowReference:

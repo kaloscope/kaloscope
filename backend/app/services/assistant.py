@@ -65,7 +65,7 @@ With name/category/purpose known, create_workflow_draft saves one empty draft.
 Finish so the app opens it and sends the build follow-up. Ask only for missing
 information; use supplied values/defaults. Leave unknown credentials/accounts/
 paths/URLs empty and list them. Layout: columns >=800px, rows >=600; enlarge as needed.
-For JSON indexers/HTML movie scrapers read json_indexer/movie_scraper reference.
+Indexers/movie/TV scrapers: read the matching recipe reference.
 Prefer compact schemas (include_examples=false).
 Fix business output errors and recheck before previewing; never invent source fields.
 Plans: list/read workflows to unlock tools; retain keyword, ask which indexer;
@@ -579,7 +579,13 @@ class AssistantService:
                     result["ok"]
                     and call.function.name == "get_workflow_reference"
                     and result["data"].get("topic")
-                    in {"json_indexer", "html_indexer", "indexer_auth", "movie_scraper"}
+                    in {
+                        "json_indexer",
+                        "html_indexer",
+                        "indexer_auth",
+                        "movie_scraper",
+                        "tv_scraper",
+                    }
                 ):
                     # keep full domain catalogs for ordinary turns, focus recipe builds
                     workflow_authoring = True
@@ -644,7 +650,7 @@ class AssistantService:
                                 item["workflow_id"]
                                 for key in (
                                     "bindings",
-                                    "movie_workflows",
+                                    "workflows",
                                     "unpublished_workflows",
                                 )
                                 for item in review.get(key, [])

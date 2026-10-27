@@ -8,6 +8,21 @@ from app.core.flow.handles import InputHandle, OutputHandle
 from app.core.flow.nodes.base import Node, control_node
 
 
+def condition_value(var: Any) -> bool:
+    """Interpret a rendered condition the way branch selection does.
+
+    Args:
+        var: Native value rendered from the condition expression.
+
+    Returns:
+        Whether the `is_true` branch is taken.
+    """
+    # an XPath element indicates a match even when it has no children
+    if isinstance(var, etree._Element):
+        return True
+    return bool(var) and str(var).lower() not in ("false", "0", "none", "null")
+
+
 @control_node(order=1, icon="arrowCircleDownSplit")
 class ConditionNode(Node):
     """Choose a branch using a rendered expression.
@@ -38,10 +53,7 @@ class ConditionNode(Node):
             True or false output handle.
         """
         var = cls.expression.extract(node_data, context=context, raw=True)
-        # an XPath element indicates a match even when it has no children
-        if isinstance(var, etree._Element):
-            var = True
-        if var and str(var).lower() not in ("false", "0", "none", "null"):
+        if condition_value(var):
             return cls.Handles.is_true
         else:
             return cls.Handles.is_false

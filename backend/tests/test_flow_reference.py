@@ -250,6 +250,7 @@ def test_script_examples(monkeypatch, language):
         "html_indexer",
         "indexer_auth",
         "movie_scraper",
+        "tv_scraper",
     ],
 )
 def test_reference_budget(monkeypatch, topic):

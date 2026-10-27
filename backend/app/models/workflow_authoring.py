@@ -61,6 +61,8 @@ class TemplateValidation(AuthoringInput):
         "search",
         "details",
         "movie",
+        "tv_show",
+        "episode",
         "auth",
     ] = "text"
     strict: bool = False

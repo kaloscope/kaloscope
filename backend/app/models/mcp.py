@@ -196,7 +196,7 @@ class DownloadTaskResult(Result):
 
 
 class LibraryIngestionResult(Result):
-    """Describe a library's ordered bindings and usable movie ingestion workflows."""
+    """Describe a library's ordered bindings and compatible ingestion workflows."""
 
     library_id: int
     library_name: str
@@ -204,7 +204,7 @@ class LibraryIngestionResult(Result):
     bindings: list[dict[str, JSONType]]
     binding_count: int
     revision: str
-    movie_workflows: list[dict[str, JSONType]]
+    workflows: list[dict[str, JSONType]]
     unpublished_workflows: list[dict[str, JSONType]]
     scope: str
 
@@ -367,6 +367,7 @@ class WorkflowReference(Result):
         "html_indexer",
         "indexer_auth",
         "movie_scraper",
+        "tv_scraper",
     ]
     content: str = Field(description="Complete English Markdown reference.")
 
