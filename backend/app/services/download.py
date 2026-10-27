@@ -8,9 +8,12 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
+from weakref import WeakValueDictionary
 
 import aiofiles
+import httpx
 import orjson
+from filelock import Timeout as LockTimeout
 from sanic import Sanic
 from sanic.log import logger
 from tortoise import timezone
@@ -65,6 +68,9 @@ from app.models.download import (
     DownloadState,
     DownloadStats,
     DownloadTask,
+    DownloadTaskCheck,
+    DownloadTaskCreate,
+    DownloadTaskSettings,
     IndexerSearch,
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
@@ -78,7 +84,8 @@ from app.utils.bittorrent import (
     decode_torrent,
     standardize_magnet,
 )
-from app.utils.json import dumps
+from app.utils.crypto import fernet_decrypt, fernet_encrypt
+from app.utils.json import dumps, loads
 
 
 def default_download_directory() -> Path:
@@ -94,6 +101,91 @@ def default_download_directory() -> Path:
         except OSError:
             continue
     return Path(KaloscopeConfig.get()._workspace) / "downloads"
+
+
+async def seal_source(
+    workflow_id: int, resource_id: str, title: str | None, link: str
+) -> str:
+    """Seal a search result's download link for one later selection.
+
+    Args:
+        workflow_id: Indexer that returned the result.
+        resource_id: Result ID shown to the user.
+        title: Observed title shown to the user.
+        link: Exact link from the search output.
+
+    Returns:
+        Fernet token binding the link to this indexer and result; the link itself
+        never appears in assistant or MCP results.
+    """
+    payload = dumps({"w": workflow_id, "i": resource_id, "t": title, "l": link})
+    return await asyncio.to_thread(
+        fernet_encrypt,
+        payload.decode(),
+        KaloscopeConfig.get().secret_key_path,
+        create_key=True,
+    )
+
+
+async def open_source(selection: Any) -> dict[str, Any] | None:
+    """Unseal a selected result's source and check that it belongs to it.
+
+    Args:
+        selection: Reviewed indexer, result ID and sealed source.
+
+    Returns:
+        Observed title and exact link, or `None` for a foreign, damaged or
+        unreadable source.
+    """
+    try:
+        payload = loads(
+            await asyncio.to_thread(
+                fernet_decrypt, selection.source, KaloscopeConfig.get().secret_key_path
+            )
+        )
+    except (RuntimeError, OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("w") != selection.workflow_id
+        or payload.get("i") != selection.resource_id
+        or not isinstance(payload.get("l"), str)
+    ):
+        return None
+    return {"title": payload.get("t"), "link": payload["l"]}
+
+
+# avoid contending for the shared submission lock within this worker
+_REQUEST_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+
+
+def _maybe_sent(
+    error: Exception, driver: DownloaderDriver, request: DownloadRequest
+) -> bool:
+    """Check whether a failed RPC submission may have reached the downloader.
+
+    Args:
+        error: Exception raised by the driver.
+        driver: Driver whose submission method may contain multiple requests.
+        request: Submission that selected the link or torrent method.
+
+    Returns:
+        Whether submission may have succeeded. Single-request connection failures
+        and HTTP client rejections are definite. Multi-step failures retain
+        uncertainty because an earlier step may already have submitted it.
+    """
+    if isinstance(driver, RpcDriver):
+        api = driver.config.methods.get(
+            "add_torrent" if request.torrent else "add_link"
+        )
+        if api and api.steps:
+            return True
+    cause = error.__context__ if isinstance(error, KaloscopeException) else error
+    if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return False
+    extra = getattr(error, "extra", None) or {}
+    status = extra.get("status_code", 0)
+    return not (extra.get("responded") and 400 <= status < 500 and status != 408)
 
 
 class DownloaderService(BaseService[Downloader], model=Downloader):
@@ -527,11 +619,439 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         return task
 
     @classmethod
+    async def _review_request(
+        cls, settings: DownloadTaskSettings, ingest_workflow_id: int | None, user
+    ) -> tuple[list[dict[str, str]], dict[str, Any], DownloadRequest | None, Any]:
+        """Check a selected result and settings exactly as submission will use them.
+
+        Args:
+            settings: Reviewed result, downloader, directory and transfer.
+            ingest_workflow_id: Optional movie ingestion workflow to bind.
+            user: Current administrator; permissions are checked again.
+
+        Returns:
+            Located issues, the review shown to the user, the normalized request
+            and the loaded driver (callers close it).
+
+        Raises:
+            ForbiddenException: If the account cannot submit downloads or read the
+                indexer, library or workflow.
+            NotFoundException: If the indexer, library or workflow is missing.
+        """
+        FlowGraphService.require_editor(user)
+        selection = settings.resource
+        graph = await FlowGraphService.get_accessible(selection.workflow_id, user)
+        issues = []
+        review: dict[str, Any] = {
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "resource_id": selection.resource_id,
+            "transfer_lib_id": settings.transfer_lib_id,
+        }
+        if graph.category != GraphCategory.INDEXER or graph.state == GraphState.DRAFT:
+            issues.append(
+                {"path": "resource.workflow_id", "message": "Use a published indexer."}
+            )
+        source = await open_source(selection)
+        if source is None:
+            issues.append(
+                {
+                    "path": "resource.source",
+                    "message": "Use this result's source from search_indexer with "
+                    "sources=true; search again if it changed.",
+                }
+            )
+        else:
+            review["title"] = source["title"]
+        downloader = await Downloader.get_or_none(id=settings.downloader_id)
+        driver = None
+        if downloader is None:
+            issues.append(
+                {"path": "downloader_id", "message": "Select an existing downloader."}
+            )
+        else:
+            review["downloader_name"] = downloader.name
+        if settings.transfer_lib_id:
+            await MediaLibService.get_accessible(settings.transfer_lib_id, user)
+            if settings.transfer_method is None:
+                issues.append(
+                    {
+                        "path": "transfer_method",
+                        "message": "Choose a transfer method for the library.",
+                    }
+                )
+        if ingest_workflow_id is not None:
+            if settings.transfer_lib_id:
+                found, review["ingestion"] = await MediaLibService.ingestion_check(
+                    settings.transfer_lib_id, ingest_workflow_id, user
+                )
+                issues.extend(found)
+            else:
+                issues.append(
+                    {
+                        "path": "transfer_lib_id",
+                        "message": "Choose the movie library that ingests it.",
+                    }
+                )
+        if issues:
+            return issues, review, None, None
+        driver = load_driver(decrypt_config(downloader.config))
+        request = None
+        try:
+            # the existing normalizer requires torrent content or a hashed magnet
+            magnet = await standardize_magnet(source["link"])
+            if magnet is None:
+                issues.append(
+                    {
+                        "path": "resource.source",
+                        "message": "The result's link is not a magnet, BT hash or "
+                        "torrent file; detail and player pages cannot be "
+                        "downloaded.",
+                    }
+                )
+            else:
+                # torrent content falls back to its magnet like other submissions
+                torrent = (
+                    magnet.torrent
+                    if DownloadSource.TORRENT in driver.source_types
+                    else None
+                )
+                request = await cls._normalize_source(
+                    driver,
+                    DownloadRequest(
+                        directory=settings.dir,
+                        link=magnet.link,
+                        torrent=torrent,
+                        transfer_library_id=settings.transfer_lib_id,
+                        transfer_method=settings.transfer_method,
+                    ),
+                )
+                review["source_kind"] = "torrent" if magnet.torrent else "magnet"
+                review["info_hash"] = magnet.info_hash or magnet.info_hash_v2
+                if request is None:
+                    issues.append(
+                        {
+                            "path": "downloader_id",
+                            "message": "This downloader cannot accept the result's "
+                            "magnet or torrent.",
+                        }
+                    )
+        except BaseException:
+            await driver.close()
+            raise
+        return issues, review, request, driver
+
+    @classmethod
+    async def validate_request(cls, body: DownloadTaskCheck, user) -> dict[str, Any]:
+        """Validate one selected result for a one-time download without submitting.
+
+        Args:
+            body: Reviewed result, settings and optional ingestion workflow.
+            user: Current administrator.
+
+        Returns:
+            Located issues, the reviewed result and settings, an existing task with
+            the same content if any, and a new request ID for confirmation. Only
+            reads happen; a torrent URL may be fetched to identify its content.
+        """
+        issues, review, request, driver = await cls._review_request(
+            body, body.ingest_workflow_id, user
+        )
+        if driver is not None:
+            await driver.close()
+        result = {
+            "valid": False,
+            "request_id": str(uuid4()),
+            "download": {
+                **review,
+                **body.model_dump(
+                    mode="json", include={"downloader_id", "dir", "transfer_lib_id"}
+                ),
+                "transfer_method": body.transfer_method,
+            },
+        }
+        if (
+            request is not None
+            and request.identity is not None
+            and (existing := await cls._same_content(request.identity))
+        ):
+            result["existing_download"] = existing
+            issues.append(
+                {
+                    "path": "resource",
+                    "message": f"Task {existing['task_id']} already has this "
+                    "content; open it instead of downloading again.",
+                }
+            )
+        if ingestion := review.pop("ingestion", None):
+            result["ingestion"] = ingestion
+            result["download"].pop("ingestion", None)
+        result.update(
+            valid=not issues,
+            issues=issues[:12],
+            first_execution="Submitted after confirmation; downloading, transfer and "
+            "ingestion then continue in the background.",
+        )
+        return result
+
+    @classmethod
+    async def _same_content(cls, identity: DownloadIdentity) -> dict | None:
+        """Find an existing task holding the same torrent content.
+
+        Args:
+            identity: Normalized content hashes.
+
+        Returns:
+            Compact task facts, or `None` when no task has these hashes.
+        """
+        queries = [
+            Q(**{field: value})
+            for field, value in (
+                ("info_hash", identity.info_hash),
+                ("info_hash_v2", identity.info_hash_v2),
+            )
+            if value
+        ]
+        task = (
+            await DownloadTask.filter(Q(*queries, join_type="OR")).first()
+            if queries
+            else None
+        )
+        if task is None:
+            return None
+        return {"task_id": task.id, "name": task.name, "state": task.state}
+
+    @classmethod
+    async def _task_result(
+        cls, task: DownloadTask, user: UserInfo, *, replayed: bool = False
+    ) -> dict[str, Any]:
+        """Describe a submitted one-time task without claiming later progress.
+
+        Args:
+            task: Task created or replayed for the request.
+            user: Current account whose source permissions are rechecked.
+            replayed: Whether the same request already created it.
+
+        Returns:
+            Task identity, current stored state and where to follow it.
+        """
+        receipt = task.creation_receipt or {}
+        download = receipt["download"]
+        await FlowGraphService.get_accessible(download["workflow_id"], user)
+        library_id = download.get("transfer_lib_id")
+        if library_id:
+            await MediaLibService.get_accessible(library_id, user)
+        result = {
+            "created": True,
+            "replayed": replayed,
+            "task_id": task.id,
+            "name": task.name,
+            "state": task.state,
+            "uncertain": task.state == DownloadState.SUBMIT_UNKNOWN,
+            "path": "/downloads/downloading",
+            "download": download,
+        }
+        if library_id and (workflow_id := receipt.get("ingest_workflow_id")):
+            with suppress(NotFoundException):
+                _, review = await MediaLibService.ingestion_check(
+                    library_id, workflow_id, user
+                )
+                result["ingestion"] = {
+                    **review,
+                    "binding": "configured"
+                    if review["binding"] == "reuse"
+                    else "missing",
+                }
+        return result
+
+    @classmethod
+    async def _replay_request(
+        cls, key: str, digest: str, user: UserInfo
+    ) -> dict[str, Any] | None:
+        """Recover one persisted request or report a settings conflict.
+
+        Args:
+            key: Account-scoped request identity.
+            digest: Fingerprint of the confirmed source and settings.
+            user: Current account used to recheck source permissions.
+
+        Returns:
+            Replayed task, a conflict, or `None` before a task is persisted.
+        """
+        task = await DownloadTask.get_or_none(creation_key=key)
+        if task is None:
+            return None
+        if (task.creation_receipt or {}).get("digest") != digest:
+            return {
+                "created": False,
+                "conflict": True,
+                "message": "This request ID already submitted different settings; "
+                "validate again for a new request.",
+            }
+        return await cls._task_result(task, user, replayed=True)
+
+    @classmethod
+    async def create_once(cls, body: DownloadTaskCreate, user) -> dict[str, Any]:
+        """Submit one reviewed result once and return without waiting for it.
+
+        Args:
+            body: Stable request ID, reviewed result and settings, optional reviewed
+                ingestion binding and explicit confirmation.
+            user: Current administrator; everything is rechecked before writing.
+
+        Returns:
+            Validation issues, an unconfirmed preview, a conflict for a reused
+            request ID, an existing task with the same content, or the submitted
+            task (the same one on every retry). A reviewed binding is applied first;
+            if submission then fails, the kept binding is reported and a retry with
+            the same request ID reuses it. An unconfirmed downloader response is
+            recorded as `submit_unknown`, never resubmitted.
+
+        Raises:
+            ForbiddenException: If the account cannot submit downloads.
+        """
+        FlowGraphService.require_editor(user)
+        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        source = await open_source(body.resource)
+        identity = {
+            **body.model_dump(mode="json", exclude={"request_id", "confirmed"}),
+            "resource": {
+                "workflow_id": body.resource.workflow_id,
+                "resource_id": body.resource.resource_id,
+                "link": hashlib.sha256(
+                    (source or {}).get("link", body.resource.source).encode()
+                ).hexdigest(),
+            },
+            "ingestion": body.ingestion.workflow_id if body.ingestion else None,
+        }
+        digest = hashlib.sha256(
+            dumps(identity, option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()
+        lock = _REQUEST_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            try:
+                with submission_lock(f"one-time:{key}"):
+                    return await cls._create_locked(body, user, key, digest)
+            except LockTimeout:
+                if replay := await cls._replay_request(key, digest, user):
+                    return replay
+                return {
+                    "created": False,
+                    "pending": True,
+                    "request_id": str(body.request_id),
+                    "message": "This submission is still in progress; recover it "
+                    "later using the same request_id.",
+                }
+
+    @classmethod
+    async def _create_locked(
+        cls, body: DownloadTaskCreate, user, key: str, digest: str
+    ) -> dict[str, Any]:
+        """Replay or submit one request while holding its shared submission lock.
+
+        Args:
+            body: Reviewed request.
+            user: Current administrator.
+            key: Account-scoped request identity.
+            digest: Fingerprint of the reviewed result and settings.
+
+        Returns:
+            Shared creation result described by `create_once`.
+        """
+        if replay := await cls._replay_request(key, digest, user):
+            return replay
+        workflow_id = body.ingestion.workflow_id if body.ingestion else None
+        issues, review, request, driver = await cls._review_request(
+            body, workflow_id, user
+        )
+        # the binding outcome below replaces the validation-time ingestion review
+        review.pop("ingestion", None)
+        try:
+            result: dict[str, Any] = {
+                "request_id": str(body.request_id),
+                "download": review,
+            }
+            if request is not None and review.get("info_hash") != body.info_hash:
+                issues.append(
+                    {
+                        "path": "info_hash",
+                        "message": "The download content changed; validate it again "
+                        "and confirm the new result.",
+                    }
+                )
+            if (
+                request is not None
+                and request.identity is not None
+                and (same := await cls._same_content(request.identity))
+            ):
+                result["existing_download"] = same
+                issues.append(
+                    {"path": "resource", "message": "Another task has this content."}
+                )
+            if issues or request is None or driver is None:
+                return {"created": False, "valid": False, "issues": issues, **result}
+            if not body.confirmed:
+                return {"created": False, "confirmation_required": True, **result}
+            binding = None
+            if body.ingestion is not None and body.transfer_lib_id:
+                # prepare the library before the download can complete
+                binding = await MediaLibService.ensure_ingestion(
+                    body.transfer_lib_id,
+                    body.ingestion.workflow_id,
+                    body.ingestion.revision,
+                    user,
+                )
+                result["ingestion"] = binding
+                if binding["binding"] not in {"added", "reused"}:
+                    return {"created": False, "valid": False, **result}
+            creation = {
+                "creation_key": key,
+                "creation_receipt": {
+                    "digest": digest,
+                    "download": review,
+                    "ingest_workflow_id": workflow_id,
+                },
+            }
+            try:
+                task = await cls.add_request(
+                    body.downloader_id, driver, request, creation=creation
+                )
+            except IntegrityError:
+                # a concurrent retry or an independent task stored the same content
+                if replay := await cls._replay_request(key, digest, user):
+                    return {**result, **replay}
+                same = await cls._same_content(request.identity)
+                return {"created": False, "existing_download": same, **result}
+            except Exception:
+                if task := await DownloadTask.get_or_none(creation_key=key):
+                    # the durable claim survives ambiguous responses and save errors
+                    notify_download_changes()
+                elif binding is not None:
+                    logger.exception("Download submission failed after its binding")
+                    return {
+                        "created": False,
+                        **result,
+                        "submit_error": "The library binding was kept but the "
+                        "download was not submitted; retry with the same request_id.",
+                    }
+                else:
+                    raise
+            result.update(await cls._task_result(task, user))
+            if binding is not None:
+                result["ingestion"] = binding
+            return result
+        finally:
+            if driver is not None:
+                await driver.close()
+
+    @classmethod
     async def add_request(
         cls,
         downloader_id: int,
         driver: DownloaderDriver,
         request: DownloadRequest,
+        *,
+        creation: dict[str, Any] | None = None,
     ) -> DownloadTask:
         """Submit a normalized download request and notify synchronization.
 
@@ -542,6 +1062,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             downloader_id: Downloader ID.
             driver: Driver used for submission.
             request: Normalized download request.
+            creation: Request identity fields stored with the task; `None` for
+                editor and plan submissions.
 
         Returns:
             Persisted download task.
@@ -555,25 +1077,45 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 else nullcontext()
             )
             with lock:
-                return await cls._add_draft(downloader_id, driver, draft)
+                return await cls._add_draft(
+                    downloader_id, driver, draft, creation=creation
+                )
 
-        snapshot = await driver.add(request)
+        task = None
+        if creation:
+            # commit the request claim before RPC can have any remote effect
+            task = await DownloadTask.create(
+                **cls._task_values(downloader_id, request),
+                magnet_link=request.link,
+                state=DownloadState.SUBMIT_UNKNOWN,
+                **creation,
+            )
+        try:
+            snapshot = await driver.add(request)
+        except Exception as error:
+            if task is not None and not _maybe_sent(error, driver, request):
+                await task.delete()
+            raise
 
         # save the download directory
         await DownloadDirService.upsert(request.directory)
         # create the download task
-        task = await DownloadTask.create(
-            **cls._task_values(downloader_id, request),
-            unique_id=snapshot.identity.remote_id,
-            magnet_link=(
-                request.link
-                if identity and (identity.info_hash or identity.info_hash_v2)
-                else None
-            ),
-            state=(
-                DownloadState.PAUSED if request.paused else DownloadState.DOWNLOADING
-            ),
-        )
+        state = DownloadState.PAUSED if request.paused else DownloadState.DOWNLOADING
+        if task is not None:
+            task.unique_id = snapshot.identity.remote_id
+            task.state = state
+            await task.save(update_fields=["unique_id", "state"])
+        else:
+            task = await DownloadTask.create(
+                **cls._task_values(downloader_id, request),
+                unique_id=snapshot.identity.remote_id,
+                magnet_link=(
+                    request.link
+                    if identity and (identity.info_hash or identity.info_hash_v2)
+                    else None
+                ),
+                state=state,
+            )
         notify_download_changes()
         return task
 
@@ -583,6 +1125,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         downloader_id: int,
         driver: DownloaderDriver,
         draft: DownloadDraft,
+        *,
+        creation: dict[str, Any] | None = None,
     ) -> DownloadTask:
         """Persist a driver draft and notify recovery before remote submission.
 
@@ -590,6 +1134,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             downloader_id: Owning downloader ID.
             driver: Driver used for remote submission.
             draft: Task and optional offline-job persistence draft.
+            creation: Request identity fields stored with the task before the
+                remote submission can become uncertain.
 
         Returns:
             Persisted task updated with its submission snapshot.
@@ -607,6 +1153,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 state=draft.state,
                 percentage=draft.percentage,
                 using_db=connection,
+                **(creation or {}),
             )
             if draft.job is not None:
                 job = draft.job
@@ -1002,8 +1549,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             items=[],
             truncated=False,
             projection=(
-                "Resource metadata only; links and extra fields omitted. This "
-                "preview is not the plan's first attempt or a downloadability check."
+                "Resource metadata only; links and extra fields omitted (sources "
+                "are sealed). This preview is not a plan attempt or a "
+                "downloadability check."
             ),
         )
         fields = ("id", "title", "size", "category", "uploader", "uploaded_at", "misc")
@@ -1015,6 +1563,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     projected[key] = value[:256]
                     if len(value) > 256:
                         result["truncated"] = True
+            link = item.get("link")
+            if body.sources and isinstance(link, str) and projected.get("id"):
+                # links can carry tracker passkeys, so only a sealed copy leaves here
+                projected["source"] = await seal_source(
+                    graph.id, projected["id"], projected.get("title"), link
+                )
             result["items"].append(projected)
             if len(dumps(result)) > 7500:
                 result["items"].pop()
@@ -1101,6 +1655,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             "interval_unit": "hours",
             "timezone": "UTC",
             "creation_rules": (
+                "One-time download of one chosen result (no plan): search_indexer "
+                "with sources=true, let the user pick a result, then use only the "
+                "downloader/dir/transfer defaults below with validate_download_task "
+                "and, after final confirmation, create_download_task. Plans: "
                 "Retain the user's title/keyword and supplied preferences. Ask them to "
                 "choose a downloadable published indexer unless already specified. "
                 "After selection, immediately search_indexer with that keyword. Then "

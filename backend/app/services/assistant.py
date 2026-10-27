@@ -616,12 +616,24 @@ class AssistantService:
                             )
                             if library_id:
                                 resource_ids.append(f"media_lib:{library_id}")
+                        if call.function.name in {
+                            "validate_download_task",
+                            "create_download_task",
+                        } and (download := result["data"].get("download")):
+                            # one-time reviews reveal the indexer and transfer library
+                            resource_ids.append(download["workflow_id"])
+                            if download.get("transfer_lib_id"):
+                                resource_ids.append(
+                                    media_resource(download["transfer_lib_id"])
+                                )
                         if call.function.name == "get_library_ingestion" or (
                             call.function.name
                             in {
                                 "validate_download_plan",
                                 "create_download_plan",
                                 "get_download_plan",
+                                "validate_download_task",
+                                "create_download_task",
                             }
                             and result["data"].get("ingestion")
                         ):

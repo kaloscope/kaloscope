@@ -169,4 +169,14 @@ class Migration(migrations.Migration):
             name='creation_receipt',
             field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
         ),
+        ops.AddField(
+            model_name='DownloadTask',
+            name='creation_key',
+            field=fields.CharField(null=True, unique=True, max_length=64),
+        ),
+        ops.AddField(
+            model_name='DownloadTask',
+            name='creation_receipt',
+            field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
+        ),
     ]

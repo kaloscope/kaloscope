@@ -186,6 +186,15 @@ class PlanCreationResult(Result):
     first_execution: dict[str, JSONType] | Literal["scheduled", "queued_after_creation"]
 
 
+class DownloadTaskResult(Result):
+    """Describe a one-time download review, preview or submission."""
+
+    valid: bool | None = None
+    created: bool | None = None
+    request_id: str | None = None
+    download: dict[str, JSONType] | None = None
+
+
 class LibraryIngestionResult(Result):
     """Describe a library's ordered bindings and usable movie ingestion workflows."""
 
