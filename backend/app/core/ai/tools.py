@@ -212,6 +212,7 @@ class ReferenceQuery(ToolArguments):
         "html_indexer",
         "indexer_auth",
         "movie_scraper",
+        "tv_scraper",
     ]
 
 
@@ -444,7 +445,7 @@ TOOLS = (
     ),
     AssistantTool(
         "get_library_ingestion",
-        "Read a transfer library's ingestion bindings, movie workflows and setup "
+        "Read a transfer library's ingestion bindings, compatible workflows and setup "
         "rules; no changes. Bindings apply to the whole library.",
         LibraryIngestion,
         admin=True,
@@ -475,7 +476,7 @@ TOOLS = (
     ),
     AssistantTool(
         "get_workflow_reference",
-        "Read context/template rules or authoring recipes.",
+        "Read context/template rules or recipes.",
         ReferenceQuery,
     ),
     AssistantTool(
@@ -488,7 +489,7 @@ TOOLS = (
     AssistantTool(
         "validate_workflow_template",
         "Check Jinja fixtures: expression=native, json/object/array=JSONC, "
-        "search/details/movie/auth=business output. strict rejects undefined. "
+        "end-node modes=business output. strict rejects undefined. "
         "No nodes execute; Python internals blocked.",
         TemplateValidation,
     ),
@@ -689,7 +690,7 @@ def tool_schemas(
             return next turn; this changes model context, never authorization.
         plan_authoring: Expose plan tools after reading the source workflows.
         plan_only: Focus a selected indexer's plan conversation on relevant tools.
-        ingestion: Allow A1 scraper creation after inspecting a movie library.
+        ingestion: Allow A1 scraper creation after inspecting a movie/TV library.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The

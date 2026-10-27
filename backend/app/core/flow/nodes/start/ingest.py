@@ -31,7 +31,6 @@ class IngestStartNode(Node):
 
     @classmethod
     async def execute(cls, *, context: Context, **kwargs):
-        # skip check if it's a manual execution
         """Skip NFO generation when the source already has an NFO file.
 
         Args:
@@ -41,13 +40,13 @@ class IngestStartNode(Node):
         Raises:
             CancellationSignal: If the flow should end without an error.
         """
+        # manual lookup can refresh metadata even when an NFO exists
         bootparams = context.bootparams
         if bootparams.get(MANUAL_KEY):
             return
 
         # check if NFO file already exists
-        nfo_type = bootparams.get("nfo_type")
         nfo_path = bootparams.get("nfo_path")
-        if nfo_type and nfo_path and Path(nfo_path).exists():
+        if nfo_path and Path(nfo_path).exists():
             logger.info("NFO file already exists, skipping generation: %s", nfo_path)
             raise CancellationSignal

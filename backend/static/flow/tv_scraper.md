@@ -1,0 +1,11 @@
+# HTML TV metadata scraper
+
+Category `ingest`. A TV library sends two request kinds to every bound workflow. Branch before processing: `ingest_start -> condition` with `{{ nfo_type == 'episode' }}`, `is_true -> http -> episode` and `is_false -> http -> tv_show`. Read these four schemas (include_examples=false). A1 creates the draft, then generation uses its canvas snapshot. TV files need series/episode or series/season/episode paths; files at the library root are not indexed.
+
+Requests are top-level variables. Show requests (`nfo_type=tvshow`: series or season folders) have title, optional year, season from the folder name (series folders default to 1) and page_num/page_size (manual search: 5). Episodes add episode (null if unparsed) and series_id/site from indexed parent metadata or a manually selected show. A new NFO must be indexed before it supplies these IDs. Build supplied URLs with `quote('')`; use series_id when present, else search by title/year.
+
+Probe the requested show and episode pages; do not parse an error/login page as success. The formatter can return `{"html": {{ response.text|tojson }}}`; extract fields there for large pages. Use XPath `/text()`/`/@...` and serialize with `tojson`.
+
+tv_show candidates are series metadata as in its example: title required, id and site for later episodes, integer year, premiered YYYY-MM-DD, rating 0..10, arrays for list fields; omit season. episode candidates: title required, season/episode integers >= 0 (0 is valid, e.g. specials), aired YYYY-MM-DD, plot, rating, poster. Use only numbers and IDs the source states; omit unknown values. Automatic ingestion writes only the first candidate: put the best title/year match first, and for episodes the requested season/episode; return [] for no match. Omitted numbers keep the file's parsed ones.
+
+Validate exact templates with mode=tv_show and mode=episode, passing request fields in context: matching, missing-optional and no-match samples, and episodes with and without series_id. The checker uses the real NFO render/read-back without writing files. Fix reported fields and recheck, at most twice. Preview the tested templates through Keep/Revert. Do not bind a library, write metadata, publish or execute; after the user saves and publishes, validate the library binding. List unresolved selectors and source coverage.

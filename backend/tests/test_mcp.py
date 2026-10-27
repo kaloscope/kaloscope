@@ -1269,6 +1269,7 @@ def test_node_knowledge(monkeypatch):
                 "html_indexer",
                 "indexer_auth",
                 "movie_scraper",
+                "tv_scraper",
             ):
                 result = await call(app, "get_workflow_reference", {"topic": topic})
                 assert (

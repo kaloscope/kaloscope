@@ -165,7 +165,14 @@ def validate_workflow_template(
             return TemplateResult(valid=False, error="Expected a JSON object.")
         if args.mode == "array" and not isinstance(value, list):
             return TemplateResult(valid=False, error="Expected a JSON array.")
-        business = args.mode in {"search", "details", "movie", "auth"}
+        business = args.mode in {
+            "search",
+            "details",
+            "movie",
+            "tv_show",
+            "episode",
+            "auth",
+        }
         issues, warnings, outcome = [], [], None
         if args.mode == "auth":
             # the input model requires config for this mode

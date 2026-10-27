@@ -1,4 +1,4 @@
-"""Check authored indexer and movie results without executing workflow nodes."""
+"""Check authored indexer and video metadata results without executing nodes."""
 
 import re
 from datetime import date
@@ -27,6 +27,8 @@ from app.utils.bittorrent import (
 )
 
 type Text = Annotated[str, Field(min_length=1, pattern=r"\S")]
+# NFO readers accept season and episode numbers from zero, such as specials
+type Number = Annotated[int, Field(ge=0, le=2**31 - 1)]
 
 
 def download_link_kind(link: Any) -> Literal["hash", "http"] | None:
@@ -194,11 +196,73 @@ class MovieOutput(BaseModel):
         Raises:
             ValueError: If a supplied date is not a real `YYYY-MM-DD` date.
         """
-        if value and (
-            len(value) != 10 or date.fromisoformat(value).isoformat() != value
-        ):
-            raise ValueError("Use YYYY-MM-DD for premiered")
-        return value
+        return _iso_date(value, "premiered")
+
+
+class TVShowOutput(MovieOutput):
+    """Check series candidates before the existing tvshow NFO render/read-back."""
+
+    # manual refresh applies a stated season to episodes; tvshow.nfo omits it
+    season: Number | None = None
+
+
+class EpisodeOutput(BaseModel):
+    """Check episode candidates before the existing episode NFO render/read-back."""
+
+    model_config = ConfigDict(strict=True, extra="allow")
+
+    title: Text
+    id: str | None = None
+    site: str | None = None
+    plot: str | None = None
+    rating: Annotated[float, Field(ge=0, le=10)] | None = None
+    aired: str | None = None
+    season: Number | None = None
+    episode: Number | None = None
+    poster: str | None = None
+    lockdata: bool | None = None
+
+    @field_validator("aired")
+    @classmethod
+    def check_aired(cls, value: str | None) -> str | None:
+        """Check the documented air date without guessing or normalizing it.
+
+        Args:
+            value: Optional air date in the candidate.
+
+        Returns:
+            The original date or absent value.
+
+        Raises:
+            ValueError: If a supplied date is not a real `YYYY-MM-DD` date.
+        """
+        return _iso_date(value, "aired")
+
+
+# business modes, their candidate contracts and NFO templates
+VIDEO_OUTPUTS: dict[str, tuple[type[BaseModel], str]] = {
+    "movie": (MovieOutput, "movie"),
+    "tv_show": (TVShowOutput, "tvshow"),
+    "episode": (EpisodeOutput, "episode"),
+}
+
+
+def _iso_date(value: str | None, name: str) -> str | None:
+    """Accept only real `YYYY-MM-DD` dates, as the NFO examples document.
+
+    Args:
+        value: Optional date text from a candidate.
+        name: Candidate field named in the error.
+
+    Returns:
+        The original date or absent value.
+
+    Raises:
+        ValueError: If a supplied date is not a real `YYYY-MM-DD` date.
+    """
+    if value and (len(value) != 10 or date.fromisoformat(value).isoformat() != value):
+        raise ValueError(f"Use YYYY-MM-DD for {name}")
+    return value
 
 
 class AuthOutput(BaseModel):
@@ -481,13 +545,54 @@ def _download_issues(
     return issues
 
 
+def _video_warnings(mode: str, candidate: BaseModel, context: dict) -> list[str]:
+    """Explain how runtime ingestion treats the first TV candidate's identity.
+
+    Args:
+        mode: `tv_show` or `episode`; other modes have no extra notes.
+        candidate: First validated candidate, the one automatic ingestion writes.
+        context: Fixture request fields such as `season` and `episode`.
+
+    Returns:
+        Notes on unmatched or omitted numbers, zero values and missing series IDs.
+    """
+    warnings = []
+    if mode == "tv_show" and not getattr(candidate, "id", None):
+        warnings.append(
+            "[0]: Without id, later episode requests have no series_id; "
+            "search by title/year."
+        )
+    if mode != "episode":
+        return warnings
+    numbers = {name: getattr(candidate, name) for name in ("season", "episode")}
+    if any(
+        type(context.get(name)) is int and value is not None and value != context[name]
+        for name, value in numbers.items()
+    ):
+        warnings.append(
+            "[0]: season/episode differ from the request; automatic ingestion "
+            "writes the candidate's numbers."
+        )
+    if None in numbers.values():
+        warnings.append("Omitted season/episode keep the file's parsed numbers.")
+    if 0 in numbers.values():
+        warnings.append(
+            "Season/episode 0 is written as given; manual series refresh replaces "
+            "0 with the request's numbers."
+        )
+    return warnings
+
+
 def check_output(
-    mode: Literal["search", "details", "movie"], value: Any, context: dict
+    mode: Literal["search", "details", "movie", "tv_show", "episode"],
+    value: Any,
+    context: dict,
 ) -> tuple[list[OutputIssue], list[str]]:
     """Check supplied business output, retaining original values for node parity.
 
-    Authored search hits need nonblank string IDs/titles, and movie numeric fields
-    must be JSON numbers. These authoring checks do not alter legacy node behavior.
+    Authored search hits need nonblank string IDs/titles, and video metadata
+    numeric fields must be JSON numbers. These authoring checks do not alter
+    legacy node behavior.
 
     Args:
         mode: End-node contract to check.
@@ -679,13 +784,16 @@ def check_output(
                 "URLs are not fetched; this check does not prove content is reachable."
             )
         else:
-            candidates = TypeAdapter(list[MovieOutput]).validate_python(
-                value, strict=True
+            model, nfo_type = VIDEO_OUTPUTS[mode]
+            candidates = TypeAdapter(list[model]).validate_python(value, strict=True)
+            template = (TEMPLATES_PATH / f"{nfo_type}.nfo").read_text(
+                encoding="utf-8-sig"
             )
-            template = (TEMPLATES_PATH / "movie.nfo").read_text(encoding="utf-8-sig")
+            if candidates:
+                warnings.extend(_video_warnings(mode, candidates[0], context))
             for index, candidate in enumerate(candidates):
                 try:
-                    render_nfo("movie", template, value[index])
+                    render_nfo(nfo_type, template, value[index])
                 except ContentError:
                     issues.append(
                         OutputIssue(
@@ -697,8 +805,8 @@ def check_output(
                 unknown = set(candidate.model_extra or {})
                 if unknown:
                     warnings.append(
-                        f"[{index}]: Unknown movie fields are not mapped by "
-                        "the NFO template; use the movie node example."
+                        f"[{index}]: Unknown {mode} fields are not mapped by "
+                        f"the NFO template; use the {mode} node example."
                     )
             if not candidates:
                 warnings.append(

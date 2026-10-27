@@ -626,7 +626,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
         Args:
             settings: Reviewed result, downloader, directory and transfer.
-            ingest_workflow_id: Optional movie ingestion workflow to bind.
+            ingest_workflow_id: Optional ingestion workflow to bind.
             user: Current administrator; permissions are checked again.
 
         Returns:
@@ -690,7 +690,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 issues.append(
                     {
                         "path": "transfer_lib_id",
-                        "message": "Choose the movie library that ingests it.",
+                        "message": "Choose the library that ingests it.",
                     }
                 )
         if issues:
@@ -1677,7 +1677,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "if needed. Never invent or promise undeclared filters (year/group/"
                 "season/episode); keyword alternatives require a new search. Re-search "
                 "changed search inputs. Empty results need revised inputs or explicit "
-                "agreement to wait for future resources. For ingestion into a movie "
+                "agreement to wait for future resources. For ingestion into a movie/TV "
                 "transfer library, follow get_library_ingestion rules. Validate and "
                 "show ALL final settings/defaults and possible overlaps; the user may "
                 "view them "
@@ -1873,7 +1873,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 issues.append(
                     {
                         "path": "transfer_lib_id",
-                        "message": "Choose the movie library that ingests downloads.",
+                        "message": "Choose the library that ingests downloads.",
                     }
                 )
         if body.sample is not None:
