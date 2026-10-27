@@ -1363,7 +1363,7 @@ async def create_task(
         body = DownloadTaskCreate(
             request_id=args.request_id,
             info_hash=data["download"]["info_hash"],
-            **checked.model_dump(exclude={"ingest_workflow_id"}),
+            **checked.model_dump(exclude={"ingest_workflow_id", "transfer_samples"}),
             ingestion={
                 "workflow_id": review["workflow_id"],
                 "revision": review["revision"],

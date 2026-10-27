@@ -619,12 +619,15 @@ def test_one_time(monkeypatch, tmp_path):
         async with database() as (owner, _), client:
             data = await tv_libraries(tmp_path)
             items = await searched(owner, data.graph.id, monkeypatch, driver, client)
+            # the single-file torrent needs a series/season folder in TV libraries
             fields = settings(
                 data.graph.id,
                 items["r2"],
                 data.downloader.id,
                 transfer_lib_id=data.shows.id,
                 transfer_method=TransferMethod.HARDLINK,
+                sub_pattern="^",
+                sub_repl="Wayfinder (2024)/Season 01/",
             )
             before = await bindings(data.shows.id)
             check = await service.DownloadTaskService.validate_request(
@@ -857,15 +860,13 @@ def test_completion(tmp_path, monkeypatch, layout):
 
             from app.core.dl import syncer
 
-            assert await syncer.transfer_files(task, task.files)
+            transferred = await syncer.transfer_files(task, task.files)
             video = tmp_path / "shows" / relative
-            assert video.read_bytes() == b"video"
-            event = await MediaEvent.create(
-                lib=data.shows, src_path=str(video), event_type="created"
-            )
-            await asyncio.wait_for(watcher.consume_event(event), timeout=5)
-
             if layout == "root":
+                assert not transferred
+                assert source.read_bytes() == b"video"
+                assert not video.exists()
+                assert not task.transfer_targets
                 assert (
                     "library root are not indexed" in validation["ingestion"]["scope"]
                 )
@@ -874,6 +875,13 @@ def test_completion(tmp_path, monkeypatch, layout):
                 assert not video.with_suffix(".nfo").exists()
                 assert remote == []
                 return
+
+            assert transferred
+            assert video.read_bytes() == b"video"
+            event = await MediaEvent.create(
+                lib=data.shows, src_path=str(video), event_type="created"
+            )
+            await asyncio.wait_for(watcher.consume_event(event), timeout=5)
 
             season, number, title = (
                 (0, 1, "Charting the Journals")
@@ -1301,8 +1309,9 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
                 "Choose the published indexer for Wayfinder.",
                 "Results: 1) 1080p  2) 720p. Shows has no TV scraper routing series "
                 "and episodes; which site should it read?",
-                "720p to Shows by hardlink; Wayfinder TV is appended after the "
-                "existing bindings for all future Shows imports. Confirm?",
+                "720p to Shows/Wayfinder (2024)/Season 01 by hardlink; Wayfinder "
+                "TV is appended after the existing bindings for all future Shows "
+                "imports. Confirm?",
                 "Bound Wayfinder TV and submitted the task; it continues in the "
                 "background.",
             ][number]
@@ -1393,6 +1402,8 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
                         dir=options["dir"],
                         transfer_lib_id=data.shows.id,
                         transfer_method="hardlink",
+                        sub_pattern="^",
+                        sub_repl="Wayfinder (2024)/Season 01/",
                     )
                 if number == 2:
                     identities.append(turn[-1]["data"]["request_id"])
@@ -1412,6 +1423,20 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
             created, replayed = by_name["create_download_task"]
             assert created["created"] and created["ingestion"]["binding"] == "added"
             assert replayed["replayed"] and replayed["task_id"] == created["task_id"]
+            # the confirmed preview names the torrent's file and its TV location
+            transfer = by_name["validate_download_task"][0]["download"]["transfer"]
+            assert transfer["basis"] == "known_files"
+            assert transfer["items"] == [
+                {
+                    "from": "movie.mkv",
+                    "to": "Wayfinder (2024)/Season 01/movie.mkv",
+                    "season": 1,
+                    "episode": None,
+                }
+            ]
+            assert created["download"]["transfer"] == transfer
+            task = await DownloadTask.get(id=created["task_id"])
+            assert task.sub_repl == "Wayfinder (2024)/Season 01/"
             assert await bindings(data.shows.id) == [
                 *before,
                 (data.series.id, 3, False),
