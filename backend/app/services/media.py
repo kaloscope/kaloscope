@@ -1395,7 +1395,7 @@ INGESTION_RULES = (
     "source details, build one with the movie_scraper or tv_scraper recipe "
     "(create_workflow_draft), keep the pending settings in this conversation and "
     "resume after the user saves and publishes it. Validate the plan or download "
-    "with ingest_workflow_id and show library, transfer method, workflow, "
+    "with ingest_workflow_id and show library, transfer method/preview, workflow, "
     "reuse/add, scope and first execution before confirmation. Creation binds "
     "first, then creates it; report each outcome and retry the same request_id. "
     "Do not wait for downloads or ingestion; later progress comes from task, log "

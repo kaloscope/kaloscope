@@ -275,6 +275,11 @@ def create_server() -> MCPServer:
             "get_library_ingestion; creation binds the reviewed workflow first. "
             "One-time downloads: search_indexer with sources=true, then "
             "validate_download_task and confirmed create_download_task. "
+            "TV libraries index only Series/episode or Series/Season NN/episode "
+            "files: set sub_pattern/sub_repl, pass transfer_samples when files are "
+            "unknown and show the returned transfer preview (samples are only "
+            "illustrative) before confirmation; changed settings need validation "
+            "and confirmation again. "
             "List resources before reading their details; "
             "inspect node schemas and logs to diagnose workflows. Access follows the "
             "account's permissions; AI provider settings require an administrator. "
@@ -380,17 +385,22 @@ def create_server() -> MCPServer:
         ctx: Context,
         validation: Annotated[
             DownloadPlanCheck,
-            Field(description="Settings and optional search sample; no execution."),
+            Field(
+                description="Settings, optional search sample and transfer file "
+                "samples; no execution."
+            ),
         ],
     ) -> PlanValidationResult:
         """Check settings and supply a stable request ID for review and creation.
 
         Args:
             ctx: Authenticated administrator context.
-            validation: Final settings and optional sample, using UTC-aware times.
+            validation: Final settings, optional sample and transfer file samples,
+                using UTC-aware times.
 
         Returns:
-            Located issues, editor settings and first-execution behavior.
+            Located issues, editor settings, the read-only `transfer` preview of
+            destinations and first-execution behavior.
         """
         return PlanValidationResult.model_validate(
             await _read(DownloadPlanService.validate_creation(validation, _user(ctx)))
@@ -469,7 +479,7 @@ def create_server() -> MCPServer:
             DownloadTaskCheck,
             Field(
                 description="One result chosen from search_indexer with sources=true "
-                "and its downloader, directory and optional transfer/ingestion."
+                "and its downloader, directory and optional transfer rule/ingestion."
             ),
         ],
     ) -> DownloadTaskResult:
@@ -481,8 +491,10 @@ def create_server() -> MCPServer:
 
         Returns:
             Located issues, the observed title, magnet/torrent kind and content hash,
-            settings, an existing task with the same content and a request ID. A
-            torrent URL may be fetched to identify its content; nothing is created.
+            settings, an existing task with the same content and a request ID.
+            `download.transfer` previews destinations from the torrent's known
+            files, else from supplied samples. A torrent URL may be fetched to
+            identify its content; nothing is created, moved or recorded.
         """
         return DownloadTaskResult.model_validate(
             await _read(DownloadTaskService.validate_request(check, _user(ctx)))
@@ -511,7 +523,8 @@ def create_server() -> MCPServer:
         Args:
             ctx: Administrator context with a read-write token.
             creation: Validation's request ID and `info_hash`, the same result and
-                settings, and its optional `ingestion` review.
+                settings including any transfer rule, and its optional `ingestion`
+                review.
 
         Returns:
             The task ID and stored state (the same task on every retry), `uncertain`

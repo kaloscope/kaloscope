@@ -1,9 +1,11 @@
 from datetime import UTC, datetime
 from enum import StrEnum, auto
-from typing import Any, Self, cast
+from pathlib import PurePosixPath
+from typing import Annotated, Any, Self, cast
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -45,7 +47,7 @@ from app.utils.disk import format_bytes
 
 # -------------------- Enumerations --------------------
 class TransferMethod(StrEnum):
-    """Transfer completed files by hardlink, symlink, move or copy."""
+    """Place completed files in a library."""
 
     HARDLINK = auto()
     SYMLINK = auto()
@@ -428,7 +430,7 @@ class DownloadPlanUpsert(BaseModel):
     graph_id: PositiveInt
     downloader_id: PositiveInt
     dir: str = Field(min_length=1, max_length=4096)
-    keyword: str = Field(min_length=0, max_length=4096)
+    keyword: str = Field(max_length=4096)
     filters: dict[str, Any] | None = None
     interval_num: PositiveInt
     interval_start: datetime | None = None
@@ -473,6 +475,37 @@ class DownloadPlanSettings(DownloadPlanUpsert):
     interval_end: datetime | None = None
 
 
+def _check_samples(samples: list[str] | None) -> list[str] | None:
+    """Bound illustrative transfer names to a few short relative paths.
+
+    Args:
+        samples: File names to preview, or `None`.
+
+    Returns:
+        The unchanged samples.
+
+    Raises:
+        ValueError: If there are more than 8, or one is empty, longer than 512
+            characters, absolute or contains `..`.
+    """
+    if samples is None:
+        return None
+    if len(samples) > 8:
+        raise ValueError("Supply at most 8 transfer samples")
+    for sample in samples:
+        path = PurePosixPath(sample)
+        if not sample or len(sample) > 512 or path.is_absolute() or ".." in path.parts:
+            raise ValueError("Transfer samples are relative paths up to 512 characters")
+    return samples
+
+
+TransferSamples = Annotated[
+    list[str] | None,
+    AfterValidator(_check_samples),
+    Field(description="Example file names to preview."),
+]
+
+
 class DownloadPlanCheck(BaseModel):
     """Check explicit plan settings and an optional search-result fixture."""
 
@@ -486,6 +519,7 @@ class DownloadPlanCheck(BaseModel):
         default=None,
         description="Ingestion workflow for the transfer library.",
     )
+    transfer_samples: TransferSamples = None
 
     @model_validator(mode="after")
     def bound_input(self) -> Self:
@@ -550,6 +584,8 @@ class DownloadTaskSettings(BaseModel):
     dir: str = Field(min_length=1, max_length=4096)
     transfer_lib_id: PositiveInt | None = None
     transfer_method: TransferMethod | None = None
+    sub_pattern: str | None = Field(max_length=4096, default=None)
+    sub_repl: str | None = Field(max_length=4096, default=None)
 
 
 class DownloadTaskCheck(DownloadTaskSettings):
@@ -559,6 +595,7 @@ class DownloadTaskCheck(DownloadTaskSettings):
         default=None,
         description="Ingestion workflow for the transfer library.",
     )
+    transfer_samples: TransferSamples = None
 
 
 class DownloadTaskCreate(DownloadTaskSettings):

@@ -1,8 +1,10 @@
 import asyncio
 import errno
 import hashlib
+import mimetypes
 import os
 import re
+from collections import Counter
 from datetime import datetime, timedelta
 from functools import cached_property
 from multiprocessing.managers import DictProxy
@@ -49,7 +51,7 @@ from app.models.download import (
     TransferMethod,
 )
 from app.models.flow import GraphState
-from app.models.media import MediaLib
+from app.models.media import LibType, MediaLib
 from app.utils.bittorrent import MagnetLink, standardize_magnet
 from app.utils.extractor import (
     extract_episode,
@@ -885,6 +887,188 @@ def _followed_by(result: dict) -> tuple[bool, str | None]:
     return (metadata, gid)
 
 
+def transfer_names(
+    pattern: str | None,
+    repl: str | None,
+    files: list[str],
+    *,
+    sandboxed: bool = False,
+) -> tuple[list[str], bool]:
+    """Apply a destination-name substitution exactly as file transfer does.
+
+    Args:
+        pattern: Regular expression replaced in each relative path; empty or `None`
+            keeps the original names.
+        repl: Replacement, first rendered as a template with the `title`, `year`,
+            `season` and `episode` extracted from each file stem.
+        files: Relative file paths within the download directory.
+        sandboxed: Whether templates are denied Python internals, as previews of
+            unconfirmed rules require.
+
+    Returns:
+        Destination paths in input order and whether the substitution applied. The
+        original paths are kept without a pattern or when names would collide.
+
+    Raises:
+        re.error: If the pattern or the rendered replacement is invalid.
+        jinja2.TemplateError: If the replacement template cannot be rendered.
+    """
+    if not pattern:
+        return files, False
+    replaced = []
+    for file in files:
+        replacement = repl or ""
+        # render the template with the extracted metadata
+        if is_template(replacement):
+            stem = Path(file).stem
+            context = {
+                "title": extract_title(stem),
+                "year": extract_year(stem),
+                "season": extract_season(stem),
+                "episode": extract_episode(stem),
+            }
+            replacement = render(replacement, context=context, sandboxed=sandboxed)
+        # apply the replacement pattern
+        replaced.append(re.sub(pattern, replacement, file))
+
+    # discard replacement if duplicate file names arise
+    if len(set(replaced)) != len(replaced):
+        return files, False
+    return replaced, True
+
+
+def transfer_target(directory: Path, name: str) -> Path | None:
+    """Place a destination name inside a library directory.
+
+    Args:
+        directory: Absolute library directory.
+        name: Relative destination produced by `transfer_names`.
+
+    Returns:
+        The normalized destination, or `None` for an absolute/invalid name, a
+        library escape (including directory symlinks) or a non-directory parent.
+        The final component is not resolved: recorded transfers may be symlinks
+        to downloaded files. A symlink used as the library root is supported.
+    """
+    if not name or "\0" in name or Path(name).is_absolute():
+        return None
+    root = Path(os.path.normpath(directory))
+    path = Path(os.path.normpath(root / name))
+    if path == root or not path.is_relative_to(root):
+        return None
+    try:
+        if not path.parent.resolve().is_relative_to(root.resolve()):
+            return None
+        for parent in path.parents:
+            if parent == root.parent:
+                break
+            if (parent.exists() or parent.is_symlink()) and not parent.is_dir():
+                return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
+
+
+TV_TRANSFER_DEPTH = (
+    "TV ingestion indexes only Series/episode or Series/Season NN/episode files."
+)
+
+
+def transfer_issues(
+    lib: MediaLib, sources: list[str], targets: list[Path | None]
+) -> dict[int, str]:
+    """Check resolved transfer paths before preview or publication.
+
+    Args:
+        lib: Destination library.
+        sources: Relative download paths in transfer order.
+        targets: Paths checked by `transfer_target`, or `None` for unsafe paths.
+
+    Returns:
+        File indexes mapped to path, collision, TV numbering or companion issues.
+        Existing-file ownership is checked separately by the caller. Deeper TV
+        extras remain allowed alongside episodes; missing episode numbers are not
+        invented.
+    """
+    from app.core.media.handlers.tvshow import episode_location
+
+    keys = [path.parent.resolve() / path.name if path else None for path in targets]
+    counts = Counter(key for key in keys if key is not None)
+    issues = {}
+    videos = []
+    root = Path(os.path.normpath(Path(lib.dir).absolute()))
+    for index, (source, target) in enumerate(zip(sources, targets, strict=True)):
+        if target is None:
+            issues[index] = (
+                "Unsafe destination: absolute, outside the library or invalid parents."
+            )
+            continue
+        if counts[keys[index]] > 1:
+            issues[index] = "Several files share this destination."
+        video = (mimetypes.guess_file_type(source)[0] or "").startswith("video/")
+        if not video:
+            continue
+        videos.append((Path(source), target))
+        if index in issues or lib.lib_type != LibType.TV_SHOW:
+            continue
+        parts = target.relative_to(root).parts
+        if not (mimetypes.guess_file_type(target)[0] or "").startswith("video/"):
+            issues[index] = "The video destination no longer has a video extension."
+        elif len(parts) == 1:
+            issues[index] = TV_TRANSFER_DEPTH
+        elif (location := episode_location(parts)) is not None:
+            season, episode = location
+            stated_season = extract_season(Path(source).stem)
+            stated_episode = extract_episode(Path(source).stem)
+            if season is None:
+                issues[index] = "The folder has no season number."
+            elif stated_season is not None and stated_season != season:
+                issues[index] = (
+                    f"Destination is read as season {season}, but the file states "
+                    f"season {stated_season}."
+                )
+            elif stated_episode is not None and stated_episode != episode:
+                inferred = episode if episode is not None else "unknown"
+                issues[index] = (
+                    f"Destination is read as episode {inferred}, but the file states "
+                    f"episode {stated_episode}."
+                )
+    for index, (source, target) in enumerate(zip(sources, targets, strict=True)):
+        if (
+            index in issues
+            or target is None
+            or (mimetypes.guess_file_type(source)[0] or "").startswith("video/")
+        ):
+            continue
+        source = Path(source)
+        for video_source, video_target in videos:
+            if source.parent != video_source.parent or not source.name.startswith(
+                f"{video_source.stem}."
+            ):
+                continue
+            if target.parent != video_target.parent or not target.name.startswith(
+                f"{video_target.stem}."
+            ):
+                issues[index] = "Keep companion names beside their video."
+            break
+    if (
+        lib.lib_type == LibType.TV_SHOW
+        and videos
+        and not any(
+            episode_location(target.relative_to(root).parts) is not None
+            and (mimetypes.guess_file_type(target)[0] or "").startswith("video/")
+            for _, target in videos
+        )
+    ):
+        video_targets = {target for _, target in videos}
+        for index, target in enumerate(targets):
+            if target in video_targets:
+                issues.setdefault(
+                    index, "No video reaches a folder depth the library indexes."
+                )
+    return issues
+
+
 def _transfer_names(task: DownloadTask, files: list[str]) -> list[str]:
     """Apply the download task's destination-name substitution.
 
@@ -896,28 +1080,7 @@ def _transfer_names(task: DownloadTask, files: list[str]) -> list[str]:
         Destination paths in input order, or the original paths if substitution
         is disabled or produces duplicate names.
     """
-    new_files = files
-    if task.sub_pattern:
-        replaced = []
-        for file in files:
-            repl = task.sub_repl or ""
-            # render the template with the extracted metadata
-            if is_template(repl):
-                stem = Path(file).stem
-                context = {
-                    "title": extract_title(stem),
-                    "year": extract_year(stem),
-                    "season": extract_season(stem),
-                    "episode": extract_episode(stem),
-                }
-                repl = render(repl, context=context)
-            # apply the replacement pattern
-            replaced.append(re.sub(task.sub_pattern, repl, file))
-
-        # discard replacement if duplicate file names arise
-        if len(set(replaced)) == len(replaced):
-            new_files = replaced
-    return new_files
+    return transfer_names(task.sub_pattern, task.sub_repl, files)[0]
 
 
 def _same_transfer_file(source: Path, destination: Path) -> bool:
@@ -973,7 +1136,9 @@ async def backfill_transfer_targets(lib: MediaLib):
                 )
             else:
                 for name, new_name in zip(task.files, new_files, strict=True):
-                    destinations.setdefault(name, destination_dir / new_name)
+                    if (target := transfer_target(destination_dir, new_name)) is None:
+                        continue
+                    destinations.setdefault(name, target)
         transfer_id = (
             job_ids.get(task.id)
             or hashlib.sha256(f"download:{task.id}".encode()).hexdigest()[:32]
@@ -1022,7 +1187,9 @@ async def transfer_files(
 
     Returns:
         `True` if all files are available at recorded paths or no transfer is
-        required; `False` if a file is missing or conflicts with an unrelated target.
+        required; `False` for missing/conflicting files, invalid rules or paths,
+        or TV destinations that lose known season/episode information. Recorded
+        destinations recover independently of the current naming rule.
 
     Raises:
         OrganizePendingError: If pending organization cannot finish safely.
@@ -1050,9 +1217,46 @@ async def transfer_files(
         # refresh paths that may have changed since the task was loaded
         await task.refresh_from_db(fields=["transfer_targets"])
         targets = dict(task.transfer_targets or {})
-        for name, new_name in zip(files, _transfer_names(task, files), strict=True):
+        pending = [name for name in files if not targets.get(name)]
+        proposed = {}
+        try:
+            names, applied = transfer_names(task.sub_pattern, task.sub_repl, pending)
+            if not task.sub_pattern or applied:
+                proposed = dict(zip(pending, names, strict=True))
+            elif pending:
+                logger.warning("Duplicate transfer destinations for task %s", task.id)
+        except Exception as error:
+            # recorded targets must still recover when the current rule is invalid
+            logger.warning("Invalid transfer rule for task %s: %s", task.id, error)
+        destinations = [
+            transfer_target(
+                dst_dir,
+                os.path.relpath(targets[name], dst_dir)
+                if targets.get(name)
+                else proposed.get(name, ""),
+            )
+            for name in files
+        ]
+        # earlier episodes support later batches of companions or extras
+        earlier = [name for name in targets if name not in files]
+        prior_paths = [
+            transfer_target(dst_dir, os.path.relpath(targets[name], dst_dir))
+            for name in earlier
+        ]
+        issues = transfer_issues(lib, files + earlier, destinations + prior_paths)
+        blocked = {
+            index
+            for index in issues
+            if index < len(files)
+            and (not targets.get(files[index]) or destinations[index] is None)
+        }
+        for index, (name, dst) in enumerate(zip(files, destinations, strict=True)):
             src = src_dir / name
-            dst = Path(targets.get(name) or dst_dir / new_name)
+            if index in blocked:
+                logger.warning(
+                    "Skipping transfer for task %s: %s", task.id, issues[index]
+                )
+                continue
             published = False
             cancelled = False
             try:
@@ -1113,7 +1317,7 @@ async def transfer_files(
                 raise
             if cancelled:
                 raise asyncio.CancelledError
-        return all(
+        return not blocked and all(
             targets.get(name) and Path(targets[name]).is_file() for name in files
         )
 

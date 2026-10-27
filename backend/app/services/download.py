@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+import mimetypes
 import os
+import re
 import shutil
 from contextlib import nullcontext, suppress
 from dataclasses import replace
@@ -14,6 +16,8 @@ import aiofiles
 import httpx
 import orjson
 from filelock import Timeout as LockTimeout
+from jinja2 import TemplateSyntaxError
+from jinja2.sandbox import SecurityError
 from sanic import Sanic
 from sanic.log import logger
 from tortoise import timezone
@@ -41,10 +45,14 @@ from app.core.dl.driver import (
 from app.core.dl.openlist.state import retry_state
 from app.core.dl.rpc import RpcDriver
 from app.core.dl.syncer import (
+    TV_TRANSFER_DEPTH,
     execute_download_plan,
     notify_download_changes,
     resolve_details,
     submission_lock,
+    transfer_issues,
+    transfer_names,
+    transfer_target,
 )
 from app.core.exceptions import (
     BadRequestException,
@@ -54,6 +62,7 @@ from app.core.exceptions import (
 )
 from app.core.flow.nodes.base import start_config
 from app.core.flow.outputs import check_output, download_link_kind
+from app.core.renderer import SANDBOX_ENV, is_template
 from app.models.download import (
     DownloadAdd,
     DownloadDir,
@@ -76,6 +85,7 @@ from app.models.download import (
     OfflineDownloadJob,
 )
 from app.models.flow import FlowGraph, GraphCategory, GraphState
+from app.models.media import LibType, MediaLib
 from app.models.user import UserInfo, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowGraphService
@@ -153,6 +163,242 @@ async def open_source(selection: Any) -> dict[str, Any] | None:
     ):
         return None
     return {"title": payload.get("t"), "link": payload["l"]}
+
+
+# keep transfer previews compact in assistant and MCP results
+TRANSFER_PREVIEW_ITEMS = 6
+TRANSFER_PREVIEW_PROBLEMS = 4
+TRANSFER_PATH_CHARS = 160
+TV_TRANSFER_HINT = (
+    "sub_pattern is a regex replaced in each relative path by sub_repl, a template "
+    "with title/year/season/episode read from the file name, e.g. ^(?:.*/)? -> "
+    "Show/Season {{ season }}/. Use the user's or evidenced series name and ask "
+    "only for missing ones; search titles are not file names."
+)
+
+
+def _shown(path: str) -> str:
+    """Shorten a long path for a transfer preview, keeping both ends.
+
+    Args:
+        path: Source or destination path.
+
+    Returns:
+        The path, or its start and end joined by an ellipsis when it is longer
+        than `TRANSFER_PATH_CHARS`.
+    """
+    if len(path) <= TRANSFER_PATH_CHARS:
+        return path
+    return f"{path[:60]}…{path[-(TRANSFER_PATH_CHARS - 61) :]}"
+
+
+def _rule_failure(
+    pattern: str, repl: str | None, names: list[str]
+) -> tuple[str, Exception] | None:
+    """Find the first file whose destination name cannot be produced.
+
+    Args:
+        pattern: Transfer `sub_pattern`.
+        repl: Transfer `sub_repl`.
+        names: Relative source paths.
+
+    Returns:
+        The failing path and its error, or `None` when every name renders.
+    """
+    for name in names:
+        try:
+            transfer_names(pattern, repl, [name], sandboxed=True)
+        except Exception as error:
+            return name, error
+    return None
+
+
+async def transfer_preview(
+    lib: MediaLib,
+    pattern: str | None,
+    repl: str | None,
+    *,
+    files: list[str] | None = None,
+    samples: list[str] | None = None,
+) -> tuple[list[dict[str, str]], dict[str, Any] | None]:
+    """Preview where file transfer puts files and how the library reads them.
+
+    Uses the transfer's own naming with sandboxed templates. Nothing is created,
+    moved or recorded; destinations are only checked for existing files.
+
+    Args:
+        lib: Accessible transfer library.
+        pattern: `sub_pattern` applied to each relative download path.
+        repl: `sub_repl` replacement template.
+        files: Relative paths known from the download's torrent metadata.
+        samples: Illustrative file names when the actual files are unknown.
+
+    Returns:
+        Located issues and a bounded preview: library, rule outcome, basis, the
+        first source-to-destination items (problems first) with the season and
+        episode a TV library reads, the omitted count and notes. The preview is
+        `None` when a movie or reading library has no rule and no names.
+    """
+    from app.core.media.handlers.base import get_handler
+    from app.core.media.handlers.tvshow import episode_location
+
+    names = files or samples or []
+    if not (pattern or names or lib.lib_type == LibType.TV_SHOW):
+        return [], None
+    field = "sub_repl" if pattern else "sub_pattern"
+    issues: list[dict[str, str]] = []
+    notes: list[str] = []
+    preview: dict[str, Any] = {
+        "library": lib.name,
+        "lib_type": lib.lib_type,
+        "basis": "known_files" if files else "samples" if samples else None,
+        "rule": "unchecked" if pattern else "none",
+    }
+    if pattern:
+        try:
+            regex = re.compile(pattern)
+        except re.error as error:
+            issues.append({"path": "sub_pattern", "message": f"Invalid regex: {error}"})
+            return issues, preview
+        try:
+            SANDBOX_ENV.parse(repl or "")
+        except TemplateSyntaxError as error:
+            issues.append({"path": "sub_repl", "message": f"Invalid template: {error}"})
+            return issues, preview
+        if not is_template(repl or ""):
+            try:
+                regex.sub(repl or "", "")
+            except re.error as error:
+                issues.append(
+                    {"path": "sub_repl", "message": f"Invalid replacement: {error}"}
+                )
+                return issues, preview
+    if not names:
+        if lib.lib_type == LibType.TV_SHOW:
+            preview["notes"] = [
+                f"No file names to check. {TV_TRANSFER_DEPTH} Supply transfer_samples."
+            ]
+            preview["hint"] = TV_TRANSFER_HINT
+        return issues, preview
+    if pattern and (failure := _rule_failure(pattern, repl, names)):
+        name, error = failure
+        name = _shown(name)
+        message = (
+            "Uses blocked Python internals"
+            if isinstance(error, SecurityError)
+            else str(error)
+        )
+        issues.append(
+            {
+                "path": "sub_repl",
+                "message": f"{name}: {message}; transfer would fail for every file.",
+            }
+        )
+        return issues, preview
+    destinations, applied = transfer_names(pattern, repl, names, sandboxed=True)
+    if pattern:
+        preview["rule"] = "applied" if applied else "conflict"
+        if not applied:
+            issues.append(
+                {
+                    "path": "sub_repl",
+                    "message": "Several files get one destination; "
+                    "new transfers are blocked.",
+                }
+            )
+            return issues, preview
+
+    root = Path(os.path.normpath(Path(lib.dir).absolute()))
+    handler = get_handler(lib.lib_type)
+    targets = [transfer_target(root, name) for name in destinations]
+    path_issues = transfer_issues(lib, names, targets)
+    items = []
+    video_count = 0
+    series = set()
+    skipped = 0
+    unnumbered = []
+    for index, (source, name) in enumerate(zip(names, destinations, strict=True)):
+        target = targets[index]
+        shown = _shown(str(target.relative_to(root)) if target else name)
+        item: dict[str, Any] = {"from": _shown(source), "to": shown}
+        video = (mimetypes.guess_file_type(name)[0] or "").startswith("video/")
+        problem = f"{shown}: {path_issues[index]}" if index in path_issues else None
+        if (
+            target is not None
+            and not problem
+            and (target.exists() or target.is_symlink())
+        ):
+            problem = f"{shown} already exists; transfer will not overwrite it."
+        elif (
+            target is not None
+            and video
+            and not handler.is_target(str(root), str(target), check_exists=False)
+        ):
+            if lib.lib_type == LibType.TV_SHOW and target.parent == root:
+                problem = f"{shown}: {TV_TRANSFER_DEPTH}"
+            else:
+                # deeper extras or samples stay unindexed without blocking the rest
+                item["indexed"] = False
+                skipped += 1
+        elif target is not None and video and lib.lib_type == LibType.TV_SHOW:
+            parts = target.relative_to(root).parts
+            season, episode = episode_location(parts) or (None, None)
+            item.update(season=season, episode=episode)
+            series.add(parts[0])
+            if episode is None:
+                unnumbered.append(shown)
+        if video:
+            video_count += 1
+        items.append((problem, item))
+
+    problems = [entry[0] for entry in items if entry[0]]
+    issues.extend(
+        {"path": field, "message": problem}
+        for problem in problems[:TRANSFER_PREVIEW_PROBLEMS]
+    )
+    if len(problems) > TRANSFER_PREVIEW_PROBLEMS:
+        issues.append(
+            {
+                "path": field,
+                "message": f"{len(problems) - TRANSFER_PREVIEW_PROBLEMS} more files "
+                "have problems like these.",
+            }
+        )
+    if skipped and skipped == video_count and lib.lib_type != LibType.TV_SHOW:
+        issues.append(
+            {
+                "path": field,
+                "message": "No video reaches a folder depth the library indexes.",
+            }
+        )
+    elif 0 < skipped < video_count:
+        notes.append(
+            f"{skipped} video(s) marked indexed=false are below the indexed folder "
+            "depth, e.g. extras; they stay unindexed."
+        )
+    if unnumbered:
+        more = f" and {len(unnumbered) - 1} more" if len(unnumbered) > 1 else ""
+        notes.append(
+            f"{unnumbered[0]}{more}: no episode number; ingestion gets episode=null."
+        )
+    if len(series) > 1:
+        folders = ", ".join(_shown(folder) for folder in sorted(series)[:3])
+        notes.append(f"Files reach {len(series)} series folders: {folders}.")
+    if samples and not files:
+        notes.insert(
+            0, "Samples only illustrate the rule; actual names are known on completion."
+        )
+    ordered = [entry[1] for entry in items if entry[0]] + [
+        entry[1] for entry in items if not entry[0]
+    ]
+    preview["items"] = ordered[:TRANSFER_PREVIEW_ITEMS]
+    if len(ordered) > TRANSFER_PREVIEW_ITEMS:
+        preview["omitted"] = len(ordered) - TRANSFER_PREVIEW_ITEMS
+    if notes:
+        preview["notes"] = notes[:3]
+    if issues and lib.lib_type == LibType.TV_SHOW:
+        preview["hint"] = TV_TRANSFER_HINT
+    return issues, preview
 
 
 # avoid contending for the shared submission lock within this worker
@@ -620,7 +866,11 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
     @classmethod
     async def _review_request(
-        cls, settings: DownloadTaskSettings, ingest_workflow_id: int | None, user
+        cls,
+        settings: DownloadTaskSettings,
+        ingest_workflow_id: int | None,
+        user,
+        samples: list[str] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any], DownloadRequest | None, Any]:
         """Check a selected result and settings exactly as submission will use them.
 
@@ -628,10 +878,13 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             settings: Reviewed result, downloader, directory and transfer.
             ingest_workflow_id: Optional ingestion workflow to bind.
             user: Current administrator; permissions are checked again.
+            samples: Illustrative file names for the transfer preview when the
+                torrent's files are unknown.
 
         Returns:
-            Located issues, the review shown to the user, the normalized request
-            and the loaded driver (callers close it).
+            Located issues, the review shown to the user including its transfer
+            rule and preview, the normalized request and the loaded driver
+            (callers close it).
 
         Raises:
             ForbiddenException: If the account cannot submit downloads or read the
@@ -671,8 +924,14 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             )
         else:
             review["downloader_name"] = downloader.name
+        lib = None
+        review.update(
+            (field, value)
+            for field in ("sub_pattern", "sub_repl")
+            if (value := getattr(settings, field)) is not None
+        )
         if settings.transfer_lib_id:
-            await MediaLibService.get_accessible(settings.transfer_lib_id, user)
+            lib = await MediaLibService.get_accessible(settings.transfer_lib_id, user)
             if settings.transfer_method is None:
                 issues.append(
                     {
@@ -693,10 +952,25 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                         "message": "Choose the library that ingests it.",
                     }
                 )
+        if settings.sub_pattern and not settings.transfer_lib_id:
+            issues.append(
+                {
+                    "path": "transfer_lib_id",
+                    "message": "Choose the library that receives renamed files.",
+                }
+            )
         if issues:
+            if lib is not None:
+                found, preview = await transfer_preview(
+                    lib, settings.sub_pattern, settings.sub_repl, samples=samples
+                )
+                issues.extend(found)
+                if preview:
+                    review["transfer"] = preview
             return issues, review, None, None
         driver = load_driver(decrypt_config(downloader.config))
         request = None
+        known = None
         try:
             # the existing normalizer requires torrent content or a hashed magnet
             magnet = await standardize_magnet(source["link"])
@@ -724,8 +998,13 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                         torrent=torrent,
                         transfer_library_id=settings.transfer_lib_id,
                         transfer_method=settings.transfer_method,
+                        sub_pattern=settings.sub_pattern,
+                        sub_repl=settings.sub_repl,
                     ),
                 )
+                if magnet.torrent and (content := decode_torrent(magnet.torrent[1])):
+                    # torrent metadata names the files the downloader will write
+                    known = [file.name for file in content.files]
                 review["source_kind"] = "torrent" if magnet.torrent else "magnet"
                 review["info_hash"] = magnet.info_hash or magnet.info_hash_v2
                 if request is None:
@@ -736,6 +1015,17 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                             "magnet or torrent.",
                         }
                     )
+            if lib is not None:
+                found, preview = await transfer_preview(
+                    lib,
+                    settings.sub_pattern,
+                    settings.sub_repl,
+                    files=known,
+                    samples=samples,
+                )
+                issues.extend(found)
+                if preview:
+                    review["transfer"] = preview
         except BaseException:
             await driver.close()
             raise
@@ -755,7 +1045,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             reads happen; a torrent URL may be fetched to identify its content.
         """
         issues, review, request, driver = await cls._review_request(
-            body, body.ingest_workflow_id, user
+            body, body.ingest_workflow_id, user, body.transfer_samples
         )
         if driver is not None:
             await driver.close()
@@ -895,8 +1185,9 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         """Submit one reviewed result once and return without waiting for it.
 
         Args:
-            body: Stable request ID, reviewed result and settings, optional reviewed
-                ingestion binding and explicit confirmation.
+            body: Stable request ID, reviewed result and settings including the
+                transfer rule, optional reviewed ingestion binding and explicit
+                confirmation.
             user: Current administrator; everything is rechecked before writing.
 
         Returns:
@@ -913,8 +1204,12 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         FlowGraphService.require_editor(user)
         key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
         source = await open_source(body.resource)
+        # requests without a transfer rule keep their original receipt digest
+        unset = {
+            field for field in ("sub_pattern", "sub_repl") if not getattr(body, field)
+        }
         identity = {
-            **body.model_dump(mode="json", exclude={"request_id", "confirmed"}),
+            **body.model_dump(mode="json", exclude={"request_id", "confirmed", *unset}),
             "resource": {
                 "workflow_id": body.resource.workflow_id,
                 "resource_id": body.resource.resource_id,
@@ -1679,7 +1974,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "changed search inputs. Empty results need revised inputs or explicit "
                 "agreement to wait for future resources. For ingestion into a movie/TV "
                 "transfer library, follow get_library_ingestion rules. Validate and "
-                "show ALL final settings/defaults and possible overlaps; the user may "
+                "show ALL final settings/defaults, transfer preview and possible "
+                "overlaps; the user may "
                 "view them "
                 "(navigate, get_download_plan) or confirm another plan. Never reject "
                 "creation or change existing plans because of an overlap. Wait for "
@@ -1798,11 +2094,13 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         """Check a plan against the published indexer without executing it.
 
         Args:
-            body: Editor fields and optional explicit search-result sample.
+            body: Editor fields, an optional explicit search-result sample and
+                optional file names for the transfer preview.
             user: Current account; creation requires the same administrator role.
 
         Returns:
-            Located issues, normalized editor data and first-execution semantics.
+            Located issues, normalized editor data, the transfer preview and
+            first-execution semantics.
 
         Raises:
             ForbiddenException: If the account cannot create plans or read resources.
@@ -1853,8 +2151,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     }
                 )
             await driver.close()
+        transfer = None
         if plan.transfer_lib_id:
-            await MediaLibService.get_accessible(plan.transfer_lib_id, user)
+            lib = await MediaLibService.get_accessible(plan.transfer_lib_id, user)
             if plan.transfer_method is None:
                 issues.append(
                     {
@@ -1862,6 +2161,17 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                         "message": "Choose a transfer method for the library.",
                     }
                 )
+            found, transfer = await transfer_preview(
+                lib, plan.sub_pattern, plan.sub_repl, samples=body.transfer_samples
+            )
+            issues.extend(found)
+        elif plan.sub_pattern:
+            issues.append(
+                {
+                    "path": "transfer_lib_id",
+                    "message": "Choose the library that receives renamed files.",
+                }
+            )
         ingestion = None
         if body.ingest_workflow_id is not None:
             if plan.transfer_lib_id:
@@ -1940,6 +2250,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             else "queued_after_creation",
             "interval_unit": "hours",
             "timezone": "UTC",
+            **({"transfer": transfer} if transfer else {}),
             **({"ingestion": ingestion} if ingestion else {}),
         }
 

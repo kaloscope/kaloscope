@@ -20,6 +20,28 @@ from app.utils.extractor import (
 from app.utils.xml import get_all_text, get_decimal, get_element, get_integer, get_text
 
 
+def episode_location(parts: tuple[str, ...]) -> tuple[int | None, int | None] | None:
+    """Read the season and episode numbers the library assigns to a video path.
+
+    Args:
+        parts: Path components relative to the library directory, ending with the
+            video file name.
+
+    Returns:
+        Season and episode numbers, each `None` when unparsed, or `None` when the
+        path is not a series or season file. Series folders default to season 1.
+    """
+    if len(parts) == 2:
+        season = extract_season(parts[0])
+        if season is None:
+            season = 1
+    elif len(parts) == 3:
+        season = extract_season(parts[1])
+    else:
+        return None
+    return season, extract_episode(Path(parts[-1]).stem)
+
+
 class TVShowMediaHandler(MediaHandler):
     """The media item handler for TV show library type."""
 
@@ -165,23 +187,13 @@ class TVShowMediaHandler(MediaHandler):
 
         dir = Path(lib.dir)
         parts = path.relative_to(dir).parts
-        series = parts[0]
         # extract season number based on the directory structure
-        if len(parts) == 2:
-            parent_info = _parent(
-                dir / series,
-                series=series,
-                season=extract_season(series) or 1,
-            )
-        elif len(parts) == 3:
-            season = parts[1]
-            parent_info = _parent(
-                dir / series / season,
-                series=series,
-                season=extract_season(season),
-            )
-        else:
+        if (location := episode_location(parts)) is None:
             return result
+        series = parts[0]
+        parent_info = _parent(
+            dir.joinpath(*parts[:-1]), series=series, season=location[0]
+        )
 
         # create parent item for the directory
         parent_item = await MediaItemService.create(lib.id, path_info=parent_info)
