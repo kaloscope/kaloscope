@@ -183,7 +183,7 @@
         >
       </span>
     {/snippet}
-    <div class="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-1.5">
+    <div class="flex shrink-0 items-center justify-between gap-2 border-b py-1.5 pr-1.5 pl-3">
       <span class="text-xs font-medium" aria-live="polite">
         {managing ? $_('assistant.chats_selected', selected.length) : $_('assistant.history')}
       </span>
@@ -241,21 +241,23 @@
       {#if !$assistant.conversations.length && !$assistant.conversationsLoading}
         <li class="px-2 py-3 text-xs text-base-content/60">{$_('assistant.no_history')}</li>
       {/if}
-      {#if $assistant.conversationsBefore}
+      {#if $assistant.conversationsLoading}
+        <li class="pointer-events-none">
+          <div class="flex justify-center py-2" role="status" aria-label={$_('assistant.loading_history')}>
+            <span class="loading loading-xs loading-spinner" aria-hidden="true"></span>
+          </div>
+        </li>
+      {:else if $assistant.conversationsBefore}
         <li>
           <button
             type="button"
+            class="justify-center"
             disabled={locked || confirming || $assistant.conversationsLoading}
             onclick={() => void loadAssistantConversations(true)}>{$_('assistant.load_older')}</button
           >
         </li>
       {/if}
     </ul>
-    {#if $assistant.conversationsLoading}
-      <div class="flex shrink-0 justify-center py-2" role="status" aria-label={$_('assistant.loading_history')}>
-        <span class="loading loading-xs loading-spinner" aria-hidden="true"></span>
-      </div>
-    {/if}
     {#if managing}
       {#if $assistant.error}
         <p class="px-3 py-2 text-xs text-error" role="alert">{$_(`alert.${$assistant.error}`)}</p>
