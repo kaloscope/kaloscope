@@ -32,6 +32,7 @@ from app.core.ai.queries import (
     media_item_details,
     media_items,
     media_libraries,
+    trial_run,
     value_page,
     workflow_details,
     workflow_jobs,
@@ -80,13 +81,13 @@ from app.models.media import MediaQuery
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
 from app.services.download import DownloadPlanService, DownloadTaskService
-from app.services.flow import FlowGraphService
+from app.services.flow import FlowGraphService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.workflow_authoring import (
     probe_http_request,
     validate_workflow_template,
 )
-from app.utils.json import dumps, loads
+from app.utils.json import JSONType, dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
@@ -222,6 +223,15 @@ class WorkflowValidation(GraphReference):
 
 class WorkflowPreview(GraphProposal):
     """Apply bounded edits and preview them against the original saved version."""
+
+
+class WorkflowRun(GraphReference):
+    """Run an exact reviewed saved version or snapshot once from one entry."""
+
+    entry: str = Field(max_length=64, description="Start node type, e.g. search_start.")
+    params: dict[str, JSONType] = Field(
+        default_factory=dict, description="Fields as in its request example."
+    )
 
 
 class LogDetailQuery(WorkflowID):
@@ -501,8 +511,8 @@ TOOLS = (
     ),
     AssistantTool(
         "validate_workflow",
-        "Validate exact-base structure/fields/readiness, never execute. "
-        "Unsaved edits use page snapshots.",
+        "Validate exact-base structure/fields/readiness; never executes. Valid "
+        "unlocks run_workflow.",
         WorkflowValidation,
         admin=True,
     ),
@@ -512,6 +522,13 @@ TOOLS = (
         "elsewhere reference only. Never saves/publishes. On conflict, revert and "
         "load the latest draft before editing. Remove edges before their nodes.",
         WorkflowPreview,
+        admin=True,
+    ),
+    AssistantTool(
+        "run_workflow",
+        "Really run a validated version/snapshot once, only on user request; never "
+        "saves/publishes. Reports effects, status, output checks.",
+        WorkflowRun,
         admin=True,
     ),
     AssistantTool(
@@ -593,8 +610,9 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
         user: Authenticated account with current resource permissions.
 
     Returns:
-        Read and preview tools, plus draft and download-plan creation for editors.
-        Canvas saves, publication and direct workflow execution remain user actions.
+        Read and preview tools, plus draft and download-plan creation and
+        user-requested trial runs for editors. Canvas saves, publication and
+        unrequested execution remain user actions.
     """
     return {
         tool.name: tool
@@ -681,6 +699,7 @@ def tool_schemas(
     plan_authoring: bool = False,
     plan_only: bool = False,
     ingestion: bool = False,
+    trial: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -691,6 +710,7 @@ def tool_schemas(
         plan_authoring: Expose plan tools after reading the source workflows.
         plan_only: Focus a selected indexer's plan conversation on relevant tools.
         ingestion: Allow A1 scraper creation after inspecting a movie/TV library.
+        trial: Offer trial runs after a successful static validation this turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -699,6 +719,8 @@ def tool_schemas(
     """
     schemas = []
     for tool in available_tools(user).values():
+        if tool.name == "run_workflow" and not trial:
+            continue
         if tool.name in {
             "search_indexer",
             "get_download_plan_options",
@@ -739,20 +761,29 @@ def tool_schemas(
             )
         ):
             continue
-        if authoring and tool.name not in {
-            "list_workflows",
-            "get_workflow",
-            "list_node_types",
-            "get_workflow_reference",
-            "probe_http_request",
-            "validate_workflow_template",
-            "validate_workflow",
-            "preview_workflow_draft",
-            "create_workflow_draft",
-            "read_workflow_snapshot",
-            "read_conversation_history",
-            "navigate",
-        }:
+        if (
+            authoring
+            and not (
+                trial
+                and tool.name
+                in {"run_workflow", "get_workflow_logs", "read_workflow_log"}
+            )
+            and tool.name
+            not in {
+                "list_workflows",
+                "get_workflow",
+                "list_node_types",
+                "get_workflow_reference",
+                "probe_http_request",
+                "validate_workflow_template",
+                "validate_workflow",
+                "preview_workflow_draft",
+                "create_workflow_draft",
+                "read_workflow_snapshot",
+                "read_conversation_history",
+                "navigate",
+            }
+        ):
             continue
         parameters = compact_schema(tool.arguments.model_json_schema())
         parameters.pop("description", None)
@@ -951,6 +982,13 @@ async def execute_tool(
                     result = await log_detail(**args.model_dump(), user=user)
                 case WorkflowLogQuery():
                     result = await workflow_logs(args.workflow_id, args.limit, user)
+                case WorkflowRun():
+                    result = await run_reviewed(
+                        args, conversation_id, call_id, user, canvas, canvas_snapshot_id
+                    )
+                    if result.get("ok") is False:
+                        # a canvas mismatch is a recoverable tool failure
+                        return result
                 case WorkflowValidation() | WorkflowPreview() | SnapshotQuery():
                     document = await resolve_document(args, conversation_id, user)
                     if isinstance(args, SnapshotQuery):
@@ -1218,6 +1256,163 @@ async def resolve_document(
     return graph.draft or {"nodes": [], "edges": []}
 
 
+async def retry_chain(turn_id: int | None, conversation_id: int) -> list[int]:
+    """List a turn and the turns it retried, back to the original request.
+
+    Args:
+        turn_id: Turn whose retry chain is followed.
+        conversation_id: Server-owned conversation containing the turns.
+
+    Returns:
+        Turn IDs from the given turn to the original one; the last is the root.
+    """
+    turn_ids: list[int] = []
+    while turn_id is not None and turn_id not in turn_ids:
+        turn_ids.append(turn_id)
+        turn = await AssistantTurn.get_or_none(
+            id=turn_id, conversation_id=conversation_id
+        )
+        turn_id = turn.retry_of if turn else None
+    return turn_ids
+
+
+async def run_reviewed(
+    args: WorkflowRun,
+    conversation_id: int,
+    call_id: str,
+    user: UserInfo,
+    canvas: dict[str, Any] | None,
+    canvas_snapshot_id: int | None,
+) -> dict:
+    """Run exact reviewed content once per request, within the repair limit.
+
+    A request is the original turn and its retries: identical calls in it replay
+    the same run. It allows the initial run and two repair runs, and no other
+    run after one with side effects or an unknown outcome, including a call that
+    was interrupted or failed after it may have dispatched.
+
+    Args:
+        args: Exact saved version or owned snapshot, entry and parameters.
+        conversation_id: Server-owned conversation.
+        call_id: Server-owned call record.
+        user: Current account whose administrator rights are checked again.
+        canvas: Current designer context, whose canvas must be the one that runs.
+        canvas_snapshot_id: Latest canvas or proposal snapshot in this turn.
+
+    Returns:
+        Shared trial result, a refusal, or a canvas mismatch error.
+
+    Raises:
+        NotFoundException: If the call or snapshot is unavailable.
+        KaloscopeException: If the saved version has changed.
+    """
+    import hashlib
+
+    from app.services.assistant_sessions import AssistantSessionService
+
+    call = await AssistantToolCall.get_or_none(
+        call_id=call_id, turn__conversation_id=conversation_id
+    )
+    if call is None:
+        raise NotFoundException
+    if (
+        canvas is not None
+        and args.workflow_id == canvas["resource_id"]
+        and (
+            args.draft_version != canvas["draft_version"]
+            or args.snapshot_id != canvas_snapshot_id
+        )
+    ):
+        return tool_error(
+            ErrorCode.ASSISTANT_CANVAS_CHANGED,
+            "Run the current canvas: its workflow/version and the latest "
+            "proposal_snapshot_id, or the page snapshot before any edit.",
+        )
+    graph = await FlowGraphService.get_accessible(args.workflow_id, user)
+    FlowGraphService._check_version(graph, args.draft_version)
+    source = "saved_draft"
+    document = graph.draft or {"nodes": [], "edges": []}
+    if args.snapshot_id is not None:
+        snapshot = await AssistantSessionService.read_snapshot(
+            conversation_id, args.snapshot_id, user
+        )
+        if (
+            snapshot.workflow_id != args.workflow_id
+            or snapshot.draft_version != args.draft_version
+        ):
+            raise NotFoundException
+        source, document = snapshot.origin, snapshot.document
+    turn_ids = await retry_chain(call.turn_id, conversation_id)
+    digest = FlowRunService.digest(document, args.entry, args.params)
+    key = hashlib.sha256(
+        f"{user.id}:{conversation_id}:{turn_ids[-1]}:{args.workflow_id}:{digest}".encode()
+    ).hexdigest()[:16]
+    keys: set[str] = set()
+    blocked = False
+    for record in (
+        await AssistantToolCall.filter(turn_id__in=turn_ids, name="run_workflow")
+        .exclude(id=call.id)
+        .order_by("id")
+    ):
+        result = record.result or {}
+        data = result.get("data") or {}
+        try:
+            other = WorkflowRun.model_validate_json(record.arguments)
+        except ValidationError:
+            # rejected arguments never reached a run
+            continue
+        if other.workflow_id != args.workflow_id:
+            continue
+        if data.get("executed"):
+            keys.add(data["run_key"])
+            blocked |= data.get("rerun") == "ask" or data.get("status") in {
+                "running",
+                "unknown",
+            }
+        elif other != args and (
+            record.status in {"running", "interrupted"}
+            or (result.get("error") or {}).get("code")
+            in {ErrorCode.AI_TIMEOUT, ErrorCode.INTERNAL_SERVER_ERROR}
+            or data.get("status") == "submitting"
+        ):
+            # an identical call reads the same run; another may follow an unseen one
+            blocked = True
+    if key not in keys:
+        message = None
+        if len(keys) >= 3:
+            message = (
+                "Repair limit reached: report the remaining failure and missing "
+                "evidence instead of running again."
+            )
+        elif blocked:
+            message = (
+                "An earlier run in this request had effects or an unknown outcome; "
+                "ask the user before running again."
+            )
+        if message:
+            return {
+                "workflow_id": args.workflow_id,
+                "executed": False,
+                "status": "refused",
+                "message": message,
+            }
+    return await trial_run(
+        args.workflow_id,
+        document,
+        target={
+            "workflow_id": args.workflow_id,
+            "draft_version": args.draft_version,
+            "snapshot_id": args.snapshot_id,
+            "source": source,
+        },
+        entry=args.entry,
+        params=args.params,
+        key=key,
+        user=user,
+        repairs_left=max(0, 3 - len(keys | {key})),
+    )
+
+
 async def create_plan(
     args: PlanCreate, conversation_id: int, call_id: str, user: UserInfo
 ) -> dict:
@@ -1244,14 +1439,7 @@ async def create_plan(
     )
     if call is None:
         raise NotFoundException
-    turn_ids = []
-    turn_id = call.turn_id
-    while turn_id is not None and turn_id not in turn_ids:
-        turn_ids.append(turn_id)
-        turn = await AssistantTurn.get_or_none(
-            id=turn_id, conversation_id=conversation_id
-        )
-        turn_id = turn.retry_of if turn else None
+    turn_ids = await retry_chain(call.turn_id, conversation_id)
     for earlier in (
         await AssistantToolCall.filter(
             turn_id__in=turn_ids, name="create_download_plan"

@@ -256,6 +256,22 @@ class FlowDraftRevision(TortoiseModel):
         unique_together = (("graph", "version"),)
 
 
+class FlowRunReceipt(TortoiseModel):
+    """Retain a trial request independently of rotating logs and draft revisions."""
+
+    key = CharField(max_length=64, unique=True)
+    graph_id: int
+    graph: ForeignKeyRelation[FlowGraph] = ForeignKeyField(
+        "models.FlowGraph", related_name=False, db_index=True
+    )
+    draft_version = IntField()
+    digest = CharField(max_length=64)
+    definition = JSONField[dict[str, Any]]()
+
+    class Meta:
+        table = "flow_run_receipt"
+
+
 class FlowLog(TortoiseModel):
     graph_id: int
     graph: ForeignKeyRelation[FlowGraph] = ForeignKeyField(

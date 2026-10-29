@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import hashlib
 import io
 import time
 import zipfile
@@ -10,11 +12,12 @@ from typing import Any, Literal
 
 import aiofiles
 import httpx
+import orjson
 from sanic.log import logger
 from sanic.request.form import File
 from tortoise import Tortoise, timezone
-from tortoise.expressions import F, Q
-from tortoise.transactions import atomic
+from tortoise.expressions import F, Q, RawSQL
+from tortoise.transactions import atomic, in_transaction
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
@@ -25,10 +28,10 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
-from app.core.flow.context import AUTH_KEY
+from app.core.flow.context import AUTH_KEY, MANUAL_KEY, START_KEY
 from app.core.flow.diff import changed_paths
 from app.core.flow.fetcher import fetch_origin, save_icon
-from app.core.flow.nodes.base import Node, NodeSchema, start_config
+from app.core.flow.nodes.base import Node, NodeGroup, NodeSchema, start_config
 from app.core.flow.validation import (
     comparison_document,
     compress_document,
@@ -37,9 +40,11 @@ from app.core.flow.validation import (
 from app.models.flow import (
     FlowDraftRevision,
     FlowGraph,
+    FlowInstance,
     FlowJob,
     FlowLog,
     FlowRepository,
+    FlowRunReceipt,
     FlowTemplate,
     FlowTrigger,
     FlowVariable,
@@ -1095,6 +1100,363 @@ class FlowLogService(BaseService[FlowLog], model=FlowLog):
                     )
             groups.append(group)
         return groups
+
+
+# trial runs carry this server-owned marker through their startup parameters
+TRIAL_KEY = "$trial"
+# SQLite reads the marker key without loading every stored parameter set
+TRIAL_KEY_SQL = """json_extract("bootparams", '$."$trial".key')"""
+TRIAL_PARAMS_BYTES = 8192
+# seconds one trial call may spend before reporting a background run
+TRIAL_WAIT = 8.0
+TRIAL_EFFECTS = {
+    "http": "sends real HTTP requests",
+    "script": "runs Python scripts",
+    "cache": "saves workflow variables",
+    "text": "writes files in media libraries",
+    "ai": "calls the configured AI model",
+}
+
+
+def trial_marker(bootparams: Mapping[str, Any] | None) -> dict[str, str]:
+    """Read the trial marker from stored startup parameters.
+
+    Args:
+        bootparams: Instance or log parameters.
+
+    Returns:
+        The marker's `key` and `digest`, or an empty mapping for other runs.
+    """
+    marker = (bootparams or {}).get(TRIAL_KEY)
+    return marker if isinstance(marker, dict) else {}
+
+
+class FlowRunService(BaseService[FlowInstance], model=FlowInstance):
+    """Run exact reviewed workflow content once through the existing engine."""
+
+    @classmethod
+    def digest(cls, document: dict, entry: str, params: Mapping[str, Any]) -> str:
+        """Fingerprint the executed definition, entry and parameters.
+
+        Args:
+            document: Compressed graph that will run.
+            entry: Start node type.
+            params: Caller startup parameters.
+
+        Returns:
+            Hex SHA-256 digest of the canonical request.
+        """
+        request = {"definition": document, "entry": entry, "params": params}
+        return hashlib.sha256(
+            json.dumps(request, option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()
+
+    @classmethod
+    def effects(cls, document: dict, entry: str) -> tuple[list[str], bool]:
+        """Describe side effects of the nodes reachable from one entry.
+
+        Args:
+            document: Compressed graph that will run.
+            entry: Start node type.
+
+        Returns:
+            Effect descriptions and whether an automatic repeat is safe, which
+            holds only when the reachable nodes at most send GET/HEAD requests.
+        """
+        nodes = {node["id"]: node for node in document["nodes"]}
+        targets: dict[str, list[str]] = {}
+        for edge in document["edges"]:
+            targets.setdefault(edge["source"], []).append(edge["target"])
+        pending = [
+            id for id, node in nodes.items() if node["data"].get("$schema") == entry
+        ]
+        reached = set(pending)
+        while pending:
+            for target in targets.get(pending.pop(), []):
+                if target in nodes and target not in reached:
+                    reached.add(target)
+                    pending.append(target)
+        types = {nodes[id]["data"].get("$schema") for id in reached}
+        effects = [TRIAL_EFFECTS[type] for type in sorted(types & TRIAL_EFFECTS.keys())]
+        methods = {
+            str(nodes[id]["data"].get("method") or "GET").upper()
+            for id in reached
+            if nodes[id]["data"].get("$schema") == "http"
+        } - {"GET", "HEAD"}
+        if methods:
+            effects.append(f"uses {'/'.join(sorted(methods))}, which may change data")
+        return effects, not methods and (types & TRIAL_EFFECTS.keys()) <= {"http"}
+
+    @classmethod
+    async def check(
+        cls, graph: FlowGraph, document: dict, entry: str, params: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Check the entry, parameters and static validity before a run.
+
+        Args:
+            graph: Workflow whose category constrains entries.
+            document: Compressed graph that will run.
+            entry: Requested start node type.
+            params: Caller startup parameters.
+
+        Returns:
+            Located issues; empty when the run may start. Nothing is executed.
+        """
+        issues: list[dict[str, Any]] = []
+        entries = sorted(
+            schema.node_type
+            for schema in Node.schemas
+            if schema.group == NodeGroup.START
+            and graph.category in schema.categories
+            and schema.node_type != "auth_start"
+        )
+        if entry == "auth_start":
+            issues.append(
+                {
+                    "path": "entry",
+                    "message": "Login needs credentials; the user logs in from the "
+                    "search page.",
+                }
+            )
+        elif entry not in entries:
+            issues.append(
+                {"path": "entry", "message": f"Use one of: {', '.join(entries)}."}
+            )
+        elif not any(
+            node["data"].get("$schema") == entry for node in document["nodes"]
+        ):
+            issues.append({"path": "entry", "message": f"The graph has no {entry}."})
+        if any(str(key).startswith("$") for key in params):
+            issues.append(
+                {"path": "params", "message": "Keys starting with $ are reserved."}
+            )
+        if len(json.dumps(params)) > TRIAL_PARAMS_BYTES:
+            issues.append({"path": "params", "message": "Parameters exceed 8 KiB."})
+        validation = await validate_document(
+            GraphDocument.model_validate(document), graph.category
+        )
+        issues.extend(
+            {"path": "document", **issue.model_dump(exclude_none=True)}
+            for issue in validation.issues
+            if issue.severity == "error"
+        )
+        return issues[:8]
+
+    @classmethod
+    async def find(cls, key: str) -> tuple[FlowInstance | None, list[FlowLog]]:
+        """Locate a trial's pending instance and retained log rows in any workflow.
+
+        Args:
+            key: Trial request key.
+
+        Returns:
+            The instance while queued, running or awaiting resumption, and the
+            retained log rows in creation order. Callers compare the workflow, so
+            a key reused for another workflow is detected.
+        """
+        instance = (
+            await FlowInstance.annotate(trial_key=RawSQL(TRIAL_KEY_SQL))
+            .filter(trial_key=key)
+            .order_by("id")
+            .only("id", "graph_id", "bootparams")
+            .first()
+        )
+        logs = (
+            await FlowLog.annotate(trial_key=RawSQL(TRIAL_KEY_SQL))
+            .filter(trial_key=key)
+            .order_by("id")
+        )
+        return instance, logs
+
+    @classmethod
+    async def saved_draft(
+        cls, graph: FlowGraph, version: int, key: str
+    ) -> tuple[dict, bool]:
+        """Resolve the saved draft a request names, keeping its own run readable.
+
+        Args:
+            graph: Accessible workflow.
+            version: Saved draft version the caller reviewed.
+            key: Trial request key.
+
+        Returns:
+            The original definition for a recorded request, or the current draft.
+            Recorded requests may only read their existing run.
+
+        Raises:
+            KaloscopeException: If the version differs from the recorded request,
+                or an unsubmitted request names a stale version.
+        """
+        receipt = await FlowRunReceipt.get_or_none(key=key)
+        if receipt is not None and receipt.graph_id == graph.id:
+            if receipt.draft_version != version:
+                raise KaloscopeException(ErrorCode.FLOW_DRAFT_CONFLICT, status_code=409)
+            return receipt.definition, True
+        FlowGraphService._check_version(graph, version)
+        return graph.draft or {"nodes": [], "edges": []}, False
+
+    @classmethod
+    async def running(cls, graph_id: int) -> set[str]:
+        """List the keys of trials still holding an instance for one workflow.
+
+        Args:
+            graph_id: Workflow whose instances to inspect.
+
+        Returns:
+            Keys of trials that are queued, running or awaiting resumption.
+        """
+        return set(
+            await FlowInstance.filter(graph_id=graph_id)
+            .annotate(trial_key=RawSQL(TRIAL_KEY_SQL))
+            .filter(trial_key__not_isnull=True)
+            .values_list("trial_key", flat=True)
+        )
+
+    @classmethod
+    async def submit(
+        cls, graph_id: int, document: dict, bootparams: dict[str, Any], version: int
+    ) -> FlowInstance:
+        """Claim a trial with a recoverable instance and queue it once.
+
+        Args:
+            graph_id: Workflow whose engine context, variables and logs are used.
+            document: Exact compressed graph stored on the instance.
+            bootparams: Startup parameters, including the trial marker.
+            version: Reviewed saved draft version underlying the definition.
+
+        Returns:
+            Queued instance whose stored definition the engine executes.
+
+        Raises:
+            Exception: If queueing fails; the claim is then released for a retry.
+        """
+        marker = trial_marker(bootparams)
+        async with in_transaction():
+            receipt = await FlowRunReceipt.create(
+                key=marker["key"],
+                graph_id=graph_id,
+                draft_version=version,
+                digest=marker["digest"],
+                definition=document,
+            )
+            instance = await FlowInstance.create(
+                graph_id=graph_id,
+                definition=document,
+                bootparams=bootparams,
+                context={},
+                repeatable=True,
+            )
+        try:
+            # no await after queue acceptance: a later lookup cannot undo the claim
+            cls.app_ctx().flow_engine.enqueue_instance(instance)
+        except Exception:
+            # a failed queue write leaves nothing to run, so a retry may submit
+            async with in_transaction():
+                await instance.delete()
+                await receipt.delete()
+            raise
+        return instance
+
+    @classmethod
+    async def run(
+        cls,
+        workflow_id: int,
+        document: dict,
+        *,
+        entry: str,
+        params: Mapping[str, Any],
+        key: str,
+        user: UserInfo,
+        replay_only: bool = False,
+        draft_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Submit reviewed content once, then wait briefly for its outcome.
+
+        The run is a recoverable instance holding this exact definition, so the
+        engine never substitutes the published one; an interrupted run resumes
+        like other recoverable runs. Ingest runs only preview candidates.
+
+        Args:
+            workflow_id: Workflow whose engine context, variables and logs are used.
+            document: Exact compressed graph to execute.
+            entry: Start node type.
+            params: Caller startup parameters without `$` keys.
+            key: Account-scoped request key; the same key never dispatches twice.
+            user: Current administrator.
+            replay_only: Only read an existing run, as for an outdated version.
+            draft_version: Reviewed saved version; `None` uses the current version.
+
+        Returns:
+            Raw facts: `issues` (nothing ran), `conflict` (the key ran another
+            workflow, content or parameters), `pending` (another call is
+            submitting it), or the `instance` still running and the retained
+            `logs`, with `replayed` when the key had already been submitted. An
+            interrupted caller still completes its dispatch before the key is
+            released, so a retry reads that run.
+
+        Raises:
+            ForbiddenException: If the account cannot edit workflows.
+            NotFoundException: If the workflow is missing.
+            KaloscopeException: If an outdated version has no run to read.
+        """
+        from filelock import Timeout
+
+        from app.core.dl.syncer import submission_lock
+
+        deadline = time.monotonic() + TRIAL_WAIT
+        FlowGraphService.require_editor(user)
+        graph = await FlowGraphService.get_accessible(workflow_id, user)
+        digest = cls.digest(document, entry, params)
+        bootparams = {
+            **params,
+            START_KEY: entry,
+            TRIAL_KEY: {"key": key, "digest": digest},
+        }
+        if graph.category == GraphCategory.INGEST:
+            # interactive ingest runs only preview metadata candidates
+            bootparams[MANUAL_KEY] = True
+        try:
+            with submission_lock(f"trial:{key}"):
+                receipt = await FlowRunReceipt.get_or_none(key=key)
+                instance, logs = await cls.find(key)
+                replayed = receipt is not None
+                if replayed:
+                    if (
+                        receipt.graph_id != graph.id
+                        or receipt.digest != digest
+                        or (
+                            draft_version is not None
+                            and receipt.draft_version != draft_version
+                        )
+                    ):
+                        return {"conflict": True}
+                else:
+                    if replay_only:
+                        raise KaloscopeException(
+                            ErrorCode.FLOW_DRAFT_CONFLICT, status_code=409
+                        )
+                    await graph.refresh_from_db()
+                    if draft_version is not None:
+                        FlowGraphService._check_version(graph, draft_version)
+                    if issues := await cls.check(graph, document, entry, params):
+                        return {"issues": issues}
+                    submission = asyncio.ensure_future(
+                        cls.submit(graph.id, document, bootparams, graph.draft_version)
+                    )
+                    try:
+                        instance = await asyncio.shield(submission)
+                    except asyncio.CancelledError:
+                        # a cancelled call never splits the claim from its dispatch
+                        await submission
+                        raise
+        except Timeout:
+            return {"pending": True}
+        while instance is not None and time.monotonic() < deadline:
+            if not await FlowInstance.exists(id=instance.id):
+                break
+            await asyncio.sleep(0.2)
+        instance, logs = await cls.find(key)
+        return {"replayed": replayed, "instance": instance, "logs": logs}
 
 
 class FlowTriggerService(BaseService[FlowTrigger], model=FlowTrigger):

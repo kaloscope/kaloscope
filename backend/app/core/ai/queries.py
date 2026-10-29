@@ -7,6 +7,7 @@ from sanic import Sanic
 from app.core.ai.documents import graph_summary, value_summary
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import NotFoundException
+from app.core.flow.outputs import check_output
 from app.core.media.watcher import LibWatcher
 from app.models.download import (
     Downloader,
@@ -14,11 +15,23 @@ from app.models.download import (
     DownloadQuery,
     DownloadTask,
 )
-from app.models.flow import FlowLog, GraphDocument, GraphQuery, JobQuery, JobTrigger
+from app.models.flow import (
+    FlowGraph,
+    FlowLog,
+    GraphDocument,
+    GraphQuery,
+    JobQuery,
+    JobTrigger,
+)
 from app.models.media import MediaItem, MediaQuery
 from app.models.user import UserInfo
 from app.services.download import DownloadPlanService, DownloadTaskService
-from app.services.flow import FlowGraphService, FlowJobService
+from app.services.flow import (
+    FlowGraphService,
+    FlowJobService,
+    FlowRunService,
+    trial_marker,
+)
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps
 
@@ -231,8 +244,12 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
         Output counts cover a root array or an object's `items` array, with its
         exact path; other output shapes have an unknown count and path. Skip
         groups deleted during retrieval and omit duration without an end time.
+        Trial runs carry their `run_key`; a trial still holding its instance is
+        `running` and at most five such keys are listed.
     """
     await FlowGraphService.get_accessible(workflow_id, user)
+    # trial runs keep an instance until they finish or after an interruption
+    running = await FlowRunService.running(workflow_id)
     query = FlowLog.filter(graph_id=workflow_id)
     starts = (
         await query.order_by("-started_at")
@@ -244,7 +261,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
     for start in starts[:limit]:
         started = start.started_at
         run = query.filter(started_at=started)
-        first = await run.order_by("id").first().only("id")
+        first = await run.order_by("id").first().only("id", "bootparams")
         if first is None:
             continue
         error_count = await run.filter(ended_at=None).count()
@@ -273,17 +290,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
                 if ended_at is not None
                 else None,
                 "error_count": error_count,
-                "errors": [
-                    {
-                        "log_id": row.id,
-                        "node_id": row.node_id,
-                        "node_type": row.node_type,
-                        "input_handle": row.input_id,
-                        "code": (row.node_data or {}).get("$error"),
-                        "message": value_summary(row.exc_info, limit=500),
-                    }
-                    for row in errors[:5]
-                ],
+                "errors": log_errors(errors),
                 "omitted_errors": max(0, error_count - 5),
                 "output_log_id": last.id if last else None,
                 "output_count": count,
@@ -291,11 +298,197 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
                 "output": value_summary(output),
             }
         )
-    return {
+        if key := trial_marker(first.bootparams).get("key"):
+            runs[-1]["run_key"] = key
+            if key in running:
+                # errors logged so far are not the final outcome
+                runs[-1]["status"] = "running"
+            elif last is not None and error_count:
+                runs[-1]["status"] = "completed_with_errors"
+    result = {
         "workflow_id": workflow_id,
         "runs": runs,
         "truncated": len(starts) > limit,
     }
+    if running:
+        result["running_trials"] = sorted(running)[:5]
+        if len(running) > 5:
+            result["omitted_running_trials"] = len(running) - 5
+    return result
+
+
+def log_errors(rows: list[FlowLog]) -> list[dict]:
+    """Describe failed node log rows with their stable detail identifiers.
+
+    Args:
+        rows: Failed node rows in execution order.
+
+    Returns:
+        At most five errors with node location, error code and message summary.
+    """
+    return [
+        {
+            "log_id": row.id,
+            "node_id": row.node_id,
+            "node_type": row.node_type,
+            "input_handle": row.input_id,
+            "code": (row.node_data or {}).get("$error"),
+            "message": value_summary(row.exc_info, limit=500),
+        }
+        for row in rows[:5]
+    ]
+
+
+# end-node contracts checked against a trial's retained output
+RUN_OUTPUTS = {"search_start": "search", "details_start": "details"}
+INGEST_OUTPUTS = {"movie": "movie", "tvshow": "tv_show", "episode": "episode"}
+
+
+async def trial_run(
+    workflow_id: int,
+    document: dict,
+    *,
+    target: dict,
+    entry: str,
+    params: dict,
+    key: str,
+    user: UserInfo,
+    repairs_left: int | None = None,
+    replay_only: bool = False,
+) -> dict:
+    """Run reviewed content once and report each kind of evidence separately.
+
+    Args:
+        workflow_id: Workflow whose engine context and logs are used.
+        document: Exact compressed graph to execute.
+        target: Reference facts naming the version and snapshot that run.
+        entry: Start node type.
+        params: Caller startup parameters.
+        key: Account-scoped request key shared by retries.
+        user: Current administrator.
+        repairs_left: Automatic repair runs still allowed after this one, or
+            `None` when the caller enforces its own limit.
+        replay_only: Only read the run this key started, never dispatch.
+
+    Returns:
+        Target, effects, status and evidence: static validation, submission,
+        completion and the business-output check are reported separately, with
+        node errors, the bounded output and recovery guidance. Static issues
+        mean nothing ran; `running` and `unknown` are not failures or successes.
+    """
+    outcome = await FlowRunService.run(
+        workflow_id,
+        document,
+        entry=entry,
+        params=params,
+        key=key,
+        user=user,
+        replay_only=replay_only,
+        draft_version=target.get("draft_version"),
+    )
+    graph = await FlowGraph.get(id=workflow_id)
+    effects, repeatable = FlowRunService.effects(document, entry)
+    result: dict[str, Any] = {
+        "workflow_id": workflow_id,
+        "run_key": key,
+        "target": {
+            **{key: value for key, value in target.items() if value is not None},
+            "entry": entry,
+            "params": value_summary(params, limit=300),
+            "matches_published": bool(graph.definition)
+            and not FlowGraphService.compare_documents(graph.definition, document),
+        },
+        "effects": effects,
+        "rerun": "allowed" if repeatable else "ask",
+    }
+    if issues := outcome.get("issues"):
+        return {**result, "executed": False, "status": "invalid", "issues": issues}
+    if outcome.get("conflict"):
+        return {
+            **result,
+            "executed": False,
+            "status": "conflict",
+            "message": "This request_id already ran other content or parameters; "
+            "use a new request_id.",
+        }
+    if outcome.get("pending"):
+        return {
+            **result,
+            "executed": None,
+            "status": "submitting",
+            "message": "Another call is submitting this run; repeat the same "
+            "request later to read it.",
+        }
+    logs = outcome["logs"]
+    errors = [row for row in logs if row.ended_at is None]
+    last = next((row for row in reversed(logs) if row.ended_at is not None), None)
+    if outcome["instance"] is not None:
+        status = "running"
+    elif last is None:
+        status = "failed" if errors else "unknown"
+    else:
+        status = "completed_with_errors" if errors else "completed"
+    evidence: dict[str, Any] = {
+        "static_validation": "passed",
+        "submitted": True,
+        "completed": last is not None,
+        "output_check": "not_available",
+    }
+    result.update(executed=True, status=status)
+    if outcome["replayed"]:
+        result["replayed"] = True
+    if errors:
+        result["errors"] = log_errors(errors)
+        result["omitted_errors"] = max(0, len(errors) - 5)
+    found = []
+    if last is not None:
+        result["output_log_id"] = last.id
+        result["output"] = value_summary(last.retval, limit=800)
+        mode = RUN_OUTPUTS.get(entry) or (
+            INGEST_OUTPUTS.get(params.get("nfo_type"))
+            if entry == "ingest_start"
+            else None
+        )
+        if mode is None:
+            evidence["output_check"] = "not_applicable"
+        else:
+            found, notes = check_output(mode, last.retval, params)
+            evidence["output_check"] = "failed" if found else "passed"
+            if found:
+                result["output_issues"] = [
+                    issue.model_dump(mode="json") for issue in found[:5]
+                ]
+            if notes:
+                result["output_notes"] = notes[:3]
+    result["evidence"] = evidence
+    if status == "running":
+        result["next"] = (
+            "Still running in the background; tell the user and check "
+            "get_workflow_logs (run_key) later instead of waiting."
+        )
+    elif status == "unknown":
+        result["next"] = (
+            "No execution record or log remains; report the unknown outcome and do "
+            "not run again without the user."
+        )
+    elif errors or found:
+        if repairs_left == 0:
+            result["next"] = (
+                "Repair limit reached: report the remaining failure and missing "
+                "evidence."
+            )
+        elif not repeatable:
+            result["next"] = (
+                "Read the errors, preview and validate a minimal fix, then ask the "
+                "user before running again because of its effects."
+            )
+        else:
+            left = "at most 2" if repairs_left is None else str(repairs_left)
+            result["next"] = (
+                "Read errors, preview a minimal fix, validate it, then run its "
+                f"snapshot; {left} repair runs left."
+            )
+    return result
 
 
 def value_page(value: Any, offset: int, limit: int) -> dict:

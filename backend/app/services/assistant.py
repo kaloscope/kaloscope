@@ -349,8 +349,10 @@ class AssistantService:
         """
         schemas = tool_schemas(user)
         workflow_authoring = False
+        plan_tools = False
         plan_authoring = False
         ingestion_authoring = False
+        trial_ready = False
         current_context = turn.context
         # only a server-confirmed editable designer receives saveable direct edits
         canvas = (
@@ -569,11 +571,29 @@ class AssistantService:
                     }
                     if call.function.name == "get_library_ingestion":
                         ingestion_authoring = result["data"]["supported"]
+                    plan_tools = True
                     schemas = tool_schemas(
                         user,
                         plan_authoring=True,
                         plan_only=plan_authoring,
                         ingestion=ingestion_authoring,
+                        trial=trial_ready,
+                    )
+                if (
+                    not trial_ready
+                    and result["ok"]
+                    and call.function.name == "validate_workflow"
+                    and result["data"].get("valid")
+                ):
+                    # trial runs follow a successful static check of the same turn
+                    trial_ready = True
+                    schemas = tool_schemas(
+                        user,
+                        authoring=workflow_authoring,
+                        plan_authoring=plan_tools,
+                        plan_only=plan_authoring,
+                        ingestion=ingestion_authoring,
+                        trial=True,
                     )
                 if (
                     result["ok"]
@@ -589,7 +609,7 @@ class AssistantService:
                 ):
                     # keep full domain catalogs for ordinary turns, focus recipe builds
                     workflow_authoring = True
-                    schemas = tool_schemas(user, authoring=True)
+                    schemas = tool_schemas(user, authoring=True, trial=trial_ready)
                 # a result committed together with its effect is authoritative
                 await AssistantToolCall.filter(
                     turn_id=turn.id, call_id=info["id"], status="running"
