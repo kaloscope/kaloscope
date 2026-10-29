@@ -1,6 +1,7 @@
 from tortoise import migrations
 from tortoise.migrations import operations as ops
 from app.models.ai import AIProtocol, AIProviderPreset
+from app.models.download import PlanAction
 from app.models.flow import ScheduleAction
 from app.models.mcp import MCPTokenScope
 from orjson import loads
@@ -123,6 +124,21 @@ class Migration(migrations.Migration):
                 ('result', fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads)),
             ],
             options={'table': 'assistant_tool_call', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Record actual tool execution independently of generated explanations.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
+            name='DownloadPlanReceipt',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('key', fields.CharField(unique=True, max_length=64)),
+                ('action', fields.CharEnumField(description='UPDATE: update\nDELETE: delete', enum_type=PlanAction, max_length=16)),
+                ('plan_id', fields.IntField()),
+                ('graph_id', fields.IntField()),
+                ('result', fields.JSONField(encoder=JSON_DUMPS, decoder=loads)),
+            ],
+            options={'table': 'download_plan_receipt', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Retain one applied plan change so retries read its outcome.'},
             bases=['TortoiseModel'],
         ),
         ops.CreateModel(

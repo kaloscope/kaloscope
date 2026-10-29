@@ -27,6 +27,7 @@ from app.models.assistant import (
     WorkflowDesignerContext,
     media_resource,
 )
+from app.models.download import DownloadPlan
 from app.models.flow import FlowJob, GraphDocument
 from app.models.user import UserInfo
 from app.services.flow import FlowGraphService
@@ -391,14 +392,15 @@ class AssistantSessionService:
         return record
 
     @classmethod
-    async def schedule_reviewed(cls, turn: AssistantTurn) -> bool:
-        """Check whether the previous completed turn showed a valid schedule review.
+    async def reviewed(cls, turn: AssistantTurn) -> set[str]:
+        """Name the change reviews the previous completed turn showed as valid.
 
         Args:
             turn: Active turn whose conversation history is read.
 
         Returns:
-            Whether that review may be confirmed in this turn.
+            Schedule and plan review tools whose results may be confirmed in this
+            turn.
         """
         previous = (
             await AssistantTurn.filter(
@@ -407,12 +409,16 @@ class AssistantSessionService:
             .order_by("-id")
             .first()
         )
-        return previous is not None and any(
-            ((call.result or {}).get("data") or {}).get("valid")
+        if previous is None:
+            return set()
+        return {
+            call.name
             for call in await AssistantToolCall.filter(
-                turn_id=previous.id, name="review_workflow_schedule"
+                turn_id=previous.id,
+                name__in=["review_workflow_schedule", "review_download_plan_change"],
             )
-        )
+            if ((call.result or {}).get("data") or {}).get("valid")
+        }
 
     @classmethod
     async def begin(
@@ -430,8 +436,8 @@ class AssistantSessionService:
 
         Raises:
             KaloscopeException: If the request is active or duplicated.
-            BadRequestException: If a snapshot, selected node, or schedule reference
-                does not match its workflow.
+            BadRequestException: If a snapshot, selected node, schedule or plan
+                reference does not match its workflow.
             NotFoundException: If a retry references another conversation.
         """
         conversation = await cls.owned(conversation_id, user)
@@ -450,6 +456,19 @@ class AssistantSessionService:
                 resource_ids = [media_resource(context["library_id"])]
             elif context["page_type"] == "workflow_jobs" and context["selected_job"]:
                 resource_ids = [context["selected_job"]["workflow_id"]]
+            elif context["page_type"] == "download_plans":
+                if context["filters"]["workflow_id"]:
+                    resource_ids = [context["filters"]["workflow_id"]]
+                if selected := context["selected_plan"]:
+                    plan = await DownloadPlan.get_or_none(
+                        id=selected["plan_id"], graph_id=selected["workflow_id"]
+                    )
+                    if plan is None:
+                        raise BadRequestException
+                    # a selected plan also reveals the library it transfers to
+                    resource_ids.append(plan.graph_id)
+                    if plan.transfer_lib_id:
+                        resource_ids.append(media_resource(plan.transfer_lib_id))
             # download pages show shared tasks, so they add nothing to recheck
             if not await cls.allowed(resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)

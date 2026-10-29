@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '$lib/api';
+  import { registerAssistantContext } from '$lib/assistant/context';
+  import { downloadPlansPath } from '$lib/assistant/navigation';
   import {
     Button,
     Cell,
@@ -17,7 +19,7 @@
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores';
-  import type { DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
+  import type { AssistantPageContext, DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { onMount, tick, untrack } from 'svelte';
 
@@ -33,22 +35,37 @@
   const ordering = createSortField();
   const loading = createLoading();
 
+  type PlanFilters = Extract<AssistantPageContext, { page_type: 'download_plans' }>['filters'];
+
+  // retain the filters of the displayed results, independently of unsubmitted input
+  let displayed: PlanFilters | null = null;
+
   /**
    * Search for download plans.
    *
    * @param page - Page number.
    * @param size - Page size.
+   * @param base - Filters to reuse instead of the current inputs.
    */
-  function search(page: number = 1, size: number = pagination.size) {
+  function search(
+    page: number = 1,
+    size: number = pagination.size,
+    base: Omit<PlanFilters, 'page_num' | 'page_size'> | null = null
+  ) {
+    const filters = {
+      ...(base ?? { workflow_id: graph || null, keyword, ordering: $ordering }),
+      page_num: page,
+      page_size: size
+    };
     loading.start();
     api
       .get('download/plan/list', {
         searchParams: {
           page_num: page,
           page_size: size,
-          ordering: $ordering,
-          graph_id: graph || 0,
-          keyword: keyword
+          ordering: filters.ordering,
+          graph_id: filters.workflow_id || 0,
+          keyword: filters.keyword
         }
       })
       .json<Resp<Page<DownloadPlan>>>()
@@ -57,6 +74,7 @@
         pagination.size = size;
         pagination.total = data.total;
         plans = data.items;
+        displayed = filters;
       })
       .finally(() => loading.end());
   }
@@ -81,7 +99,26 @@
 
   onMount(() => {
     const refresh = () => search();
+    /**
+     * Reload the displayed page after an assistant change, keeping its filters.
+     */
+    const changed = () => {
+      if (!displayed) return;
+      const { page_num, page_size, ...base } = displayed;
+      search(page_num, page_size, base);
+    };
     window.addEventListener('download-plan-created', refresh);
+    window.addEventListener('download-plan-changed', changed);
+    const unregister = registerAssistantContext(() => {
+      if (!displayed) return null;
+      const current = plans.find((plan) => plan.id === selected?.id);
+      return {
+        page_type: 'download_plans',
+        route: downloadPlansPath,
+        filters: { ...displayed },
+        selected_plan: current ? { plan_id: current.id, workflow_id: current.graph_id } : null
+      };
+    });
     api
       .get('flow/graph/list', {
         searchParams: [
@@ -97,7 +134,11 @@
         const items = data.items;
         graphs = items.filter((g) => g.node_types.includes('search_start') && !g.only_preview);
       });
-    return () => window.removeEventListener('download-plan-created', refresh);
+    return () => {
+      window.removeEventListener('download-plan-created', refresh);
+      window.removeEventListener('download-plan-changed', changed);
+      unregister();
+    };
   });
 </script>
 

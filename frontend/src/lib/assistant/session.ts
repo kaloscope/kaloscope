@@ -883,6 +883,9 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'apply_workflow_schedule' && event.data.ok && event.data.data?.applied !== false) {
             window.dispatchEvent(new Event('workflow-job-changed'));
           }
+          if (tool.name === 'apply_download_plan_change' && event.data.ok && event.data.data?.applied !== false) {
+            window.dispatchEvent(new Event('download-plan-changed'));
+          }
           break;
         }
         case 'done':

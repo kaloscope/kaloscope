@@ -247,6 +247,8 @@ def test_protocol(mode):
                 "run_workflow",
                 "review_workflow_schedule",
                 "apply_workflow_schedule",
+                "review_download_plan_change",
+                "apply_download_plan_change",
             }
             for tool in result.tools:
                 assert tool.annotations is not None
@@ -261,6 +263,7 @@ def test_protocol(mode):
                     "search_indexer",
                     "run_workflow",
                     "apply_workflow_schedule",
+                    "apply_download_plan_change",
                 }
                 assert tool.annotations.read_only_hint is (not writes)
                 assert tool.annotations.destructive_hint is (
@@ -274,6 +277,7 @@ def test_protocol(mode):
                         "search_indexer",
                         "run_workflow",
                         "apply_workflow_schedule",
+                        "apply_download_plan_change",
                     }
                 )
                 # repeating a request ID reads the same plan, task, run or change
@@ -285,6 +289,7 @@ def test_protocol(mode):
                         "create_download_task",
                         "run_workflow",
                         "apply_workflow_schedule",
+                        "apply_download_plan_change",
                     }
                 )
                 if tool.name == "validate_download_task":
@@ -348,7 +353,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 32
+            assert len(response_json(response)["result"]["tools"]) == 34
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

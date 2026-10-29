@@ -6,7 +6,7 @@ import re
 import shutil
 from contextlib import nullcontext, suppress
 from dataclasses import replace
-from datetime import UTC
+from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -18,6 +18,7 @@ import orjson
 from filelock import Timeout as LockTimeout
 from jinja2 import TemplateSyntaxError
 from jinja2.sandbox import SecurityError
+from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
 from tortoise import timezone
@@ -64,14 +65,19 @@ from app.core.flow.nodes.base import start_config
 from app.core.flow.outputs import check_output, download_link_kind
 from app.core.renderer import SANDBOX_ENV, is_template
 from app.models.download import (
+    PLAN_SETTINGS,
     DownloadAdd,
     DownloadDir,
     Downloader,
     DownloaderUpsert,
     DownloadPlan,
+    DownloadPlanApply,
+    DownloadPlanChange,
     DownloadPlanCheck,
     DownloadPlanCreate,
     DownloadPlanQuery,
+    DownloadPlanReceipt,
+    DownloadPlanSettings,
     DownloadPlanUpsert,
     DownloadQuery,
     DownloadState,
@@ -83,6 +89,7 @@ from app.models.download import (
     IndexerSearch,
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
+    PlanAction,
 )
 from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.media import LibType, MediaLib
@@ -403,6 +410,7 @@ async def transfer_preview(
 
 # avoid contending for the shared submission lock within this worker
 _REQUEST_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+_PLAN_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
 def _maybe_sent(
@@ -2090,13 +2098,17 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         return issues
 
     @classmethod
-    async def validate_creation(cls, body: DownloadPlanCheck, user: UserInfo) -> dict:
+    async def validate_creation(
+        cls, body: DownloadPlanCheck, user: UserInfo, *, search: bool = True
+    ) -> dict:
         """Check a plan against the published indexer without executing it.
 
         Args:
             body: Editor fields, an optional explicit search-result sample and
                 optional file names for the transfer preview.
             user: Current account; creation requires the same administrator role.
+            search: Check the indexer, keyword and filters. An update that keeps
+                its search inputs skips them.
 
         Returns:
             Located issues, normalized editor data, the transfer preview and
@@ -2114,7 +2126,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             "Configuration and supplied samples only; no search, HTTP request "
             "or download was executed."
         ]
-        issues.extend(await cls._search_issues(graph, plan.keyword, plan.filters))
+        if search:
+            issues.extend(await cls._search_issues(graph, plan.keyword, plan.filters))
         if not plan.dir.strip():
             issues.append({"path": "dir", "message": "Supply a download directory."})
         for field in ("interval_start", "interval_end"):
@@ -2437,6 +2450,519 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         if plan is None:
             return {"created": False}
         return await cls.creation_result(plan, user, replayed=True)
+
+    @classmethod
+    def settings(cls, plan: DownloadPlan | DownloadPlanSettings) -> dict[str, Any]:
+        """Read the editor settings that a plan change reviews and writes.
+
+        Args:
+            plan: Stored plan or proposed editor settings.
+
+        Returns:
+            JSON settings with the plan's indexer; offset times are UTC. Runtime
+            counters, history and creation records are excluded.
+        """
+        values = {name: getattr(plan, name) for name in ("graph_id", *PLAN_SETTINGS)}
+        for name in ("interval_start", "interval_end"):
+            if values[name] is not None and values[name].tzinfo is not None:
+                values[name] = values[name].astimezone(UTC)
+        return loads(dumps(values))
+
+    @classmethod
+    def revision(cls, plan: DownloadPlan) -> str:
+        """Fingerprint a plan's settings so a review detects later edits.
+
+        Args:
+            plan: Stored plan.
+
+        Returns:
+            Short digest of its indexer and editor settings. Attempts that only
+            advance counters or history leave it unchanged.
+        """
+        return hashlib.sha256(
+            dumps(cls.settings(plan), option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()[:16]
+
+    @classmethod
+    def change_request(
+        cls,
+        user_id: int,
+        change: DownloadPlanChange,
+        revision: str,
+        nonce: bytes | None = None,
+    ) -> UUID:
+        """Issue a request ID that identifies one reviewed change and revision.
+
+        Args:
+            user_id: Reviewing account.
+            change: Reviewed change; omitted and explicitly cleared fields differ.
+            revision: Reviewed plan revision.
+            nonce: Random half of an existing ID being checked; `None` issues one.
+
+        Returns:
+            A new ID, or the only ID this nonce can have for the same review.
+        """
+        nonce = nonce or os.urandom(8)
+        digest = hashlib.sha256(
+            dumps(
+                change.model_dump(mode="json", exclude_unset=True),
+                option=orjson.OPT_SORT_KEYS,
+            )
+        ).hexdigest()
+        tag = hashlib.sha256(nonce + f"{user_id}:{digest}:{revision}".encode())
+        return UUID(bytes=nonce + tag.digest()[:8])
+
+    @classmethod
+    async def plan_state(cls, plan: DownloadPlan) -> dict[str, Any]:
+        """Describe a plan's current settings, recorded attempts and scheduling.
+
+        Args:
+            plan: Stored plan.
+
+        Returns:
+            JSON settings, `total_count`, `last_exec` and the `schedule` state
+            derived from stored settings, not from an attempt.
+        """
+        graph = await FlowGraph.get_or_none(id=plan.graph_id)
+        settings = cls.settings(plan)
+        return loads(
+            dumps(
+                {
+                    **{name: settings[name] for name in PLAN_SETTINGS},
+                    "total_count": plan.total_count,
+                    "last_exec": plan.last_exec,
+                    "schedule": plan.schedule_state(
+                        graph is not None and graph.state != GraphState.DRAFT
+                    ),
+                }
+            )
+        )
+
+    @classmethod
+    async def _review_change(
+        cls, change: DownloadPlanChange, user: UserInfo
+    ) -> tuple[dict[str, Any], DownloadPlan, dict[str, Any]]:
+        """Check a plan change against current permissions and editor rules.
+
+        Args:
+            change: Requested update or deletion.
+            user: Current account.
+
+        Returns:
+            The review, the stored plan and the changed settings an update writes.
+
+        Raises:
+            ForbiddenException: If the account cannot manage the plan's resources.
+            NotFoundException: If the plan, or a library it names, does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        plan = await DownloadPlan.get_or_none(id=change.plan_id)
+        if plan is None:
+            raise NotFoundException
+        graph = await FlowGraphService.get_accessible(plan.graph_id, user)
+        if plan.transfer_lib_id:
+            await MediaLibService.get_accessible(plan.transfer_lib_id, user)
+        published = graph.state != GraphState.DRAFT
+        before = cls.settings(plan)
+        issues: list[dict[str, str]] = []
+        notes: list[str] = []
+        after: dict[str, Any] | None = None
+        proposed = None
+        writes: dict[str, Any] = {}
+        extra: dict[str, Any] = {}
+        if change.action == PlanAction.UPDATE:
+            provided = change.model_dump(include=set(PLAN_SETTINGS), exclude_unset=True)
+            values = {**before, **provided}
+            if values["transfer_lib_id"] is None:
+                # the editor saves transfer options only together with a library
+                values.update(
+                    {
+                        name: None
+                        for name in ("transfer_method", "sub_pattern", "sub_repl")
+                        if name not in provided
+                    }
+                )
+            try:
+                proposed = DownloadPlanSettings.model_validate(values)
+            except ValidationError as exc:
+                issues.extend(
+                    {
+                        # the only model-level rule orders the start and end
+                        "path": ".".join(map(str, error["loc"])) or "interval_start",
+                        "message": error["msg"].removeprefix("Value error, ")[:200],
+                    }
+                    for error in exc.errors(include_input=False, include_url=False)
+                )
+        if proposed is not None:
+            after = cls.settings(proposed)
+            search = any(after[name] != before[name] for name in ("keyword", "filters"))
+            checked = await cls.validate_creation(
+                DownloadPlanCheck(plan=proposed), user, search=search
+            )
+            issues.extend(checked["issues"])
+            if "transfer" in checked:
+                extra["transfer"] = checked["transfer"]
+            for name in PLAN_SETTINGS:
+                if after[name] != before[name]:
+                    value = getattr(proposed, name)
+                    if name in {"interval_start", "interval_end"} and value:
+                        value = value.astimezone(UTC)
+                    writes[name] = value
+            if not writes and not issues:
+                issues.append({"path": "action", "message": "Nothing would change."})
+            if search and not issues:
+                extra["search_preview"] = {
+                    "workflow_id": graph.id,
+                    "keyword": after["keyword"],
+                    "filters": after["filters"],
+                    "page_size": min(after["batch_limit"], 20),
+                }
+                notes.append(
+                    "Search inputs changed: run search_indexer with search_preview "
+                    "and show the results before confirming. Resources this plan "
+                    "already handled stay skipped."
+                )
+            if writes.keys() & {
+                "downloader_id",
+                "dir",
+                "transfer_lib_id",
+                "transfer_method",
+                "sub_pattern",
+                "sub_repl",
+            }:
+                notes.append(
+                    "Existing tasks keep their downloader, directory and transfer "
+                    "settings; only new submissions use these."
+                )
+            if after["transfer_lib_id"] and "transfer_lib_id" in writes:
+                notes.append("Library ingestion bindings are unchanged.")
+        timing: dict[str, Any] = {"before": plan.schedule_state(published)}
+        if change.action == PlanAction.DELETE:
+            timing.update(
+                after="deleted",
+                rule="No further attempts; an attempt already running is not "
+                "cancelled and may still submit one download before it stops.",
+            )
+            notes.append(
+                "Deletes the plan and its deduplication history; its download "
+                "tasks and downloaded files stay."
+            )
+        elif proposed is not None and not issues:
+            future = DownloadPlan(
+                interval_start=writes.get("interval_start", plan.interval_start),
+                interval_end=writes.get("interval_end", plan.interval_end),
+                total_limit=proposed.total_limit,
+                total_count=plan.total_count,
+            )
+            timing["after"] = future.schedule_state(published)
+            if plan.creation_key and plan.last_exec is None:
+                timing["rule"] = (
+                    "Its queued first attempt runs at the next check once active, "
+                    "with these settings."
+                )
+            else:
+                timing.update(
+                    interval_elapses_at=(plan.last_exec or plan.created_at)
+                    + timedelta(hours=proposed.interval_num),
+                    rule="Hourly checks start an attempt while schedule is active "
+                    "once interval_num hours have passed since the last attempt; "
+                    "not an exact time.",
+                )
+            notes.append(
+                "Applies from the next attempt; one already running keeps its "
+                "earlier settings. Counters, history and tasks are kept."
+            )
+            if proposed.total_limit is not None and "total_limit" in writes:
+                left = proposed.total_limit - plan.total_count
+                notes.append(
+                    f"At most {left} more downloads ({plan.total_count} of "
+                    f"{proposed.total_limit} added)."
+                    if left > 0
+                    else f"total_limit {proposed.total_limit} is not above the "
+                    f"{plan.total_count} already added, so no further attempts run "
+                    "until it is raised or cleared."
+                )
+            if timing["after"] == "not_started":
+                notes.append("Waits until interval_start.")
+        if not published and change.action == PlanAction.UPDATE:
+            notes.append("The indexer is unpublished; attempts wait until published.")
+        shown_ids = [before, after or before]
+        names = dict(
+            await Downloader.filter(
+                id__in=[settings["downloader_id"] for settings in shown_ids]
+            ).values_list("id", "name")
+        )
+        libraries = dict(
+            await MediaLib.filter(
+                id__in=[settings["transfer_lib_id"] or 0 for settings in shown_ids]
+            ).values_list("id", "name")
+        )
+
+        def shown(settings: dict[str, Any]) -> dict[str, Any]:
+            """Add downloader and library names to settings for the summary.
+
+            Args:
+                settings: Reviewed settings.
+
+            Returns:
+                Editor settings without the indexer, plus display names.
+            """
+            return {
+                **{name: settings[name] for name in PLAN_SETTINGS},
+                "downloader_name": names.get(settings["downloader_id"]),
+                "transfer_lib_name": libraries.get(settings["transfer_lib_id"]),
+            }
+
+        revision = cls.revision(plan)
+        result = {
+            "valid": not issues,
+            "issues": issues[:12],
+            "action": change.action,
+            "plan_id": plan.id,
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "revision": revision,
+            "before": shown(before),
+            "after": shown(after) if after else None,
+            "changes": [
+                {"field": name, "before": before[name], "after": after[name]}
+                for name in PLAN_SETTINGS
+                if after and after[name] != before[name]
+            ],
+            "runtime": {
+                "total_count": plan.total_count,
+                "last_exec": plan.last_exec,
+                "first_execution": (plan.creation_receipt or {}).get("first_execution"),
+            },
+            "timing": timing,
+            "notes": notes,
+            "interval_unit": "hours",
+            "timezone": "UTC",
+            **extra,
+        }
+        if not issues:
+            result["request_id"] = str(cls.change_request(user.id, change, revision))
+        return loads(dumps(result)), plan, writes
+
+    @classmethod
+    async def review_change(cls, change: DownloadPlanChange, user: UserInfo) -> dict:
+        """Review a plan update or deletion without saving or executing anything.
+
+        Args:
+            change: Target plan and the settings to replace.
+            user: Current account; only administrators change plans.
+
+        Returns:
+            Located issues, before/after settings and changes, recorded attempts,
+            scheduling before and after, notes, a `search_preview` when search
+            inputs change, the plan's `revision` and, when valid, a `request_id`
+            for this exact review.
+
+        Raises:
+            ForbiddenException: If the account cannot manage the plan's resources.
+            NotFoundException: If the plan, or a library it names, does not exist.
+        """
+        result, _, _ = await cls._review_change(change, user)
+        return result
+
+    @classmethod
+    async def apply_change(cls, body: DownloadPlanApply, user: UserInfo) -> dict:
+        """Apply a confirmed plan review once without starting an attempt.
+
+        The change and its receipt commit together, so a repeated request reads
+        the recorded outcome, including a deletion after the plan is gone.
+
+        Args:
+            body: Request ID, the exact reviewed change and revision, and the
+                user's confirmation.
+            user: Current account; permissions and settings are checked again.
+
+        Returns:
+            The applied outcome and current plan (`replayed` on retries), or
+            `conflict`, `pending`, `stale`, `confirmation_required`, located
+            issues, an `absent` plan, a `failed` change that saved nothing, or an
+            `uncertain` outcome to inspect rather than repeat.
+
+        Raises:
+            ForbiddenException: If the account cannot manage the plan's resources.
+            NotFoundException: If a library the change names no longer exists.
+        """
+        FlowGraphService.require_editor(user)
+        nonce = body.request_id.bytes[:8]
+        if (
+            cls.change_request(user.id, body.change, body.revision, nonce)
+            != body.request_id
+        ):
+            return {
+                "applied": False,
+                "conflict": True,
+                "message": "This request_id was reviewed for another change or "
+                "revision; review the change again.",
+            }
+        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        lock = _PLAN_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            try:
+                with submission_lock(f"plan-change:{key}"):
+                    task = asyncio.ensure_future(cls._apply_locked(body, key, user))
+                    try:
+                        return await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        # a cancelled caller never splits a change from its receipt
+                        await task
+                        raise
+            except LockTimeout:
+                if receipt := await DownloadPlanReceipt.get_or_none(key=key):
+                    return await cls._replay_change(receipt, user)
+                return {
+                    "applied": False,
+                    "pending": True,
+                    "message": "Another call is applying this request; repeat the "
+                    "same request later to read its outcome.",
+                }
+
+    @classmethod
+    async def _replay_change(
+        cls, receipt: DownloadPlanReceipt, user: UserInfo
+    ) -> dict[str, Any]:
+        """Read a recorded outcome under current permissions.
+
+        Args:
+            receipt: Applied request.
+            user: Current account.
+
+        Returns:
+            The recorded outcome with the plan as it is now, or `None` once deleted.
+
+        Raises:
+            ForbiddenException: If the account can no longer read its resources.
+        """
+        # a removed workflow or library cannot be revealed by its old outcome
+        with suppress(NotFoundException):
+            await FlowGraphService.get_accessible(receipt.graph_id, user)
+        for change in receipt.result.get("changes", []):
+            if change["field"] == "transfer_lib_id":
+                for library_id in {change["before"], change["after"]} - {None}:
+                    with suppress(NotFoundException):
+                        await MediaLibService.get_accessible(library_id, user)
+        plan = await DownloadPlan.get_or_none(id=receipt.plan_id)
+        if plan and plan.transfer_lib_id:
+            await MediaLibService.get_accessible(plan.transfer_lib_id, user)
+        return {
+            **receipt.result,
+            "replayed": True,
+            "plan": await cls.plan_state(plan) if plan else None,
+        }
+
+    @classmethod
+    async def _apply_locked(
+        cls, body: DownloadPlanApply, key: str, user: UserInfo
+    ) -> dict[str, Any]:
+        """Recheck and apply one request while holding its submission lock.
+
+        Args:
+            body: Confirmed request.
+            key: Account-scoped request identity.
+            user: Current account.
+
+        Returns:
+            Shared outcome described by `apply_change`.
+        """
+        if receipt := await DownloadPlanReceipt.get_or_none(key=key):
+            return await cls._replay_change(receipt, user)
+        change = body.change
+        absent = {
+            "applied": False,
+            "outcome": "absent",
+            "action": change.action,
+            "plan_id": change.plan_id,
+            "message": "The plan no longer exists; this request changed nothing.",
+        }
+        try:
+            review, plan, writes = await cls._review_change(change, user)
+        except NotFoundException:
+            if not await DownloadPlan.exists(id=change.plan_id):
+                return absent
+            raise
+        base = {
+            name: review[name]
+            for name in ("action", "plan_id", "workflow_id", "workflow_name")
+        }
+        stale = {
+            "applied": False,
+            **base,
+            "stale": True,
+            "message": "The plan's settings changed after the review; review it again.",
+            "current": review["before"],
+        }
+        if review["revision"] != body.revision:
+            return stale
+        if not review["valid"]:
+            return {
+                "applied": False,
+                **base,
+                "valid": False,
+                "issues": review["issues"],
+            }
+        if not body.confirmed:
+            return {
+                **review,
+                "request_id": str(body.request_id),
+                "applied": False,
+                "confirmation_required": True,
+            }
+        try:
+            async with in_transaction():
+                # an editor or another review may have changed it since the check
+                current = await DownloadPlan.get_or_none(id=plan.id)
+                if current is None:
+                    return absent
+                if cls.revision(current) != body.revision:
+                    return stale
+                if change.action == PlanAction.DELETE:
+                    await DownloadPlan.filter(id=plan.id).delete()
+                    state = None
+                else:
+                    # counters and the last attempt advance independently
+                    await DownloadPlan.filter(id=plan.id).update(**writes)
+                    state = await cls.plan_state(await DownloadPlan.get(id=plan.id))
+                result = {
+                    "applied": True,
+                    "outcome": "deleted"
+                    if change.action == PlanAction.DELETE
+                    else "updated",
+                    **base,
+                    "changes": review["changes"],
+                    "plan": state,
+                }
+                await DownloadPlanReceipt.create(
+                    key=key,
+                    action=change.action,
+                    plan_id=plan.id,
+                    graph_id=base["workflow_id"],
+                    result=result,
+                )
+        except Exception:
+            logger.exception("Failed to apply a download plan change")
+            try:
+                receipt = await DownloadPlanReceipt.get_or_none(key=key)
+            except Exception:
+                return {
+                    "applied": None,
+                    "outcome": "uncertain",
+                    **base,
+                    "message": "The outcome could not be read; inspect the plan "
+                    "instead of repeating the request.",
+                }
+            if receipt is not None:
+                return await cls._replay_change(receipt, user)
+            return {
+                "applied": False,
+                **base,
+                "failed": True,
+                "message": "Nothing was changed; the same request may be repeated.",
+            }
+        return {**result, "replayed": False}
 
     @classmethod
     async def upsert(cls, obj: DownloadPlanUpsert) -> DownloadPlan:

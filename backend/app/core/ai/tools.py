@@ -57,6 +57,8 @@ from app.models.assistant import (
     media_resource,
 )
 from app.models.download import (
+    DownloadPlanApply,
+    DownloadPlanChange,
     DownloadPlanCheck,
     DownloadPlanCreate,
     DownloadPlanQuery,
@@ -64,6 +66,8 @@ from app.models.download import (
     DownloadTaskCheck,
     DownloadTaskCreate,
     IndexerSearch,
+    PlanAction,
+    TransferMethod,
 )
 from app.models.flow import (
     GraphCategory,
@@ -97,6 +101,9 @@ MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
 CREATE_TOOL = "create_workflow_draft"
 SCHEDULE_TOOLS = frozenset({"review_workflow_schedule", "apply_workflow_schedule"})
+PLAN_CHANGE_TOOLS = frozenset(
+    {"review_download_plan_change", "apply_download_plan_change"}
+)
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -376,6 +383,23 @@ class ScheduleConfirm(ToolArguments):
     )
 
 
+class PlanChangeReview(DownloadPlanChange):
+    """Review one plan update or deletion without saving it."""
+
+    action: Annotated[PlanAction, plain_enum(PlanAction)]
+    transfer_method: Annotated[TransferMethod, plain_enum(TransferMethod)] | None = None
+
+
+class PlanChangeConfirm(ToolArguments):
+    """Apply a plan review from an earlier turn of this conversation."""
+
+    request_id: UUID
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
@@ -487,7 +511,8 @@ TOOLS = (
         "list_download_plans",
         "Page accessible plans; all indexers unless workflow_id; keyword=substring. "
         "plan_id != workflow_id. schedule=settings, not execution; total_count/"
-        "last_exec/first_execution=recorded attempts. Full plan: get_download_plan.",
+        "last_exec/first_execution=recorded attempts. Full plan/changes: "
+        "get_download_plan.",
         PlanList,
     ),
     AssistantTool(
@@ -633,6 +658,23 @@ TOOLS = (
         admin=True,
     ),
     AssistantTool(
+        "review_download_plan_change",
+        "Review an update/delete of a plan read via get_download_plan; saves "
+        "nothing. Omitted fields keep values, null clears; the indexer is fixed. "
+        "Summarize changes, timing and notes in the user's language, not JSON. "
+        "End the turn for confirmation.",
+        PlanChangeReview,
+        admin=True,
+    ),
+    AssistantTool(
+        "apply_download_plan_change",
+        "Apply a prior turn's valid plan review after the user confirms it; starts "
+        "no attempt. Repeat the same request_id after errors; never re-review to "
+        "retry.",
+        PlanChangeConfirm,
+        admin=True,
+    ),
+    AssistantTool(
         "navigate",
         "Offer a user-clicked page button with unsaved-edit checks. "
         "Designer/media: accessible resource_id; lists: omit it.",
@@ -739,6 +781,7 @@ def tool_schemas(
     ingestion: bool = False,
     trial: bool = False,
     schedule: bool = False,
+    plan_change: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -752,6 +795,8 @@ def tool_schemas(
         trial: Offer trial runs after a successful static validation this turn.
         schedule: Offer schedule changes after listing schedules this turn or
             after a review in the previous turn.
+        plan_change: Offer plan changes after reading a plan this turn or after
+            a review in the previous turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -763,6 +808,8 @@ def tool_schemas(
         if tool.name == "run_workflow" and not trial:
             continue
         if tool.name in SCHEDULE_TOOLS and not schedule:
+            continue
+        if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
             continue
         if tool.name in {
             "search_indexer",
@@ -797,6 +844,7 @@ def tool_schemas(
                 "read_workflow_log",
                 "read_conversation_history",
                 "navigate",
+                *PLAN_CHANGE_TOOLS,
             }
             and not (
                 ingestion
@@ -956,6 +1004,10 @@ async def execute_tool(
                     result = await FlowJobService.review_change(args, user)
                 case ScheduleConfirm():
                     result = await apply_schedule(args, conversation_id, user)
+                case DownloadPlanChange():
+                    result = await DownloadPlanService.review_change(args, user)
+                case PlanChangeConfirm():
+                    result = await apply_plan_change(args, conversation_id, user)
                 case PlanList():
                     result = await download_plans(
                         DownloadPlanQuery(
@@ -1663,6 +1715,70 @@ async def apply_schedule(
             ScheduleApply(
                 request_id=args.request_id,
                 change=ScheduleChange.model_validate_json(record.arguments),
+                revision=data["revision"],
+                confirmed=args.confirmed and ready,
+            ),
+            user,
+        )
+        if not ready and not result.get("replayed"):
+            return {
+                **result,
+                "applied": False,
+                "confirmation_required": True,
+                "message": "A newer review replaced this one; confirm that one."
+                if superseded
+                else "Show this review, finish the turn and wait for the user's "
+                "confirmation.",
+            }
+        return result
+    raise NotFoundException
+
+
+async def apply_plan_change(
+    args: PlanChangeConfirm, conversation_id: int, user: UserInfo
+) -> dict:
+    """Apply a plan review the user confirmed after it was shown.
+
+    Only the newest review of a plan may be applied, and it must be valid and from
+    a completed earlier turn; a newer review, even an invalid one, replaces it.
+    The active turn is never complete, so its own reviews wait. A committed
+    request replays first, so retries never repeat it.
+
+    Args:
+        args: Reviewed request ID and the user's confirmation.
+        conversation_id: Server-owned conversation.
+        user: Current account whose rights the service checks again.
+
+    Returns:
+        Shared outcome, or a confirmation request for a review that is not ready.
+
+    Raises:
+        NotFoundException: If the review record is unavailable.
+    """
+    reviews = [
+        (record, data)
+        for record in (
+            await AssistantToolCall.filter(
+                turn__conversation_id=conversation_id,
+                name="review_download_plan_change",
+            )
+            .order_by("-id")
+            .limit(30)
+        )
+        if "valid" in (data := (record.result or {}).get("data") or {})
+    ]
+    for index, (record, data) in enumerate(reviews):
+        if data.get("request_id") != str(args.request_id):
+            continue
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        superseded = any(
+            other["plan_id"] == data["plan_id"] for _, other in reviews[:index]
+        )
+        ready = not superseded and reviewed.status == "complete"
+        result = await DownloadPlanService.apply_change(
+            DownloadPlanApply(
+                request_id=args.request_id,
+                change=DownloadPlanChange.model_validate_json(record.arguments),
                 revision=data["revision"],
                 confirmed=args.confirmed and ready,
             ),

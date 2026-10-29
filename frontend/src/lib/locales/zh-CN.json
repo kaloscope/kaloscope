@@ -1128,6 +1128,8 @@
       "list_workflow_jobs": "查找定时任务",
       "review_workflow_schedule": "检查定时任务变更",
       "apply_workflow_schedule": "应用定时任务变更",
+      "review_download_plan_change": "检查下载计划变更",
+      "apply_download_plan_change": "应用下载计划变更",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
@@ -1269,6 +1271,20 @@
       "stale": "未应用：定时任务在预览后已变更",
       "conflict": "未应用：请求与预览内容不一致",
       "pending": "仍在应用中，请稍后再次确认以读取结果",
+      "invalid": "未应用，请展开工具详情查看问题",
+      "refused": "未应用，未保存任何更改"
+    },
+    "plan_change": {
+      "reviewed": "尚未应用，请确认此变更后再应用",
+      "updated": "已更新下载计划 #{0}，下次执行起生效",
+      "deleted": "已删除下载计划 #{0}，任务与文件保留，进行中的执行不会取消",
+      "absent": "下载计划 #{0} 已不存在，未做任何更改",
+      "uncertain": "结果待确认，请先查看下载计划页面，勿重复操作",
+      "confirmation_required": "尚未应用，请先确认最新的变更预览",
+      "stale": "未应用：下载计划在预览后已变更",
+      "conflict": "未应用：请求与预览内容不一致",
+      "pending": "仍在应用中，请稍后再次确认以读取结果",
+      "failed": "未应用，未保存任何更改，可再次确认重试",
       "invalid": "未应用，请展开工具详情查看问题",
       "refused": "未应用，未保存任何更改"
     }

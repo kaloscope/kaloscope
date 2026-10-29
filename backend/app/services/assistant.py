@@ -22,6 +22,7 @@ from openai import (
 from app.core.ai.history import budgets, context_size, prepare_context
 from app.core.ai.tools import (
     CREATE_TOOL,
+    PLAN_CHANGE_TOOLS,
     SCHEDULE_TOOLS,
     execute_tool,
     media_resources,
@@ -350,8 +351,10 @@ class AssistantService:
             APIError: If the provider request fails.
         """
         # a review shown in the previous turn may be confirmed in this one
-        schedule_ready = await AssistantSessionService.schedule_reviewed(turn)
-        schemas = tool_schemas(user, schedule=schedule_ready)
+        reviewed = await AssistantSessionService.reviewed(turn)
+        schedule_ready = "review_workflow_schedule" in reviewed
+        plan_change = "review_download_plan_change" in reviewed
+        schemas = tool_schemas(user, schedule=schedule_ready, plan_change=plan_change)
         workflow_authoring = False
         plan_tools = False
         plan_authoring = False
@@ -555,6 +558,7 @@ class AssistantService:
                     and (
                         call.function.name == "get_download_plan_options"
                         or call.function.name == "get_library_ingestion"
+                        or call.function.name == "list_download_plans"
                         or (
                             call.function.name == "list_workflows"
                             and any(
@@ -569,9 +573,11 @@ class AssistantService:
                         )
                     )
                 ):
-                    plan_authoring |= call.function.name in {
+                    # listed plans and offered changes need room, as authoring does
+                    plan_authoring |= plan_change or call.function.name in {
                         "get_download_plan_options",
                         "get_library_ingestion",
+                        "list_download_plans",
                     }
                     if call.function.name == "get_library_ingestion":
                         ingestion_authoring = result["data"]["supported"]
@@ -583,6 +589,7 @@ class AssistantService:
                         ingestion=ingestion_authoring,
                         trial=trial_ready,
                         schedule=schedule_ready,
+                        plan_change=plan_change,
                     )
                 if (
                     not trial_ready
@@ -600,6 +607,7 @@ class AssistantService:
                         ingestion=ingestion_authoring,
                         trial=True,
                         schedule=schedule_ready,
+                        plan_change=plan_change,
                     )
                 if (
                     not schedule_ready
@@ -616,6 +624,24 @@ class AssistantService:
                         ingestion=ingestion_authoring,
                         trial=trial_ready,
                         schedule=True,
+                        plan_change=plan_change,
+                    )
+                if (
+                    not plan_change
+                    and not workflow_authoring
+                    and result["ok"]
+                    and call.function.name == "get_download_plan"
+                ):
+                    # plan changes follow reading the plan and focus on plan tools
+                    plan_change = plan_tools = plan_authoring = True
+                    schemas = tool_schemas(
+                        user,
+                        plan_authoring=True,
+                        plan_only=True,
+                        ingestion=ingestion_authoring,
+                        trial=trial_ready,
+                        schedule=schedule_ready,
+                        plan_change=True,
                     )
                 if (
                     result["ok"]
@@ -632,7 +658,11 @@ class AssistantService:
                     # keep full domain catalogs for ordinary turns, focus recipe builds
                     workflow_authoring = True
                     schemas = tool_schemas(
-                        user, authoring=True, trial=trial_ready, schedule=schedule_ready
+                        user,
+                        authoring=True,
+                        trial=trial_ready,
+                        schedule=schedule_ready,
+                        plan_change=plan_change,
                     )
                 # a result committed together with its effect is authoritative
                 await AssistantToolCall.filter(
@@ -737,6 +767,28 @@ class AssistantService:
                     ):
                         # a schedule reveals its workflow; job IDs are not workflows
                         resource_ids.append(result["data"]["workflow_id"])
+                    if (
+                        result["ok"]
+                        and call.function.name in PLAN_CHANGE_TOOLS
+                        and isinstance(result["data"].get("workflow_id"), int)
+                    ):
+                        # a plan reveals its indexer and libraries; plan IDs never do
+                        data = result["data"]
+                        resource_ids.append(data["workflow_id"])
+                        libraries = {
+                            (data.get(key) or {}).get("transfer_lib_id")
+                            for key in ("before", "after", "current", "plan")
+                        } | {
+                            value
+                            for change in data.get("changes", [])
+                            if change["field"] == "transfer_lib_id"
+                            for value in (change["before"], change["after"])
+                        }
+                        resource_ids.extend(
+                            media_resource(library_id)
+                            for library_id in libraries
+                            if library_id
+                        )
                     if result["ok"] and call.function.name == "list_download_plans":
                         # each listed plan reveals its indexer and transfer library
                         for item in result["data"]["items"]:

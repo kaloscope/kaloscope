@@ -13,6 +13,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveInt,
     field_serializer,
+    field_validator,
     model_validator,
 )
 from sanic.request.form import File
@@ -53,6 +54,17 @@ class TransferMethod(StrEnum):
     SYMLINK = auto()
     MOVE = auto()
     COPY = auto()
+
+
+class PlanAction(StrEnum):
+    """Change an existing download plan.
+
+    `update`: Replace the given editor settings; omitted settings keep their values.
+    `delete`: Remove the plan and its deduplication history; tasks stay.
+    """
+
+    UPDATE = auto()
+    DELETE = auto()
 
 
 class OfflineDownloadErrorKind(StrEnum):
@@ -221,6 +233,20 @@ class DownloadPlanHistory(TortoiseModel):
             ("plan_id", "info_hash"),
             ("plan_id", "info_hash_v2"),
         )
+
+
+class DownloadPlanReceipt(TortoiseModel):
+    """Retain one applied plan change so retries read its outcome."""
+
+    key = CharField(max_length=64, unique=True)
+    action = CharEnumField(max_length=16, enum_type=PlanAction)
+    # deletion removes the plan, so these identities are not relations
+    plan_id = IntField()
+    graph_id = IntField()
+    result = JSONField[dict[str, Any]]()
+
+    class Meta:
+        table = "download_plan_receipt"
 
 
 class DownloadTask(TortoiseModel):
@@ -561,6 +587,88 @@ class DownloadPlanCreate(BaseModel):
     confirmed: bool = Field(
         default=False,
         description="True only after the user approves these final settings.",
+    )
+
+
+# editor settings a plan change may replace; the plan's indexer stays fixed
+PLAN_SETTINGS = (
+    "downloader_id",
+    "dir",
+    "keyword",
+    "filters",
+    "interval_num",
+    "interval_start",
+    "interval_end",
+    "batch_limit",
+    "total_limit",
+    "transfer_lib_id",
+    "transfer_method",
+    "sub_pattern",
+    "sub_repl",
+)
+
+
+class DownloadPlanChange(BaseModel):
+    """Update or delete one existing plan; omitted settings keep their values."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    action: PlanAction
+    plan_id: PositiveInt = Field(description="Plan ID, not a workflow ID.")
+    downloader_id: PositiveInt | None = None
+    dir: str | None = Field(default=None, min_length=1, max_length=4096)
+    keyword: str | None = Field(default=None, max_length=4096)
+    filters: dict[str, Any] | None = None
+    interval_num: PositiveInt | None = None
+    interval_start: datetime | None = None
+    interval_end: datetime | None = None
+    batch_limit: PositiveInt | None = None
+    total_limit: PositiveInt | None = None
+    transfer_lib_id: PositiveInt | None = None
+    transfer_method: TransferMethod | None = None
+    sub_pattern: str | None = Field(default=None, max_length=4096)
+    sub_repl: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("interval_start", "interval_end")
+    @classmethod
+    def normalize_time(cls, value: datetime | None) -> datetime | None:
+        """Store offset times in UTC so equal instants review identically.
+
+        Args:
+            value: Requested time; naive values are reported by the review.
+
+        Returns:
+            The same instant in UTC, or the unchanged naive or missing value.
+        """
+        return value.astimezone(UTC) if value and value.tzinfo else value
+
+    @model_validator(mode="after")
+    def validate_action(self) -> Self:
+        """Keep deletion free of settings.
+
+        Returns:
+            The validated change.
+
+        Raises:
+            ValueError: If a deletion also supplies settings.
+        """
+        if self.action == PlanAction.DELETE and self.model_fields_set - {
+            "action",
+            "plan_id",
+        }:
+            raise ValueError("delete takes only plan_id")
+        return self
+
+
+class DownloadPlanApply(BaseModel):
+    """Apply one reviewed plan change; repeat the same request to read its outcome."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    request_id: UUID
+    change: DownloadPlanChange
+    revision: str = Field(max_length=64, description="Reviewed plan revision.")
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
     )
 
 

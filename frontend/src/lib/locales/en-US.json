@@ -1128,6 +1128,8 @@
       "list_workflow_jobs": "Find Scheduled Jobs",
       "review_workflow_schedule": "Review Schedule Change",
       "apply_workflow_schedule": "Apply Schedule Change",
+      "review_download_plan_change": "Review Plan Change",
+      "apply_download_plan_change": "Apply Plan Change",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_reference": "Read Workflow Reference",
@@ -1269,6 +1271,20 @@
       "stale": "Not applied: the schedule changed after review.",
       "conflict": "Not applied: this request does not match its review.",
       "pending": "Still being applied. Confirm again later to read the result.",
+      "invalid": "Not applied. Expand the details to see the issues.",
+      "refused": "Not applied; nothing was saved."
+    },
+    "plan_change": {
+      "reviewed": "Not applied yet. Confirm this change to apply it.",
+      "updated": "Plan #{0} updated; applies from its next attempt",
+      "deleted": "Plan #{0} deleted; tasks and files stay, a running attempt is not cancelled",
+      "absent": "Plan #{0} no longer exists; nothing changed",
+      "uncertain": "Result unconfirmed. Check Download Plans before any new change.",
+      "confirmation_required": "Not applied. Confirm the latest review first.",
+      "stale": "Not applied: the plan changed after review.",
+      "conflict": "Not applied: this request does not match its review.",
+      "pending": "Still being applied. Confirm again later to read the result.",
+      "failed": "Not applied; nothing was saved. Confirm again to retry.",
       "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was saved."
     }
