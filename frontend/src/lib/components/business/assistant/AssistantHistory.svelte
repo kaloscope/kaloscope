@@ -263,8 +263,8 @@
       {#if selected.length > 999}
         <p class="px-3 py-2 text-xs text-error" role="alert">{$_('assistant.delete_chats_limit', 999)}</p>
       {/if}
-      <div class="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2">
-        <label class="flex min-h-8 cursor-pointer items-center gap-2 text-xs text-base-content/60">
+      <div class="flex shrink-0 items-center justify-between gap-2 border-t px-1.5 py-2">
+        <label class="flex min-h-8 cursor-pointer items-center gap-2.5 px-2.5 text-xs text-base-content/60">
           <input
             type="checkbox"
             class="checkbox checkbox-xs"
