@@ -619,9 +619,9 @@ TOOLS = (
     ),
     AssistantTool(
         "review_workflow_schedule",
-        "Check one schedule change; saves nothing. Use listed IDs and ask when "
-        "matches are ambiguous. Times need offsets. Show before/after, defaults, "
-        "first_run and notes, then end the turn for confirmation.",
+        "Review a schedule change; saves nothing. Use listed IDs; ask if ambiguous. "
+        "Times need offsets. Summarize changes, defaults, first_run and notes in "
+        "the user's language, not JSON. End the turn for confirmation.",
         ScheduleReview,
         admin=True,
     ),
@@ -1625,10 +1625,10 @@ async def apply_schedule(
 ) -> dict:
     """Apply a schedule review the user confirmed after it was shown.
 
-    Only the newest valid review of a schedule (or of a new schedule for a
-    workflow) from a completed earlier turn is applied; the active turn is never
-    complete, so its own reviews wait. A committed request replays first, so
-    retries never repeat it.
+    Only the newest review of a schedule (or of a new schedule for a workflow)
+    may be applied, and it must be valid and from a completed earlier turn. The
+    active turn is never complete, so its own reviews wait. A committed request
+    replays first, so retries never repeat it.
 
     Args:
         args: Reviewed request ID and the user's confirmation.
@@ -1650,11 +1650,11 @@ async def apply_schedule(
         .limit(30)
     ):
         data = (record.result or {}).get("data") or {}
-        if data.get("valid"):
+        if "valid" in data:
             target = (data["job_id"], None if data["job_id"] else data["workflow_id"])
             reviews.append((record, data, target))
     for index, (record, data, target) in enumerate(reviews):
-        if data["request_id"] != str(args.request_id):
+        if data.get("request_id") != str(args.request_id):
             continue
         reviewed = await AssistantTurn.get(id=record.turn_id)
         superseded = any(other == target for _, _, other in reviews[:index])

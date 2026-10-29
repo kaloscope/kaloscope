@@ -7,7 +7,6 @@ import re
 import time
 import zipfile
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import groupby
@@ -39,7 +38,7 @@ from app.core.exceptions import (
 )
 from app.core.flow.context import AUTH_KEY, MANUAL_KEY, START_KEY
 from app.core.flow.diff import changed_paths
-from app.core.flow.engine import EventWrapper, job_trigger
+from app.core.flow.engine import EventWrapper, job_expired, job_trigger
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node, NodeGroup, NodeSchema, start_config
 from app.core.flow.validation import (
@@ -1650,9 +1649,10 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
         engine = cls.app_ctx().flow_engine
         data = obj.model_dump(exclude={"id"})
         if obj.id:
+            previous = await FlowJob.get(id=obj.id)
             await FlowJob.filter(id=obj.id).update(**data)
             job = await FlowJob.get(id=obj.id)
-            await engine.refresh_job(job.id)
+            await engine.refresh_job(job.id, expired=job_expired(previous))
         else:
             data["state"] = JobState.PENDING
             job = await FlowJob.create(**data)
@@ -2030,9 +2030,10 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
     async def apply_change(cls, body: ScheduleApply, user: UserInfo) -> dict:
         """Apply a confirmed review once and return without waiting for any run.
 
-        The change, its scheduler notice and its receipt commit together, so a
-        refused notice saves nothing. Retries with the request ID read the receipt
-        instead of repeating the change; a cancelled caller completes it first.
+        A durable receipt claims the request before any scheduler notice. The
+        change and its successful outcome commit together; a refused notice
+        rolls back the change and releases the claim. An uncertain claim remains
+        readable even if recording its final outcome fails.
 
         Args:
             body: Request ID, the exact reviewed change and revision, and the
@@ -2117,6 +2118,9 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
 
         Returns:
             Shared outcome described by `apply_change`.
+
+        Raises:
+            NotFoundException: If the associated workflow no longer exists.
         """
         if receipt := await FlowJobReceipt.get_or_none(key=key):
             return await cls._replay(receipt, user)
@@ -2162,15 +2166,38 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
                 "confirmation_required": True,
             }
         engine = cls.app_ctx().flow_engine
+        uncertain = {
+            "applied": None,
+            "outcome": "uncertain",
+            **base,
+            "message": "The change may have reached the scheduler; inspect the "
+            "schedule instead of repeating it.",
+        }
+        # keep a claim even when the later transaction or outcome write fails
+        receipt = await FlowJobReceipt.create(
+            key=key,
+            action=change.action,
+            job_id=change.job_id,
+            graph_id=base["workflow_id"],
+            result=uncertain,
+        )
         notified = False
         try:
             async with in_transaction():
+                if change.action == ScheduleAction.CREATE:
+                    # another reviewed creation may have committed while we waited
+                    current_review, _, _ = await cls._review(change, user)
+                    if not current_review["valid"]:
+                        await receipt.delete()
+                        return {**current_review, "applied": False}
                 if job is not None:
                     # another editor may have changed it since the review
                     current = await FlowJob.get_or_none(id=job.id)
                     if current is None:
+                        await receipt.delete()
                         return absent
                     if cls.revision(current) != body.revision:
+                        await receipt.delete()
                         return stale
                 match change.action:
                     case ScheduleAction.CREATE | ScheduleAction.UPDATE:
@@ -2195,36 +2222,19 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
                     result["message"] = (
                         "pending: the scheduler is registering the new settings."
                     )
-                await FlowJobReceipt.create(
-                    key=key,
-                    action=change.action,
-                    job_id=job.id,
-                    graph_id=base["workflow_id"],
-                    result=result,
-                )
+                receipt.job_id = job.id
+                receipt.result = result
+                await receipt.save(update_fields=["job_id", "result"])
         except Exception:
             logger.exception("Failed to apply a schedule change")
             if not notified:
+                await receipt.delete()
                 return {
                     "applied": False,
                     **base,
                     "message": "The scheduler refused the change, so nothing was "
                     "saved; the same request may be repeated.",
                 }
-            result = {
-                "applied": None,
-                "outcome": "uncertain",
-                **base,
-                "message": "The scheduler received the change but it was not "
-                "saved; inspect the schedule instead of repeating it.",
-            }
-            # later retries read this outcome rather than notifying again
-            with suppress(Exception):
-                await FlowJobReceipt.create(
-                    key=key,
-                    action=change.action,
-                    job_id=change.job_id,
-                    graph_id=base["workflow_id"],
-                    result=result,
-                )
+            # the receipt predates the rolled-back change, so retry never submits
+            result = uncertain
         return {**result, "replayed": False}

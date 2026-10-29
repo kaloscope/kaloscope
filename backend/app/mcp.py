@@ -1461,6 +1461,9 @@ def create_server() -> MCPServer:
     ) -> ScheduleReviewResult:
         """Review a schedule change without saving or registering anything.
 
+        Summarize changes, defaults, first execution and effects in the user's
+        language using short bullets, not raw JSON. Wait for confirmation.
+
         Args:
             ctx: Administrator request context.
             change: Target, settings and optional display timezone.
