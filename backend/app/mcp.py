@@ -47,6 +47,8 @@ from app.models.flow import (
     JobQuery,
     JobState,
     JobTrigger,
+    ScheduleApply,
+    ScheduleChange,
 )
 from app.models.mcp import (
     DownloadResult,
@@ -65,6 +67,8 @@ from app.models.mcp import (
     PlanOptionsResult,
     PlanValidationResult,
     ProviderResult,
+    ScheduleApplyResult,
+    ScheduleReviewResult,
     WorkflowDetails,
     WorkflowDraftResult,
     WorkflowDraftVersion,
@@ -144,6 +148,7 @@ _READ_TOOLS = frozenset(
         "preview_workflow_draft",
         "list_workflow_drafts",
         "get_workflow_draft",
+        "review_workflow_schedule",
     }
 )
 _WRITE_TOOLS = frozenset(
@@ -156,6 +161,7 @@ _WRITE_TOOLS = frozenset(
         "restore_workflow_draft",
         "probe_http_request",
         "run_workflow",
+        "apply_workflow_schedule",
     }
 )
 DRAFT_WRITE = ToolAnnotations(
@@ -314,6 +320,10 @@ def create_server() -> MCPServer:
             "request_id to read it, validate fixes first, stop after two repair "
             "runs and ask before rerunning when rerun=ask. No tool publishes, scans "
             "libraries or deletes workflows. "
+            "Schedules: find IDs with list_workflow_jobs or list_workflows (ask when "
+            "several match), review_workflow_schedule, show the review, then call "
+            "apply_workflow_schedule with its request_id, change and revision only "
+            "after approval; repeat that call to read its outcome. "
             "For invalid arguments, correct the reported fields before retrying. "
             "For HTTP 401, ask the user to generate a new MCP access token and "
             "update the client's bearer token; credentials are never tool arguments. "
@@ -1436,6 +1446,66 @@ def create_server() -> MCPServer:
                     ),
                 )
             )
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def review_workflow_schedule(
+        ctx: Context,
+        change: Annotated[
+            ScheduleChange,
+            Field(
+                description="One create, update, enable, pause or delete; times "
+                "need UTC offsets."
+            ),
+        ],
+    ) -> ScheduleReviewResult:
+        """Review a schedule change without saving or registering anything.
+
+        Args:
+            ctx: Administrator request context.
+            change: Target, settings and optional display timezone.
+
+        Returns:
+            Located issues, before/after settings and changes, defaults, the
+            scheduler's first-run rule and estimate, notes, `revision` and, when
+            valid, a `request_id` bound to this exact change.
+        """
+        return ScheduleReviewResult.model_validate(
+            await _read(FlowJobService.review_change(change, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        )
+    )
+    async def apply_workflow_schedule(
+        ctx: Context,
+        application: Annotated[
+            ScheduleApply,
+            Field(
+                description="Show the review and wait for approval, then pass its "
+                "request_id, change and revision with confirmed=true. Repeat the "
+                "same call on retries."
+            ),
+        ],
+    ) -> ScheduleApplyResult:
+        """Apply a reviewed schedule change once; the scheduler runs it later.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            application: The reviewed request and the user's confirmation.
+
+        Returns:
+            The outcome and current schedule (`replayed` on retries), or a
+            `conflict`, `pending`, `stale`, `confirmation_required`, `absent` or
+            `uncertain` outcome. It never waits for or reports a run.
+        """
+        return ScheduleApplyResult.model_validate(
+            await _read(FlowJobService.apply_change(application, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)

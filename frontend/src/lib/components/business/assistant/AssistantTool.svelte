@@ -2,6 +2,7 @@
   import type { AssistantTool } from '$lib/assistant/session';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import type { ScheduleChangeOutcome } from '$lib/types';
 
   const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
   const trialStatus = $derived.by(() => {
@@ -16,9 +17,23 @@
     }
     return result.status;
   });
+  // applied outcomes name themselves; other replies say why nothing changed
+  const scheduleStatus = $derived.by(() => {
+    if (tool.name !== 'apply_workflow_schedule' || !tool.result?.ok || !tool.result.data) return null;
+    const result = tool.result.data as unknown as ScheduleChangeOutcome;
+    if (result.outcome) return result.outcome;
+    for (const key of ['confirmation_required', 'stale', 'conflict', 'pending'] as const) {
+      if (result[key]) return key;
+    }
+    return result.valid === false ? 'invalid' : 'refused';
+  });
   const statusIcon = $derived.by(() => {
     if (trialStatus === 'running' || trialStatus === 'submitting') return icons.clock;
     if (trialStatus && trialStatus !== 'completed') return icons.warning;
+    if (scheduleStatus === 'pending') return icons.clock;
+    if (scheduleStatus && !['created', 'updated', 'enabled', 'paused', 'deleted'].includes(scheduleStatus)) {
+      return icons.warning;
+    }
     if (tool.status === 'complete') return icons.checkmark;
     if (tool.status === 'error') return icons.warning;
     return icons.subtractCircle;
@@ -111,6 +126,14 @@
 {/if}
 {#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.confirmation_required}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{$_('assistant.plan.confirmation_required')}</p>
+{/if}
+{#if tool.name === 'review_workflow_schedule' && tool.result?.ok && tool.result.data?.valid}
+  <p class="ml-8 text-xs leading-5 text-base-content/60">{$_('assistant.schedule.reviewed')}</p>
+{/if}
+{#if scheduleStatus}
+  <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
+    {$_(`assistant.schedule.${scheduleStatus}`, [Number(tool.result?.data?.job_id)])}
+  </p>
 {/if}
 {#if tool.name === 'search_indexer' && tool.result?.ok && tool.result.data}
   {@const result = tool.result.data}

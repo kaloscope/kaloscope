@@ -31,6 +31,10 @@ export function assistantDestination(
   } else if ((result.name === 'create_download_plan' || result.name === 'get_download_plan') && result.data.created) {
     target = { page: 'download_plans' };
     path = result.data.path;
+  } else if (result.name === 'apply_workflow_schedule' && result.data.applied !== false) {
+    // the outcome can be inspected on the registered schedule page
+    target = { page: 'workflow_jobs' };
+    path = workflowJobsPath;
   }
   if (!target) return null;
   const id = target.resource_id;

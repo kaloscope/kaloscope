@@ -38,8 +38,10 @@
   const ordering = createSortField();
   const loading = createLoading();
 
+  type JobFilters = Extract<AssistantPageContext, { page_type: 'workflow_jobs' }>['filters'];
+
   // retain the filters of the displayed results, independently of unsubmitted input
-  let displayed: Extract<AssistantPageContext, { page_type: 'workflow_jobs' }>['filters'] | null = null;
+  let displayed: JobFilters | null = null;
 
   /**
    * Search for flow jobs.
@@ -47,8 +49,14 @@
    * @param page - Page number.
    * @param size - Page size.
    * @param retry - Whether this search is a retry attempt.
+   * @param base - Filters to reuse instead of the current inputs.
    */
-  function search(page: number = 1, size: number = pagination.size, retry: boolean = false) {
+  function search(
+    page: number = 1,
+    size: number = pagination.size,
+    retry: boolean = false,
+    base: Omit<JobFilters, 'page_num' | 'page_size'> | null = null
+  ) {
     if (!retry) {
       if (retryTimer) {
         clearTimeout(retryTimer);
@@ -57,10 +65,12 @@
       retryCount = 0;
     }
     const filters = {
-      name: jobName,
-      state: jobState as FlowJob['state'] | null,
-      trigger: jobTrigger as FlowJob['trigger'] | null,
-      ordering: $ordering,
+      ...(base ?? {
+        name: jobName,
+        state: jobState as FlowJob['state'] | null,
+        trigger: jobTrigger as FlowJob['trigger'] | null,
+        ordering: $ordering
+      }),
       page_num: page,
       page_size: size
     };
@@ -85,7 +95,7 @@
           retryTimer = setTimeout(
             () => {
               retryTimer = null;
-              search(page, size, true);
+              search(page, size, true, base);
             },
             1000 * Math.pow(2, retryCount)
           );
@@ -164,8 +174,17 @@
     untrack(() => search());
   });
 
-  onMount(() =>
-    registerAssistantContext(() => {
+  onMount(() => {
+    /**
+     * Reload the displayed page after an assistant change, keeping its filters.
+     */
+    const refresh = () => {
+      if (!displayed) return;
+      const { page_num, page_size, ...base } = displayed;
+      search(page_num, page_size, false, base);
+    };
+    window.addEventListener('workflow-job-changed', refresh);
+    const unregister = registerAssistantContext(() => {
       if (!displayed) return null;
       const current = jobs.find((job) => job.id === selected?.id);
       return {
@@ -174,8 +193,12 @@
         filters: { ...displayed },
         selected_job: current ? { job_id: current.id, workflow_id: current.graph_id } : null
       };
-    })
-  );
+    });
+    return () => {
+      window.removeEventListener('workflow-job-changed', refresh);
+      unregister();
+    };
+  });
 </script>
 
 <DataView dvh loading={$loading} data={jobs}>

@@ -1126,6 +1126,8 @@
     "tools": {
       "list_workflows": "查找工作流",
       "list_workflow_jobs": "查找定时任务",
+      "review_workflow_schedule": "检查定时任务变更",
+      "apply_workflow_schedule": "应用定时任务变更",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
@@ -1253,6 +1255,22 @@
       "search_failed": "搜索失败，未创建计划，请查看工作流日志",
       "search_invalid_input": "搜索条件有误，请展开工具详情查看",
       "search_invalid_output": "搜索结果有误，请查看工具详情和工作流日志"
+    },
+    "schedule": {
+      "reviewed": "尚未应用，请确认此变更后再应用",
+      "created": "已创建并启用定时任务 #{0}",
+      "updated": "已更新定时任务 #{0}",
+      "enabled": "已启用定时任务 #{0}",
+      "paused": "已暂停定时任务 #{0}，进行中的运行不受影响",
+      "deleted": "已删除定时任务 #{0}，进行中的运行不受影响",
+      "absent": "定时任务 #{0} 已不存在，未做任何更改",
+      "uncertain": "结果待确认，请先查看定时调度页面，勿重复操作",
+      "confirmation_required": "尚未应用，请先确认最新的变更预览",
+      "stale": "未应用：定时任务在预览后已变更",
+      "conflict": "未应用：请求与预览内容不一致",
+      "pending": "仍在应用中，请稍后再次确认以读取结果",
+      "invalid": "未应用，请展开工具详情查看问题",
+      "refused": "未应用，未保存任何更改"
     }
   }
 }

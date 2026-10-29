@@ -32,6 +32,7 @@ from app.models.flow import (
     IntervalUnit,
     JobState,
     JobTrigger,
+    ScheduleAction,
 )
 from app.models.media import IndexState, Language, LibType, MediaFormat, MediaType
 from app.models.user import User, UserInfo
@@ -192,6 +193,32 @@ class WorkflowRunResult(Result):
     workflow_id: int
     executed: bool | None
     status: str
+
+
+class ScheduleReviewResult(Result):
+    """Describe a reviewed schedule change; nothing is saved or registered."""
+
+    valid: bool
+    issues: list[dict[str, str]]
+    action: ScheduleAction
+    job_id: int | None = Field(description="Schedule ID; null for a creation.")
+    workflow_id: int = Field(description="Workflow the schedule runs.")
+    workflow_name: str
+    revision: str | None = Field(
+        description="Reviewed schedule revision; pass it back when applying."
+    )
+    first_run: dict[str, JSONType] = Field(
+        description="UTC `estimate` if registered now, its `rule`, and `local` time."
+    )
+
+
+class ScheduleApplyResult(Result):
+    """Describe an applied, replayed, refused or uncertain schedule change."""
+
+    applied: bool | None = Field(
+        description="True once saved and registered; null when the outcome is "
+        "uncertain and must be inspected rather than repeated."
+    )
 
 
 class DownloadTaskResult(Result):

@@ -1,6 +1,7 @@
 from tortoise import migrations
 from tortoise.migrations import operations as ops
 from app.models.ai import AIProtocol, AIProviderPreset
+from app.models.flow import ScheduleAction
 from app.models.mcp import MCPTokenScope
 from orjson import loads
 from tortoise.fields.base import OnDelete
@@ -135,6 +136,21 @@ class Migration(migrations.Migration):
                 ('draft', fields.JSONField(encoder=JSON_DUMPS, decoder=loads)),
             ],
             options={'table': 'flow_draft_revision', 'app': 'models', 'unique_together': (('graph', 'version'),), 'pk_attr': 'id', 'table_description': 'Retain recent saved drafts for review and version-checked restoration.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
+            name='FlowJobReceipt',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('key', fields.CharField(unique=True, max_length=64)),
+                ('action', fields.CharEnumField(description='CREATE: create\nUPDATE: update\nENABLE: enable\nPAUSE: pause\nDELETE: delete', enum_type=ScheduleAction, max_length=16)),
+                ('job_id', fields.IntField(null=True)),
+                ('graph_id', fields.IntField()),
+                ('result', fields.JSONField(encoder=JSON_DUMPS, decoder=loads)),
+            ],
+            options={'table': 'flow_job_receipt', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Retain one applied schedule change so retries read its outcome.'},
             bases=['TortoiseModel'],
         ),
         ops.CreateModel(
