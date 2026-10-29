@@ -26,6 +26,8 @@ from app.core.exceptions import (
 from app.core.flow.reference import get_workflow_reference as read_workflow_reference
 from app.models.assistant import DownloadPlanOrdering
 from app.models.download import (
+    DownloadPlanApply,
+    DownloadPlanChange,
     DownloadPlanCheck,
     DownloadPlanCreate,
     DownloadPlanQuery,
@@ -62,6 +64,8 @@ from app.models.mcp import (
     MediaResult,
     NodeTypesResult,
     PageResult,
+    PlanChangeApplyResult,
+    PlanChangeReviewResult,
     PlanCreationResult,
     PlanListResult,
     PlanOptionsResult,
@@ -149,6 +153,7 @@ _READ_TOOLS = frozenset(
         "list_workflow_drafts",
         "get_workflow_draft",
         "review_workflow_schedule",
+        "review_download_plan_change",
     }
 )
 _WRITE_TOOLS = frozenset(
@@ -162,6 +167,7 @@ _WRITE_TOOLS = frozenset(
         "probe_http_request",
         "run_workflow",
         "apply_workflow_schedule",
+        "apply_download_plan_change",
     }
 )
 DRAFT_WRITE = ToolAnnotations(
@@ -324,6 +330,8 @@ def create_server() -> MCPServer:
             "several match), review_workflow_schedule, show the review, then call "
             "apply_workflow_schedule with its request_id, change and revision only "
             "after approval; repeat that call to read its outcome. "
+            "Plan updates/deletions follow the same review and apply steps; run "
+            "search_indexer with search_preview when search inputs change. "
             "For invalid arguments, correct the reported fields before retrying. "
             "For HTTP 401, ask the user to generate a new MCP access token and "
             "update the client's bearer token; credentials are never tool arguments. "
@@ -1509,6 +1517,71 @@ def create_server() -> MCPServer:
         """
         return ScheduleApplyResult.model_validate(
             await _read(FlowJobService.apply_change(application, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def review_download_plan_change(
+        ctx: Context,
+        change: Annotated[
+            DownloadPlanChange,
+            Field(
+                description="One update or delete of a listed plan; omitted settings "
+                "keep their values, null clears; times need UTC offsets."
+            ),
+        ],
+    ) -> PlanChangeReviewResult:
+        """Review a plan update or deletion without saving, searching or downloading.
+
+        Summarize the target, changed fields, timing and consequences in the
+        user's language using short bullets, not raw JSON. Wait for confirmation.
+
+        Args:
+            ctx: Administrator request context.
+            change: Target plan and the settings to replace.
+
+        Returns:
+            Located issues, before/after settings and changes, recorded attempts,
+            scheduling before and after, notes, a `search_preview` when search
+            inputs change, `revision` and, when valid, a `request_id` bound to
+            this exact change.
+        """
+        return PlanChangeReviewResult.model_validate(
+            await _read(DownloadPlanService.review_change(change, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        )
+    )
+    async def apply_download_plan_change(
+        ctx: Context,
+        application: Annotated[
+            DownloadPlanApply,
+            Field(
+                description="Show the review and wait for approval, then pass its "
+                "request_id, change and revision with confirmed=true. Repeat the "
+                "same call on retries."
+            ),
+        ],
+    ) -> PlanChangeApplyResult:
+        """Apply a reviewed plan change once; it starts no plan attempt.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            application: The reviewed request and the user's confirmation.
+
+        Returns:
+            The outcome and current plan (`replayed` on retries; `null` once
+            deleted), or a `conflict`, `pending`, `stale`, `confirmation_required`,
+            `absent`, `failed` or `uncertain` outcome. Deletion keeps download
+            tasks and files and does not cancel an attempt already running.
+        """
+        return PlanChangeApplyResult.model_validate(
+            await _read(DownloadPlanService.apply_change(application, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)

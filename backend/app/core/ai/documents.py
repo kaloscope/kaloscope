@@ -225,6 +225,28 @@ RUN_FACTS = (
     "evidence",
     "output_log_id",
 )
+# plan change identities and outcomes retained; settings stay in the original record
+PLAN_CHANGE_FACTS = (
+    "valid",
+    "issues",
+    "action",
+    "plan_id",
+    "workflow_id",
+    "workflow_name",
+    "revision",
+    "request_id",
+    "changes",
+    "timing",
+    "applied",
+    "outcome",
+    "replayed",
+    "confirmation_required",
+    "stale",
+    "conflict",
+    "pending",
+    "failed",
+    "message",
+)
 
 
 def tool_facts(result: dict) -> dict:
@@ -244,6 +266,11 @@ def tool_facts(result: dict) -> dict:
     if result.get("name") == "run_workflow":
         # outputs, issues and guidance stay in the original run record
         data = {key: data[key] for key in RUN_FACTS if key in data}
+    elif result.get("name") in {
+        "review_download_plan_change",
+        "apply_download_plan_change",
+    }:
+        data = {key: data[key] for key in PLAN_CHANGE_FACTS if key in data}
     facts = {}
     if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
         facts["graph_source"] = "saved_draft"

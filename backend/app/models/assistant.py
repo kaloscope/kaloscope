@@ -285,13 +285,40 @@ class WorkflowJobsContext(ContextModel):
     filters: WorkflowJobFilters = Field(default_factory=WorkflowJobFilters)
 
 
+class DownloadPlanFilters(ContextModel):
+    """Describe the filters and pagination of the displayed plans."""
+
+    workflow_id: ResourceID | None = None
+    keyword: str = Field(default="", max_length=255)
+    ordering: DownloadPlanOrdering = ""
+    page_num: int = Field(default=1, ge=1)
+    page_size: int = Field(default=15, ge=1, le=100)
+
+
+class DownloadPlanSelection(ContextModel):
+    """Keep a selected plan distinct from its indexer."""
+
+    plan_id: ResourceID
+    workflow_id: ResourceID
+
+
+class DownloadPlansContext(ContextModel):
+    """Identify the displayed plans and the plan last opened in the editor."""
+
+    page_type: Literal["download_plans"]
+    route: Literal["/downloads/plans"]
+    selected_plan: DownloadPlanSelection | None = None
+    filters: DownloadPlanFilters = Field(default_factory=DownloadPlanFilters)
+
+
 type AssistantPageContext = Annotated[
     WorkflowListContext
     | WorkflowDesignerContext
     | MediaLibraryContext
     | MediaItemContext
     | DownloadListContext
-    | WorkflowJobsContext,
+    | WorkflowJobsContext
+    | DownloadPlansContext,
     Field(discriminator="page_type"),
 ]
 

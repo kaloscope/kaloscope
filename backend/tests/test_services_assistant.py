@@ -81,8 +81,8 @@ def stored_context(monkeypatch):
     monkeypatch.setattr(service.AssistantSessionService, "checkpoint", AsyncMock())
     monkeypatch.setattr(
         service.AssistantSessionService,
-        "schedule_reviewed",
-        AsyncMock(return_value=False),
+        "reviewed",
+        AsyncMock(return_value=set()),
     )
     monkeypatch.setattr(
         service.AssistantSessionService, "record_resources", AsyncMock()

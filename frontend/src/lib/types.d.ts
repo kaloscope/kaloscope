@@ -140,6 +140,20 @@ export type AssistantPageContext =
       selected_id: number | null;
     }
   | {
+      page_type: 'download_plans';
+      route: string;
+      // the plan last opened in the editor while it is still displayed
+      selected_plan: { plan_id: number; workflow_id: number } | null;
+      // filters and page of the plans on screen, not unsubmitted input
+      filters: {
+        workflow_id: number | null;
+        keyword: string;
+        ordering: string;
+        page_num: number;
+        page_size: number;
+      };
+    }
+  | {
       page_type: 'active_downloads' | 'completed_downloads';
       route: string;
       selected_ids: number[];
@@ -212,6 +226,21 @@ export type ScheduleChangeOutcome = {
   stale?: boolean;
   conflict?: boolean;
   pending?: boolean;
+};
+
+/** Outcome of applying a reviewed download plan update or deletion. */
+export type PlanChangeOutcome = {
+  applied: boolean | null;
+  outcome?: 'updated' | 'deleted' | 'absent' | 'uncertain';
+  plan_id?: number;
+  workflow_id?: number;
+  replayed?: boolean;
+  valid?: boolean;
+  confirmation_required?: boolean;
+  stale?: boolean;
+  conflict?: boolean;
+  pending?: boolean;
+  failed?: boolean;
 };
 
 /** Durable save lifecycle of an assistant canvas edit. */

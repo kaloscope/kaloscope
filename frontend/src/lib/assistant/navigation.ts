@@ -35,6 +35,9 @@ export function assistantDestination(
     // the outcome can be inspected on the registered schedule page
     target = { page: 'workflow_jobs' };
     path = workflowJobsPath;
+  } else if (result.name === 'apply_download_plan_change' && result.data.applied !== false) {
+    target = { page: 'download_plans' };
+    path = downloadPlansPath;
   }
   if (!target) return null;
   const id = target.resource_id;

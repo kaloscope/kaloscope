@@ -24,7 +24,7 @@ from tortoise.fields import (
 from app.core.dl.driver import DownloadAction, DownloadState
 from app.models.ai import AIProtocol, AIProviderPreset
 from app.models.base import TortoiseModel
-from app.models.download import OfflineDownloadErrorKind
+from app.models.download import OfflineDownloadErrorKind, PlanAction
 from app.models.flow import (
     GraphCategory,
     GraphRef,
@@ -217,6 +217,33 @@ class ScheduleApplyResult(Result):
 
     applied: bool | None = Field(
         description="True once saved and registered; null when the outcome is "
+        "uncertain and must be inspected rather than repeated."
+    )
+
+
+class PlanChangeReviewResult(Result):
+    """Describe a reviewed plan update or deletion; nothing is saved."""
+
+    valid: bool
+    issues: list[dict[str, str]]
+    action: PlanAction
+    plan_id: int = Field(description="Plan ID, not its workflow ID.")
+    workflow_id: int = Field(description="Indexer the plan searches.")
+    workflow_name: str
+    revision: str = Field(
+        description="Reviewed plan revision; pass it back when applying."
+    )
+    timing: dict[str, JSONType] = Field(
+        description="Scheduling `before`/`after` from stored settings and its "
+        "`rule`; never an exact run time."
+    )
+
+
+class PlanChangeApplyResult(Result):
+    """Describe an applied, replayed, refused or uncertain plan change."""
+
+    applied: bool | None = Field(
+        description="True once saved or deleted; null when the outcome is "
         "uncertain and must be inspected rather than repeated."
     )
 
