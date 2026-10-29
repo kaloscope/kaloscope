@@ -39,6 +39,7 @@ from app.models.flow import (
     FlowLog,
     GraphRef,
     JobState,
+    JobTrigger,
 )
 
 # the execution policy for the flow jobs
@@ -158,6 +159,19 @@ def job_trigger(event: EventWrapper) -> BaseTrigger | None:
     return None
 
 
+def job_expired(job: FlowJob) -> bool:
+    """Check whether a bounded trigger has no remaining scheduled time.
+
+    Args:
+        job: Stored schedule; this does not establish whether it ever ran.
+
+    Returns:
+        Whether its date or interval end has passed.
+    """
+    end = job.run_date if job.trigger == JobTrigger.DATE else job.interval_end
+    return job.trigger != JobTrigger.CRON and end is not None and end <= timezone.now()
+
+
 @dataclass(kw_only=True)
 class NodeWrapper:
     """The node date wrapper."""
@@ -247,7 +261,13 @@ class FlowEngine:
                 if not self._reload_flag.is_set():
                     for inst in await FlowInstance.filter(prev_id__isnull=True):
                         self._events.put(EventWrapper.from_inst(inst))
-                    for job in await FlowJob.filter(state=JobState.RUNNING):
+                    for job in await FlowJob.filter(
+                        state__in=[JobState.RUNNING, JobState.PENDING]
+                    ):
+                        if job.state == JobState.PENDING and not await FlowJob.filter(
+                            id=job.id, state=JobState.PENDING
+                        ).update(state=JobState.RUNNING):
+                            continue
                         self._events.put(EventWrapper.from_job(job))
                     self._reload_flag.set()
             finally:
@@ -304,16 +324,11 @@ class FlowEngine:
                         # add the job to the scheduler
                         if trigger is not None:
                             self._scheduler.add_job(
-                                self.execute,
+                                self._execute_job,
                                 trigger,
-                                kwargs={
-                                    "graph_id": event.graph_id,
-                                    "bootparams": event.bootparams,
-                                    "repeatable": event.repeatable,
-                                    "recoverable": event.recoverable,
-                                    "asynchronous": True,
-                                },
+                                kwargs={"event": event},
                                 id=str(event.job_id),
+                                replace_existing=True,
                             )
                 await asyncio.sleep(self.payload())
             except queue.Empty:
@@ -323,6 +338,23 @@ class FlowEngine:
             except Exception:
                 logger.error("Failed to consume the flow event!", exc_info=True)
                 await asyncio.sleep(1)
+
+    async def _execute_job(self, event: EventWrapper) -> None:
+        """Run a scheduled callback only while its stored settings still apply.
+
+        Args:
+            event: Registration that fired, including its schedule and settings.
+        """
+        job = await FlowJob.get_or_none(id=event.job_id, state=JobState.RUNNING)
+        if job is None or EventWrapper.from_job(job) != event:
+            return
+        await self.execute(
+            event.graph_id,
+            event.bootparams,
+            repeatable=event.repeatable,
+            recoverable=event.recoverable,
+            asynchronous=True,
+        )
 
     async def _job_listener(self):
         """Listen for the actions and perform the corresponding operations."""
@@ -351,6 +383,13 @@ class FlowEngine:
         Args:
             job_id: Flow job ID.
         """
+        if self._job_actions.get(job_id) == JobAction.PAUSE:
+            # let the worker holding the old registration remove it before adding
+            if await FlowJob.filter(id=job_id, state=JobState.PAUSED).update(
+                state=JobState.PENDING
+            ):
+                self._job_actions[job_id] = JobAction.REFRESH
+            return
         job = FlowJob.filter(id=job_id, state__not=JobState.RUNNING)
         if await job.update(state=JobState.RUNNING) == 1:
             self._events.put(EventWrapper.from_job(await FlowJob.get(id=job_id)))
@@ -361,8 +400,15 @@ class FlowEngine:
         Args:
             job_id: Flow job ID.
         """
-        job = FlowJob.filter(id=job_id, state=JobState.RUNNING)
-        if await job.update(state=JobState.PAUSED) == 1:
+        job = await FlowJob.get_or_none(id=job_id, state=JobState.RUNNING)
+        if (
+            job
+            and await FlowJob.filter(id=job_id, state=JobState.RUNNING).update(
+                state=JobState.PAUSED
+            )
+            == 1
+            and not job_expired(job)
+        ):
             self._job_actions[job_id] = JobAction.PAUSE
 
     async def resume_job(self, job_id: int):
@@ -373,15 +419,20 @@ class FlowEngine:
         """
         await self.add_job(job_id)
 
-    async def refresh_job(self, job_id: int):
+    async def refresh_job(self, job_id: int, *, expired: bool = False):
         """Refresh the flow job.
 
         Args:
             job_id: Flow job ID.
+            expired: Whether the previous trigger has finished and needs a new
+                registration rather than waiting for an existing one.
         """
         job = FlowJob.filter(id=job_id, state=JobState.RUNNING)
         if await job.update(state=JobState.PENDING) == 1:
-            self._job_actions[job_id] = JobAction.REFRESH
+            if expired:
+                await self.add_job(job_id)
+            else:
+                self._job_actions[job_id] = JobAction.REFRESH
 
     async def delete_job(self, job_id: int):
         """Delete the flow job.
@@ -389,9 +440,10 @@ class FlowEngine:
         Args:
             job_id: Flow job ID.
         """
-        if await FlowJob.filter(id=job_id, state=JobState.RUNNING).exists():
-            self._job_actions[job_id] = JobAction.DELETE
+        running = await FlowJob.filter(id=job_id, state=JobState.RUNNING).exists()
         await FlowJob.filter(id=job_id).delete()
+        if running:
+            self._job_actions[job_id] = JobAction.DELETE
 
     def enqueue_instance(self, instance: FlowInstance) -> None:
         """Queue one persisted instance without dispatching its successors.

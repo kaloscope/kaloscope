@@ -8,6 +8,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
@@ -204,6 +205,7 @@ async def scheduling(monkeypatch):
         asyncio.create_task(engine._event_consumer()),
         asyncio.create_task(engine._job_listener()),
     ]
+    engine.loops = loops
     try:
         yield engine
     finally:
@@ -994,16 +996,24 @@ def test_uncertain(monkeypatch):
                 "cron_expr": "0 1 * * *",
             }
             reviewed = await review(owner, **values)
-            create = FlowJobReceipt.create
+            save = FlowJobReceipt.save
             attempts = []
+            notices = []
+            add_job = engine.add_job
 
-            async def flaky(*args, **kwargs):
-                attempts.append(kwargs["result"]["outcome"])
-                if len(attempts) == 1:
+            async def notify(job_id):
+                await add_job(job_id)
+                notices.append(job_id)
+
+            async def flaky(receipt, *args, **kwargs):
+                attempts.append(receipt.result["outcome"])
+                if notices:
                     raise OSError("disk full")
-                return await create(*args, **kwargs)
+                return await save(receipt, *args, **kwargs)
 
-            monkeypatch.setattr(FlowJobReceipt, "create", flaky)
+            monkeypatch.setattr(FlowJobReceipt, "save", flaky)
+            monkeypatch.setattr(engine, "add_job", notify)
+            monkeypatch.setattr(engine, "execute", AsyncMock())
 
             uncertain = await apply(owner, reviewed, **values)
             await settle(engine)
@@ -1014,9 +1024,13 @@ def test_uncertain(monkeypatch):
             assert "instead of repeating" in uncertain["message"]
             assert replay["replayed"] and replay["outcome"] == "uncertain"
             # the scheduler was notified once and never again
-            assert attempts == ["created", "uncertain"]
+            assert attempts == ["uncertain", "created"]
+            assert len(notices) == 1
             assert len(engine._scheduler.get_jobs()) == 1
             assert not await FlowJob.exists()
+            orphan = engine._scheduler.get_jobs()[0]
+            await orphan.func(**orphan.kwargs)
+            engine.execute.assert_not_awaited()
 
     asyncio.run(run())
 
@@ -1343,6 +1357,82 @@ def test_superseded(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("action", ["enable", "delete"])
+def test_rapid_pause(monkeypatch, action):
+    async def run():
+        async with database() as (owner, _), scheduling(monkeypatch) as engine:
+            graph = await workflow()
+            _, created = await change(
+                owner,
+                action="create",
+                workflow_id=graph.id,
+                trigger="cron",
+                cron_expr="0 1 * * *",
+            )
+            job_id = created["job_id"]
+            await settle(engine)
+            for loop in engine.loops:
+                loop.cancel()
+            await asyncio.gather(*engine.loops, return_exceptions=True)
+
+            await change(owner, action="pause", job_id=job_id)
+            _, result = await change(owner, action=action, job_id=job_id)
+            engine.loops[:] = [
+                asyncio.create_task(engine._event_consumer()),
+                asyncio.create_task(engine._job_listener()),
+            ]
+            await settle(engine)
+
+            assert result["applied"]
+            assert (registered(engine, job_id) is not None) == (action == "enable")
+            if action == "enable":
+                assert (await FlowJob.get(id=job_id)).state == "running"
+
+    asyncio.run(run())
+
+
+def test_invalid_review_supersedes(monkeypatch):
+    async def run():
+        async with application() as app, scheduling(monkeypatch):
+            admin = app.shared_ctx.sessions["admin"]
+            graph = await workflow()
+            job = await schedule(graph)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), admin
+            )
+            turn = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="review-changes",
+                status="complete",
+                prompt="Change the timing.",
+            )
+            original = None
+            for index, cron in enumerate(["0 2 * * *", "bad cron"]):
+                args = {"action": "update", "job_id": job.id, "cron_expr": cron}
+                result = await review(admin, **args)
+                await AssistantToolCall.create(
+                    turn_id=turn.id,
+                    call_id=f"review-{index}",
+                    name="review_workflow_schedule",
+                    arguments=dumps(args).decode(),
+                    status="complete",
+                    result={"ok": True, "data": result},
+                )
+                original = original or result
+            confirmed = await tools.apply_schedule(
+                tools.ScheduleConfirm(
+                    request_id=original["request_id"], confirmed=True
+                ),
+                conversation["id"],
+                admin,
+            )
+
+            assert confirmed["confirmation_required"] and not confirmed["applied"]
+            assert (await FlowJob.get(id=job.id)).cron_expr == "0 1 * * *"
+
+    asyncio.run(run())
+
+
 def test_page_selection(monkeypatch):
     streams, seen = [], {}
 
@@ -1443,5 +1533,123 @@ def test_page_selection(monkeypatch):
                 call_id="review",
             )
             assert refused["error"]["code"] == "forbidden"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("trigger", ["date", "interval"])
+@pytest.mark.parametrize("paused", [False, True])
+def test_finished_schedule(monkeypatch, trigger, paused):
+    async def run():
+        async with database() as (owner, _), scheduling(monkeypatch) as engine:
+            graph = await workflow()
+            past = datetime.now(UTC) - timedelta(hours=1)
+            timing = (
+                {"run_date": past}
+                if trigger == "date"
+                else {"interval_num": 1, "interval_unit": "hours", "interval_end": past}
+            )
+            job = await schedule(graph, trigger=trigger, **timing)
+            if paused:
+                await change(owner, action="pause", job_id=job.id)
+            settings = (
+                {"run_date": soon(days=1)}
+                if trigger == "date"
+                else {"interval_end": soon(days=1)}
+            )
+            _, result = await change(owner, action="update", job_id=job.id, **settings)
+            if paused:
+                await change(owner, action="enable", job_id=job.id)
+            await settle(engine)
+
+            assert result["applied"]
+            assert registered(engine, job.id) is not None
+            assert (await FlowJob.get(id=job.id)).state == "running"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutation", ["pause", "delete", "update"])
+def test_stale_callback(monkeypatch, mutation):
+    async def run():
+        async with database() as (owner, _), scheduling(monkeypatch) as engine:
+            graph = await workflow()
+            _, created = await change(
+                owner,
+                action="create",
+                workflow_id=graph.id,
+                trigger="cron",
+                cron_expr="0 1 * * *",
+            )
+            await settle(engine)
+            callback = registered(engine, created["job_id"])
+            execute = AsyncMock()
+            monkeypatch.setattr(engine, "execute", execute)
+            await callback.func(**callback.kwargs)
+            execute.assert_awaited_once()
+            execute.reset_mock()
+
+            values = {"cron_expr": "0 2 * * *"} if mutation == "update" else {}
+            await change(owner, action=mutation, job_id=created["job_id"], **values)
+            await callback.func(**callback.kwargs)
+
+            execute.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_pending_reload(monkeypatch):
+    async def run():
+        async with database(), scheduling(monkeypatch) as engine:
+            graph = await workflow()
+            pending = await schedule(graph, state="pending")
+            paused = await schedule(graph, state="paused")
+            engine.__dict__["_lock"] = SimpleNamespace(
+                acquire=lambda **_: True, release=lambda: None
+            )
+            engine.__dict__["_reload_flag"] = threading.Event()
+
+            await engine._reload()
+            await settle(engine)
+
+            assert (await FlowJob.get(id=pending.id)).state == "running"
+            assert registered(engine, pending.id) is not None
+            assert (await FlowJob.get(id=paused.id)).state == "paused"
+            assert registered(engine, paused.id) is None
+
+    asyncio.run(run())
+
+
+def test_overlapping_creations(monkeypatch):
+    async def run():
+        async with database() as (owner, _), scheduling(monkeypatch):
+            graph = await workflow()
+            values = {
+                "action": "create",
+                "workflow_id": graph.id,
+                "trigger": "cron",
+                "cron_expr": "0 1 * * *",
+            }
+            reviews = [await review(owner, **values) for _ in range(2)]
+            original = FlowJobService._review
+            reached = []
+            ready = asyncio.Event()
+
+            async def both(cls, change, user):
+                result = await original(change, user)
+                if len(reached) < 2:
+                    reached.append(True)
+                    if len(reached) == 2:
+                        ready.set()
+                    await ready.wait()
+                return result
+
+            monkeypatch.setattr(FlowJobService, "_review", classmethod(both))
+            results = await asyncio.gather(
+                *(apply(owner, item, **values) for item in reviews)
+            )
+
+            assert sum(bool(item.get("applied")) for item in results) == 1
+            assert await FlowJob.all().count() == 1
 
     asyncio.run(run())
