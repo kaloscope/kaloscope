@@ -1,9 +1,11 @@
 """Expose permission-checked application tools through the existing HTTP server."""
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable
 from contextlib import suppress
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -13,7 +15,7 @@ from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
 from pydantic import BaseModel, Field
 from sanic import HTTPResponse, Request, Sanic, raw
 
-from app.core.ai.queries import download_plans
+from app.core.ai.queries import download_plans, trial_run
 from app.core.constants import MCP_PATH
 from app.core.exceptions import (
     ErrorCode,
@@ -70,6 +72,7 @@ from app.models.mcp import (
     WorkflowLogs,
     WorkflowReference,
     WorkflowResult,
+    WorkflowRunResult,
 )
 from app.models.media import MediaQuery
 from app.models.user import UserInfo
@@ -81,7 +84,12 @@ from app.models.workflow_authoring import (
 )
 from app.services.ai import AIProviderService
 from app.services.download import DownloadPlanService, DownloadTaskService
-from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
+from app.services.flow import (
+    FlowGraphService,
+    FlowJobService,
+    FlowLogService,
+    FlowRunService,
+)
 from app.services.media import MediaItemService, MediaLibService
 from app.services.workflow_authoring import (
     probe_http_request as probe_request,
@@ -147,6 +155,7 @@ _WRITE_TOOLS = frozenset(
         "save_workflow_draft",
         "restore_workflow_draft",
         "probe_http_request",
+        "run_workflow",
     }
 )
 DRAFT_WRITE = ToolAnnotations(
@@ -299,9 +308,12 @@ def create_server() -> MCPServer:
             "before previewing. "
             "Use the exact tested templates; stop after two unsuccessful repairs "
             "and report missing evidence. Validation is not execution. "
-            "Only selected indexer searches and confirmed download operations "
-            "execute; no tool publishes, scans libraries, deletes workflows "
-            "or calls an AI model. "
+            "Only selected indexer searches, confirmed download operations and "
+            "user-requested run_workflow trial runs execute. A trial really runs the "
+            "saved draft, including its HTTP, script, file and AI nodes; repeat its "
+            "request_id to read it, validate fixes first, stop after two repair "
+            "runs and ask before rerunning when rerun=ask. No tool publishes, scans "
+            "libraries or deletes workflows. "
             "For invalid arguments, correct the reported fields before retrying. "
             "For HTTP 401, ask the user to generate a new MCP access token and "
             "update the client's bearer token; credentials are never tool arguments. "
@@ -1145,6 +1157,97 @@ def create_server() -> MCPServer:
         """
         logs = await _read(FlowLogService.get_accessible_logs(workflow_id, _user(ctx)))
         return WorkflowLogs(runs=logs[:limit])
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def run_workflow(
+        ctx: Context,
+        request_id: Annotated[
+            UUID, Field(description="Stable ID; repeat it to read the same run.")
+        ],
+        workflow_id: Annotated[
+            _ResourceID, Field(description="Workflow ID returned by list_workflows.")
+        ],
+        draft_version: Annotated[
+            int,
+            Field(
+                ge=0,
+                strict=True,
+                description="Saved draft version to run; an earlier one only reads "
+                "the run its request_id started.",
+            ),
+        ],
+        entry: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=64,
+                description="Start node type, such as search_start.",
+            ),
+        ],
+        params: Annotated[
+            dict[str, Any] | None,
+            Field(description="Startup fields as in the entry's request example."),
+        ] = None,
+    ) -> WorkflowRunResult:
+        """Really execute the current saved draft once from one entry.
+
+        Run only when the user asked to run this reviewed version; it is never
+        published or replaced by the published definition. Ingest runs only
+        preview candidates; indexer login is excluded.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            request_id: Client request identity shared by retries and reconnects.
+            workflow_id: Workflow whose saved draft runs.
+            draft_version: Version the user reviewed. After a newer save it only
+                reads the run its request already started.
+            entry: Start node type valid for the workflow category.
+            params: Startup parameters without `$` keys.
+
+        Returns:
+            Target, side effects, `rerun` (`ask` when repeating needs the user),
+            status (`invalid`, `conflict`, `running`, `completed`,
+            `completed_with_errors`, `failed` or `unknown`) and separate static,
+            submission, completion and output-check evidence, with node errors and
+            the bounded output. Repeating the same request reads that run instead
+            of starting another; fix failures with at most two repair runs.
+        """
+        user = _user(ctx)
+
+        async def run() -> dict:
+            """Resolve the reviewed saved draft and run it once.
+
+            Returns:
+                Shared trial result.
+            """
+            graph = await FlowGraphService.get_accessible(workflow_id, user)
+            key = hashlib.sha256(f"{user.id}:{request_id}".encode()).hexdigest()[:16]
+            document, outdated = await FlowRunService.saved_draft(
+                graph, draft_version, key
+            )
+            return await trial_run(
+                workflow_id,
+                document,
+                target={
+                    "workflow_id": workflow_id,
+                    "draft_version": draft_version,
+                    "source": "saved_draft",
+                },
+                entry=entry,
+                params=params or {},
+                key=key,
+                user=user,
+                replay_only=outdated,
+            )
+
+        return WorkflowRunResult.model_validate(await _read(run()))
 
     @server.tool(annotations=READ_ONLY)
     async def list_media_libraries(ctx: Context) -> ItemsResult[LibraryStatus]:

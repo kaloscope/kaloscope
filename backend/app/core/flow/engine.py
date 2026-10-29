@@ -381,6 +381,17 @@ class FlowEngine:
             self._job_actions[job_id] = JobAction.DELETE
         await FlowJob.filter(id=job_id).delete()
 
+    def enqueue_instance(self, instance: FlowInstance) -> None:
+        """Queue one persisted instance without dispatching its successors.
+
+        Args:
+            instance: Exact definition and recovery state already committed.
+
+        Raises:
+            Exception: If the queue rejects the event before accepting it.
+        """
+        self._events.put(EventWrapper.from_inst(instance))
+
     async def execute(
         self,
         graph_id: int,

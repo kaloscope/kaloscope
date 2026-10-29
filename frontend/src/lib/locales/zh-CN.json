@@ -1133,6 +1133,7 @@
       "validate_workflow_template": "校验模板",
       "get_workflow_logs": "读取运行日志",
       "validate_workflow": "校验工作流",
+      "run_workflow": "试运行工作流",
       "preview_workflow_draft": "调整画布草稿",
       "create_workflow_draft": "创建工作流草稿",
       "navigate": "提供页面入口",
@@ -1153,6 +1154,18 @@
       "list_download_plans": "查找下载计划",
       "get_library_ingestion": "读取入库设置",
       "search_indexer": "搜索索引器"
+    },
+    "trial_status": {
+      "submitting": "提交中",
+      "running": "后台运行中",
+      "completed": "运行完成",
+      "completed_with_errors": "部分节点失败",
+      "failed": "运行失败",
+      "unknown": "结果未知",
+      "invalid": "校验未通过",
+      "conflict": "版本冲突",
+      "refused": "未执行",
+      "invalid_output": "输出校验未通过"
     },
     "tool_status": {
       "running": "执行中",

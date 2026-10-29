@@ -138,6 +138,21 @@ class Migration(migrations.Migration):
             bases=['TortoiseModel'],
         ),
         ops.CreateModel(
+            name='FlowRunReceipt',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('key', fields.CharField(unique=True, max_length=64)),
+                ('graph', fields.ForeignKeyField('models.FlowGraph', source_field='graph_id', db_index=True, db_constraint=True, to_field='id', related_name=False, on_delete=OnDelete.CASCADE)),
+                ('draft_version', fields.IntField()),
+                ('digest', fields.CharField(max_length=64)),
+                ('definition', fields.JSONField(encoder=JSON_DUMPS, decoder=loads)),
+            ],
+            options={'table': 'flow_run_receipt', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Retain a trial request independently of rotating logs and draft revisions.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
             name='MCPAccessToken',
             fields=[
                 ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
@@ -155,28 +170,28 @@ class Migration(migrations.Migration):
             bases=['TortoiseModel'],
         ),
         ops.AddField(
+            model_name='DownloadPlan',
+            name='creation_key',
+            field=fields.CharField(null=True, unique=True, max_length=64),
+        ),
+        ops.AddField(
+            model_name='DownloadPlan',
+            name='creation_receipt',
+            field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
+        ),
+        ops.AddField(
+            model_name='DownloadTask',
+            name='creation_key',
+            field=fields.CharField(null=True, unique=True, max_length=64),
+        ),
+        ops.AddField(
+            model_name='DownloadTask',
+            name='creation_receipt',
+            field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
+        ),
+        ops.AddField(
             model_name='FlowGraph',
             name='draft_version',
             field=fields.IntField(default=0, db_default=0),
-        ),
-        ops.AddField(
-            model_name='DownloadPlan',
-            name='creation_key',
-            field=fields.CharField(null=True, unique=True, max_length=64),
-        ),
-        ops.AddField(
-            model_name='DownloadPlan',
-            name='creation_receipt',
-            field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
-        ),
-        ops.AddField(
-            model_name='DownloadTask',
-            name='creation_key',
-            field=fields.CharField(null=True, unique=True, max_length=64),
-        ),
-        ops.AddField(
-            model_name='DownloadTask',
-            name='creation_receipt',
-            field=fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads),
         ),
     ]

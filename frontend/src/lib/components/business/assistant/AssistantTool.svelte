@@ -4,7 +4,21 @@
   import { icons } from '$lib/icons';
 
   const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
+  const trialStatus = $derived.by(() => {
+    if (tool.name !== 'run_workflow' || tool.status !== 'complete' || !tool.result?.ok) return null;
+    const result = tool.result.data;
+    if (typeof result?.status !== 'string') return null;
+    if (
+      result.status === 'completed' &&
+      (result.evidence as { output_check?: string } | undefined)?.output_check === 'failed'
+    ) {
+      return 'invalid_output';
+    }
+    return result.status;
+  });
   const statusIcon = $derived.by(() => {
+    if (trialStatus === 'running' || trialStatus === 'submitting') return icons.clock;
+    if (trialStatus && trialStatus !== 'completed') return icons.warning;
     if (tool.status === 'complete') return icons.checkmark;
     if (tool.status === 'error') return icons.warning;
     return icons.subtractCircle;
@@ -30,8 +44,10 @@
   <span class="min-w-0 truncate font-medium">
     {$_(`assistant.tools.${tool.name}`, { default: tool.name })}
   </span>
-  <span class="shrink-0" class:sr-only={tool.status === 'complete' || tool.status === 'running'}>
-    {$_(`assistant.tool_status.${tool.status}`)}
+  <span class="shrink-0" class:sr-only={!trialStatus && (tool.status === 'complete' || tool.status === 'running')}>
+    {trialStatus
+      ? $_(`assistant.trial_status.${trialStatus}`, { default: $_('assistant.trial_status.unknown') })
+      : $_(`assistant.tool_status.${tool.status}`)}
   </span>
 {/snippet}
 

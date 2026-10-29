@@ -212,6 +212,21 @@ def graph_summary(document: dict) -> dict:
     return result
 
 
+# trial run facts retained when older tool exchanges are compacted
+RUN_FACTS = (
+    "workflow_id",
+    "run_key",
+    "executed",
+    "status",
+    "replayed",
+    "target",
+    "effects",
+    "rerun",
+    "evidence",
+    "output_log_id",
+)
+
+
 def tool_facts(result: dict) -> dict:
     """Preserve source identities and deterministic facts in historical tool records.
 
@@ -226,6 +241,9 @@ def tool_facts(result: dict) -> dict:
     data = result.get("data", {})
     if not isinstance(data, dict):
         data = {}
+    if result.get("name") == "run_workflow":
+        # outputs, issues and guidance stay in the original run record
+        data = {key: data[key] for key in RUN_FACTS if key in data}
     facts = {}
     if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
         facts["graph_source"] = "saved_draft"

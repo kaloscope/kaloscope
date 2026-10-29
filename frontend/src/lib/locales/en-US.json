@@ -1133,6 +1133,7 @@
       "validate_workflow_template": "Validate Template",
       "get_workflow_logs": "Read Run Logs",
       "validate_workflow": "Validate Workflow",
+      "run_workflow": "Trial Run Workflow",
       "preview_workflow_draft": "Edit canvas draft",
       "create_workflow_draft": "Create Workflow Draft",
       "navigate": "Suggest Page",
@@ -1153,6 +1154,18 @@
       "list_download_plans": "Find Download Plans",
       "get_library_ingestion": "Read Library Ingestion",
       "search_indexer": "Search Indexer"
+    },
+    "trial_status": {
+      "submitting": "Submitting",
+      "running": "Running in background",
+      "completed": "Run completed",
+      "completed_with_errors": "Node errors",
+      "failed": "Run failed",
+      "unknown": "Outcome unknown",
+      "invalid": "Validation failed",
+      "conflict": "Version conflict",
+      "refused": "Not executed",
+      "invalid_output": "Invalid output"
     },
     "tool_status": {
       "running": "Running",

@@ -186,6 +186,14 @@ class PlanCreationResult(Result):
     first_execution: dict[str, JSONType] | Literal["scheduled", "queued_after_creation"]
 
 
+class WorkflowRunResult(Result):
+    """Describe a trial run's target, effects, status and separate evidence."""
+
+    workflow_id: int
+    executed: bool | None
+    status: str
+
+
 class DownloadTaskResult(Result):
     """Describe a one-time download review, preview or submission."""
 
