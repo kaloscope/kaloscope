@@ -91,15 +91,16 @@
     // send the request
     loading.start();
     const json: Record<string, unknown> = { id, graph_id, trigger, bootparams: params };
+    // local inputs are sent as UTC instants, as the schedule page displays them
     if (trigger === 'date') {
-      json.run_date = run_date || null;
+      json.run_date = run_date ? new Date(run_date).toISOString() : null;
     } else if (trigger === 'cron') {
       json.cron_expr = cron_expr;
     } else if (trigger === 'interval') {
       json.interval_num = interval_num;
       json.interval_unit = interval_unit;
-      json.interval_start = interval_start || null;
-      json.interval_end = interval_end || null;
+      json.interval_start = interval_start ? new Date(interval_start).toISOString() : null;
+      json.interval_end = interval_end ? new Date(interval_end).toISOString() : null;
     }
     api
       .post('flow/job/upsert', { json })

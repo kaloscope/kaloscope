@@ -16,12 +16,12 @@ from app.models.download import (
     DownloadTask,
 )
 from app.models.flow import (
+    TIMING_FIELDS,
     FlowGraph,
     FlowLog,
     GraphDocument,
     GraphQuery,
     JobQuery,
-    JobTrigger,
 )
 from app.models.media import MediaItem, MediaQuery
 from app.models.user import UserInfo
@@ -140,16 +140,6 @@ async def workflow_jobs(query: JobQuery, user: UserInfo) -> dict:
         activation, concurrency and recovery settings do not prove execution.
     """
     page = await FlowJobService.list_jobs(query, user)
-    timing_fields = {
-        JobTrigger.DATE: ("run_date",),
-        JobTrigger.CRON: ("cron_expr",),
-        JobTrigger.INTERVAL: (
-            "interval_num",
-            "interval_unit",
-            "interval_start",
-            "interval_end",
-        ),
-    }
     return {
         "filters": {
             "name": query.name or None,
@@ -179,7 +169,7 @@ async def workflow_jobs(query: JobQuery, user: UserInfo) -> dict:
                         "trigger",
                         "repeatable",
                         "recoverable",
-                        *timing_fields[job["trigger"]],
+                        *TIMING_FIELDS[job["trigger"]],
                     )
                 },
             }

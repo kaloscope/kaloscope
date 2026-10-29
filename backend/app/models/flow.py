@@ -1,6 +1,8 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum, auto
 from typing import Annotated, Any, Literal, Self
+from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import (
@@ -9,6 +11,7 @@ from pydantic import (
     Field,
     FutureDatetime,
     PositiveInt,
+    field_validator,
     model_validator,
 )
 from sanic.request.form import File
@@ -95,6 +98,46 @@ class IntervalUnit(StrEnum):
     HOURS = "hours"
     DAYS = "days"
     WEEKS = "weeks"
+
+
+class ScheduleAction(StrEnum):
+    """Select one schedule change reviewed before confirmation.
+
+    `create`: Add a schedule, enabled at once, for a published workflow.
+    `update`: Change timing or startup parameters; the state is unchanged.
+    `enable`: Resume a paused schedule.
+    `pause`: Stop future runs; a run in progress continues.
+    `delete`: Remove the schedule; a run in progress continues.
+    """
+
+    CREATE = "create"
+    UPDATE = "update"
+    ENABLE = "enable"
+    PAUSE = "pause"
+    DELETE = "delete"
+
+
+# the timing fields each trigger stores; the others stay unset
+TIMING_FIELDS = {
+    JobTrigger.DATE: ("run_date",),
+    JobTrigger.CRON: ("cron_expr",),
+    JobTrigger.INTERVAL: (
+        "interval_num",
+        "interval_unit",
+        "interval_start",
+        "interval_end",
+    ),
+}
+SETTING_FIELDS = (
+    "trigger",
+    "run_date",
+    "cron_expr",
+    "interval_num",
+    "interval_unit",
+    "interval_start",
+    "interval_end",
+    "bootparams",
+)
 
 
 # -------------------- ORM Models --------------------
@@ -318,6 +361,20 @@ class FlowJob(TortoiseModel):
 
     class PydanticMeta:
         exclude = ("graph",)
+
+
+class FlowJobReceipt(TortoiseModel):
+    """Retain one applied schedule change so retries read its outcome."""
+
+    key = CharField(max_length=64, unique=True)
+    action = CharEnumField(max_length=16, enum_type=ScheduleAction)
+    # deletion removes the schedule, so these identities are not relations
+    job_id = IntField(null=True)
+    graph_id = IntField()
+    result = JSONField[dict[str, Any]]()
+
+    class Meta:
+        table = "flow_job_receipt"
 
 
 class FlowTrigger(TortoiseModel):
@@ -588,6 +645,127 @@ class JobUpsert(BaseModel):
             ):
                 raise ValueError("interval_start must be before interval_end")
         return self
+
+
+class ScheduleChange(BaseModel):
+    """Describe one schedule change to review against the scheduler's rules.
+
+    `create` names a workflow and a trigger; other actions name `job_id` only.
+    `update` keeps omitted settings and an explicit null clears an interval bound.
+    """
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    action: ScheduleAction
+    job_id: PositiveInt | None = Field(
+        default=None, description="Existing schedule ID, not a workflow ID."
+    )
+    workflow_id: PositiveInt | None = Field(
+        default=None, description="Published schedule workflow; create only."
+    )
+    trigger: JobTrigger | None = None
+    run_date: datetime | None = None
+    cron_expr: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Five UTC fields; weekdays as mon-sun names.",
+    )
+    interval_num: PositiveInt | None = None
+    interval_unit: IntervalUnit | None = None
+    interval_start: datetime | None = None
+    interval_end: datetime | None = None
+    bootparams: dict[str, JSONType] | None = Field(
+        default=None, description="Startup parameters; create defaults to {}."
+    )
+    timezone: str | None = Field(
+        default=None, max_length=64, description="User's IANA zone; display only."
+    )
+
+    @field_validator("run_date", "interval_start", "interval_end")
+    @classmethod
+    def validate_offset(cls, value: datetime | None) -> datetime | None:
+        """Require an explicit offset and store the time in UTC.
+
+        Args:
+            value: Requested time.
+
+        Returns:
+            The same instant in UTC.
+
+        Raises:
+            ValueError: If the time has no UTC offset.
+        """
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                "Times need a UTC offset such as +08:00; ask the user's timezone."
+            )
+        return value.astimezone(UTC)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        """Accept only zones the server can convert.
+
+        Args:
+            value: IANA zone name used to display times.
+
+        Returns:
+            The validated zone name.
+
+        Raises:
+            ValueError: If the zone is unknown.
+        """
+        if value is not None:
+            try:
+                ZoneInfo(value)
+            except (ValueError, ZoneInfoNotFoundError):
+                raise ValueError(
+                    "timezone must be an IANA name such as Asia/Shanghai"
+                ) from None
+        return value
+
+    @model_validator(mode="after")
+    def validate_target(self) -> Self:
+        """Require the target and settings each action uses.
+
+        Returns:
+            Validated change.
+
+        Raises:
+            ValueError: If the target or settings do not fit the action.
+        """
+        if self.action == ScheduleAction.CREATE:
+            if self.workflow_id is None or self.job_id is not None:
+                raise ValueError("create takes workflow_id, not job_id")
+            if self.trigger is None:
+                raise ValueError("create requires trigger")
+        elif self.job_id is None or self.workflow_id is not None:
+            raise ValueError(f"{self.action} takes job_id, not workflow_id")
+        elif self.action != ScheduleAction.UPDATE and (
+            self.model_fields_set & set(SETTING_FIELDS)
+        ):
+            raise ValueError(f"{self.action} takes no settings")
+        return self
+
+
+class ScheduleApply(BaseModel):
+    """Apply a reviewed schedule change once after the user approves it."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    request_id: UUID = Field(description="request_id returned by the review.")
+    change: ScheduleChange = Field(description="The exact reviewed change.")
+    revision: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Revision returned by the review; null for create.",
+    )
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
 
 
 class IndexerResource(BaseModel):

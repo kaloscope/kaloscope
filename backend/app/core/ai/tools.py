@@ -72,16 +72,20 @@ from app.models.flow import (
     GraphQuery,
     GraphState,
     GraphWrite,
+    IntervalUnit,
     JobQuery,
     JobState,
     JobTrigger,
+    ScheduleAction,
+    ScheduleApply,
+    ScheduleChange,
 )
 from app.models.mcp import NodeTypesResult
 from app.models.media import MediaQuery
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
 from app.services.download import DownloadPlanService, DownloadTaskService
-from app.services.flow import FlowGraphService, FlowRunService
+from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.workflow_authoring import (
     probe_http_request,
@@ -92,6 +96,7 @@ from app.utils.json import JSONType, dumps, loads
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
 CREATE_TOOL = "create_workflow_draft"
+SCHEDULE_TOOLS = frozenset({"review_workflow_schedule", "apply_workflow_schedule"})
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -353,6 +358,24 @@ class PlanCreate(ToolArguments):
     )
 
 
+class ScheduleReview(ScheduleChange):
+    """Review one schedule change without saving it."""
+
+    action: Annotated[ScheduleAction, plain_enum(ScheduleAction)]
+    trigger: Annotated[JobTrigger, plain_enum(JobTrigger)] | None = None
+    interval_unit: Annotated[IntervalUnit, plain_enum(IntervalUnit)] | None = None
+
+
+class ScheduleConfirm(ToolArguments):
+    """Apply a schedule review from an earlier turn of this conversation."""
+
+    request_id: UUID
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
@@ -588,11 +611,26 @@ TOOLS = (
     ),
     AssistantTool(
         "list_workflow_jobs",
-        "Page schedules by workflow name; newest first. job_id != workflow_id. "
-        "Times/cron UTC. running=enabled, not executing; "
-        "repeatable allows concurrent identical parameters; recoverable=recovery, "
-        "neither sets timing. Never infer next run or success; use workflow logs.",
+        "Page schedules by workflow name; newest first; unlocks changes. job_id "
+        "!= workflow_id. Times/cron UTC. running=enabled, not executing; "
+        "repeatable=concurrent identical parameters; recoverable=recovery; "
+        "neither sets timing. Never infer next run or success.",
         WorkflowJobList,
+    ),
+    AssistantTool(
+        "review_workflow_schedule",
+        "Check one schedule change; saves nothing. Use listed IDs and ask when "
+        "matches are ambiguous. Times need offsets. Show before/after, defaults, "
+        "first_run and notes, then end the turn for confirmation.",
+        ScheduleReview,
+        admin=True,
+    ),
+    AssistantTool(
+        "apply_workflow_schedule",
+        "Apply a prior turn's valid review after the user confirms it; returns at "
+        "once. Repeat the same request_id after errors; never re-review to retry.",
+        ScheduleConfirm,
+        admin=True,
     ),
     AssistantTool(
         "navigate",
@@ -700,6 +738,7 @@ def tool_schemas(
     plan_only: bool = False,
     ingestion: bool = False,
     trial: bool = False,
+    schedule: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -711,6 +750,8 @@ def tool_schemas(
         plan_only: Focus a selected indexer's plan conversation on relevant tools.
         ingestion: Allow A1 scraper creation after inspecting a movie/TV library.
         trial: Offer trial runs after a successful static validation this turn.
+        schedule: Offer schedule changes after listing schedules this turn or
+            after a review in the previous turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -720,6 +761,8 @@ def tool_schemas(
     schemas = []
     for tool in available_tools(user).values():
         if tool.name == "run_workflow" and not trial:
+            continue
+        if tool.name in SCHEDULE_TOOLS and not schedule:
             continue
         if tool.name in {
             "search_indexer",
@@ -909,6 +952,10 @@ async def execute_tool(
                     result = await DownloadTaskService.validate_request(args, user)
                 case TaskCreate():
                     result = await create_task(args, conversation_id, call_id, user)
+                case ScheduleChange():
+                    result = await FlowJobService.review_change(args, user)
+                case ScheduleConfirm():
+                    result = await apply_schedule(args, conversation_id, user)
                 case PlanList():
                     result = await download_plans(
                         DownloadPlanQuery(
@@ -1568,6 +1615,68 @@ async def create_task(
                 "confirmation_required": True,
                 "message": "Show the latest validated result and settings, finish "
                 "the turn, and wait for the user's final confirmation.",
+            }
+        return result
+    raise NotFoundException
+
+
+async def apply_schedule(
+    args: ScheduleConfirm, conversation_id: int, user: UserInfo
+) -> dict:
+    """Apply a schedule review the user confirmed after it was shown.
+
+    Only the newest valid review of a schedule (or of a new schedule for a
+    workflow) from a completed earlier turn is applied; the active turn is never
+    complete, so its own reviews wait. A committed request replays first, so
+    retries never repeat it.
+
+    Args:
+        args: Reviewed request ID and the user's confirmation.
+        conversation_id: Server-owned conversation.
+        user: Current account whose rights the service checks again.
+
+    Returns:
+        Shared outcome, or a confirmation request for a review that is not ready.
+
+    Raises:
+        NotFoundException: If the review record is unavailable.
+    """
+    reviews = []
+    for record in (
+        await AssistantToolCall.filter(
+            turn__conversation_id=conversation_id, name="review_workflow_schedule"
+        )
+        .order_by("-id")
+        .limit(30)
+    ):
+        data = (record.result or {}).get("data") or {}
+        if data.get("valid"):
+            target = (data["job_id"], None if data["job_id"] else data["workflow_id"])
+            reviews.append((record, data, target))
+    for index, (record, data, target) in enumerate(reviews):
+        if data["request_id"] != str(args.request_id):
+            continue
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        superseded = any(other == target for _, _, other in reviews[:index])
+        ready = not superseded and reviewed.status == "complete"
+        result = await FlowJobService.apply_change(
+            ScheduleApply(
+                request_id=args.request_id,
+                change=ScheduleChange.model_validate_json(record.arguments),
+                revision=data["revision"],
+                confirmed=args.confirmed and ready,
+            ),
+            user,
+        )
+        if not ready and not result.get("replayed"):
+            return {
+                **result,
+                "applied": False,
+                "confirmation_required": True,
+                "message": "A newer review replaced this one; confirm that one."
+                if superseded
+                else "Show this review, finish the turn and wait for the user's "
+                "confirmation.",
             }
         return result
     raise NotFoundException

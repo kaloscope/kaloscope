@@ -245,6 +245,8 @@ def test_protocol(mode):
                 "get_workflow_draft",
                 "restore_workflow_draft",
                 "run_workflow",
+                "review_workflow_schedule",
+                "apply_workflow_schedule",
             }
             for tool in result.tools:
                 assert tool.annotations is not None
@@ -258,6 +260,7 @@ def test_protocol(mode):
                     "create_download_task",
                     "search_indexer",
                     "run_workflow",
+                    "apply_workflow_schedule",
                 }
                 assert tool.annotations.read_only_hint is (not writes)
                 assert tool.annotations.destructive_hint is (
@@ -270,13 +273,19 @@ def test_protocol(mode):
                         "create_download_task",
                         "search_indexer",
                         "run_workflow",
+                        "apply_workflow_schedule",
                     }
                 )
-                # repeating a request ID reads the same plan, task or trial run
+                # repeating a request ID reads the same plan, task, run or change
                 assert tool.annotations.idempotent_hint is (
                     not writes
                     or tool.name
-                    in {"create_download_plan", "create_download_task", "run_workflow"}
+                    in {
+                        "create_download_plan",
+                        "create_download_task",
+                        "run_workflow",
+                        "apply_workflow_schedule",
+                    }
                 )
                 if tool.name == "validate_download_task":
                     assert tool.annotations.open_world_hint is True
@@ -339,7 +348,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 30
+            assert len(response_json(response)["result"]["tools"]) == 32
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

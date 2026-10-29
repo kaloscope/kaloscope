@@ -879,6 +879,10 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'create_download_plan' && event.data.ok && event.data.data?.created) {
             window.dispatchEvent(new Event('download-plan-created'));
           }
+          // an applied or uncertain change refreshes the schedule page's current results
+          if (tool.name === 'apply_workflow_schedule' && event.data.ok && event.data.data?.applied !== false) {
+            window.dispatchEvent(new Event('workflow-job-changed'));
+          }
           break;
         }
         case 'done':

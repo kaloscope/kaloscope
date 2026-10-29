@@ -1126,6 +1126,8 @@
     "tools": {
       "list_workflows": "Find Workflows",
       "list_workflow_jobs": "Find Scheduled Jobs",
+      "review_workflow_schedule": "Review Schedule Change",
+      "apply_workflow_schedule": "Apply Schedule Change",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_reference": "Read Workflow Reference",
@@ -1253,6 +1255,22 @@
       "search_failed": "Search failed; no plan created. Check workflow logs.",
       "search_invalid_input": "Invalid search settings. Expand tool details.",
       "search_invalid_output": "Invalid search result. Check tool details and workflow logs."
+    },
+    "schedule": {
+      "reviewed": "Not applied yet. Confirm this change to apply it.",
+      "created": "Schedule #{0} created and enabled",
+      "updated": "Schedule #{0} updated",
+      "enabled": "Schedule #{0} enabled",
+      "paused": "Schedule #{0} paused; a run in progress continues",
+      "deleted": "Schedule #{0} deleted; a run in progress continues",
+      "absent": "Schedule #{0} no longer exists; nothing changed",
+      "uncertain": "Result unconfirmed. Check Schedules before any new change.",
+      "confirmation_required": "Not applied. Confirm the latest review first.",
+      "stale": "Not applied: the schedule changed after review.",
+      "conflict": "Not applied: this request does not match its review.",
+      "pending": "Still being applied. Confirm again later to read the result.",
+      "invalid": "Not applied. Expand the details to see the issues.",
+      "refused": "Not applied; nothing was saved."
     }
   }
 }

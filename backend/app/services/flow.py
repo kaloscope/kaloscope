@@ -2,17 +2,26 @@ import asyncio
 import base64
 import hashlib
 import io
+import os
+import re
 import time
 import zipfile
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import replace
+from datetime import UTC, datetime
 from itertools import groupby
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
+from uuid import UUID
+from weakref import WeakValueDictionary
+from zoneinfo import ZoneInfo
 
 import aiofiles
 import httpx
 import orjson
+from apscheduler.triggers.cron import CronTrigger
+from pydantic import ValidationError
 from sanic.log import logger
 from sanic.request.form import File
 from tortoise import Tortoise, timezone
@@ -30,6 +39,7 @@ from app.core.exceptions import (
 )
 from app.core.flow.context import AUTH_KEY, MANUAL_KEY, START_KEY
 from app.core.flow.diff import changed_paths
+from app.core.flow.engine import EventWrapper, job_trigger
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node, NodeGroup, NodeSchema, start_config
 from app.core.flow.validation import (
@@ -38,10 +48,13 @@ from app.core.flow.validation import (
     validate_document,
 )
 from app.models.flow import (
+    SETTING_FIELDS,
+    TIMING_FIELDS,
     FlowDraftRevision,
     FlowGraph,
     FlowInstance,
     FlowJob,
+    FlowJobReceipt,
     FlowLog,
     FlowRepository,
     FlowRunReceipt,
@@ -61,8 +74,12 @@ from app.models.flow import (
     GraphWrite,
     JobQuery,
     JobState,
+    JobTrigger,
     JobUpsert,
     RepositoryAdd,
+    ScheduleAction,
+    ScheduleApply,
+    ScheduleChange,
 )
 from app.models.user import (
     HistoryType,
@@ -1567,6 +1584,24 @@ class FlowTriggerService(BaseService[FlowTrigger], model=FlowTrigger):
         )
 
 
+# the states in which each change to an existing schedule takes effect
+_ACTION_STATES = {
+    ScheduleAction.UPDATE: {JobState.RUNNING, JobState.PAUSED},
+    ScheduleAction.ENABLE: {JobState.PAUSED},
+    ScheduleAction.PAUSE: {JobState.RUNNING},
+    ScheduleAction.DELETE: {JobState.RUNNING, JobState.PAUSED, JobState.PENDING},
+}
+_OUTCOMES = {
+    ScheduleAction.CREATE: "created",
+    ScheduleAction.UPDATE: "updated",
+    ScheduleAction.ENABLE: "enabled",
+    ScheduleAction.PAUSE: "paused",
+    ScheduleAction.DELETE: "deleted",
+}
+_SCHEDULE_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+SCHEDULE_PARAMS_BYTES = 8192
+
+
 class FlowJobService(BaseService[FlowJob], model=FlowJob):
     """The service class for all flow job related operations."""
 
@@ -1623,3 +1658,573 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
             job = await FlowJob.create(**data)
             await engine.add_job(job.id)
         return job
+
+    @classmethod
+    def describe(cls, job: FlowJob) -> dict[str, Any]:
+        """Describe a schedule with only the timing fields its trigger uses.
+
+        Args:
+            job: Stored or proposed schedule.
+
+        Returns:
+            JSON settings and state; times are UTC.
+        """
+        return json.loads(
+            json.dumps(
+                {
+                    "state": job.state,
+                    "trigger": job.trigger,
+                    **{name: getattr(job, name) for name in TIMING_FIELDS[job.trigger]},
+                    "bootparams": job.bootparams,
+                    "repeatable": job.repeatable,
+                    "recoverable": job.recoverable,
+                }
+            )
+        )
+
+    @classmethod
+    def shown(cls, settings: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Bound the startup parameters a review or outcome repeats.
+
+        Args:
+            settings: Settings from `describe`.
+
+        Returns:
+            The same settings; oversized parameters become their encoded size.
+        """
+        if settings is None:
+            return None
+        size = len(json.dumps(settings["bootparams"]))
+        if size <= SCHEDULE_PARAMS_BYTES:
+            return settings
+        return {**settings, "bootparams": {"omitted_bytes": size}}
+
+    @classmethod
+    def revision(cls, job: FlowJob) -> str:
+        """Fingerprint a schedule so a review detects later changes.
+
+        Args:
+            job: Stored schedule.
+
+        Returns:
+            Short digest of its workflow, settings and state.
+        """
+        value = {"workflow_id": job.graph_id, **cls.describe(job)}
+        return hashlib.sha256(
+            json.dumps(value, option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()[:16]
+
+    @classmethod
+    def request_id(
+        cls,
+        user_id: int,
+        change: ScheduleChange,
+        revision: str | None,
+        nonce: bytes | None = None,
+    ) -> UUID:
+        """Issue a request ID that identifies one reviewed change and revision.
+
+        Args:
+            user_id: Reviewing account.
+            change: Reviewed change; its display timezone is ignored.
+            revision: Reviewed schedule revision, or `None` for a creation.
+            nonce: Random half of an existing ID being checked; `None` issues one.
+
+        Returns:
+            A new ID, or the only ID this nonce can have for the same review.
+        """
+        nonce = nonce or os.urandom(8)
+        digest = hashlib.sha256(
+            json.dumps(
+                change.model_dump(
+                    mode="json", exclude_unset=True, exclude={"timezone"}
+                ),
+                option=orjson.OPT_SORT_KEYS,
+            )
+        ).hexdigest()
+        tag = hashlib.sha256(nonce + f"{user_id}:{digest}:{revision}".encode())
+        return UUID(bytes=nonce + tag.digest()[:8])
+
+    @classmethod
+    def first_run(
+        cls, event: EventWrapper, zone: str | None
+    ) -> tuple[dict[str, Any], str | None]:
+        """Predict the first run with the trigger the scheduler registers.
+
+        Args:
+            event: Schedule event as the scheduler would receive it now.
+            zone: IANA zone for an additional local rendering.
+
+        Returns:
+            The UTC estimate, its local rendering and rule, plus an issue when
+            the trigger would never run.
+        """
+        now = datetime.now(UTC)
+        trigger = job_trigger(event)
+        estimate = trigger.get_next_fire_time(None, now) if trigger else None
+        issue = None
+        if event.policy == JobTrigger.DATE:
+            rule = "Runs once; a run_date missed while stopped is skipped."
+            if estimate is not None and estimate <= now:
+                estimate, issue = None, "run_date has passed; it would never run."
+        elif event.policy == JobTrigger.CRON:
+            rule = "Next UTC match after registration, then each match."
+        elif event.interval_start is None:
+            rule = "One interval after registration, then every interval."
+        elif event.interval_start > now:
+            rule = "At interval_start, then every interval."
+        else:
+            rule = "Next interval_start + n intervals after registration."
+        if estimate is None and issue is None:
+            issue = "No future run fits these settings."
+        result: dict[str, Any] = {"estimate": estimate, "rule": rule}
+        if zone and estimate:
+            result["local"] = estimate.astimezone(ZoneInfo(zone))
+        return json.loads(json.dumps(result)), issue
+
+    @classmethod
+    async def _review(
+        cls, change: ScheduleChange, user: UserInfo
+    ) -> tuple[dict[str, Any], FlowJob | None, JobUpsert | None]:
+        """Check a change against current permissions, state and scheduler rules.
+
+        Args:
+            change: Requested change.
+            user: Current account.
+
+        Returns:
+            The review, the current schedule and the editor settings to save.
+
+        Raises:
+            ForbiddenException: If the account cannot manage the workflow.
+            NotFoundException: If the workflow or schedule does not exist.
+        """
+        FlowGraphService.require_editor(user)
+        job = None
+        if change.action == ScheduleAction.CREATE:
+            graph = await FlowGraphService.get_accessible(change.workflow_id, user)
+        else:
+            job = await FlowJob.get_or_none(id=change.job_id)
+            if job is None:
+                raise NotFoundException
+            graph = await FlowGraphService.get_accessible(job.graph_id, user)
+        issues: list[dict[str, str]] = []
+        notes = []
+        defaults: dict[str, Any] = {}
+        before = cls.shown(cls.describe(job)) if job else None
+        after = None
+        upsert = None
+        event = None
+        if job is None:
+            if graph.category != GraphCategory.SCHEDULE:
+                issues.append(
+                    {"path": "workflow_id", "message": "Choose a schedule workflow."}
+                )
+            if graph.state == GraphState.DRAFT:
+                issues.append(
+                    {
+                        "path": "workflow_id",
+                        "message": "Publish the workflow before scheduling it.",
+                    }
+                )
+        elif job.state not in _ACTION_STATES[change.action]:
+            message = {
+                JobState.PENDING: "The scheduler is still registering it; read it "
+                "again shortly.",
+                JobState.RUNNING: "It is already enabled.",
+                JobState.PAUSED: "It is already paused.",
+            }[job.state]
+            issues.append({"path": "job_id", "message": message})
+        if change.action in {ScheduleAction.CREATE, ScheduleAction.UPDATE}:
+            provided = change.model_dump(
+                include=set(SETTING_FIELDS), exclude_unset=True
+            )
+            values: dict[str, Any] = {}
+            if job is not None:
+                values = {"bootparams": job.bootparams}
+                if provided.get("trigger", job.trigger) == job.trigger:
+                    values["trigger"] = job.trigger
+                    values.update(
+                        {
+                            name: getattr(job, name)
+                            for name in TIMING_FIELDS[job.trigger]
+                        }
+                    )
+            else:
+                defaults = {"bootparams": {}}
+                if change.trigger == JobTrigger.INTERVAL:
+                    defaults.update(interval_start=None, interval_end=None)
+                defaults = {k: v for k, v in defaults.items() if k not in provided}
+                values.update(defaults)
+            values.update(provided)
+            trigger = values.get("trigger")
+            for name in SETTING_FIELDS[1:-1]:
+                if name in provided and name not in TIMING_FIELDS.get(trigger, ()):
+                    issues.append(
+                        {"path": name, "message": f"{trigger} triggers do not use it."}
+                    )
+            try:
+                upsert = JobUpsert.model_validate(
+                    {
+                        **values,
+                        "id": job.id if job else None,
+                        "graph_id": graph.id,
+                    }
+                )
+            except ValidationError as exc:
+                issues.extend(
+                    {
+                        "path": ".".join(map(str, error["loc"])) or "trigger",
+                        "message": error["msg"].removeprefix("Value error, ")[:200],
+                    }
+                    for error in exc.errors(include_input=False, include_url=False)
+                )
+            if upsert is not None and upsert.trigger == JobTrigger.CRON:
+                try:
+                    CronTrigger.from_crontab(upsert.cron_expr, timezone=UTC)
+                except ValueError as exc:
+                    issues.append({"path": "cron_expr", "message": str(exc)[:200]})
+                if "cron_expr" in provided and re.search(
+                    r"\d", upsert.cron_expr.split()[4]
+                ):
+                    issues.append(
+                        {
+                            "path": "cron_expr",
+                            "message": "Name weekdays (mon-sun): this scheduler "
+                            "reads 0 as Monday, unlike standard cron.",
+                        }
+                    )
+            # stored parameters are kept as they are; only new ones are checked
+            params = provided.get("bootparams")
+            if params and any(key.startswith("$") for key in params):
+                issues.append(
+                    {
+                        "path": "bootparams",
+                        "message": "Keys starting with $ are reserved.",
+                    }
+                )
+            if params and len(json.dumps(params)) > SCHEDULE_PARAMS_BYTES:
+                issues.append({"path": "bootparams", "message": "Too large."})
+            if upsert is not None:
+                proposed = FlowJob(
+                    **upsert.model_dump(exclude={"id"}),
+                    state=job.state if job else JobState.RUNNING,
+                    repeatable=job.repeatable if job else False,
+                    recoverable=job.recoverable if job else True,
+                )
+                after = cls.shown(cls.describe(proposed))
+                if proposed.state == JobState.RUNNING:
+                    event = EventWrapper.from_job(proposed)
+                if job is None:
+                    # another schedule with these settings would only duplicate runs
+                    settings = {**cls.describe(proposed), "state": None}
+                    for other in await FlowJob.filter(graph_id=graph.id):
+                        if {**cls.describe(other), "state": None} == settings:
+                            issues.append(
+                                {
+                                    "path": "workflow_id",
+                                    "message": f"Schedule {other.id} already has "
+                                    "these settings; enable or update it instead.",
+                                }
+                            )
+        elif change.action != ScheduleAction.DELETE:
+            enable = change.action == ScheduleAction.ENABLE
+            after = {**before, "state": JobState.RUNNING if enable else JobState.PAUSED}
+            if enable:
+                event = EventWrapper.from_job(job)
+                if graph.state == GraphState.DRAFT:
+                    # resuming follows the schedule page's publication rule
+                    issues.append(
+                        {"path": "job_id", "message": "Publish the workflow first."}
+                    )
+        first_run: dict[str, Any] = {"estimate": None}
+        if event is not None and not issues:
+            first_run, issue = cls.first_run(event, change.timezone)
+            if issue:
+                issues.append({"path": "trigger", "message": issue})
+        elif change.action in {ScheduleAction.PAUSE, ScheduleAction.DELETE}:
+            first_run["rule"] = "No further runs; a run in progress is not cancelled."
+        elif after is not None and after["state"] == JobState.PAUSED:
+            first_run["rule"] = "Stays paused; no runs until enabled."
+        changes = (
+            [
+                {"field": name, "before": before.get(name), "after": after.get(name)}
+                # a trigger change drops the previous trigger's timing fields
+                for name in dict.fromkeys([*before, *after])
+                if before.get(name) != after.get(name)
+            ]
+            if before and after
+            else []
+        )
+        if change.action == ScheduleAction.UPDATE and not changes and not issues:
+            issues.append({"path": "action", "message": "Nothing would change."})
+        if change.action == ScheduleAction.CREATE:
+            notes.append(
+                "Enabled at once. repeatable=false skips a run while one with "
+                "the same parameters is active; recoverable=true resumes "
+                "interrupted runs after restart."
+            )
+        elif change.action == ScheduleAction.UPDATE and event is not None:
+            notes.append("Saving re-registers it with the new timing.")
+        elif change.action == ScheduleAction.ENABLE:
+            notes.append("Runs missed while paused are not made up.")
+        if event is not None or change.action == ScheduleAction.UPDATE:
+            notes.append("Each run uses the workflow's published definition then.")
+        if job is not None and graph.state == GraphState.DRAFT:
+            notes.append("The workflow is unpublished; runs fail until published.")
+        if change.timezone and after and after["trigger"] == JobTrigger.CRON:
+            zone = ZoneInfo(change.timezone)
+            year = datetime.now(UTC).year
+            if (
+                len(
+                    {
+                        datetime(year, month, 1, tzinfo=zone).utcoffset()
+                        for month in (1, 7)
+                    }
+                )
+                > 1
+            ):
+                notes.append(f"UTC cron ignores daylight saving in {change.timezone}.")
+        revision = cls.revision(job) if job else None
+        result = {
+            "valid": not issues,
+            "issues": issues,
+            "action": change.action,
+            "job_id": job.id if job else None,
+            "workflow_id": graph.id,
+            "workflow_name": graph.name,
+            "revision": revision,
+            "before": before,
+            "after": after,
+            "changes": changes,
+            "defaults": defaults,
+            "first_run": first_run,
+            "timezone": "UTC",
+            "notes": notes,
+        }
+        if not issues:
+            result["request_id"] = str(cls.request_id(user.id, change, revision))
+        return json.loads(json.dumps(result)), job, upsert
+
+    @classmethod
+    async def review_change(cls, change: ScheduleChange, user: UserInfo) -> dict:
+        """Review a schedule change without saving or registering anything.
+
+        Args:
+            change: Requested change.
+            user: Current account; only administrators manage schedules.
+
+        Returns:
+            Located issues, the before/after settings and changes, applied
+            defaults, the first-run rule and estimate, notes, the schedule's
+            `revision` and, when valid, a `request_id` for this exact review.
+
+        Raises:
+            ForbiddenException: If the account cannot manage the workflow.
+            NotFoundException: If the workflow or schedule does not exist.
+        """
+        result, _, _ = await cls._review(change, user)
+        return result
+
+    @classmethod
+    async def apply_change(cls, body: ScheduleApply, user: UserInfo) -> dict:
+        """Apply a confirmed review once and return without waiting for any run.
+
+        The change, its scheduler notice and its receipt commit together, so a
+        refused notice saves nothing. Retries with the request ID read the receipt
+        instead of repeating the change; a cancelled caller completes it first.
+
+        Args:
+            body: Request ID, the exact reviewed change and revision, and the
+                user's confirmation.
+            user: Current account; permissions and state are checked again.
+
+        Returns:
+            The applied outcome and current schedule (`replayed` on retries), or
+            `conflict`, `pending`, `stale`, `confirmation_required`, located
+            issues, an `absent` schedule, a refused notice, or an `uncertain`
+            outcome that is never repeated.
+
+        Raises:
+            ForbiddenException: If the account cannot manage the workflow.
+            NotFoundException: If the workflow does not exist.
+        """
+        from filelock import Timeout
+
+        from app.core.dl.syncer import submission_lock
+
+        FlowGraphService.require_editor(user)
+        nonce = body.request_id.bytes[:8]
+        if (
+            cls.request_id(user.id, body.change, body.revision, nonce)
+            != body.request_id
+        ):
+            return {
+                "applied": False,
+                "conflict": True,
+                "message": "This request_id was reviewed for another change or "
+                "revision; review the change again.",
+            }
+        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        lock = _SCHEDULE_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            try:
+                with submission_lock(f"schedule:{key}"):
+                    task = asyncio.ensure_future(cls._apply(body, key, user))
+                    try:
+                        return await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        # a cancelled caller never splits a change from its receipt
+                        await task
+                        raise
+            except Timeout:
+                if receipt := await FlowJobReceipt.get_or_none(key=key):
+                    return await cls._replay(receipt, user)
+                return {
+                    "applied": False,
+                    "pending": True,
+                    "message": "Another call is applying this request; repeat the "
+                    "same request later to read its outcome.",
+                }
+
+    @classmethod
+    async def _replay(cls, receipt: FlowJobReceipt, user: UserInfo) -> dict:
+        """Read a recorded outcome under current permissions.
+
+        Args:
+            receipt: Applied request.
+            user: Current account.
+
+        Returns:
+            The recorded outcome with the schedule as it is now.
+        """
+        await FlowGraphService.get_accessible(receipt.graph_id, user)
+        job = await FlowJob.get_or_none(id=receipt.job_id) if receipt.job_id else None
+        return {
+            **receipt.result,
+            "replayed": True,
+            "schedule": cls.shown(cls.describe(job)) if job else None,
+        }
+
+    @classmethod
+    async def _apply(cls, body: ScheduleApply, key: str, user: UserInfo) -> dict:
+        """Recheck and apply one request while holding its submission lock.
+
+        Args:
+            body: Confirmed request.
+            key: Account-scoped request identity.
+            user: Current account.
+
+        Returns:
+            Shared outcome described by `apply_change`.
+        """
+        if receipt := await FlowJobReceipt.get_or_none(key=key):
+            return await cls._replay(receipt, user)
+        change = body.change
+        absent = {
+            "applied": False,
+            "outcome": "absent",
+            "action": change.action,
+            "job_id": change.job_id,
+            "message": "The schedule no longer exists; this request changed nothing.",
+        }
+        try:
+            review, job, upsert = await cls._review(change, user)
+        except NotFoundException:
+            if change.job_id and not await FlowJob.exists(id=change.job_id):
+                return absent
+            raise
+        base = {
+            name: review[name]
+            for name in ("action", "job_id", "workflow_id", "workflow_name")
+        }
+        if not review["valid"]:
+            return {
+                "applied": False,
+                **base,
+                "valid": False,
+                "issues": review["issues"],
+            }
+        stale = {
+            "applied": False,
+            **base,
+            "stale": True,
+            "message": "The schedule changed after the review; review it again.",
+            "current": review["before"],
+        }
+        if review["revision"] != body.revision:
+            return stale
+        if not body.confirmed:
+            return {
+                **review,
+                "request_id": str(body.request_id),
+                "applied": False,
+                "confirmation_required": True,
+            }
+        engine = cls.app_ctx().flow_engine
+        notified = False
+        try:
+            async with in_transaction():
+                if job is not None:
+                    # another editor may have changed it since the review
+                    current = await FlowJob.get_or_none(id=job.id)
+                    if current is None:
+                        return absent
+                    if cls.revision(current) != body.revision:
+                        return stale
+                match change.action:
+                    case ScheduleAction.CREATE | ScheduleAction.UPDATE:
+                        job = await cls.upsert(cast(JobUpsert, upsert))
+                    case ScheduleAction.ENABLE:
+                        await engine.resume_job(job.id)
+                    case ScheduleAction.PAUSE:
+                        await engine.pause_job(job.id)
+                    case ScheduleAction.DELETE:
+                        await engine.delete_job(job.id)
+                notified = True
+                job = cast(FlowJob, job)
+                current = await FlowJob.get_or_none(id=job.id)
+                result = {
+                    "applied": True,
+                    "outcome": _OUTCOMES[change.action],
+                    **base,
+                    "job_id": job.id,
+                    "schedule": cls.shown(cls.describe(current)) if current else None,
+                }
+                if current and current.state == JobState.PENDING:
+                    result["message"] = (
+                        "pending: the scheduler is registering the new settings."
+                    )
+                await FlowJobReceipt.create(
+                    key=key,
+                    action=change.action,
+                    job_id=job.id,
+                    graph_id=base["workflow_id"],
+                    result=result,
+                )
+        except Exception:
+            logger.exception("Failed to apply a schedule change")
+            if not notified:
+                return {
+                    "applied": False,
+                    **base,
+                    "message": "The scheduler refused the change, so nothing was "
+                    "saved; the same request may be repeated.",
+                }
+            result = {
+                "applied": None,
+                "outcome": "uncertain",
+                **base,
+                "message": "The scheduler received the change but it was not "
+                "saved; inspect the schedule instead of repeating it.",
+            }
+            # later retries read this outcome rather than notifying again
+            with suppress(Exception):
+                await FlowJobReceipt.create(
+                    key=key,
+                    action=change.action,
+                    job_id=change.job_id,
+                    graph_id=base["workflow_id"],
+                    result=result,
+                )
+        return {**result, "replayed": False}

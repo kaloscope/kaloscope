@@ -200,6 +200,20 @@ export type AssistantToolResult = {
   error?: { code: string; guidance?: string };
 };
 
+/** Shared outcome of applying a reviewed schedule change; a `null` `applied` is uncertain. */
+export type ScheduleChangeOutcome = {
+  applied: boolean | null;
+  outcome?: 'created' | 'updated' | 'enabled' | 'paused' | 'deleted' | 'absent' | 'uncertain';
+  job_id?: number | null;
+  workflow_id?: number;
+  replayed?: boolean;
+  valid?: boolean;
+  confirmation_required?: boolean;
+  stale?: boolean;
+  conflict?: boolean;
+  pending?: boolean;
+};
+
 /** Durable save lifecycle of an assistant canvas edit. */
 export type AssistantProposalStatus = 'pending' | 'saved' | 'unchanged' | 'conflict' | 'failed' | 'cancelled';
 

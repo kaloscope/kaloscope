@@ -15,6 +15,7 @@ from typing import Any, Literal, Self
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -124,6 +125,37 @@ class EventWrapper:
             interval_start=job.interval_start,
             interval_end=job.interval_end,
         )
+
+
+def job_trigger(event: EventWrapper) -> BaseTrigger | None:
+    """Build the UTC scheduler trigger a schedule event registers.
+
+    Args:
+        event: Schedule event carrying its trigger and timing fields.
+
+    Returns:
+        Date, cron or interval trigger; `None` when the timing fields are missing.
+
+    Raises:
+        ValueError: If the cron expression is invalid.
+    """
+    if event.policy == "date" and event.run_date is not None:
+        return DateTrigger(run_date=event.run_date, timezone=pytz.utc)
+    if event.policy == "cron" and event.cron_expr is not None:
+        return CronTrigger.from_crontab(event.cron_expr, timezone=pytz.utc)
+    if event.policy == "interval" and event.interval is not None:
+        num, unit = event.interval
+        return IntervalTrigger(
+            weeks=num if unit == "weeks" else 0,
+            days=num if unit == "days" else 0,
+            hours=num if unit == "hours" else 0,
+            minutes=num if unit == "minutes" else 0,
+            seconds=num if unit == "seconds" else 0,
+            start_date=event.interval_start,
+            end_date=event.interval_end,
+            timezone=pytz.utc,
+        )
+    return None
 
 
 @dataclass(kw_only=True)
@@ -268,27 +300,7 @@ class FlowEngine:
                                 )
                             )
                     elif event.job_id is not None:
-                        trigger = None
-                        if event.policy == "date" and event.run_date is not None:
-                            trigger = DateTrigger(
-                                run_date=event.run_date, timezone=pytz.utc
-                            )
-                        elif event.policy == "cron" and event.cron_expr is not None:
-                            trigger = CronTrigger.from_crontab(
-                                event.cron_expr, timezone=pytz.utc
-                            )
-                        elif event.policy == "interval" and event.interval is not None:
-                            num, unit = event.interval
-                            trigger = IntervalTrigger(
-                                weeks=num if unit == "weeks" else 0,
-                                days=num if unit == "days" else 0,
-                                hours=num if unit == "hours" else 0,
-                                minutes=num if unit == "minutes" else 0,
-                                seconds=num if unit == "seconds" else 0,
-                                start_date=event.interval_start,
-                                end_date=event.interval_end,
-                                timezone=pytz.utc,
-                            )
+                        trigger = job_trigger(event)
                         # add the job to the scheduler
                         if trigger is not None:
                             self._scheduler.add_job(

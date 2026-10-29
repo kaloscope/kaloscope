@@ -391,6 +391,30 @@ class AssistantSessionService:
         return record
 
     @classmethod
+    async def schedule_reviewed(cls, turn: AssistantTurn) -> bool:
+        """Check whether the previous completed turn showed a valid schedule review.
+
+        Args:
+            turn: Active turn whose conversation history is read.
+
+        Returns:
+            Whether that review may be confirmed in this turn.
+        """
+        previous = (
+            await AssistantTurn.filter(
+                conversation_id=turn.conversation_id, id__lt=turn.id, status="complete"
+            )
+            .order_by("-id")
+            .first()
+        )
+        return previous is not None and any(
+            ((call.result or {}).get("data") or {}).get("valid")
+            for call in await AssistantToolCall.filter(
+                turn_id=previous.id, name="review_workflow_schedule"
+            )
+        )
+
+    @classmethod
     async def begin(
         cls, conversation_id: int, body: AssistantTurnRequest, user: UserInfo
     ) -> AssistantTurn:
