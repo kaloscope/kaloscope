@@ -80,7 +80,8 @@
     if (!(event.target instanceof Node)) {
       return;
     }
-    const outside = !dropdown.contains(event.target);
+    // retain the original event path when a clicked control is removed
+    const outside = !event.composedPath().includes(dropdown);
     if ((outside && closeOnOutsideClick) || (!outside && closeOnClick && event.target instanceof HTMLButtonElement)) {
       open = false;
     }
