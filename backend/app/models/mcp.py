@@ -24,7 +24,7 @@ from tortoise.fields import (
 from app.core.dl.driver import DownloadAction, DownloadState
 from app.models.ai import AIProtocol, AIProviderPreset
 from app.models.base import TortoiseModel
-from app.models.download import OfflineDownloadErrorKind, PlanAction
+from app.models.download import OfflineDownloadErrorKind, PlanAction, TaskAction
 from app.models.flow import (
     GraphCategory,
     GraphRef,
@@ -245,6 +245,36 @@ class PlanChangeApplyResult(Result):
     applied: bool | None = Field(
         description="True once saved or deleted; null when the outcome is "
         "uncertain and must be inspected rather than repeated."
+    )
+
+
+class TaskActionReviewResult(Result):
+    """Describe a reviewed task action; nothing is performed."""
+
+    valid: bool
+    issues: list[dict[str, str]]
+    action: TaskAction
+    task_id: int = Field(description="Task ID, not a plan, workflow or downloader ID.")
+    name: str
+    state: DownloadState = Field(description="Stored state when reviewed.")
+    actions: list[TaskAction] = Field(
+        description="Actions this account may review for the task now."
+    )
+    dispatch: Literal["immediate", "deferred"] = Field(
+        description="`deferred` actions are queued for download synchronization."
+    )
+    revision: str = Field(
+        description="Reviewed task revision; pass it back when applying."
+    )
+    notes: list[str] = Field(description="Consequences to show before confirming.")
+
+
+class TaskActionApplyResult(Result):
+    """Describe a dispatched, queued, replayed, refused or uncertain task action."""
+
+    applied: bool | None = Field(
+        description="True once sent or queued; `queued` is not completion. Null "
+        "when the outcome is uncertain and must be inspected rather than repeated."
     )
 
 
@@ -708,7 +738,8 @@ class DownloadResult(RecordResult):
     )
     capabilities: list[DownloadAction] = Field(
         description="Actions supported for this task by its downloader and current "
-        "state; these are not operations exposed by the read-only MCP tools."
+        "state. review_download_task_action checks pause, resume, retry or "
+        "delete (administrators only) before apply_download_task_action."
     )
     error_kind: OfflineDownloadErrorKind | None = Field(
         description="Offline-download failure category; null when no categorized "

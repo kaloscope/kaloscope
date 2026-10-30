@@ -763,7 +763,7 @@ async def media_item_details(
 
 
 async def download_tasks(
-    query: DownloadQuery, scope: Literal["all", "active", "completed"]
+    query: DownloadQuery, scope: Literal["all", "active", "completed"], user: UserInfo
 ) -> dict:
     """Page stored download tasks like the active and completed download pages.
 
@@ -774,12 +774,14 @@ async def download_tasks(
         query: Name, state, downloader, ordering, and pagination filters.
         scope: `active` excludes completed tasks, `completed` keeps only completed
             tasks, and `all` applies no state scope.
+        user: Current account whose permitted task actions are listed.
 
     Returns:
         The exact matching total, this page's count and continuation, downloader
-        names, and compact task identities, states and progress. Error lengths
-        indicate when a detail read can retrieve stored error text. Sizes, speeds,
-        raw status and update times remain available through the detail tool.
+        names, and compact task identities, states, progress and the `actions`
+        the account may review. Error lengths indicate when a detail read can
+        retrieve stored error text. Sizes, speeds, raw status and update times
+        remain available through the detail tool.
     """
     if scope == "active":
         query.states = [state for state in DownloadState if state != "completed"]
@@ -793,6 +795,7 @@ async def download_tasks(
             key: task.get(key)
             for key in ("id", "name", "downloader_id", "state", "percentage")
         }
+        item["actions"] = DownloadTaskService.permitted(task["capabilities"], user)
         error = task.get("error_msg")
         if error:
             item["error_length"] = len(error)
@@ -885,17 +888,21 @@ async def download_plans(query: DownloadPlanQuery, user: UserInfo) -> dict:
     }
 
 
-async def download_task_details(task_id: int, offset: int, limit: int) -> dict:
+async def download_task_details(
+    task_id: int, offset: int, limit: int, user: UserInfo
+) -> dict:
     """Read one shared task and an exact page of its stored error message.
 
     Args:
         task_id: Task ID from the displayed selection or a query result.
         offset: Zero-based character offset in the error message.
         limit: Maximum error characters to return.
+        user: Current account whose permitted task actions are listed.
 
     Returns:
-        Named task fields and a paged error, or null when no error was recorded.
-        Values use the same shared visibility and stored status as list queries.
+        Named task fields, the `actions` the account may review and a paged
+        error, or null when no error was recorded. Values use the same shared
+        visibility and stored status as list queries.
 
     Raises:
         NotFoundException: If the task no longer exists.
@@ -906,6 +913,7 @@ async def download_task_details(task_id: int, offset: int, limit: int) -> dict:
     data = await DownloadTaskService.dump(task, include=DOWNLOAD_STORED_FIELDS)
     return {
         **{key: data.get(key) for key in DOWNLOAD_FIELDS},
+        "actions": DownloadTaskService.permitted(data["capabilities"], user),
         "error": value_page(task.error_msg, offset, limit)
         if task.error_msg is not None
         else None,

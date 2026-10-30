@@ -886,6 +886,9 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'apply_download_plan_change' && event.data.ok && event.data.data?.applied !== false) {
             window.dispatchEvent(new Event('download-plan-changed'));
           }
+          if (tool.name === 'apply_download_task_action' && event.data.ok && event.data.data?.applied !== false) {
+            window.dispatchEvent(new Event('download-task-changed'));
+          }
           break;
         }
         case 'done':

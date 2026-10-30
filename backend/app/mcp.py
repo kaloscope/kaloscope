@@ -33,6 +33,8 @@ from app.models.download import (
     DownloadPlanQuery,
     DownloadQuery,
     DownloadState,
+    DownloadTaskAction,
+    DownloadTaskActionApply,
     DownloadTaskCheck,
     DownloadTaskCreate,
     IndexerSearch,
@@ -73,6 +75,8 @@ from app.models.mcp import (
     ProviderResult,
     ScheduleApplyResult,
     ScheduleReviewResult,
+    TaskActionApplyResult,
+    TaskActionReviewResult,
     WorkflowDetails,
     WorkflowDraftResult,
     WorkflowDraftVersion,
@@ -154,6 +158,7 @@ _READ_TOOLS = frozenset(
         "get_workflow_draft",
         "review_workflow_schedule",
         "review_download_plan_change",
+        "review_download_task_action",
     }
 )
 _WRITE_TOOLS = frozenset(
@@ -168,6 +173,7 @@ _WRITE_TOOLS = frozenset(
         "run_workflow",
         "apply_workflow_schedule",
         "apply_download_plan_change",
+        "apply_download_task_action",
     }
 )
 DRAFT_WRITE = ToolAnnotations(
@@ -332,6 +338,9 @@ def create_server() -> MCPServer:
             "after approval; repeat that call to read its outcome. "
             "Plan updates/deletions follow the same review and apply steps; run "
             "search_indexer with search_preview when search inputs change. "
+            "Task pause/resume/retry/delete also follows them for one listed task; "
+            "delete files only on explicit request. A queued action is not done; "
+            "list the task later instead of waiting. "
             "For invalid arguments, correct the reported fields before retrying. "
             "For HTTP 401, ask the user to generate a new MCP access token and "
             "update the client's bearer token; credentials are never tool arguments. "
@@ -1418,8 +1427,9 @@ def create_server() -> MCPServer:
             0 to 100; null means unknown. Progress can describe an intermediate phase;
             use `state` to determine completion. `ratio` is progress display text and
             `estimate` combines speed with optional time remaining. `capabilities`
-            describes downloader actions, not MCP write tools. Source links, file
-            lists, and downloader credentials are excluded.
+            lists downloader actions for the stored state; review one through
+            review_download_task_action. Source links, file lists, and downloader
+            credentials are excluded.
         """
         _user(ctx)
         query = DownloadQuery(
@@ -1582,6 +1592,73 @@ def create_server() -> MCPServer:
         """
         return PlanChangeApplyResult.model_validate(
             await _read(DownloadPlanService.apply_change(application, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def review_download_task_action(
+        ctx: Context,
+        change: Annotated[
+            DownloadTaskAction,
+            Field(
+                description="One pause, resume, retry or delete of a listed task; "
+                "delete_files only on the user's explicit request."
+            ),
+        ],
+    ) -> TaskActionReviewResult:
+        """Review one task action without contacting downloaders or changing tasks.
+
+        Summarize the task, action and consequences in the user's language using
+        short bullets, not raw JSON. Wait for confirmation.
+
+        Args:
+            ctx: Authenticated request context; deletion requires an administrator.
+            change: Target task, action and whether deletion removes files.
+
+        Returns:
+            The task's identity and stored state, permitted `actions`, whether
+            the action is `immediate` or `deferred`, consequences, located
+            issues, `revision` and, when valid, a `request_id` bound to this
+            exact action.
+        """
+        return TaskActionReviewResult.model_validate(
+            await _read(DownloadTaskService.review_action(change, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def apply_download_task_action(
+        ctx: Context,
+        application: Annotated[
+            DownloadTaskActionApply,
+            Field(
+                description="Show the review and wait for approval, then pass its "
+                "request_id, change and revision with confirmed=true. Repeat the "
+                "same call on retries."
+            ),
+        ],
+    ) -> TaskActionApplyResult:
+        """Dispatch a reviewed task action at most once and return at once.
+
+        Args:
+            ctx: Context with a read-write token; deletion requires an
+                administrator.
+            application: The reviewed request and the user's confirmation.
+
+        Returns:
+            A `changed` or `deleted` outcome, a `queued` action that download
+            synchronization applies later, `replayed` outcomes with the task as
+            it is now, or a `conflict`, `pending`, `stale`,
+            `confirmation_required`, `absent`, `unavailable`, `failed` or
+            `uncertain` outcome. It never waits for downloads or transfers.
+        """
+        return TaskActionApplyResult.model_validate(
+            await _read(DownloadTaskService.apply_action(application, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)

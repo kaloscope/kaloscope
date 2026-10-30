@@ -1130,6 +1130,8 @@
       "apply_workflow_schedule": "应用定时任务变更",
       "review_download_plan_change": "检查下载计划变更",
       "apply_download_plan_change": "应用下载计划变更",
+      "review_download_task_action": "检查下载任务操作",
+      "apply_download_task_action": "执行下载任务操作",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
@@ -1287,6 +1289,22 @@
       "failed": "未应用，未保存任何更改，可再次确认重试",
       "invalid": "未应用，请展开工具详情查看问题",
       "refused": "未应用，未保存任何更改"
+    },
+    "task_action": {
+      "reviewed": "尚未执行，请确认此操作后再执行",
+      "changed": "下载器已接受操作，已更新下载任务 #{0}",
+      "queued": "下载任务 #{0} 的操作已排队等待同步，尚未完成，请稍后查看",
+      "deleted": "已删除下载任务 #{0}",
+      "unavailable": "未执行：任务已先变更，未发送任何操作",
+      "absent": "下载任务 #{0} 已不存在，未执行任何操作",
+      "uncertain": "结果待确认，请先查看该任务，勿重复操作",
+      "confirmation_required": "尚未执行，请先确认最新的操作预览",
+      "stale": "未执行：任务在预览后已变更",
+      "conflict": "未执行：请求与预览内容不一致",
+      "pending": "仍在执行中，请稍后再次确认以读取结果",
+      "failed": "未执行，未发送任何操作，可再次确认重试",
+      "invalid": "未执行，请展开工具详情查看问题",
+      "refused": "未执行，未发送任何操作"
     }
   }
 }
