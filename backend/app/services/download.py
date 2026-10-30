@@ -4,8 +4,9 @@ import mimetypes
 import os
 import re
 import shutil
+from collections.abc import Collection
 from contextlib import nullcontext, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, timedelta
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from app.core.dl.driver import (
 )
 from app.core.dl.openlist.state import retry_state
 from app.core.dl.rpc import RpcDriver
+from app.core.dl.rpc.models import Method
 from app.core.dl.syncer import (
     TV_TRANSFER_DEPTH,
     execute_download_plan,
@@ -58,12 +60,14 @@ from app.core.dl.syncer import (
 from app.core.exceptions import (
     BadRequestException,
     ErrorCode,
+    ForbiddenException,
     KaloscopeException,
     NotFoundException,
 )
 from app.core.flow.nodes.base import start_config
 from app.core.flow.outputs import check_output, download_link_kind
 from app.core.renderer import SANDBOX_ENV, is_template
+from app.models.assistant import DOWNLOAD_PATHS
 from app.models.download import (
     PLAN_SETTINGS,
     DownloadAdd,
@@ -83,13 +87,17 @@ from app.models.download import (
     DownloadState,
     DownloadStats,
     DownloadTask,
+    DownloadTaskAction,
+    DownloadTaskActionApply,
     DownloadTaskCheck,
     DownloadTaskCreate,
+    DownloadTaskReceipt,
     DownloadTaskSettings,
     IndexerSearch,
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
     PlanAction,
+    TaskAction,
 )
 from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.media import LibType, MediaLib
@@ -411,27 +419,34 @@ async def transfer_preview(
 # avoid contending for the shared submission lock within this worker
 _REQUEST_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _PLAN_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+_TASK_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+# RPC methods behind immediate task actions, for delivery checks after errors
+_TASK_METHODS: dict[TaskAction, Method] = {
+    TaskAction.PAUSE: "pause",
+    TaskAction.RESUME: "start",
+    TaskAction.DELETE: "delete",
+}
+TASK_UNCERTAIN = (
+    "The downloader may have received it; read the task with get_download_task "
+    "instead of repeating the request."
+)
 
 
-def _maybe_sent(
-    error: Exception, driver: DownloaderDriver, request: DownloadRequest
-) -> bool:
-    """Check whether a failed RPC submission may have reached the downloader.
+def _maybe_sent(error: Exception, driver: DownloaderDriver, method: Method) -> bool:
+    """Check whether a failed RPC request may have reached the downloader.
 
     Args:
         error: Exception raised by the driver.
-        driver: Driver whose submission method may contain multiple requests.
-        request: Submission that selected the link or torrent method.
+        driver: Driver whose configured method may contain multiple requests.
+        method: Configured RPC method that failed, such as `add_link` or `pause`.
 
     Returns:
-        Whether submission may have succeeded. Single-request connection failures
+        Whether the request may have succeeded. Single-request connection failures
         and HTTP client rejections are definite. Multi-step failures retain
-        uncertainty because an earlier step may already have submitted it.
+        uncertainty because an earlier step may already have reached it.
     """
     if isinstance(driver, RpcDriver):
-        api = driver.config.methods.get(
-            "add_torrent" if request.torrent else "add_link"
-        )
+        api = driver.config.methods.get(method)
         if api and api.steps:
             return True
     cause = error.__context__ if isinstance(error, KaloscopeException) else error
@@ -440,6 +455,18 @@ def _maybe_sent(
     extra = getattr(error, "extra", None) or {}
     status = extra.get("status_code", 0)
     return not (extra.get("responded") and 400 <= status < 500 and status != 408)
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskControl:
+    """Describe what one task's downloader allows now and how it applies it."""
+
+    downloader: Downloader
+    driver: DownloaderDriver
+    job: OfflineDownloadJob | None
+    actions: list[TaskAction]
+    retry_from: DownloadState | None
+    revision: str
 
 
 class DownloaderService(BaseService[Downloader], model=Downloader):
@@ -1396,7 +1423,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         try:
             snapshot = await driver.add(request)
         except Exception as error:
-            if task is not None and not _maybe_sent(error, driver, request):
+            method = "add_torrent" if request.torrent else "add_link"
+            if task is not None and not _maybe_sent(error, driver, method):
                 await task.delete()
             raise
 
@@ -1658,6 +1686,546 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         # delete the download task
         await DownloadTask.filter(id=id).delete()
         notify_download_changes()
+
+    @staticmethod
+    def permitted(capabilities: Collection[str], user: UserInfo) -> list[TaskAction]:
+        """Select the task actions an account may request through review.
+
+        Args:
+            capabilities: Driver actions for the task's current state.
+            user: Current account; only administrators delete tasks.
+
+        Returns:
+            Pause, resume, retry and delete actions in that order.
+        """
+        return [
+            action
+            for action in TaskAction
+            if DownloadAction(action) in capabilities
+            and (action != TaskAction.DELETE or user.role == UserRole.ADMIN)
+        ]
+
+    @classmethod
+    async def control(cls, task: DownloadTask, user: UserInfo) -> _TaskControl:
+        """Read the actions a task allows the current account now.
+
+        Args:
+            task: Stored task.
+            user: Current account; only administrators delete tasks.
+
+        Returns:
+            Permitted actions, the owning downloader and driver, an offline job
+            that defers actions to synchronization, the stage a retry restores,
+            and a `revision` of the task's identity, state, pending transfer and
+            driver actions. Progress, speeds and messages leave it unchanged.
+        """
+        downloader = await Downloader.get(id=task.downloader_id)
+        driver = load_driver(decrypt_config(downloader.config))
+        job = await OfflineDownloadJob.get_or_none(download_id=task.id)
+        target = (
+            retry_state(job.last_error_kind) if job and job.last_error_kind else None
+        )
+        capabilities = await driver.capabilities(
+            DownloadIdentity.from_task(task), task.state, retry_target=target
+        )
+        facts = {
+            "task_id": task.id,
+            "downloader_id": task.downloader_id,
+            "info_hash": task.info_hash,
+            "info_hash_v2": task.info_hash_v2,
+            "state": task.state,
+            "deferred": job is not None,
+            "retry_from": target,
+            "transfer_lib_id": task.transfer_lib_id,
+            "transfer_pending": task.transfer_pending,
+            "capabilities": sorted(capabilities),
+        }
+        return _TaskControl(
+            downloader=downloader,
+            driver=driver,
+            job=job,
+            actions=cls.permitted(capabilities, user),
+            retry_from=target,
+            revision=hashlib.sha256(
+                dumps(facts, option=orjson.OPT_SORT_KEYS)
+            ).hexdigest()[:16],
+        )
+
+    @classmethod
+    def action_request(
+        cls,
+        user_id: int,
+        change: DownloadTaskAction,
+        revision: str,
+        nonce: bytes | None = None,
+    ) -> UUID:
+        """Issue a request ID that identifies one reviewed action and revision.
+
+        Args:
+            user_id: Reviewing account.
+            change: Reviewed task, action and file option.
+            revision: Reviewed task revision.
+            nonce: Random half of an existing ID being checked; `None` issues one.
+
+        Returns:
+            A new ID, or the only ID this nonce can have for the same review.
+        """
+        nonce = nonce or os.urandom(8)
+        digest = hashlib.sha256(
+            dumps(change.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()
+        tag = hashlib.sha256(nonce + f"{user_id}:{digest}:{revision}".encode())
+        return UUID(bytes=nonce + tag.digest()[:8])
+
+    @staticmethod
+    def _action_notes(
+        change: DownloadTaskAction, task: DownloadTask, control: _TaskControl
+    ) -> list[str]:
+        """Explain what applying an available action does.
+
+        Args:
+            change: Reviewed action.
+            task: Stored task.
+            control: The task's current downloader actions.
+
+        Returns:
+            Consequences supported by the service and driver, in English.
+        """
+        deferred = control.job is not None
+        if change.action == TaskAction.PAUSE:
+            notes = [
+                "Stops pulling files locally; the remote copy is kept."
+                if deferred
+                else "Asks the downloader to pause it; it stays paused until resumed."
+            ]
+        elif change.action == TaskAction.RESUME:
+            notes = [
+                "Continues pulling files locally."
+                if deferred
+                else "Asks the downloader to resume it."
+            ]
+        elif change.action == TaskAction.RETRY:
+            notes = [
+                f"Retries this task from its {control.retry_from or 'failed'} stage; "
+                "nothing new is submitted."
+            ]
+        else:
+            notes = ["Removes the task from Kaloscope and its downloader."]
+            if task.state == DownloadState.SUBMITTING:
+                notes.append("Deletion waits until the submission in progress ends.")
+            if change.delete_files:
+                notes.append(
+                    "Also deletes the files this task pulled locally."
+                    if deferred
+                    else "Also deletes its downloaded files once the downloader "
+                    "confirms the deletion."
+                )
+                if task.transfer_lib_id:
+                    notes.append(
+                        "Library files placed by hardlink, copy or move stay; "
+                        "symlinks to deleted files break."
+                    )
+            else:
+                notes.append(
+                    "Downloaded files stay"
+                    + ("; unfinished partial files are removed." if deferred else ".")
+                )
+            if task.transfer_pending:
+                notes.append("Its pending library transfer will not run.")
+            notes.append("Plans, plan history and library records are unchanged.")
+        if deferred:
+            notes.append(
+                "Applying queues it for download synchronization, which skips it "
+                "if the task state changes first."
+            )
+        return notes
+
+    @classmethod
+    async def _review_action(
+        cls, change: DownloadTaskAction, user: UserInfo
+    ) -> tuple[dict[str, Any], DownloadTask, _TaskControl]:
+        """Check one task action against current permissions and capabilities.
+
+        Args:
+            change: Requested action.
+            user: Current account.
+
+        Returns:
+            The review, the stored task and its current downloader actions.
+
+        Raises:
+            ForbiddenException: If a non-administrator asks to delete a task.
+            NotFoundException: If the task does not exist.
+        """
+        if change.action == TaskAction.DELETE and user.role != UserRole.ADMIN:
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        task = await DownloadTask.get_or_none(id=change.task_id)
+        if task is None:
+            raise NotFoundException
+        control = await cls.control(task, user)
+        issues = []
+        if change.action not in control.actions:
+            issues.append(
+                {
+                    "path": "action",
+                    "message": f"{change.action} is unavailable while the task is "
+                    f"{task.state}; use one of actions.",
+                }
+            )
+        result: dict[str, Any] = {
+            "valid": not issues,
+            "issues": issues,
+            "action": change.action,
+            "delete_files": change.delete_files,
+            "task_id": task.id,
+            "name": task.name,
+            "downloader_id": task.downloader_id,
+            "downloader_name": control.downloader.name,
+            "state": task.state,
+            "percentage": task.percentage,
+            "actions": control.actions,
+            "dispatch": "deferred" if control.job is not None else "immediate",
+            "revision": control.revision,
+            "notes": [] if issues else cls._action_notes(change, task, control),
+        }
+        if change.action == TaskAction.RETRY and control.retry_from:
+            result["retry_from"] = control.retry_from
+        if task.transfer_lib_id:
+            result["transfer_lib_id"] = task.transfer_lib_id
+            # the name is shown only to accounts that can read the library
+            with suppress(ForbiddenException, NotFoundException):
+                library = await MediaLibService.get_accessible(
+                    task.transfer_lib_id, user
+                )
+                result["transfer_lib_name"] = library.name
+        if not issues:
+            result["request_id"] = str(
+                cls.action_request(user.id, change, control.revision)
+            )
+        return loads(dumps(result)), task, control
+
+    @classmethod
+    async def review_action(cls, change: DownloadTaskAction, user: UserInfo) -> dict:
+        """Review one pause, resume, retry or deletion without performing it.
+
+        Args:
+            change: Target task, action and whether deletion removes files.
+            user: Current account; deletion requires an administrator.
+
+        Returns:
+            The task's identity, stored state, permitted `actions`, whether the
+            action is `immediate` or `deferred` to synchronization, its
+            consequences, located issues, the task `revision` and, when valid, a
+            `request_id` for this exact review.
+
+        Raises:
+            ForbiddenException: If a non-administrator asks to delete a task.
+            NotFoundException: If the task does not exist.
+        """
+        result, _, _ = await cls._review_action(change, user)
+        return result
+
+    @classmethod
+    async def apply_action(
+        cls, body: DownloadTaskActionApply, user: UserInfo
+    ) -> dict[str, Any]:
+        """Dispatch a confirmed task action at most once and return at once.
+
+        A receipt is claimed before dispatch, so retries read the recorded outcome
+        instead of sending the action again, including after deletion.
+
+        Args:
+            body: Request ID, the exact reviewed action and revision, and the
+                user's confirmation.
+            user: Current account; permissions and capabilities are checked again.
+
+        Returns:
+            A `changed` or `deleted` stored outcome, a `queued` deferred action
+            that synchronization applies later, `replayed` outcomes, or
+            `conflict`, `pending`, `stale`, `confirmation_required`, located
+            issues, an `absent` or `unavailable` task, a `failed` action that sent
+            nothing, or an `uncertain` outcome to inspect rather than repeat.
+
+        Raises:
+            ForbiddenException: If a non-administrator asks to delete a task.
+        """
+        if body.change.action == TaskAction.DELETE and user.role != UserRole.ADMIN:
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        nonce = body.request_id.bytes[:8]
+        if (
+            cls.action_request(user.id, body.change, body.revision, nonce)
+            != body.request_id
+        ):
+            return {
+                "applied": False,
+                "conflict": True,
+                "message": "This request_id was reviewed for another task, action "
+                "or revision; review the action again.",
+            }
+        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        lock = _TASK_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            try:
+                with submission_lock(f"task-action:{key}"):
+                    task = asyncio.ensure_future(cls._apply_locked(body, key, user))
+                    try:
+                        return await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        # a cancelled caller never leaves a dispatch unrecorded
+                        await task
+                        raise
+            except LockTimeout:
+                receipt = await DownloadTaskReceipt.get_or_none(key=key)
+                if receipt is not None and receipt.result is not None:
+                    return await cls._replay_action(receipt, user)
+                return {
+                    "applied": False,
+                    "pending": True,
+                    "message": "Another call is applying this request; repeat the "
+                    "same request later to read its outcome.",
+                }
+
+    @classmethod
+    async def _task_state(cls, task: DownloadTask, user: UserInfo) -> dict[str, Any]:
+        """Describe a task's current stored state and permitted actions.
+
+        Args:
+            task: Stored task.
+            user: Current account.
+
+        Returns:
+            Stored state, progress, permitted actions and its download page.
+        """
+        control = await cls.control(task, user)
+        return {
+            "state": task.state,
+            "percentage": task.percentage,
+            "actions": control.actions,
+            "path": DOWNLOAD_PATHS[
+                "completed_downloads"
+                if task.state == DownloadState.COMPLETED
+                else "active_downloads"
+            ],
+        }
+
+    @classmethod
+    async def _replay_action(
+        cls, receipt: DownloadTaskReceipt, user: UserInfo
+    ) -> dict[str, Any]:
+        """Read a recorded outcome under current permissions without dispatching.
+
+        Args:
+            receipt: Claimed request.
+            user: Current account.
+
+        Returns:
+            The recorded outcome, or `uncertain` for a claim without one, with
+            the task as it is now, or `None` once deleted.
+
+        Raises:
+            ForbiddenException: If a non-administrator replays a deletion.
+        """
+        if receipt.action == TaskAction.DELETE and user.role != UserRole.ADMIN:
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        task = await DownloadTask.get_or_none(id=receipt.task_id)
+        return loads(
+            dumps(
+                {
+                    **(
+                        receipt.result
+                        or {
+                            "applied": None,
+                            "outcome": "uncertain",
+                            "action": receipt.action,
+                            "task_id": receipt.task_id,
+                            "message": TASK_UNCERTAIN,
+                        }
+                    ),
+                    "replayed": True,
+                    "task": await cls._task_state(task, user) if task else None,
+                }
+            )
+        )
+
+    @classmethod
+    async def _apply_locked(
+        cls, body: DownloadTaskActionApply, key: str, user: UserInfo
+    ) -> dict[str, Any]:
+        """Recheck, claim and dispatch one request while holding its lock.
+
+        Args:
+            body: Confirmed request.
+            key: Account-scoped request identity.
+            user: Current account.
+
+        Returns:
+            Shared outcome described by `apply_action`.
+        """
+        if receipt := await DownloadTaskReceipt.get_or_none(key=key):
+            return await cls._replay_action(receipt, user)
+        change = body.change
+        base: dict[str, Any] = {"action": change.action, "task_id": change.task_id}
+        try:
+            review, task, control = await cls._review_action(change, user)
+        except NotFoundException:
+            if not await DownloadTask.exists(id=change.task_id):
+                return {
+                    "applied": False,
+                    "outcome": "absent",
+                    **base,
+                    "message": "The task no longer exists; this request did nothing.",
+                }
+            raise
+        base["name"] = task.name
+        if review["revision"] != body.revision:
+            return {
+                "applied": False,
+                **base,
+                "stale": True,
+                "message": "The task's state or available actions changed after the "
+                "review; review it again.",
+                "current": {name: review[name] for name in ("state", "actions")},
+            }
+        if not review["valid"]:
+            return {
+                "applied": False,
+                **base,
+                "valid": False,
+                "issues": review["issues"],
+            }
+        if not body.confirmed:
+            return {
+                **review,
+                "request_id": str(body.request_id),
+                "applied": False,
+                "confirmation_required": True,
+            }
+        failed = {
+            "applied": False,
+            **base,
+            "failed": True,
+            "message": "Nothing was sent; the same request may be repeated.",
+        }
+        try:
+            # the claim commits before the action can have any remote effect
+            await DownloadTaskReceipt.create(
+                key=key, action=change.action, task_id=task.id
+            )
+        except Exception:
+            logger.exception("Failed to claim a download task action")
+            return failed
+        try:
+            result = await cls._dispatch(change, task, base, user)
+        except Exception as error:
+            logger.exception("Failed to apply a download task action")
+            method = _TASK_METHODS.get(change.action)
+            if control.job is not None or (
+                method and not _maybe_sent(error, control.driver, method)
+            ):
+                # deferred actions and refused requests reached no downloader
+                try:
+                    await DownloadTaskReceipt.filter(key=key).delete()
+                    return failed
+                except Exception:
+                    # a kept claim replays this failure instead of dispatching
+                    result = {**failed, "message": "Nothing was sent; review again."}
+            else:
+                result = {
+                    "applied": None,
+                    "outcome": "uncertain",
+                    **base,
+                    "message": TASK_UNCERTAIN,
+                }
+        try:
+            await DownloadTaskReceipt.filter(key=key).update(result=result)
+        except Exception:
+            # an unrecorded claim replays as uncertain, never as a new dispatch
+            logger.exception("Failed to record a download task action")
+        return {**result, "replayed": False}
+
+    @classmethod
+    async def _dispatch(
+        cls,
+        change: DownloadTaskAction,
+        task: DownloadTask,
+        base: dict[str, Any],
+        user: UserInfo,
+    ) -> dict[str, Any]:
+        """Send one checked action through the shared task controls.
+
+        Args:
+            change: Confirmed action.
+            task: Task as reviewed.
+            base: Action, task ID and name shared by every outcome.
+            user: Current account, for the actions a changed task now allows.
+
+        Returns:
+            The stored outcome of an immediate action, or a deferred action
+            accepted for synchronization without an observed state change.
+        """
+        if change.action == TaskAction.PAUSE:
+            command = await cls.pause(task.id)
+        elif change.action == TaskAction.RESUME:
+            command = await cls.start(task.id)
+        elif change.action == TaskAction.RETRY:
+            command = await cls.retry(task.id)
+        else:
+            command = await cls.delete(task.id, change.delete_files)
+        path = DOWNLOAD_PATHS[
+            "completed_downloads"
+            if task.state == DownloadState.COMPLETED
+            else "active_downloads"
+        ]
+        if command is not None:
+            action, state = command
+            try:
+                Sanic.get_app().ctx.dl_syncer.publish(
+                    task.id, action, state, local=change.delete_files
+                )
+            except Exception:
+                if change.action != TaskAction.DELETE:
+                    raise
+                # the durable deletion deadline still reaches synchronization
+                logger.warning("Deferred task deletion waits for the next sync")
+            return {
+                "applied": True,
+                "outcome": "queued",
+                **base,
+                "state": state,
+                "path": path,
+                "message": "Queued for download synchronization while the task is "
+                f"{state}; this is not completion. Read the task later.",
+            }
+        current = await DownloadTask.get_or_none(id=task.id)
+        if change.action == TaskAction.DELETE:
+            changed = current is None
+        else:
+            changed = current is not None and current.state != task.state
+        if not changed:
+            return {
+                "applied": False,
+                "outcome": "unavailable",
+                **base,
+                "state": current.state if current else None,
+                "message": "The task changed before the action ran, so nothing was "
+                "sent; read the task and review again.",
+            }
+        if current is None:
+            return {
+                "applied": True,
+                "outcome": "deleted",
+                **base,
+                "files": "deleted" if change.delete_files else "kept",
+                "path": path,
+            }
+        return {
+            "applied": True,
+            "outcome": "changed",
+            **base,
+            **await cls._task_state(current, user),
+            "message": "Stored state after the downloader accepted it; "
+            "synchronization keeps it current.",
+        }
 
     @classmethod
     async def stats(cls) -> DownloadStats:

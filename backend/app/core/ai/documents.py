@@ -248,6 +248,30 @@ PLAN_CHANGE_FACTS = (
     "message",
 )
 
+# task action identities, effects and outcomes retained for confirmation
+TASK_ACTION_FACTS = (
+    "valid",
+    "issues",
+    "action",
+    "delete_files",
+    "task_id",
+    "name",
+    "state",
+    "actions",
+    "dispatch",
+    "revision",
+    "request_id",
+    "applied",
+    "outcome",
+    "replayed",
+    "confirmation_required",
+    "stale",
+    "conflict",
+    "pending",
+    "failed",
+    "message",
+)
+
 
 def tool_facts(result: dict) -> dict:
     """Preserve source identities and deterministic facts in historical tool records.
@@ -271,6 +295,11 @@ def tool_facts(result: dict) -> dict:
         "apply_download_plan_change",
     }:
         data = {key: data[key] for key in PLAN_CHANGE_FACTS if key in data}
+    elif result.get("name") in {
+        "review_download_task_action",
+        "apply_download_task_action",
+    }:
+        data = {key: data[key] for key in TASK_ACTION_FACTS if key in data}
     facts = {}
     if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
         facts["graph_source"] = "saved_draft"

@@ -67,6 +67,21 @@ class PlanAction(StrEnum):
     DELETE = auto()
 
 
+class TaskAction(StrEnum):
+    """Control one existing download task.
+
+    `pause`: Stop transferring until resumed.
+    `resume`: Continue a paused task.
+    `retry`: Restart a failed task from its failed stage; nothing new is submitted.
+    `delete`: Remove the task; downloaded files stay unless `delete_files`.
+    """
+
+    PAUSE = auto()
+    RESUME = auto()
+    RETRY = auto()
+    DELETE = auto()
+
+
 class OfflineDownloadErrorKind(StrEnum):
     """Classify stored OpenList failures and uncertain submissions.
 
@@ -247,6 +262,20 @@ class DownloadPlanReceipt(TortoiseModel):
 
     class Meta:
         table = "download_plan_receipt"
+
+
+class DownloadTaskReceipt(TortoiseModel):
+    """Claim one confirmed task action so retries never dispatch it again."""
+
+    key = CharField(max_length=64, unique=True)
+    action = CharEnumField(max_length=16, enum_type=TaskAction)
+    # deletion removes the task, so its ID is not a relation
+    task_id = IntField()
+    # null while dispatching; a claim without an outcome may have reached the driver
+    result = JSONField[dict[str, Any] | None](null=True)
+
+    class Meta:
+        table = "download_task_receipt"
 
 
 class DownloadTask(TortoiseModel):
@@ -666,6 +695,47 @@ class DownloadPlanApply(BaseModel):
     request_id: UUID
     change: DownloadPlanChange
     revision: str = Field(max_length=64, description="Reviewed plan revision.")
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
+
+
+class DownloadTaskAction(BaseModel):
+    """Choose one action on one existing download task."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    task_id: PositiveInt = Field(
+        description="Task ID, not a plan, workflow or downloader ID."
+    )
+    action: TaskAction
+    delete_files: bool = Field(
+        default=False,
+        description="Delete only: also delete downloaded files, on explicit request.",
+    )
+
+    @model_validator(mode="after")
+    def validate_files(self) -> Self:
+        """Keep the file option on deletions.
+
+        Returns:
+            The validated action.
+
+        Raises:
+            ValueError: If another action asks to delete files.
+        """
+        if self.delete_files and self.action != TaskAction.DELETE:
+            raise ValueError("delete_files applies only to delete")
+        return self
+
+
+class DownloadTaskActionApply(BaseModel):
+    """Apply one reviewed task action; repeat the same request to read its outcome."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    request_id: UUID
+    change: DownloadTaskAction
+    revision: str = Field(max_length=64, description="Reviewed task revision.")
     confirmed: bool = Field(
         default=False,
         description="True only after the user approves this review.",

@@ -179,7 +179,13 @@
     const refreshInterval = setInterval(() => {
       search(pagination.current, pagination.size, true);
     }, 5000);
-    return () => clearInterval(refreshInterval);
+    // show an assistant action at once, keeping the page and selection
+    const changed = () => search(pagination.current, pagination.size, true);
+    window.addEventListener('download-task-changed', changed);
+    return () => {
+      clearInterval(refreshInterval);
+      window.removeEventListener('download-task-changed', changed);
+    };
   });
 </script>
 

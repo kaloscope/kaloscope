@@ -399,8 +399,8 @@ class AssistantSessionService:
             turn: Active turn whose conversation history is read.
 
         Returns:
-            Schedule and plan review tools whose results may be confirmed in this
-            turn.
+            Schedule, plan and task review tools whose results may be confirmed
+            in this turn.
         """
         previous = (
             await AssistantTurn.filter(
@@ -415,7 +415,11 @@ class AssistantSessionService:
             call.name
             for call in await AssistantToolCall.filter(
                 turn_id=previous.id,
-                name__in=["review_workflow_schedule", "review_download_plan_change"],
+                name__in=[
+                    "review_workflow_schedule",
+                    "review_download_plan_change",
+                    "review_download_task_action",
+                ],
             )
             if ((call.result or {}).get("data") or {}).get("valid")
         }

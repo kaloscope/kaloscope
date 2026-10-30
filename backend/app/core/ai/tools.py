@@ -63,10 +63,13 @@ from app.models.download import (
     DownloadPlanCreate,
     DownloadPlanQuery,
     DownloadQuery,
+    DownloadTaskAction,
+    DownloadTaskActionApply,
     DownloadTaskCheck,
     DownloadTaskCreate,
     IndexerSearch,
     PlanAction,
+    TaskAction,
     TransferMethod,
 )
 from app.models.flow import (
@@ -103,6 +106,9 @@ CREATE_TOOL = "create_workflow_draft"
 SCHEDULE_TOOLS = frozenset({"review_workflow_schedule", "apply_workflow_schedule"})
 PLAN_CHANGE_TOOLS = frozenset(
     {"review_download_plan_change", "apply_download_plan_change"}
+)
+TASK_ACTION_TOOLS = frozenset(
+    {"review_download_task_action", "apply_download_task_action"}
 )
 SAFE_INTEGER = 2**53 - 1
 
@@ -400,6 +406,22 @@ class PlanChangeConfirm(ToolArguments):
     )
 
 
+class TaskActionReview(DownloadTaskAction):
+    """Review one action on one task without performing it."""
+
+    action: Annotated[TaskAction, plain_enum(TaskAction)]
+
+
+class TaskActionConfirm(ToolArguments):
+    """Apply a task action review from an earlier turn of this conversation."""
+
+    request_id: UUID
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
@@ -675,6 +697,20 @@ TOOLS = (
         admin=True,
     ),
     AssistantTool(
+        "review_download_task_action",
+        "Review pause/resume/retry/delete of one task; does nothing. Ask which "
+        "task if several match. Summarize target, effect and notes in the user's "
+        "language, not JSON. End the turn for confirmation.",
+        TaskActionReview,
+    ),
+    AssistantTool(
+        "apply_download_task_action",
+        "Apply a prior turn's valid task review after the user confirms it; "
+        "returns at once (queued is not done). Repeat the same request_id after "
+        "errors; never re-review to retry.",
+        TaskActionConfirm,
+    ),
+    AssistantTool(
         "navigate",
         "Offer a user-clicked page button with unsaved-edit checks. "
         "Designer/media: accessible resource_id; lists: omit it.",
@@ -782,6 +818,7 @@ def tool_schemas(
     trial: bool = False,
     schedule: bool = False,
     plan_change: bool = False,
+    task_action: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -797,6 +834,8 @@ def tool_schemas(
             after a review in the previous turn.
         plan_change: Offer plan changes after reading a plan this turn or after
             a review in the previous turn.
+        task_action: Offer task actions after reading tasks this turn or after
+            a review in the previous turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -810,6 +849,8 @@ def tool_schemas(
         if tool.name in SCHEDULE_TOOLS and not schedule:
             continue
         if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
+            continue
+        if tool.name in TASK_ACTION_TOOLS and not task_action:
             continue
         if tool.name in {
             "search_indexer",
@@ -1006,6 +1047,10 @@ async def execute_tool(
                     result = await DownloadPlanService.review_change(args, user)
                 case PlanChangeConfirm():
                     result = await apply_plan_change(args, conversation_id, user)
+                case DownloadTaskAction():
+                    result = await DownloadTaskService.review_action(args, user)
+                case TaskActionConfirm():
+                    result = await apply_task_action(args, conversation_id, user)
                 case PlanList():
                     result = await download_plans(
                         DownloadPlanQuery(
@@ -1065,10 +1110,12 @@ async def execute_tool(
                     result = await media_item_details(**args.model_dump(), user=user)
                 case DownloadList():
                     result = await download_tasks(
-                        DownloadQuery(**args.model_dump(exclude={"scope"})), args.scope
+                        DownloadQuery(**args.model_dump(exclude={"scope"})),
+                        args.scope,
+                        user,
                     )
                 case DownloadDetails():
-                    result = await download_task_details(**args.model_dump())
+                    result = await download_task_details(**args.model_dump(), user=user)
                 case WorkflowCreate():
                     result = await create_workflow(args, conversation_id, call_id, user)
                 case WorkflowList():
@@ -1789,6 +1836,68 @@ async def apply_plan_change(
                 "confirmation_required": True,
                 "message": "A newer review replaced this one; confirm that one."
                 if superseded
+                else "Show this review, finish the turn and wait for the user's "
+                "confirmation.",
+            }
+        return result
+    raise NotFoundException
+
+
+async def apply_task_action(
+    args: TaskActionConfirm, conversation_id: int, user: UserInfo
+) -> dict:
+    """Apply a task action review the user confirmed after it was shown.
+
+    Only the newest task review of the conversation may be applied, and it must
+    be valid and from a completed earlier turn; any newer review, even of another
+    task or an invalid one, replaces it. The active turn is never complete, so
+    its own reviews wait. A claimed request replays first, so retries never
+    dispatch it again.
+
+    Args:
+        args: Reviewed request ID and the user's confirmation.
+        conversation_id: Server-owned conversation.
+        user: Current account whose rights the service checks again.
+
+    Returns:
+        Shared outcome, or a confirmation request for a review that is not ready.
+
+    Raises:
+        NotFoundException: If the review record is unavailable.
+    """
+    reviews = [
+        (record, data)
+        for record in (
+            await AssistantToolCall.filter(
+                turn__conversation_id=conversation_id,
+                name="review_download_task_action",
+            )
+            .order_by("-id")
+            .limit(30)
+        )
+        if "valid" in (data := (record.result or {}).get("data") or {})
+    ]
+    for index, (record, data) in enumerate(reviews):
+        if data.get("request_id") != str(args.request_id):
+            continue
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        ready = index == 0 and reviewed.status == "complete"
+        result = await DownloadTaskService.apply_action(
+            DownloadTaskActionApply(
+                request_id=args.request_id,
+                change=DownloadTaskAction.model_validate_json(record.arguments),
+                revision=data["revision"],
+                confirmed=args.confirmed and ready,
+            ),
+            user,
+        )
+        if not ready and not result.get("replayed"):
+            return {
+                **result,
+                "applied": False,
+                "confirmation_required": True,
+                "message": "A newer review replaced this one; confirm that one."
+                if index
                 else "Show this review, finish the turn and wait for the user's "
                 "confirmation.",
             }

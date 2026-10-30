@@ -24,6 +24,7 @@ from app.core.ai.tools import (
     CREATE_TOOL,
     PLAN_CHANGE_TOOLS,
     SCHEDULE_TOOLS,
+    TASK_ACTION_TOOLS,
     execute_tool,
     media_resources,
     tool_schemas,
@@ -354,7 +355,13 @@ class AssistantService:
         reviewed = await AssistantSessionService.reviewed(turn)
         schedule_ready = "review_workflow_schedule" in reviewed
         plan_change = "review_download_plan_change" in reviewed
-        schemas = tool_schemas(user, schedule=schedule_ready, plan_change=plan_change)
+        task_action = "review_download_task_action" in reviewed
+        schemas = tool_schemas(
+            user,
+            schedule=schedule_ready,
+            plan_change=plan_change,
+            task_action=task_action,
+        )
         workflow_authoring = False
         plan_tools = False
         plan_authoring = False
@@ -595,6 +602,7 @@ class AssistantService:
                         trial=trial_ready,
                         schedule=schedule_ready,
                         plan_change=plan_change,
+                        task_action=task_action,
                     )
                 if (
                     not trial_ready
@@ -613,6 +621,7 @@ class AssistantService:
                         trial=True,
                         schedule=schedule_ready,
                         plan_change=plan_change,
+                        task_action=task_action,
                     )
                 if (
                     not schedule_ready
@@ -630,6 +639,7 @@ class AssistantService:
                         trial=trial_ready,
                         schedule=True,
                         plan_change=plan_change,
+                        task_action=task_action,
                     )
                 if (
                     not workflow_authoring
@@ -646,6 +656,26 @@ class AssistantService:
                         trial=trial_ready,
                         schedule=schedule_ready,
                         plan_change=True,
+                        task_action=task_action,
+                    )
+                if (
+                    not task_action
+                    and result["ok"]
+                    and call.function.name
+                    in {"list_download_tasks", "get_download_task"}
+                ):
+                    # task actions follow reading the current tasks
+                    task_action = True
+                    schemas = tool_schemas(
+                        user,
+                        authoring=workflow_authoring,
+                        plan_authoring=plan_tools,
+                        plan_only=plan_authoring,
+                        ingestion=ingestion_authoring,
+                        trial=trial_ready,
+                        schedule=schedule_ready,
+                        plan_change=plan_change,
+                        task_action=True,
                     )
                 if (
                     result["ok"]
@@ -667,6 +697,7 @@ class AssistantService:
                         trial=trial_ready,
                         schedule=schedule_ready,
                         plan_change=plan_change,
+                        task_action=task_action,
                     )
                 if result["ok"] and call.function.name in {
                     "list_node_types",
@@ -803,6 +834,15 @@ class AssistantService:
                             media_resource(library_id)
                             for library_id in libraries
                             if library_id
+                        )
+                    if (
+                        result["ok"]
+                        and call.function.name in TASK_ACTION_TOOLS
+                        and result["data"].get("transfer_lib_name")
+                    ):
+                        # a named transfer library is revealed; task IDs never are
+                        resource_ids.append(
+                            media_resource(result["data"]["transfer_lib_id"])
                         )
                     if result["ok"] and call.function.name == "list_download_plans":
                         # each listed plan reveals its indexer and transfer library

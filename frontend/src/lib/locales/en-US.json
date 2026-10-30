@@ -1130,6 +1130,8 @@
       "apply_workflow_schedule": "Apply Schedule Change",
       "review_download_plan_change": "Review Plan Change",
       "apply_download_plan_change": "Apply Plan Change",
+      "review_download_task_action": "Review Task Action",
+      "apply_download_task_action": "Apply Task Action",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_reference": "Read Workflow Reference",
@@ -1287,6 +1289,22 @@
       "failed": "Not applied; nothing was saved. Confirm again to retry.",
       "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was saved."
+    },
+    "task_action": {
+      "reviewed": "Not applied yet. Confirm this action to apply it.",
+      "changed": "Task #{0} updated after the downloader accepted the action",
+      "queued": "Task #{0}: queued for sync, not done yet. Check the task later.",
+      "deleted": "Task #{0} deleted",
+      "unavailable": "Not applied: the task changed first; nothing was sent.",
+      "absent": "Task #{0} no longer exists; nothing was done",
+      "uncertain": "Result unconfirmed. Check the task before trying again.",
+      "confirmation_required": "Not applied. Confirm the latest review first.",
+      "stale": "Not applied: the task changed after review.",
+      "conflict": "Not applied: this request does not match its review.",
+      "pending": "Still being applied. Confirm again later to read the result.",
+      "failed": "Not applied; nothing was sent. Confirm again to retry.",
+      "invalid": "Not applied. Expand the details to see the issues.",
+      "refused": "Not applied; nothing was sent."
     }
   }
 }

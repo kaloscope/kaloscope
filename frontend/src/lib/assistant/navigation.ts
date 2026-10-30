@@ -38,6 +38,10 @@ export function assistantDestination(
   } else if (result.name === 'apply_download_plan_change' && result.data.applied !== false) {
     target = { page: 'download_plans' };
     path = downloadPlansPath;
+  } else if (result.name === 'apply_download_task_action' && result.data.applied !== false) {
+    // the task's own download page shows its state after the action
+    path = result.data.path ?? (result.data.task as { path?: unknown } | null | undefined)?.path;
+    target = { page: path === downloadPaths.completed_downloads ? 'completed_downloads' : 'active_downloads' };
   }
   if (!target) return null;
   const id = target.resource_id;

@@ -243,6 +243,21 @@ export type PlanChangeOutcome = {
   failed?: boolean;
 };
 
+/** Outcome of applying a reviewed download task pause, resume, retry or deletion. */
+export type TaskActionOutcome = {
+  applied: boolean | null;
+  outcome?: 'changed' | 'queued' | 'deleted' | 'unavailable' | 'absent' | 'uncertain';
+  task_id?: number;
+  path?: string;
+  replayed?: boolean;
+  valid?: boolean;
+  confirmation_required?: boolean;
+  stale?: boolean;
+  conflict?: boolean;
+  pending?: boolean;
+  failed?: boolean;
+};
+
 /** Durable save lifecycle of an assistant canvas edit. */
 export type AssistantProposalStatus = 'pending' | 'saved' | 'unchanged' | 'conflict' | 'failed' | 'cancelled';
 
