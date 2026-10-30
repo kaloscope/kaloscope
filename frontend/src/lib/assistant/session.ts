@@ -889,6 +889,20 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'apply_download_task_action' && event.data.ok && event.data.data?.applied !== false) {
             window.dispatchEvent(new Event('download-task-changed'));
           }
+          // show a submitted scan or a saved rescrape on the open library pages
+          if (
+            tool.name === 'apply_media_change' &&
+            event.data.ok &&
+            event.data.data &&
+            event.data.data.applied !== false
+          ) {
+            const { item_id, library_id } = event.data.data;
+            window.dispatchEvent(
+              typeof item_id === 'number'
+                ? new CustomEvent('media-item-changed', { detail: { item_id, library_id } })
+                : new CustomEvent('media-library-scan', { detail: { library_id } })
+            );
+          }
           break;
         }
         case 'done':

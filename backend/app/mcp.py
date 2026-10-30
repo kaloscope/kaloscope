@@ -62,8 +62,11 @@ from app.models.mcp import (
     LibraryIngestionResult,
     LibraryStatus,
     MCPTokenScope,
+    MediaChangeApplyResult,
     MediaDetails,
+    MediaRescrapeReviewResult,
     MediaResult,
+    MediaScanReviewResult,
     NodeTypesResult,
     PageResult,
     PlanChangeApplyResult,
@@ -86,7 +89,7 @@ from app.models.mcp import (
     WorkflowResult,
     WorkflowRunResult,
 )
-from app.models.media import MediaQuery
+from app.models.media import LibraryScan, MediaChangeApply, MediaQuery, MediaRescrape
 from app.models.user import UserInfo
 from app.models.workflow_authoring import (
     HTTPProbe,
@@ -103,6 +106,7 @@ from app.services.flow import (
     FlowRunService,
 )
 from app.services.media import MediaItemService, MediaLibService
+from app.services.media_changes import MediaChangeService
 from app.services.workflow_authoring import (
     probe_http_request as probe_request,
 )
@@ -159,6 +163,8 @@ _READ_TOOLS = frozenset(
         "review_workflow_schedule",
         "review_download_plan_change",
         "review_download_task_action",
+        "review_library_scan",
+        "review_media_rescrape",
     }
 )
 _WRITE_TOOLS = frozenset(
@@ -174,6 +180,7 @@ _WRITE_TOOLS = frozenset(
         "apply_workflow_schedule",
         "apply_download_plan_change",
         "apply_download_task_action",
+        "apply_media_change",
     }
 )
 DRAFT_WRITE = ToolAnnotations(
@@ -338,6 +345,8 @@ def create_server() -> MCPServer:
             "after approval; repeat that call to read its outcome. "
             "Plan updates/deletions follow the same review and apply steps; run "
             "search_indexer with search_preview when search inputs change. "
+            "Library scans and movie/show rescrapes follow them too: list rescrape "
+            "candidates, let the user choose one key, then review it. "
             "Task pause/resume/retry/delete also follows them for one listed task; "
             "delete files only on explicit request. A queued action is not done; "
             "list the task later instead of waiting. "
@@ -1659,6 +1668,104 @@ def create_server() -> MCPServer:
         """
         return TaskActionApplyResult.model_validate(
             await _read(DownloadTaskService.apply_action(application, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def review_library_scan(
+        ctx: Context,
+        change: Annotated[
+            LibraryScan,
+            Field(description="One movie or TV library from list_media_libraries."),
+        ],
+    ) -> MediaScanReviewResult:
+        """Review scanning one library without starting it.
+
+        Summarize the library, bound workflows and effects in the user's
+        language using short bullets, not raw JSON. Wait for confirmation.
+
+        Args:
+            ctx: Administrator request context.
+            change: Library to scan.
+
+        Returns:
+            The library, its scan state and queued events, bound ingest
+            workflows, effects, located issues, `revision` and, when valid, a
+            `request_id` bound to this exact review.
+        """
+        return MediaScanReviewResult.model_validate(
+            await _read(MediaChangeService.review_scan(change, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def review_media_rescrape(
+        ctx: Context,
+        change: Annotated[
+            MediaRescrape,
+            Field(
+                description="A top-level movie or show; omit candidate to list "
+                "matches, then pass the key the user chose."
+            ),
+        ],
+    ) -> MediaRescrapeReviewResult:
+        """Search candidates with the item's scraper, or preview one; saves nothing.
+
+        The workflow's candidate search really runs. Never choose a candidate for
+        the user. Summarize changes, episodes, organization and notes in the
+        user's language, not raw JSON, and wait for confirmation.
+
+        Args:
+            ctx: Administrator request context.
+            change: Item, workflow, search inputs and the chosen candidate key.
+
+        Returns:
+            Usable workflows, the query and compact `candidates`; with a listed
+            key, field changes, NFO, episode and organization effects, notes,
+            `revision` and a `request_id` bound to that candidate.
+        """
+        return MediaRescrapeReviewResult.model_validate(
+            await _read(MediaChangeService.review_rescrape(change, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    async def apply_media_change(
+        ctx: Context,
+        application: Annotated[
+            MediaChangeApply,
+            Field(
+                description="Show the review and wait for approval, then pass its "
+                "request_id, change and revision with confirmed=true. Repeat the "
+                "same call on retries."
+            ),
+        ],
+    ) -> MediaChangeApplyResult:
+        """Apply a reviewed scan or rescrape once and answer within seconds.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            application: The reviewed request and the user's confirmation.
+
+        Returns:
+            A `scanned`, `submitted`, `already_scanning`, `rescraped`, `partial`
+            or `running` outcome, `replayed` outcomes, or a `conflict`, `pending`,
+            `stale`, `confirmation_required`, `absent`, `failed` or `uncertain`
+            outcome. Background ingestion and organization are never awaited.
+        """
+        return MediaChangeApplyResult.model_validate(
+            await _read(MediaChangeService.apply_change(application, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)

@@ -717,6 +717,16 @@
   });
   onDestroy(closeReader);
 
+  // show an assistant rescrape of this work at once
+  onMount(() => {
+    const changed = (event: Event) => {
+      const id = (event as CustomEvent<{ item_id?: number }>).detail?.item_id;
+      if (media && id === media.id) refreshMetadata(id);
+    };
+    window.addEventListener('media-item-changed', changed);
+    return () => window.removeEventListener('media-item-changed', changed);
+  });
+
   // identify the route's work and, while it is shown, the selected episode or chapter
   onMount(() =>
     registerAssistantContext(() => {

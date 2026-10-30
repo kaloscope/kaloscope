@@ -3,6 +3,7 @@ from tortoise.migrations import operations as ops
 from app.models.ai import AIProtocol, AIProviderPreset
 from app.models.download import PlanAction, TaskAction
 from app.models.flow import ScheduleAction
+from app.models.media import MediaAction
 from app.models.mcp import MCPTokenScope
 from orjson import loads
 from tortoise.fields.base import OnDelete
@@ -153,6 +154,24 @@ class Migration(migrations.Migration):
                 ('result', fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads)),
             ],
             options={'table': 'download_task_receipt', 'app': 'models', 'pk_attr': 'id', 'table_description': 'Claim one confirmed task action so retries never dispatch it again.'},
+            bases=['TortoiseModel'],
+        ),
+        ops.CreateModel(
+            name='MediaChangeReceipt',
+            fields=[
+                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),
+                ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
+                ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
+                ('key', fields.CharField(unique=True, max_length=64)),
+                ('action', fields.CharEnumField(description='SCAN: scan\nRESCRAPE: rescrape', enum_type=MediaAction, max_length=16)),
+                ('lib_id', fields.IntField()),
+                ('item_id', fields.IntField(null=True)),
+                ('graph_id', fields.IntField(null=True)),
+                ('candidate', fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads)),
+                ('claimed', fields.BooleanField(default=False)),
+                ('result', fields.JSONField(null=True, encoder=JSON_DUMPS, decoder=loads)),
+            ],
+            options={'table': 'media_change_receipt', 'app': 'models', 'pk_attr': 'id', 'table_description': "Keep a reviewed rescrape candidate and each applied change's outcome."},
             bases=['TortoiseModel'],
         ),
         ops.CreateModel(

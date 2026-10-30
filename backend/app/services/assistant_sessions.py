@@ -399,8 +399,8 @@ class AssistantSessionService:
             turn: Active turn whose conversation history is read.
 
         Returns:
-            Schedule, plan and task review tools whose results may be confirmed
-            in this turn.
+            Schedule, plan, task and media review tools whose results may be
+            confirmed or continued in this turn.
         """
         previous = (
             await AssistantTurn.filter(
@@ -419,9 +419,13 @@ class AssistantSessionService:
                     "review_workflow_schedule",
                     "review_download_plan_change",
                     "review_download_task_action",
+                    "review_library_scan",
+                    "review_media_rescrape",
                 ],
             )
-            if ((call.result or {}).get("data") or {}).get("valid")
+            # a candidate list lets the user pick one in this turn
+            if (data := (call.result or {}).get("data") or {}).get("valid")
+            or (call.name == "review_media_rescrape" and data.get("candidates"))
         }
 
     @classmethod

@@ -42,6 +42,13 @@ export function assistantDestination(
     // the task's own download page shows its state after the action
     path = result.data.path ?? (result.data.task as { path?: unknown } | null | undefined)?.path;
     target = { page: path === downloadPaths.completed_downloads ? 'completed_downloads' : 'active_downloads' };
+  } else if (result.name === 'apply_media_change' && result.data.applied !== false) {
+    // a rescrape opens its item; a scan opens its library
+    path = result.data.path;
+    target =
+      typeof result.data.item_id === 'number'
+        ? { page: 'media_item', resource_id: result.data.item_id }
+        : { page: 'media_library', resource_id: result.data.library_id as number };
   }
   if (!target) return null;
   const id = target.resource_id;

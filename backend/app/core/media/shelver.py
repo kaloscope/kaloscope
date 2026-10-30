@@ -318,6 +318,30 @@ def render_nfo(nfo_type: str, template: str, data: dict) -> str:
         raise ContentError("invalid_metadata") from error
 
 
+async def preview_nfo(lib_type: LibType, data: dict) -> MediaMeta:
+    """Read a candidate back as its NFO would store it, without writing a file.
+
+    Args:
+        lib_type: Movie or TV library selecting the template and parser.
+        data: Candidate fields supplied to the template.
+
+    Returns:
+        Metadata that `update_metadata` and organization would read.
+
+    Raises:
+        ContentError: If the candidate cannot be saved as valid metadata.
+    """
+    nfo_type = get_nfo_type(lib_type)
+    if nfo_type not in (NFOType.MOVIE, NFOType.TV_SHOW):
+        raise ContentError("invalid_metadata")
+    path = TEMPLATES_PATH / f"{nfo_type}.nfo"
+    async with aiofiles.open(path, encoding=ENCODING) as f:
+        template = await f.read()
+    rendered = render_nfo(nfo_type, template, data)
+    meta, _ = _parse_nfo_data(lib_type, rendered.encode(ENCODING), "")
+    return meta
+
+
 def _nfo_integer(name: str, value: Any) -> int | None:
     """Validate numeric summary fallbacks even when the NFO template omits them.
 
