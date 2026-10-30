@@ -181,6 +181,9 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                     "candidates",
                     "episodes",
                     "organization",
+                    "bindings",
+                    "workflows",
+                    "nfo",
                 ):
                     if key in source["data"]:
                         fact["data"][key] = source["data"][key]

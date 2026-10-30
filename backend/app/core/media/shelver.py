@@ -319,7 +319,7 @@ def render_nfo(nfo_type: str, template: str, data: dict) -> str:
 
 
 async def preview_nfo(lib_type: LibType, data: dict) -> MediaMeta:
-    """Read a candidate back as its NFO would store it, without writing a file.
+    """Read a candidate as saved metadata, including numeric summary fallbacks.
 
     Args:
         lib_type: Movie or TV library selecting the template and parser.
@@ -339,6 +339,10 @@ async def preview_nfo(lib_type: LibType, data: dict) -> MediaMeta:
         template = await f.read()
     rendered = render_nfo(nfo_type, template, data)
     meta, _ = _parse_nfo_data(lib_type, rendered.encode(ENCODING), "")
+    # match the fallbacks in `update_metadata` when the template omits a number
+    for name in ("year", "season"):
+        if getattr(meta, name) is None:
+            setattr(meta, name, _nfo_integer(name, data.get(name)))
     return meta
 
 

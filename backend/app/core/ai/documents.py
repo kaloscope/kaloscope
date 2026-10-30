@@ -337,6 +337,7 @@ def tool_facts(result: dict) -> dict:
             # a later turn picks a candidate by key, so keep every identity
             data["candidates"] = [
                 {key: entry.get(key) for key in ("key", "title", "year")}
+                | ({"season": entry["season"]} if "season" in entry else {})
                 for entry in data["candidates"]
             ]
     facts = {}

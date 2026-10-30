@@ -501,8 +501,8 @@ def test_duplicate_scan(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("error", "outcome"),
     [
-        (ContentError("media_source_unavailable"), "failed"),
-        (KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED), "failed"),
+        (ContentError("media_source_unavailable"), "uncertain"),
+        (KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED), "uncertain"),
         (RuntimeError("enumeration stopped"), "uncertain"),
     ],
 )
@@ -518,16 +518,88 @@ def test_scan_failure(monkeypatch, tmp_path, error, outcome):
             scan.side_effect = None
             second = await apply(env.owner, reviewed, change)
 
-            if outcome == "failed":
-                # nothing was queued, so the same request may run once more
-                assert first["failed"] and first["applied"] is False
-                assert second["outcome"] == "scanned" and not second["replayed"]
-                assert scan.await_count == 2
+            # the exception type cannot prove that enumeration or recovery did nothing
+            assert first["outcome"] == outcome and first["applied"] is None
+            assert second["replayed"] and second["outcome"] == outcome
+            assert scan.await_count == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("edit", ["workflow", "definition", "language"])
+def test_scan_stale(monkeypatch, tmp_path, edit):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            reviewed = await scan_review(env.owner, env.movies.id)
+            if edit == "workflow":
+                await FlowGraph.filter(id=env.movie_graph.id).update(revision=2)
+            elif edit == "definition":
+                await FlowGraph.filter(id=env.movie_graph.id).update(
+                    definition={**scraper(), "review_test": True}
+                )
             else:
-                # a partly enumerated scan is never repeated by its request
-                assert first["outcome"] == "uncertain" and first["applied"] is None
-                assert second["replayed"] and second["outcome"] == "uncertain"
-                assert scan.await_count == 1
+                await MediaLib.filter(id=env.movies.id).update(language="zh-CN")
+
+            result = await apply(
+                env.owner, reviewed, {"action": "scan", "library_id": env.movies.id}
+            )
+
+            assert result.get("stale") and not result["applied"]
+            assert not await MediaChangeReceipt.filter(claimed=True).exists()
+            assert not await MediaEvent.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ContentError("media_source_unavailable"),
+        KaloscopeException(ErrorCode.HTTP_REQUEST_FAILED),
+    ],
+)
+def test_scan_partial_failure(monkeypatch, tmp_path, error):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            reviewed = await scan_review(env.owner, env.movies.id)
+            scan = env.watcher.scan_directory
+
+            async def interrupted(*args, **kwargs):
+                await scan(*args, **kwargs)
+                raise error
+
+            attempted = AsyncMock(side_effect=interrupted)
+            monkeypatch.setattr(env.watcher, "scan_directory", attempted)
+            change = {"action": "scan", "library_id": env.movies.id}
+
+            first = await apply(env.owner, reviewed, change)
+            second = await apply(env.owner, reviewed, change)
+
+            assert first.get("outcome") == "uncertain"
+            assert second["replayed"] and second["outcome"] == "uncertain"
+            assert attempted.await_count == 1
+
+    asyncio.run(run())
+
+
+def test_explicit_workflow_beyond_list(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            for index in range(11):
+                graph = await FlowGraph.create(
+                    name=f"Additional scraper {index:02}",
+                    category="ingest",
+                    state="published",
+                    definition=scraper(),
+                )
+
+            result = await rescrape_review(
+                env.owner, item_id=env.movie.id, workflow_id=graph.id
+            )
+
+            assert result.get("workflow_id") == graph.id
+            assert result.get("candidates")
+            assert len(result["workflows"]) <= 10
 
     asyncio.run(run())
 
@@ -705,11 +777,15 @@ def test_organization_queued(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
-def test_rescrape_tv(monkeypatch, tmp_path):
+@pytest.mark.parametrize("site", ["tmdb", "tvdb"])
+def test_rescrape_tv(monkeypatch, tmp_path, site):
+    monkeypatch.setitem(SHOWS[0], "site", site)
+
     async def run():
         async with media(monkeypatch, tmp_path) as env:
             pilot = Path(env.episodes[0].nfo_path).read_bytes()
             change, reviewed = await chosen(env.owner, env.show.id)
+            assert reviewed["episodes"]["keep"] == (1 if site == "tmdb" else 0)
             env.engine.calls.clear()
 
             applied = await apply(env.owner, reviewed, change)
@@ -721,8 +797,11 @@ def test_rescrape_tv(monkeypatch, tmp_path):
             assert sorted(
                 (params["season"], params["episode"] or 0)
                 for _, params in env.engine.calls
-            ) == [(1, 0), (1, 2)]
-            assert Path(env.episodes[0].nfo_path).read_bytes() == pilot
+            ) == ([(1, 0), (1, 2)] if site == "tmdb" else [(1, 0), (1, 1), (1, 2)])
+            if site == "tmdb":
+                assert Path(env.episodes[0].nfo_path).read_bytes() == pilot
+            else:
+                assert title_in(env.episodes[0].nfo_path) == "Episode 1"
             written = Path(env.show.path) / "S01E02.nfo"
             episode = shelver.read_nfo(LibType.TV_SHOW, written)[0]
             assert (episode.title, episode.season, episode.episode) == (
@@ -749,7 +828,7 @@ def test_partial(monkeypatch, tmp_path):
             assert partial["outcome"] == "partial" and partial["applied"] is True
             assert partial["step"] == "episodes"
             assert partial["episodes"] == {
-                "refreshed": 1,
+                "attempted": 2,
                 "failed_episode_id": env.episodes[1].id,
                 "not_attempted": 1,
             }
@@ -799,6 +878,29 @@ def test_stale(monkeypatch, tmp_path, edit):
             assert result["stale"] and not result["applied"]
             assert Path(item.nfo_path).read_bytes() == before
             assert not await MediaChangeReceipt.filter(claimed=True).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_episode_nfo_changed(monkeypatch, tmp_path, existing):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            change, reviewed = await chosen(env.owner, env.show.id, index=1)
+            episode = env.episodes[0 if existing else 1]
+            path = episode.nfo_path or shelver.get_nfo_path(episode.path)
+            await write_nfo(
+                NFOType.EPISODE,
+                path,
+                {"title": "Edited by hand", "season": 1, "episode": episode.episode},
+            )
+            before = Path(path).read_bytes()
+
+            result = await apply(env.owner, reviewed, change)
+
+            assert result.get("stale") and not result["applied"]
+            assert Path(path).read_bytes() == before
+            assert title_in(env.show.nfo_path) == "Old Show"
 
     asyncio.run(run())
 
@@ -879,6 +981,9 @@ def test_running(monkeypatch, tmp_path):
 
             # the caller is answered at once; the episodes finish in the background
             assert running["outcome"] == "running" and running["applied"] is None
+            assert running.get("item_id") == env.show.id
+            assert running.get("library_id") == env.shows.id
+            assert running.get("path") == f"/medialibs/{env.shows.id}/{env.show.id}"
             assert pending["pending"]
             assert finished["replayed"] and finished["outcome"] == "rescraped"
 
@@ -918,10 +1023,38 @@ def test_failed(monkeypatch, tmp_path):
             monkeypatch.setattr(shelver, "gen_nfo", original)
             repeated = await apply(env.owner, reviewed, change)
 
-            # nothing was written, so the same request may save once
-            assert failed["failed"] and failed["error"] == "invalid_metadata"
-            assert repeated["outcome"] == "rescraped" and not repeated["replayed"]
-            assert title_in(env.movie.nfo_path) == "New Movie"
+            # unchanged bytes alone cannot prove that nothing took effect
+            assert (
+                failed["outcome"] == "uncertain"
+                and failed["error"] == "invalid_metadata"
+            )
+            assert repeated["outcome"] == "uncertain" and repeated["replayed"]
+            assert title_in(env.movie.nfo_path) == "Old Movie"
+
+    asyncio.run(run())
+
+
+def test_unchanged_nfo_partial_failure(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            await write_nfo(NFOType.MOVIE, env.movie.nfo_path, MOVIES[0])
+            await MediaLib.filter(id=env.movies.id).update(
+                rename_template="{{title}} ({{year}})/{{title}} ({{year}})"
+            )
+            change, reviewed = await chosen(env.owner, env.movie.id)
+            monkeypatch.setattr(
+                shelver,
+                "notify_media_events",
+                Mock(side_effect=OSError("lost notification")),
+            )
+
+            first = await apply(env.owner, reviewed, change)
+            second = await apply(env.owner, reviewed, change)
+
+            assert (await MediaItem.get(id=env.movie.id)).title == "New Movie"
+            assert await MediaEvent.exists(lib_id=env.movies.id)
+            assert first.get("outcome") == "uncertain"
+            assert second.get("replayed") and second["outcome"] == "uncertain"
 
     asyncio.run(run())
 
@@ -1395,7 +1528,7 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
         {"tools": tools.tool_schemas(reader, media_change=True)}
     )
     # the active preview keeps its effects and choices when compacted
-    for data in (listed, preview):
+    for data in (listed, preview, scan):
         source = {
             "id": "review",
             "name": "review_media_rescrape",
@@ -1416,16 +1549,26 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
         ]
         compacted = history.compact_exchanges(messages, 1, 7000)
         fact = loads(compacted[0]["content"].split("\n", 1)[1])["tools"][0]
-        for key in ("candidates", "changes", "notes", "episodes", "organization"):
+        for key in (
+            "candidates",
+            "changes",
+            "notes",
+            "episodes",
+            "organization",
+            "bindings",
+            "nfo",
+            "workflows",
+        ):
             if key in data:
                 assert fact["data"][key] == data[key]
         assert len(dumps(compacted)) < 7000
-    # an earlier turn's summary keeps each candidate's key, title and year
+    # an earlier turn keeps the season needed to choose between the same show
     summary = tool_facts(
         {"id": "list", "name": "review_media_rescrape", "ok": True, "data": listed}
     )["data"]
     assert summary["candidates"] == [
         {key: entry.get(key) for key in ("key", "title", "year")}
+        | ({"season": entry["season"]} if "season" in entry else {})
         for entry in listed["candidates"]
     ]
     assert (
@@ -1439,6 +1582,105 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
         )["data"]["request_id"]
         == preview["request_id"]
     )
+
+
+def test_retry_before_publication(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            change, reviewed = await chosen(env.owner, env.movie.id)
+            with monkeypatch.context() as patch:
+                patch.setattr(shelver, "gen_nfo", AsyncMock(return_value=False))
+                refused = await apply(env.owner, reviewed, change)
+            saved = await apply(env.owner, reviewed, change)
+
+            assert refused["failed"] and refused["applied"] is False
+            assert saved["outcome"] == "rescraped" and not saved["replayed"]
+
+    asyncio.run(run())
+
+
+def test_distinct_reviews_conflict(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            first_change, first_review = await chosen(env.owner, env.movie.id)
+            second_change, second_review = await chosen(
+                env.owner, env.movie.id, index=1
+            )
+            entered, release = asyncio.Event(), asyncio.Event()
+            save = service.MediaItemService.save_video_metadata
+
+            async def delayed(*args, **kwargs):
+                entered.set()
+                await release.wait()
+                return await save(*args, **kwargs)
+
+            monkeypatch.setattr(
+                service.MediaItemService, "save_video_metadata", delayed
+            )
+            monkeypatch.setattr(service, "APPLY_WAIT", 0.05)
+            first = asyncio.create_task(apply(env.owner, first_review, first_change))
+            await entered.wait()
+            second = await apply(env.owner, second_review, second_change)
+            release.set()
+            await first
+            while service._RUNNING:
+                await asyncio.sleep(0.01)
+            repeated = await apply(env.owner, second_review, second_change)
+
+            assert second.get("pending")
+            assert repeated.get("stale") and not repeated["applied"]
+            assert (await MediaItem.get(id=env.movie.id)).unique_id == "201"
+
+    asyncio.run(run())
+
+
+def test_season_candidates(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            await MediaLib.filter(id=env.shows.id).update(
+                rename_template="{{parent.title}} ({{year}})/Season {{season}}/"
+                "{{title}} S{{season}}E{{episode}}"
+            )
+            monkeypatch.setattr(
+                env.engine,
+                "execute",
+                AsyncMock(
+                    return_value=[{**SHOWS[0], "season": 1}, {**SHOWS[0], "season": 2}]
+                ),
+            )
+            listed = await rescrape_review(env.owner, item_id=env.show.id)
+            first, second = listed["candidates"]
+            assert first["key"] != second["key"]
+            assert [entry["season"] for entry in listed["candidates"]] == [1, 2]
+            preview = await rescrape_review(
+                env.owner, item_id=env.show.id, candidate=second["key"]
+            )
+            assert preview["episodes"]["season"] == 2
+            assert preview["organization"]["expected"] == "New Show (2020)/Season 02"
+            assert {"field": "season", "before": 1, "after": 2} in preview["changes"]
+
+    asyncio.run(run())
+
+
+def test_candidate_size(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            candidate = {
+                **MOVIES[0],
+                "title": "电影" * 100,
+                "originaltitle": "x" * 6000,
+            }
+            monkeypatch.setattr(
+                env.engine, "execute", AsyncMock(return_value=[candidate] * 5)
+            )
+            listed = await rescrape_review(env.owner, item_id=env.movie.id)
+
+            assert len(listed["candidates"]) == 5
+            assert all(entry.get("usable", True) for entry in listed["candidates"])
+            assert len(dumps(listed)) < 4000
+            assert all(entry["key"] for entry in listed["candidates"])
+
+    asyncio.run(run())
 
 
 def test_review_provenance(monkeypatch, tmp_path):
