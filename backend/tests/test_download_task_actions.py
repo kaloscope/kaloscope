@@ -18,6 +18,8 @@ from app.core.ai import history, tools
 from app.core.ai.documents import tool_facts
 from app.core.dl import syncer
 from app.core.dl.driver import DownloadState
+from app.core.dl.openlist import puller
+from app.core.dl.openlist.manifest import RemoteManifestEntry, serialize_manifest
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.models.assistant import AssistantToolCall, AssistantTurn, ConversationCreate
 from app.models.download import (
@@ -598,6 +600,10 @@ def test_confirmation(monkeypatch):
         ({"state": DownloadState.PAUSED}, True),
         ({"transfer_pending": True}, True),
         ({"downloader_id": 4}, True),
+        ({"unique_id": "different-remote-task"}, True),
+        ({"name": "Another download"}, True),
+        ({"dir": "/different/downloads"}, True),
+        ({"transfer_method": "symlink"}, True),
     ],
 )
 def test_stale(monkeypatch, values, stale):
@@ -637,6 +643,24 @@ def test_capabilities_changed(monkeypatch):
 
             assert result["stale"] and result["current"]["actions"] == ["delete"]
             assert env.remote.requests == []
+
+    asyncio.run(run())
+
+
+def test_downloader_changed(monkeypatch):
+    async def run():
+        async with downloads(monkeypatch) as env:
+            change = {"task_id": 23, "action": "delete", "delete_files": True}
+            reviewed = await review(env.owner, **change)
+            await Downloader.filter(id=3).update(
+                config=RPC.replace("rpc.test", "another-rpc.test")
+            )
+
+            result = await apply(env.owner, reviewed, **change)
+
+            assert result["stale"] and not result["applied"]
+            assert env.remote.requests == []
+            assert await DownloadTask.exists(id=23)
 
     asyncio.run(run())
 
@@ -704,7 +728,7 @@ def test_pending(monkeypatch):
             assert claimed["pending"] and not claimed["applied"]
             assert restarted["replayed"] and restarted["outcome"] == "uncertain"
             assert restarted["applied"] is None
-            assert "instead of repeating" in restarted["message"]
+            assert "only reads its recorded outcome" in restarted["message"]
             assert env.remote.requests == []
             assert restarted["task"]["state"] == "downloading"
 
@@ -757,8 +781,14 @@ def test_cancelled(monkeypatch):
         ({"task_id": 21, "action": "pause"}, httpx.ReadTimeout, "uncertain", None, 1),
         ({"task_id": 21, "action": "pause"}, 502, "uncertain", None, 1),
         ({"task_id": 23, "action": "delete"}, httpx.ReadTimeout, "uncertain", None, 1),
-        # deletion treats any downloader response as delivered, as the page does
-        ({"task_id": 23, "action": "delete"}, 502, "deleted", "deleted", 1),
+        ({"task_id": 23, "action": "delete"}, 502, "uncertain", None, 1),
+        (
+            {"task_id": 23, "action": "delete", "delete_files": True},
+            400,
+            "failed",
+            "deleted",
+            2,
+        ),
     ],
 )
 def test_remote_failure(monkeypatch, change, failure, first, second, sent):
@@ -792,10 +822,6 @@ def test_rollback(monkeypatch):
         async with downloads(monkeypatch) as env:
             values = {"task_id": 24, "action": "pause"}
             reviewed = await review(env.owner, **values)
-            publish = env.syncer.publish
-            env.syncer.publish = Mock(side_effect=OSError("manager lost"))
-            unqueued = await apply(env.owner, reviewed, **values)
-            env.syncer.publish = publish
             create = DownloadTaskReceipt.create
             monkeypatch.setattr(
                 DownloadTaskReceipt, "create", AsyncMock(side_effect=OSError("disk"))
@@ -805,7 +831,7 @@ def test_rollback(monkeypatch):
             queued = await apply(env.owner, reviewed, **values)
 
             # nothing reached synchronization, so the same request may run once
-            assert unqueued["failed"] and unclaimed["failed"]
+            assert unclaimed["failed"]
             assert queued["outcome"] == "queued" and not queued["replayed"]
             assert list(env.syncer._task_actions) == [24]
             assert await DownloadTaskReceipt.all().count() == 1
@@ -834,6 +860,112 @@ def test_unrecorded(monkeypatch):
             assert applied["outcome"] == "changed"
             assert repeated["replayed"] and repeated["outcome"] == "uncertain"
             assert len(env.remote.requests) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_queue_notification_lost(monkeypatch, queued):
+    async def run():
+        async with downloads(monkeypatch) as env:
+            change = {"task_id": 24, "action": "pause"}
+            reviewed = await review(env.owner, **change)
+            if queued:
+                monkeypatch.setattr(
+                    env.syncer._sync_requested, "set", Mock(side_effect=OSError("lost"))
+                )
+            else:
+                monkeypatch.setattr(
+                    env.syncer, "publish", Mock(side_effect=OSError("lost"))
+                )
+
+            result = await apply(env.owner, reviewed, **change)
+            assert result["outcome"] == "uncertain" and result["applied"] is None
+            assert (24 in env.syncer._task_actions) is queued
+            await env.syncer._consume_actions()
+            assert await state(env.tasks["Cloud show"]) == (
+                "paused" if queued else "pulling"
+            )
+            await DownloadTask.filter(id=24).update(state=DownloadState.PULLING)
+            replayed = await apply(env.owner, reviewed, **change)
+
+            assert replayed["replayed"] and replayed["outcome"] == "uncertain"
+            assert env.syncer._task_actions == {}
+            assert await DownloadTaskReceipt.all().count() == 1
+
+    asyncio.run(run())
+
+
+def test_delete_notification_lost(monkeypatch):
+    async def run():
+        async with downloads(monkeypatch) as env:
+            change = {"task_id": 24, "action": "delete", "delete_files": True}
+            reviewed = await review(env.owner, **change)
+            monkeypatch.setattr(
+                service, "notify_download_changes", Mock(side_effect=OSError("lost"))
+            )
+
+            result = await apply(env.owner, reviewed, **change)
+            pending = await OfflineDownloadJob.get(download_id=24)
+
+            assert pending.delete_due_at and pending.delete_local
+            assert result["applied"] is None and result["outcome"] == "uncertain"
+            await env.syncer._consume_actions()
+            replayed = await apply(env.owner, reviewed, **change)
+            assert replayed["replayed"] and replayed["task"] is None
+            assert await DownloadTaskReceipt.all().count() == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("delete_files", [False, True])
+def test_owned_files(monkeypatch, tmp_path, delete_files):
+    async def run():
+        async with downloads(monkeypatch) as env:
+            job = await OfflineDownloadJob.get(download_id=24)
+            entries = tuple(
+                RemoteManifestEntry(path=name, is_dir=False, size=3)
+                for name in ("owned.mkv", "unrelated.mkv")
+            )
+            owned = tmp_path / "owned.mkv"
+            unrelated = tmp_path / "unrelated.mkv"
+            partial = tmp_path / f".owned.mkv.{job.job_uuid}.part"
+            marker = tmp_path / f".owned.mkv.{job.job_uuid}.done"
+            owned.write_bytes(b"abc")
+            unrelated.write_bytes(b"xyz")
+            marker.write_bytes(puller._ownership_value(owned))
+            partial.write_bytes(b"ab")
+            library = tmp_path / "library"
+            library.mkdir()
+            hardlink = library / "movie.mkv"
+            hardlink.hardlink_to(owned)
+            symlink = library / "linked.mkv"
+            symlink.symlink_to(owned)
+            await DownloadTask.filter(id=24).update(
+                dir=str(tmp_path), transfer_lib_id=60, transfer_method="symlink"
+            )
+            await OfflineDownloadJob.filter(download_id=24).update(
+                manifest=serialize_manifest(entries)
+            )
+
+            reviewed, result = await act(
+                env.owner, task_id=24, action="delete", delete_files=delete_files
+            )
+            assert result["outcome"] == "queued" and owned.exists()
+            assert any("remote source files stay" in note for note in reviewed["notes"])
+            assert any(
+                "pending across state changes" in note for note in reviewed["notes"]
+            )
+            await DownloadTask.filter(id=24).update(state=DownloadState.COMPLETED)
+            await env.syncer._consume_actions()
+
+            assert not await DownloadTask.exists(id=24)
+            assert owned.exists() is not delete_files
+            assert not partial.exists() and not marker.exists()
+            assert unrelated.read_bytes() == b"xyz"
+            assert hardlink.read_bytes() == b"abc"
+            assert symlink.is_symlink() and symlink.exists() is not delete_files
+            assert await MediaLib.exists(id=60)
 
     asyncio.run(run())
 
@@ -1195,7 +1327,8 @@ def test_superseded(monkeypatch):
     asyncio.run(run())
 
 
-def test_invalid_review_supersedes(monkeypatch):
+@pytest.mark.parametrize("failure", [False, True])
+def test_invalid_review_supersedes(monkeypatch, failure):
     async def run():
         async with downloads(monkeypatch) as env:
             conversation = await Sessions.create(
@@ -1217,7 +1350,9 @@ def test_invalid_review_supersedes(monkeypatch):
                     name="review_download_task_action",
                     arguments=dumps(args).decode(),
                     status="complete",
-                    result={"ok": True, "data": result},
+                    result={"ok": False, "error": "not_found"}
+                    if failure and index
+                    else {"ok": True, "data": result},
                 )
                 original = original or result
             confirmed = await tools.apply_task_action(
