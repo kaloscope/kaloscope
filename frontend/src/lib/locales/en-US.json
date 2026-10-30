@@ -1132,6 +1132,9 @@
       "apply_download_plan_change": "Apply Plan Change",
       "review_download_task_action": "Review Task Action",
       "apply_download_task_action": "Apply Task Action",
+      "review_library_scan": "Review Library Scan",
+      "review_media_rescrape": "Review Rescrape",
+      "apply_media_change": "Apply Media Change",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
       "get_workflow_reference": "Read Workflow Reference",
@@ -1305,6 +1308,24 @@
       "failed": "Not applied. Confirm again to retry.",
       "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was sent."
+    },
+    "media_change": {
+      "reviewed": "Not applied yet. Confirm this change to apply it.",
+      "scanned": "Scan of library #{0} queued its changes; background work continues",
+      "submitted": "Scan of library #{0} submitted; it continues in the background",
+      "already_scanning": "Library #{0} was already scanning; nothing new started",
+      "rescraped": "Metadata of item #{0} saved",
+      "partial": "Item #{0} partly updated. Expand the details before trying again.",
+      "running": "Still running in the background. Confirm again later to read the result.",
+      "absent": "#{0} no longer exists; nothing was changed",
+      "uncertain": "Result unconfirmed. Check the library before trying again.",
+      "confirmation_required": "Not applied. Confirm the latest review first.",
+      "stale": "Not applied: the target or metadata changed after review.",
+      "conflict": "Not applied: this request does not match its review.",
+      "pending": "Still being applied. Confirm again later to read the result.",
+      "failed": "Not applied; nothing was changed. Confirm again to retry.",
+      "invalid": "Not applied. Expand the details to see the issues.",
+      "refused": "Not applied; nothing was changed."
     }
   }
 }

@@ -15,6 +15,7 @@ from pydantic import (
     WithJsonSchema,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 from tortoise.transactions import in_transaction
 
 from app.core.ai.documents import (
@@ -88,12 +89,18 @@ from app.models.flow import (
     ScheduleChange,
 )
 from app.models.mcp import NodeTypesResult
-from app.models.media import MediaQuery
+from app.models.media import (
+    LibraryScan,
+    MediaChangeApply,
+    MediaQuery,
+    MediaRescrape,
+)
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
 from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.media_changes import MediaChangeService
 from app.services.workflow_authoring import (
     probe_http_request,
     validate_workflow_template,
@@ -110,6 +117,8 @@ PLAN_CHANGE_TOOLS = frozenset(
 TASK_ACTION_TOOLS = frozenset(
     {"review_download_task_action", "apply_download_task_action"}
 )
+MEDIA_REVIEW_TOOLS = frozenset({"review_library_scan", "review_media_rescrape"})
+MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -422,6 +431,28 @@ class TaskActionConfirm(ToolArguments):
     )
 
 
+class ScanReview(LibraryScan):
+    """Review one library scan without starting it."""
+
+    action: SkipJsonSchema[Literal["scan"]] = "scan"
+
+
+class RescrapeReview(MediaRescrape):
+    """List candidates, or preview one, without saving metadata."""
+
+    action: SkipJsonSchema[Literal["rescrape"]] = "rescrape"
+
+
+class MediaConfirm(ToolArguments):
+    """Apply a scan or rescrape review from an earlier turn of this conversation."""
+
+    request_id: UUID
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
+
+
 class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
@@ -711,6 +742,31 @@ TOOLS = (
         TaskActionConfirm,
     ),
     AssistantTool(
+        "review_library_scan",
+        "Review scanning one movie/TV library; starts nothing. Summarize library, "
+        "bindings and notes in the user's language, not JSON. End the turn for "
+        "confirmation.",
+        ScanReview,
+        admin=True,
+    ),
+    AssistantTool(
+        "review_media_rescrape",
+        "Run a top-level movie/show's scraper: without candidate, list matches for "
+        "the user to pick (never pick the first yourself); with a listed key, "
+        "preview it. Saves nothing. Summarize changes, episodes, organization and "
+        "notes in the user's language; end the turn for confirmation.",
+        RescrapeReview,
+        admin=True,
+    ),
+    AssistantTool(
+        "apply_media_change",
+        "Apply a prior turn's valid scan/rescrape review after the user confirms "
+        "it; returns quickly (submitted/running is not done). Repeat the same "
+        "request_id after errors; never re-review to retry.",
+        MediaConfirm,
+        admin=True,
+    ),
+    AssistantTool(
         "navigate",
         "Offer a user-clicked page button with unsaved-edit checks. "
         "Designer/media: accessible resource_id; lists: omit it.",
@@ -819,6 +875,7 @@ def tool_schemas(
     schedule: bool = False,
     plan_change: bool = False,
     task_action: bool = False,
+    media_change: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -836,6 +893,8 @@ def tool_schemas(
             a review in the previous turn.
         task_action: Offer task actions after reading tasks this turn or after
             a review in the previous turn.
+        media_change: Offer scans and rescrapes after reading media this turn or
+            after a review in the previous turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -851,6 +910,8 @@ def tool_schemas(
         if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
             continue
         if tool.name in TASK_ACTION_TOOLS and not task_action:
+            continue
+        if tool.name in MEDIA_CHANGE_TOOLS and not media_change:
             continue
         if tool.name in {
             "search_indexer",
@@ -1051,6 +1112,12 @@ async def execute_tool(
                     result = await DownloadTaskService.review_action(args, user)
                 case TaskActionConfirm():
                     result = await apply_task_action(args, conversation_id, user)
+                case LibraryScan():
+                    result = await MediaChangeService.review_scan(args, user)
+                case MediaRescrape():
+                    result = await MediaChangeService.review_rescrape(args, user)
+                case MediaConfirm():
+                    result = await apply_media_change(args, conversation_id, user)
                 case PlanList():
                     result = await download_plans(
                         DownloadPlanQuery(
@@ -1885,6 +1952,68 @@ async def apply_task_action(
             DownloadTaskActionApply(
                 request_id=args.request_id,
                 change=DownloadTaskAction.model_validate_json(record.arguments),
+                revision=data["revision"],
+                confirmed=args.confirmed and ready,
+            ),
+            user,
+        )
+        if not ready and not result.get("replayed"):
+            return {
+                **result,
+                "applied": False,
+                "confirmation_required": True,
+                "message": "A newer review replaced this one; confirm that one."
+                if index
+                else "Show this review, finish the turn and wait for the user's "
+                "confirmation.",
+            }
+        return result
+    raise NotFoundException
+
+
+async def apply_media_change(
+    args: MediaConfirm, conversation_id: int, user: UserInfo
+) -> dict:
+    """Apply a scan or rescrape review the user confirmed after it was shown.
+
+    Only the newest media review of the conversation may be applied, and it must
+    be valid and from a completed earlier turn; any newer scan or rescrape
+    review, even a failed one or a candidate list, replaces it. A claimed request
+    replays first, so retries never apply it again.
+
+    Args:
+        args: Reviewed request ID and the user's confirmation.
+        conversation_id: Server-owned conversation.
+        user: Current account whose rights the service checks again.
+
+    Returns:
+        Shared outcome, or a confirmation request for a review that is not ready.
+
+    Raises:
+        NotFoundException: If the review record is unavailable.
+    """
+    reviews = (
+        await AssistantToolCall.filter(
+            turn__conversation_id=conversation_id, name__in=list(MEDIA_REVIEW_TOOLS)
+        )
+        .order_by("-id")
+        .limit(30)
+    )
+    for index, record in enumerate(reviews):
+        data = (record.result or {}).get("data") or {}
+        if data.get("request_id") != str(args.request_id):
+            continue
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        ready = index == 0 and reviewed.status == "complete"
+        change = (
+            LibraryScan.model_validate_json(record.arguments)
+            if record.name == "review_library_scan"
+            else MediaRescrape.model_validate_json(record.arguments)
+        )
+        result = await MediaChangeService.apply_change(
+            MediaChangeApply(
+                request_id=args.request_id,
+                change=change,
                 revision=data["revision"],
                 confirmed=args.confirmed and ready,
             ),

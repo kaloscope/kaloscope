@@ -2,7 +2,7 @@
   import type { AssistantTool } from '$lib/assistant/session';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { PlanChangeOutcome, ScheduleChangeOutcome, TaskActionOutcome } from '$lib/types';
+  import type { MediaChangeOutcome, PlanChangeOutcome, ScheduleChangeOutcome, TaskActionOutcome } from '$lib/types';
 
   const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
   const trialStatus = $derived.by(() => {
@@ -17,7 +17,7 @@
     }
     return result.status;
   });
-  // reviewed schedule, plan and task changes share their review and outcome lines
+  // reviewed schedule, plan, task and media changes share their review and outcome lines
   const changeKind = $derived(
     (
       {
@@ -26,14 +26,18 @@
         review_download_plan_change: 'plan_change',
         apply_download_plan_change: 'plan_change',
         review_download_task_action: 'task_action',
-        apply_download_task_action: 'task_action'
+        apply_download_task_action: 'task_action',
+        review_library_scan: 'media_change',
+        review_media_rescrape: 'media_change',
+        apply_media_change: 'media_change'
       } as Record<string, string>
     )[tool.name]
   );
   // applied outcomes name themselves; other replies say why nothing changed
   const changeStatus = $derived.by(() => {
     if (!changeKind || !tool.name.startsWith('apply_') || !tool.result?.ok || !tool.result.data) return null;
-    const result = tool.result.data as unknown as ScheduleChangeOutcome | PlanChangeOutcome | TaskActionOutcome;
+    const result = tool.result.data as unknown as
+      ScheduleChangeOutcome | PlanChangeOutcome | TaskActionOutcome | MediaChangeOutcome;
     if (result.outcome) return result.outcome;
     for (const key of ['confirmation_required', 'stale', 'conflict', 'pending', 'failed'] as const) {
       if ((result as Record<string, unknown>)[key]) return key;
@@ -43,9 +47,12 @@
   const statusIcon = $derived.by(() => {
     if (trialStatus === 'running' || trialStatus === 'submitting') return icons.clock;
     if (trialStatus && trialStatus !== 'completed') return icons.warning;
-    // a queued task action is accepted but not yet observed
-    if (changeStatus === 'pending' || changeStatus === 'queued') return icons.clock;
-    if (changeStatus && !['created', 'updated', 'enabled', 'paused', 'deleted', 'changed'].includes(changeStatus)) {
+    // queued, submitted and running work is accepted but not yet observed
+    if (changeStatus && ['pending', 'queued', 'submitted', 'running'].includes(changeStatus)) return icons.clock;
+    if (
+      changeStatus &&
+      !['created', 'updated', 'enabled', 'paused', 'deleted', 'changed', 'scanned', 'rescraped'].includes(changeStatus)
+    ) {
       return icons.warning;
     }
     if (tool.status === 'complete') return icons.checkmark;
@@ -147,7 +154,13 @@
 {#if changeStatus}
   <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
     {$_(`assistant.${changeKind}.${changeStatus}`, [
-      Number(tool.result?.data?.job_id ?? tool.result?.data?.plan_id ?? tool.result?.data?.task_id)
+      Number(
+        tool.result?.data?.job_id ??
+          tool.result?.data?.plan_id ??
+          tool.result?.data?.task_id ??
+          tool.result?.data?.item_id ??
+          tool.result?.data?.library_id
+      )
     ])}
   </p>
 {/if}

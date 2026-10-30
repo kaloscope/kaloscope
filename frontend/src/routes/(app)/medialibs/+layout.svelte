@@ -63,7 +63,16 @@
 
   onMount(() => {
     scanning = data.libs.filter((lib) => lib.scanning).map((lib) => lib.id);
-    return () => abortController.abort();
+    // track a scan the assistant submitted like one started here
+    const submitted = (event: Event) => {
+      const id = (event as CustomEvent<{ library_id?: number }>).detail?.library_id;
+      if (typeof id === 'number' && !scanning.includes(id)) scanning = [...scanning, id];
+    };
+    window.addEventListener('media-library-scan', submitted);
+    return () => {
+      window.removeEventListener('media-library-scan', submitted);
+      abortController.abort();
+    };
   });
 </script>
 

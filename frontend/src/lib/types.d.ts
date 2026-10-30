@@ -258,6 +258,22 @@ export type TaskActionOutcome = {
   failed?: boolean;
 };
 
+/** Outcome of applying a reviewed library scan or video rescrape. */
+export type MediaChangeOutcome = {
+  applied: boolean | null;
+  outcome?: 'scanned' | 'submitted' | 'already_scanning' | 'rescraped' | 'partial' | 'running' | 'absent' | 'uncertain';
+  library_id?: number;
+  item_id?: number;
+  path?: string;
+  replayed?: boolean;
+  valid?: boolean;
+  confirmation_required?: boolean;
+  stale?: boolean;
+  conflict?: boolean;
+  pending?: boolean;
+  failed?: boolean;
+};
+
 /** Durable save lifecycle of an assistant canvas edit. */
 export type AssistantProposalStatus = 'pending' | 'saved' | 'unchanged' | 'conflict' | 'failed' | 'cancelled';
 

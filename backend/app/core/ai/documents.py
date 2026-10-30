@@ -272,6 +272,33 @@ TASK_ACTION_FACTS = (
     "message",
 )
 
+# scan and rescrape identities, choices and outcomes retained for confirmation
+MEDIA_CHANGE_FACTS = (
+    "valid",
+    "issues",
+    "action",
+    "library_id",
+    "library_name",
+    "item_id",
+    "title",
+    "workflow_id",
+    "workflow_name",
+    "query",
+    "candidates",
+    "candidate",
+    "revision",
+    "request_id",
+    "applied",
+    "outcome",
+    "replayed",
+    "confirmation_required",
+    "stale",
+    "conflict",
+    "pending",
+    "failed",
+    "message",
+)
+
 
 def tool_facts(result: dict) -> dict:
     """Preserve source identities and deterministic facts in historical tool records.
@@ -300,6 +327,18 @@ def tool_facts(result: dict) -> dict:
         "apply_download_task_action",
     }:
         data = {key: data[key] for key in TASK_ACTION_FACTS if key in data}
+    elif result.get("name") in {
+        "review_library_scan",
+        "review_media_rescrape",
+        "apply_media_change",
+    }:
+        data = {key: data[key] for key in MEDIA_CHANGE_FACTS if key in data}
+        if isinstance(data.get("candidates"), list):
+            # a later turn picks a candidate by key, so keep every identity
+            data["candidates"] = [
+                {key: entry.get(key) for key in ("key", "title", "year")}
+                for entry in data["candidates"]
+            ]
     facts = {}
     if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
         facts["graph_source"] = "saved_draft"

@@ -12,7 +12,7 @@ from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import BadRequestException, ErrorCode
-from app.core.media import organizer
+from app.core.media import organizer, shelver
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaMetadata
@@ -249,7 +249,7 @@ def test_video_stream_range(tmp_path, range_header, start, end):
 def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
     publish = AsyncMock(return_value=written)
     refresh = AsyncMock()
-    monkeypatch.setattr(media_routes, "gen_nfo", publish)
+    monkeypatch.setattr(shelver, "gen_nfo", publish)
     monkeypatch.setattr(media_routes.MediaItemService, "refresh_episodes", refresh)
 
     async def run():
@@ -287,7 +287,7 @@ def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
                     await route(None, body, item.id)
 
             publish.assert_awaited_once_with(
-                media_routes.get_nfo_type(lib_type),
+                shelver.get_nfo_type(lib_type),
                 item.nfo_path,
                 body.metadata,
                 overwrite=True,
@@ -363,7 +363,7 @@ def test_episode_scope(tmp_path, monkeypatch, change):
                 )
                 return True
 
-            monkeypatch.setattr(media_routes, "gen_nfo", publish)
+            monkeypatch.setattr(shelver, "gen_nfo", publish)
             body = MediaMetadata(
                 graph_id=1, metadata={"title": "Updated", "site": "tmdb", "id": "42"}
             )

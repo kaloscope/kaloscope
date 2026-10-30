@@ -1132,6 +1132,9 @@
       "apply_download_plan_change": "应用下载计划变更",
       "review_download_task_action": "检查下载任务操作",
       "apply_download_task_action": "执行下载任务操作",
+      "review_library_scan": "检查媒体库扫描",
+      "review_media_rescrape": "检查重新刮削",
+      "apply_media_change": "执行媒体变更",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
@@ -1305,6 +1308,24 @@
       "failed": "未执行，可再次确认重试",
       "invalid": "未执行，请展开工具详情查看问题",
       "refused": "未执行，未发送任何操作"
+    },
+    "media_change": {
+      "reviewed": "尚未执行，请确认此变更后再执行",
+      "scanned": "已扫描媒体库 #{0} 并排队处理变更，后台仍在继续",
+      "submitted": "已提交媒体库 #{0} 的扫描，后台仍在继续",
+      "already_scanning": "媒体库 #{0} 已在扫描中，未重复启动",
+      "rescraped": "已保存条目 #{0} 的元数据",
+      "partial": "条目 #{0} 部分更新，请先展开工具详情再决定",
+      "running": "仍在后台执行，请稍后再次确认以读取结果",
+      "absent": "#{0} 已不存在，未做任何更改",
+      "uncertain": "结果待确认，请先查看媒体库，勿重复操作",
+      "confirmation_required": "尚未执行，请先确认最新的变更预览",
+      "stale": "未执行：目标或元数据在预览后已变更",
+      "conflict": "未执行：请求与预览内容不一致",
+      "pending": "仍在执行中，请稍后再次确认以读取结果",
+      "failed": "未执行，未做任何更改，可再次确认重试",
+      "invalid": "未执行，请展开工具详情查看问题",
+      "refused": "未执行，未做任何更改"
     }
   }
 }

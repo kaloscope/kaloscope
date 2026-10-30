@@ -17,7 +17,7 @@ from contextlib import (
 )
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import aiofiles
@@ -4373,6 +4373,63 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         async with aiofiles.open(path, "rb") as f:
             md5.update(await f.read(cls.HASH_READ_SIZE))
         return md5.hexdigest()
+
+    @classmethod
+    async def save_video_metadata(
+        cls,
+        item: MediaItem,
+        meta: MediaMetadata,
+        progress: dict[str, Any] | None = None,
+    ) -> bool:
+        """Write a confirmed movie or show candidate, then refresh a show's episodes.
+
+        The NFO write refreshes stored metadata and queues organization when the
+        library has a naming template. Episodes are refreshed one at a time with
+        the existing rules, so a failure leaves earlier ones in place.
+
+        Args:
+            item: Top-level video item loaded with its library before the write.
+            meta: Selected workflow and candidate metadata.
+            progress: Optional record of finished steps for the caller: `written`,
+                the `episodes` attempted so far and the `current` episode ID.
+
+        Returns:
+            Whether the NFO was written; `False` means nothing was published.
+
+        Raises:
+            ContentError: If the candidate cannot be saved safely.
+        """
+        from app.core.media.shelver import gen_nfo, get_nfo_path, get_nfo_type
+
+        progress = {} if progress is None else progress
+        lib = item.lib
+        episode_ids = (
+            cast(
+                list[int],
+                await MediaItem.filter(parent_id=item.id).values_list("id", flat=True),
+            )
+            if lib.lib_type == LibType.TV_SHOW
+            else []
+        )
+        # overwrite the NFO file and update the metadata immediately
+        progress["written"] = await gen_nfo(
+            get_nfo_type(lib.lib_type),
+            item.nfo_path or get_nfo_path(item.path),
+            meta.metadata,
+            overwrite=True,
+            item_id=item.id,
+            refresh=True,
+        )
+        if not progress["written"]:
+            return False
+        # update child episodes one at a time so finished ones stay visible
+        progress["episodes"] = []
+        for episode_id in episode_ids:
+            progress["current"] = episode_id
+            await cls.refresh_episodes(item, meta, episode_ids=[episode_id])
+            progress["episodes"].append(episode_id)
+        progress["current"] = None
+        return True
 
     @classmethod
     async def refresh_episodes(

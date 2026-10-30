@@ -278,6 +278,37 @@ class TaskActionApplyResult(Result):
     )
 
 
+class MediaScanReviewResult(Result):
+    """Describe a reviewed library scan; nothing is started."""
+
+    valid: bool
+    issues: list[dict[str, str]]
+    library_id: int = Field(description="Library ID, not an item ID.")
+    library_name: str
+    scanning: bool = Field(description="A scan is already running.")
+    revision: str = Field(description="Reviewed revision; pass it back when applying.")
+    notes: list[str] = Field(description="Effects to show before confirming.")
+
+
+class MediaRescrapeReviewResult(Result):
+    """List metadata candidates or preview one; nothing is saved."""
+
+    valid: bool
+    issues: list[dict[str, str]]
+    item_id: int = Field(description="Top-level movie or show item ID.")
+    library_id: int
+
+
+class MediaChangeApplyResult(Result):
+    """Describe an applied, running, replayed, refused or uncertain media change."""
+
+    applied: bool | None = Field(
+        description="True once submitted or saved, which is not completion of "
+        "background work. Null while running or when the outcome is uncertain and "
+        "must be inspected rather than repeated."
+    )
+
+
 class DownloadTaskResult(Result):
     """Describe a one-time download review, preview or submission."""
 

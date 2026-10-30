@@ -1,6 +1,5 @@
 import re
 from pathlib import Path
-from typing import cast
 
 import httpx
 from aiofiles import os as async_os
@@ -21,11 +20,6 @@ from app.core.exceptions import (
     content_error,
 )
 from app.core.media.common import ContentError
-from app.core.media.shelver import (
-    gen_nfo,
-    get_nfo_path,
-    get_nfo_type,
-)
 from app.core.media.watcher import LibWatcher
 from app.core.transcode import (
     delete_tasks,
@@ -39,7 +33,6 @@ from app.core.transcode import (
 from app.models.base import IDs, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
-    LibType,
     MediaAssetQuery,
     MediaContentQuery,
     MediaDel,
@@ -397,34 +390,12 @@ async def generate_nfo(_, body: MediaMetadata, id: int) -> HTTPResponse:
     ).select_related("lib")
     if not item:
         raise BadRequestException
-    # overwrite the NFO file and update the metadata immediately
-    lib = item.lib
-    episode_ids = (
-        cast(
-            list[int],
-            await MediaItem.filter(parent_id=item.id).values_list("id", flat=True),
-        )
-        if lib.lib_type == LibType.TV_SHOW
-        else None
-    )
-    nfo_type = get_nfo_type(lib.lib_type)
-    nfo_path = item.nfo_path or get_nfo_path(item.path)
     try:
-        written = await gen_nfo(
-            nfo_type,
-            nfo_path,
-            body.metadata,
-            overwrite=True,
-            item_id=item.id,
-            refresh=True,
-        )
+        written = await MediaItemService.save_video_metadata(item, body)
     except ContentError as error:
         raise content_error(error) from error
     if not written:
         raise BadRequestException
-    # also update the metadata of the child episodes if it's a TV show
-    if lib.lib_type == LibType.TV_SHOW:
-        await MediaItemService.refresh_episodes(item, body, episode_ids=episode_ids)
     return empty()
 
 

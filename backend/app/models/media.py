@@ -1,6 +1,7 @@
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     AliasChoices,
@@ -100,6 +101,17 @@ class Language(StrEnum):
     ZH_CN = "zh-CN"
 
 
+class MediaAction(StrEnum):
+    """Change an existing movie or TV library or work.
+
+    `scan`: Reconcile one library's files and queue its existing ingestion work.
+    `rescrape`: Replace one movie or show's metadata with a reviewed candidate.
+    """
+
+    SCAN = auto()
+    RESCRAPE = auto()
+
+
 # -------------------- ORM Models --------------------
 class MediaLib(TortoiseModel):
     lib_type = CharEnumField(max_length=16, enum_type=LibType)
@@ -192,6 +204,25 @@ class MediaEvent(TortoiseModel):
         table = "media_event"
         ordering = ["created_at"]
         indexes = (("lib_id", "event_type"),)
+
+
+class MediaChangeReceipt(TortoiseModel):
+    """Keep a reviewed rescrape candidate and each applied change's outcome."""
+
+    key = CharField(max_length=64, unique=True)
+    action = CharEnumField(max_length=16, enum_type=MediaAction)
+    # removed libraries and items keep their identities
+    lib_id = IntField()
+    item_id = IntField(null=True)
+    graph_id = IntField(null=True)
+    # the exact candidate a rescrape review showed
+    candidate = JSONField[dict[str, Any] | None](null=True)
+    # a claim without an outcome may already have taken effect
+    claimed = BooleanField(default=False)
+    result = JSONField[dict[str, Any] | None](null=True)
+
+    class Meta:
+        table = "media_change_receipt"
 
 
 # -------------------- Pydantic Models --------------------
@@ -386,6 +417,48 @@ class ImageContent(ContentResponse):
 class MediaMetadata(BaseModel):
     graph_id: PositiveInt
     metadata: dict
+
+
+class LibraryScan(BaseModel):
+    """Scan one movie or TV library."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    action: Literal["scan"] = "scan"
+    library_id: PositiveInt = Field(description="Library ID, not an item ID.")
+
+
+class MediaRescrape(BaseModel):
+    """Search, then replace one movie or show's metadata."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    action: Literal["rescrape"] = "rescrape"
+    item_id: PositiveInt = Field(description="Top-level movie or show item ID.")
+    workflow_id: PositiveInt | None = Field(
+        default=None, description="Ingest workflow; default the first bound one."
+    )
+    title: str | None = Field(
+        default=None, min_length=1, max_length=255, description="Default: item title."
+    )
+    year: int | None = Field(default=None, ge=1, le=9999)
+    season: int | None = Field(default=None, ge=0, description="TV only.")
+    candidate: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Listed candidate key; omit to list candidates.",
+    )
+
+
+class MediaChangeApply(BaseModel):
+    """Apply one reviewed media change; repeat the same request to read its outcome."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    request_id: UUID
+    change: Annotated[LibraryScan | MediaRescrape, Field(discriminator="action")]
+    revision: str = Field(max_length=64, description="Reviewed revision.")
+    confirmed: bool = Field(
+        default=False,
+        description="True only after the user approves this review.",
+    )
 
 
 class MediaDel(IDs):

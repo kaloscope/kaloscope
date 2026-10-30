@@ -67,6 +67,15 @@
     captureScrollPosition(from, to, view, standaloneMode.current);
   });
 
+  // show an assistant rescrape in this library's list at once
+  onMount(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ library_id?: number }>).detail?.library_id === lib?.id) search();
+    };
+    window.addEventListener('media-item-changed', changed);
+    return () => window.removeEventListener('media-item-changed', changed);
+  });
+
   // read the library and list filters when a message is sent, since this page is reused across libraries
   onMount(() =>
     registerAssistantContext(() =>
