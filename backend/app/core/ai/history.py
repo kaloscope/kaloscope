@@ -130,6 +130,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
     Returns:
         A bounded tail where possible, preserving recent details and call pairing.
         Node schemas and authoring references read in this turn remain complete.
+        Active plan reviews retain exact changes, consequences and search inputs.
         Long assistant narration retains a source reference without a text sample.
         Explicit historical reads retain original text pages up to 8,000 bytes;
         larger pages retain truncation metadata and their pagination references.
@@ -162,6 +163,15 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
             } and source.get("ok"):
                 # these definitions are needed to build nodes, not historical samples
                 fact["data"] = source["data"]
+            elif source.get("name") in {
+                "review_download_plan_change",
+                "apply_download_plan_change",
+            } and source.get("ok"):
+                # the next reply must explain the actual change before confirmation
+                for key in ("changes", "notes", "search_preview"):
+                    if key in source["data"]:
+                        fact["data"][key] = source["data"][key]
+                fact["data"].pop("omitted_changes", None)
             elif source.get("name") == "read_conversation_history":
                 page = source.get("data", {}).get("data")
                 if isinstance(page, str):

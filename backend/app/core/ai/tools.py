@@ -816,8 +816,6 @@ def tool_schemas(
             "get_download_plan_options",
             "validate_download_plan",
             "create_download_plan",
-            "get_download_plan",
-            "list_download_plans",
             "get_library_ingestion",
             "validate_download_task",
             "create_download_task",
@@ -843,12 +841,12 @@ def tool_schemas(
                 "get_workflow_logs",
                 "read_workflow_log",
                 "read_conversation_history",
+                "create_workflow_draft",
                 "navigate",
                 *PLAN_CHANGE_TOOLS,
             }
             and not (
-                ingestion
-                and tool.name in {"create_workflow_draft", "get_workflow_reference"}
+                (ingestion or plan_change) and tool.name == "get_workflow_reference"
             )
         ):
             continue

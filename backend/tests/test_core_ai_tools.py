@@ -116,6 +116,8 @@ def test_grants():
         "get_media_item",
         "list_download_tasks",
         "get_download_task",
+        "get_download_plan",
+        "list_download_plans",
         "navigate",
     }
     assert admin_names - read_names == {
