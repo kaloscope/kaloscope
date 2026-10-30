@@ -1850,7 +1850,7 @@ async def apply_task_action(
 
     Only the newest task review of the conversation may be applied, and it must
     be valid and from a completed earlier turn; any newer review, even of another
-    task or an invalid one, replaces it. The active turn is never complete, so
+    task or a failed one, replaces it. The active turn is never complete, so
     its own reviews wait. A claimed request replays first, so retries never
     dispatch it again.
 
@@ -1866,7 +1866,7 @@ async def apply_task_action(
         NotFoundException: If the review record is unavailable.
     """
     reviews = [
-        (record, data)
+        (record, (record.result or {}).get("data") or {})
         for record in (
             await AssistantToolCall.filter(
                 turn__conversation_id=conversation_id,
@@ -1875,7 +1875,6 @@ async def apply_task_action(
             .order_by("-id")
             .limit(30)
         )
-        if "valid" in (data := (record.result or {}).get("data") or {})
     ]
     for index, (record, data) in enumerate(reviews):
         if data.get("request_id") != str(args.request_id):

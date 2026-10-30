@@ -427,8 +427,8 @@ _TASK_METHODS: dict[TaskAction, Method] = {
     TaskAction.DELETE: "delete",
 }
 TASK_UNCERTAIN = (
-    "The downloader may have received it; read the task with get_download_task "
-    "instead of repeating the request."
+    "The action may have been sent or queued; inspect the task. Repeating this "
+    "request only reads its recorded outcome."
 )
 
 
@@ -1616,6 +1616,10 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
         Returns:
             A deferred command for offline jobs, or `None` for immediate actions.
+
+        Raises:
+            KaloscopeException: If the downloader rejects deletion or its outcome
+                is unknown, unless aria2 already proved the task safe to remove.
         """
         task = await DownloadTask.get(id=id)
         downloader = await Downloader.get(id=task.downloader_id)
@@ -1663,13 +1667,10 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         try:
             remote_id = str(unique["id"]) if unique["id"] else None
             await driver.delete(replace(identity, remote_id=remote_id), local=local)
-        except KaloscopeException as e:
+        except KaloscopeException:
             if not local_safe:
-                if e.extra is not None and e.extra.get("responded"):
-                    # treat any downloader response as delete-request delivery
-                    local_path = None
-                else:
-                    raise
+                # a response alone does not prove deletion succeeded
+                raise
 
         # delete local aria2 files when the RPC succeeds or the task is safe
         if local_path is not None:
@@ -1717,7 +1718,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             Permitted actions, the owning downloader and driver, an offline job
             that defers actions to synchronization, the stage a retry restores,
             and a `revision` of the task's identity, state, pending transfer and
-            driver actions. Progress, speeds and messages leave it unchanged.
+            driver configuration/actions. Progress, speeds and messages leave
+            it unchanged.
         """
         downloader = await Downloader.get(id=task.downloader_id)
         driver = load_driver(decrypt_config(downloader.config))
@@ -1731,12 +1733,18 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         facts = {
             "task_id": task.id,
             "downloader_id": task.downloader_id,
+            "downloader_config": downloader.config,
+            "downloader_preset": downloader.preset,
+            "unique_id": task.unique_id,
+            "name": task.name,
+            "dir": task.dir,
             "info_hash": task.info_hash,
             "info_hash_v2": task.info_hash_v2,
             "state": task.state,
             "deferred": job is not None,
             "retry_from": target,
             "transfer_lib_id": task.transfer_lib_id,
+            "transfer_method": task.transfer_method,
             "transfer_pending": task.transfer_pending,
             "capabilities": sorted(capabilities),
         }
@@ -1810,7 +1818,12 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 "nothing new is submitted."
             ]
         else:
-            notes = ["Removes the task from Kaloscope and its downloader."]
+            notes = [
+                "Removes the local task and stops its managed work; remote source "
+                "files stay."
+                if deferred
+                else "Removes the task from Kaloscope and its downloader."
+            ]
             if task.state == DownloadState.SUBMITTING:
                 notes.append("Deletion waits until the submission in progress ends.")
             if change.delete_files:
@@ -1835,7 +1848,10 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             notes.append("Plans, plan history and library records are unchanged.")
         if deferred:
             notes.append(
-                "Applying queues it for download synchronization, which skips it "
+                "Applying queues it for download synchronization; deletion stays "
+                "pending across state changes and restart."
+                if change.action == TaskAction.DELETE
+                else "Applying queues it for download synchronization, which skips it "
                 "if the task state changes first."
             )
         return notes
@@ -1943,8 +1959,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             A `changed` or `deleted` stored outcome, a `queued` deferred action
             that synchronization applies later, `replayed` outcomes, or
             `conflict`, `pending`, `stale`, `confirmation_required`, located
-            issues, an `absent` or `unavailable` task, a `failed` action that sent
-            nothing, or an `uncertain` outcome to inspect rather than repeat.
+            issues, an `absent` or `unavailable` task, a `failed` action known not
+            to have applied, or an `uncertain` outcome to inspect rather than repeat.
 
         Raises:
             ForbiddenException: If a non-administrator asks to delete a task.
@@ -2104,7 +2120,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             "applied": False,
             **base,
             "failed": True,
-            "message": "Nothing was sent; the same request may be repeated.",
+            "message": "The action was not applied; repeat the same request to retry.",
         }
         try:
             # the claim commits before the action can have any remote effect
@@ -2119,16 +2135,21 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         except Exception as error:
             logger.exception("Failed to apply a download task action")
             method = _TASK_METHODS.get(change.action)
-            if control.job is not None or (
-                method and not _maybe_sent(error, control.driver, method)
+            if (
+                control.job is None
+                and method
+                and not _maybe_sent(error, control.driver, method)
             ):
-                # deferred actions and refused requests reached no downloader
+                # only definite transport failures can release the claim
                 try:
                     await DownloadTaskReceipt.filter(key=key).delete()
                     return failed
                 except Exception:
                     # a kept claim replays this failure instead of dispatching
-                    result = {**failed, "message": "Nothing was sent; review again."}
+                    result = {
+                        **failed,
+                        "message": "The action was not applied; review again.",
+                    }
             else:
                 result = {
                     "applied": None,
@@ -2184,7 +2205,15 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 )
             except Exception:
                 if change.action != TaskAction.DELETE:
-                    raise
+                    # publication may have succeeded before its wake-up failed
+                    return {
+                        "applied": None,
+                        "outcome": "uncertain",
+                        **base,
+                        "path": path,
+                        "message": "Queue delivery is unconfirmed; read the task "
+                        "instead of sending this action again.",
+                    }
                 # the durable deletion deadline still reaches synchronization
                 logger.warning("Deferred task deletion waits for the next sync")
             return {

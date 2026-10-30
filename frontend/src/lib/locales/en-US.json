@@ -1302,7 +1302,7 @@
       "stale": "Not applied: the task changed after review.",
       "conflict": "Not applied: this request does not match its review.",
       "pending": "Still being applied. Confirm again later to read the result.",
-      "failed": "Not applied; nothing was sent. Confirm again to retry.",
+      "failed": "Not applied. Confirm again to retry.",
       "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was sent."
     }
