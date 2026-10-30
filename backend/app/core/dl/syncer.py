@@ -1335,38 +1335,48 @@ async def check_download_plans(*, first_only: bool = False):
     last = "julianday(IFNULL(last_exec, download_plan.created_at))"
     pending = Q(creation_key__not_isnull=True, last_exec=None)
     due = pending if first_only else pending | Q(elapsed_hours__gte=F("interval_num"))
-    plans = await DownloadPlan.annotate(
+    eligible = DownloadPlan.annotate(
         elapsed_hours=RawSQL(f"({now} - {last}) * 24")
     ).filter(
         due,
         graph__state__not=GraphState.DRAFT,
     )
-    plans = [p for p in plans if not p.inactive()]
+    plans = [p for p in await eligible if not p.inactive()]
     if not plans:
         return
 
-    drivers: dict[int, DownloaderDriver] = {}
+    drivers: dict[int, DownloaderDriver | None] = {}
     try:
-        # load the drivers of the associated download clients
-        for downloader_id in {plan.downloader_id for plan in plans}:
-            try:
-                downloader = await Downloader.get(id=downloader_id)
-                driver = load_driver(decrypt_config(downloader.config))
-                drivers[downloader_id] = driver
-                if driver.supports_version and not await driver.version():
-                    await drivers.pop(downloader_id).close()
-            except Exception:
-                failed = drivers.pop(downloader_id, None)
-                if failed is not None:
-                    await failed.close()
-                logger.error(
-                    "Failed to probe download plan driver: %s",
-                    downloader_id,
-                    exc_info=True,
-                )
+        for candidate in plans:
+            # an earlier attempt may have awaited while this plan was changed
+            plan = await eligible.filter(id=candidate.id).first()
+            if plan is None or plan.inactive():
+                continue
+            downloader_id = plan.downloader_id
+            if downloader_id not in drivers:
+                drivers[downloader_id] = None
+                try:
+                    downloader = await Downloader.get(id=downloader_id)
+                    driver = load_driver(decrypt_config(downloader.config))
+                    drivers[downloader_id] = driver
+                    if driver.supports_version and not await driver.version():
+                        drivers[downloader_id] = None
+                        await driver.close()
+                except Exception:
+                    failed = drivers[downloader_id]
+                    drivers[downloader_id] = None
+                    if failed is not None:
+                        await failed.close()
+                    logger.error(
+                        "Failed to probe download plan driver: %s",
+                        downloader_id,
+                        exc_info=True,
+                    )
 
-        # execute each eligible plan with the corresponding driver
-        for plan in plans:
+            # recheck after probing; a new downloader can wait for the next check
+            plan = await eligible.filter(id=candidate.id).first()
+            if plan is None or plan.inactive() or plan.downloader_id != downloader_id:
+                continue
             initial = plan.creation_key is not None and plan.last_exec is None
             receipt = plan.creation_receipt or {}
             if initial:
@@ -1376,7 +1386,8 @@ async def check_download_plans(*, first_only: bool = False):
                 )
                 if not claimed:
                     continue
-            if plan.downloader_id not in drivers:
+            driver = drivers[downloader_id]
+            if driver is None:
                 if initial:
                     await DownloadPlan.filter(id=plan.id).update(
                         creation_receipt={
@@ -1389,7 +1400,6 @@ async def check_download_plans(*, first_only: bool = False):
                         }
                     )
                 continue
-            driver = drivers[plan.downloader_id]
             try:
                 outcome = await execute_download_plan(plan, driver)
                 if initial:
@@ -1409,7 +1419,8 @@ async def check_download_plans(*, first_only: bool = False):
                     )
     finally:
         for driver in drivers.values():
-            await driver.close()
+            if driver is not None:
+                await driver.close()
 
 
 async def execute_download_plan(

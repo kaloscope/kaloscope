@@ -11,12 +11,13 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from app.core.ai import tools
+from app.core.ai import history, tools
 from app.core.dl import syncer
 from app.core.dl.driver import DownloadSnapshot, DownloadState
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.models.assistant import AssistantToolCall, AssistantTurn, ConversationCreate
 from app.models.download import (
+    Downloader,
     DownloadPlan,
     DownloadPlanApply,
     DownloadPlanChange,
@@ -188,6 +189,116 @@ def test_update(monkeypatch):
             # an update never starts the creation-time attempt
             execute.assert_not_awaited()
             service.notify_download_changes.assert_not_called()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("action", ["update", "delete", "defer", "limit", "downloader"])
+@pytest.mark.parametrize("initial", [False, True], ids=["repeat", "first"])
+def test_queued_attempt(monkeypatch, action, initial):
+    async def run():
+        async with database() as (owner, _):
+            _, downloader, plan = await stored_plan(
+                total_count=1,
+                last_exec=None if initial else LAST_EXEC,
+                creation_key="k" * 64 if initial else None,
+                creation_receipt={"first_execution": {"status": "pending"}}
+                if initial
+                else None,
+            )
+            driver = SimpleNamespace(supports_version=True, close=AsyncMock())
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def version():
+                """Hold the driver probe until the plan change is applied.
+
+                Returns:
+                    A synthetic driver version.
+                """
+                entered.set()
+                await release.wait()
+                return "fixture"
+
+            driver.version = version
+            execute = AsyncMock(return_value={"added": 0})
+            monkeypatch.setattr(syncer, "load_driver", lambda _: driver)
+            monkeypatch.setattr(syncer, "execute_download_plan", execute)
+
+            checking = asyncio.create_task(
+                syncer.check_download_plans(first_only=initial)
+            )
+            await entered.wait()
+            patches = {
+                "update": {"dir": "/synthetic/changed"},
+                "delete": {},
+                "defer": {"interval_start": datetime.now(UTC) + timedelta(days=1)},
+                "limit": {"total_limit": 1},
+            }
+            if action == "downloader":
+                other = await Downloader.create(
+                    name="Another", config=downloader.config, priority=2
+                )
+                patches["downloader"] = {"downloader_id": other.id}
+            patch = patches[action]
+            await change(
+                owner,
+                action="delete" if action == "delete" else "update",
+                plan_id=plan.id,
+                **patch,
+            )
+            release.set()
+            await checking
+
+            if action == "update":
+                execute.assert_awaited_once()
+                assert execute.call_args.args[0].dir == patch["dir"]
+            else:
+                execute.assert_not_awaited()
+                if action != "delete" and initial:
+                    stored = await DownloadPlan.get(id=plan.id)
+                    assert stored.last_exec is None
+                    assert stored.creation_receipt == plan.creation_receipt
+            driver.close.assert_awaited_once()
+            if action == "downloader":
+                await syncer.check_download_plans(first_only=initial)
+                execute.assert_awaited_once()
+                assert execute.call_args.args[0].downloader_id == other.id
+
+    asyncio.run(run())
+
+
+def test_compacted_review():
+    async def run():
+        async with database() as (owner, _):
+            _, _, plan = await stored_plan(last_exec=LAST_EXEC)
+            reviewed = await review(
+                owner, action="update", plan_id=plan.id, keyword="Lantern 2"
+            )
+            source = {
+                "id": "review",
+                "name": "review_download_plan_change",
+                "ok": True,
+                "data": reviewed,
+            }
+            messages = [
+                {
+                    "role": "assistant",
+                    "content": "Planning. " * 3000,
+                    "tool_calls": [{"id": "review"}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "review",
+                    "content": dumps(source).decode(),
+                },
+            ]
+
+            compacted = history.compact_exchanges(messages, 1, 8000)
+            assert len(compacted) == 1
+            fact = loads(compacted[0]["content"].split("\n", 1)[1])["tools"][0]
+            for key in ("changes", "notes", "search_preview"):
+                assert fact["data"][key] == reviewed[key]
+            assert len(dumps(compacted)) < 8000
 
     asyncio.run(run())
 
@@ -820,7 +931,194 @@ def lost(body):
 
 
 @pytest.mark.parametrize("verbose", [False, True], ids=["short", "compacted"])
-def test_conversation(monkeypatch, verbose):
+def test_authoring_after_review(monkeypatch, verbose):
+    streams = []
+
+    def create(body):
+        """Select A1 creation from the model's actually offered tools.
+
+        Args:
+            body: Current model request.
+
+        Returns:
+            A draft creation call after verifying the available authoring tools.
+        """
+        assert {"create_workflow_draft", "get_workflow_reference"} <= names(body)
+        return [
+            (
+                "create_workflow_draft",
+                {
+                    "name": "Another indexer",
+                    "category": "indexer",
+                    "description": "Create a workflow after reviewing a plan.",
+                },
+            )
+        ]
+
+    steps = [
+        lambda _: [("list_workflows", {"category": "indexer"})],
+        lambda _: [("get_download_plan", {"plan_id": 40})],
+        lambda _: [
+            (
+                "review_download_plan_change",
+                {
+                    "action": "update",
+                    "plan_id": 40,
+                    "batch_limit": 3,
+                },
+            )
+        ],
+        lambda _: None,
+        lambda _: [("list_workflows", {"category": "indexer"})],
+        create,
+        lambda _: None,
+    ]
+    configure(monkeypatch, scripted(steps, streams, verbose=verbose))
+
+    async def run():
+        async with application() as app:
+            owner = app.shared_ctx.sessions["admin"]
+            await stored_plan()
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            first, _ = await converse(
+                conversation["id"], owner, "Change the batch limit to 3.", key="review"
+            )
+            assert first.event == "done"
+            second, results = await converse(
+                conversation["id"],
+                owner,
+                "Create another indexer instead.",
+                key="build",
+            )
+
+            assert second.event == "done", second
+            assert any(
+                r["name"] == "create_workflow_draft" and r["ok"] for r in results
+            )
+            assert (await DownloadPlan.get(id=40)).batch_limit == 2
+            assert await DownloadPlanReceipt.all().count() == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("action", ["update", "delete"])
+def test_unpublished_entry(monkeypatch, action):
+    streams = []
+    change = {"action": action, "plan_id": 40}
+    if action == "update":
+        change["dir"] = "/synthetic/changed"
+
+    def read(body):
+        """Read an existing plan without discovering a published indexer.
+
+        Args:
+            body: First request of a plan-management conversation.
+
+        Returns:
+            A read of the requested plan.
+        """
+        assert {"get_download_plan", "list_download_plans"} <= names(body)
+        assert "review_download_plan_change" not in names(body)
+        return [("get_download_plan", {"plan_id": 40})]
+
+    steps = [
+        read,
+        lambda _: [("review_download_plan_change", change)],
+        lambda _: None,
+    ]
+    configure(monkeypatch, scripted(steps, streams))
+
+    async def run():
+        async with application() as app:
+            owner = app.shared_ctx.sessions["admin"]
+            graph, _, _ = await stored_plan()
+            graph.state = "draft"
+            await graph.save()
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+
+            final, results = await converse(
+                conversation["id"], owner, f"Review {action} of plan 40."
+            )
+
+            assert final.event == "done", final
+            assert results[-1]["name"] == "review_download_plan_change"
+            assert results[-1]["data"]["valid"]
+            assert (await DownloadPlan.get(id=40)).dir != "/synthetic/changed"
+            assert await DownloadPlanReceipt.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_mixed_page_reads(monkeypatch):
+    streams, target = [], {}
+
+    def read(body):
+        """Keep plan and A1 entry tools after reading several related domains.
+
+        Args:
+            body: Request following workflow, task and schedule reads.
+
+        Returns:
+            A read of the selected plan.
+        """
+        assert {"get_download_plan", "create_workflow_draft"} <= names(body)
+        return [("get_download_plan", {"plan_id": 40})]
+
+    steps = [
+        lambda _: [
+            ("get_workflow", {"workflow_id": target["graph_id"]}),
+            ("list_download_tasks", {}),
+            ("list_workflow_jobs", {}),
+        ],
+        read,
+        lambda _: [
+            ("review_download_plan_change", {"action": "delete", "plan_id": 40})
+        ],
+        lambda _: None,
+    ]
+    configure(monkeypatch, scripted(steps, streams, verbose=True))
+
+    async def run():
+        async with application() as app:
+            owner = app.shared_ctx.sessions["admin"]
+            graph, _, _ = await stored_plan()
+            target["graph_id"] = graph.id
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            final, results = await converse(
+                conversation["id"],
+                owner,
+                "Review deleting the selected plan.",
+                context={
+                    "page_type": "download_plans",
+                    "route": "/downloads/plans",
+                    "selected_plan": {"plan_id": 40, "workflow_id": graph.id},
+                },
+            )
+
+            assert final.event == "done", final
+            assert results[-1]["name"] == "review_download_plan_change"
+            assert results[-1]["data"]["valid"]
+            assert await DownloadPlan.filter(id=40).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("verbose", [False, True], ids=["short", "compacted"])
+@pytest.mark.parametrize(
+    "readback",
+    [
+        ("list_workflows", {"category": "indexer"}),
+        ("get_download_plan", {"plan_id": 40}),
+    ],
+    ids=["workflows", "plan"],
+)
+def test_conversation(monkeypatch, verbose, readback):
     streams, offered, catalogs = [], [], []
     target = {}
 
@@ -851,8 +1149,8 @@ def test_conversation(monkeypatch, verbose):
         # turn 2: the user confirms, but the response after the change is lost
         confirm,
         lost,
-        # turn 3: rereading workflows keeps the offered changes in a plan focus
-        lambda body: offer(body, ("list_workflows", {"category": "indexer"})),
+        # turn 3: rereading either source keeps the offered changes in a plan focus
+        lambda body: offer(body, readback),
         confirm,
         lambda body: offer(body),
     ]

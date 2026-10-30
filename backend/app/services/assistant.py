@@ -71,8 +71,8 @@ paths/URLs empty and list them. Layout: columns >=800px, rows >=600; enlarge as 
 Indexers/movie/TV scrapers: read the matching recipe reference.
 Prefer compact schemas (include_examples=false).
 Fix business output errors and recheck before previewing; never invent source fields.
-Plans: list/read workflows to unlock tools; retain keyword, ask which indexer;
-follow get_download_plan_options.creation_rules.
+New plans: read workflows, follow get_download_plan_options.creation_rules.
+Edit/delete: get_download_plan, review_download_plan_change, await confirmation.
 
 IDs/versions come from context/tools. Read schemas first: type="node",
 data.$schema=node_type, fields in data. Preserve untouched IDs/handles/fields/
@@ -573,12 +573,17 @@ class AssistantService:
                         )
                     )
                 ):
-                    # listed plans and offered changes need room, as authoring does
-                    plan_authoring |= plan_change or call.function.name in {
-                        "get_download_plan_options",
-                        "get_library_ingestion",
-                        "list_download_plans",
-                    }
+                    # plan pages and offered changes need room, as authoring does
+                    plan_authoring |= (
+                        plan_change
+                        or (current_context or {}).get("page_type") == "download_plans"
+                        or call.function.name
+                        in {
+                            "get_download_plan_options",
+                            "get_library_ingestion",
+                            "list_download_plans",
+                        }
+                    )
                     if call.function.name == "get_library_ingestion":
                         ingestion_authoring = result["data"]["supported"]
                     plan_tools = True
@@ -627,8 +632,7 @@ class AssistantService:
                         plan_change=plan_change,
                     )
                 if (
-                    not plan_change
-                    and not workflow_authoring
+                    not workflow_authoring
                     and result["ok"]
                     and call.function.name == "get_download_plan"
                 ):
@@ -664,6 +668,17 @@ class AssistantService:
                         schedule=schedule_ready,
                         plan_change=plan_change,
                     )
+                if result["ok"] and call.function.name in {
+                    "list_node_types",
+                    "validate_workflow",
+                }:
+                    # keep plan discovery out of node-heavy construction and trial turns
+                    schemas = [
+                        schema
+                        for schema in schemas
+                        if schema["function"]["name"]
+                        not in {"get_download_plan", "list_download_plans"}
+                    ]
                 # a result committed together with its effect is authoritative
                 await AssistantToolCall.filter(
                     turn_id=turn.id, call_id=info["id"], status="running"
