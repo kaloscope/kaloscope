@@ -4439,7 +4439,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         *,
         episode_ids: list[int] | None = None,
     ):
-        """Refresh the metadata of the episodes under a season.
+        """Refresh episode metadata, reusing NFOs for the same source, ID and season.
 
         Args:
             item: Season media item.
@@ -4455,8 +4455,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         title = metadata.get("title", item.title)
         year = metadata.get("year", item.year)
 
-        # check if the series_id is the same as the current one
-        same_series = series_id and str(series_id) == str(item.unique_id)
+        # source IDs only identify the same series within one metadata site
+        same_series = (
+            series_id
+            and str(series_id) == str(item.unique_id)
+            and site == item.nfo_source
+        )
 
         # get the flow engine from the app context
         engine = Sanic.get_app().ctx.flow_engine

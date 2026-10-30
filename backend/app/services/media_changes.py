@@ -25,7 +25,6 @@ from app.core.exceptions import (
 from app.core.flow.context import MANUAL_KEY
 from app.core.media.common import ContentError
 from app.core.media.naming import render_directory, render_filename
-from app.core.media.organizer import OrganizePendingError
 from app.core.media.shelver import (
     get_nfo_path,
     get_nfo_type,
@@ -156,7 +155,7 @@ def _relative(lib: MediaLib, path: str | Path) -> str:
 
 
 def candidate_key(candidate: dict[str, Any]) -> str:
-    """Identify a candidate by its source ID, or by its content without one.
+    """Identify a candidate by source, ID and season, or by its content without an ID.
 
     Args:
         candidate: Raw metadata candidate.
@@ -165,7 +164,7 @@ def candidate_key(candidate: dict[str, Any]) -> str:
         Twelve hexadecimal characters.
     """
     identity = (
-        [str(candidate["site"]), str(candidate["id"])]
+        [str(candidate["site"]), str(candidate["id"]), candidate.get("season")]
         if candidate.get("site") and candidate.get("id")
         else candidate
     )
@@ -262,7 +261,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 lib.dir,
                 lib.lib_type,
                 lib.rename_template,
-                [row.graph_id for row in triggers],
+                lib.language,
+                [
+                    [row.graph_id, row.graph.revision, _digest(row.graph.definition)]
+                    for row in triggers
+                ],
             ]
         )
         result: dict[str, Any] = {
@@ -334,7 +337,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             for graph in graphs
             if graph.state != GraphState.DRAFT
             and output_issue(lib.lib_type, graph.definition) is None
-        ][:10]
+        ]
 
     @classmethod
     async def _target(
@@ -387,10 +390,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             )
         graph = None
         if not issues:
-            base["workflows"] = await cls._workflows(lib)
-            usable = {entry["workflow_id"] for entry in base["workflows"]}
+            available = await cls._workflows(lib)
+            base["workflows"] = available[:10]
+            usable = {entry["workflow_id"] for entry in available}
             workflow_id = change.workflow_id or next(
-                (entry["workflow_id"] for entry in base["workflows"] if entry["bound"]),
+                (entry["workflow_id"] for entry in available if entry["bound"]),
                 None,
             )
             if workflow_id is None:
@@ -412,6 +416,14 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             else:
                 graph = await FlowGraph.get(id=workflow_id)
                 base.update(workflow_id=graph.id, workflow_name=graph.name)
+                if workflow_id not in {
+                    entry["workflow_id"] for entry in base["workflows"]
+                }:
+                    base["workflows"] = base["workflows"][:9] + [
+                        entry
+                        for entry in available
+                        if entry["workflow_id"] == workflow_id
+                    ]
         return {**base, "issues": issues}, item, graph
 
     @classmethod
@@ -474,15 +486,17 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             else:
                 compact = {
                     "key": candidate_key(raw),
-                    "title": meta.title,
+                    "title": _short(meta.title, 80),
                     "year": meta.year,
-                    "site": meta.site,
-                    "id": meta.id,
+                    "site": _short(meta.site, 40),
+                    "id": _short(meta.id, 80),
                     "rating": meta.rating,
                     "plot": _short(meta.plot, 100),
                 }
                 if meta.originaltitle and meta.originaltitle != meta.title:
-                    compact["originaltitle"] = meta.originaltitle
+                    compact["originaltitle"] = _short(meta.originaltitle, 80)
+                if lib.lib_type == LibType.TV_SHOW:
+                    compact["season"] = meta.season
             candidates.append((raw, loads(dumps(compact))))
         return query, candidates, None
 
@@ -513,6 +527,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             )
         current, _, _ = read_nfo(lib.lib_type, nfo_path)
         before = asdict(current) if current else {}
+        if lib.lib_type == LibType.TV_SHOW:
+            # a missing season leaves the stored value unchanged on save
+            if before.get("season") is None:
+                before["season"] = item.season
+            if after is not None and after.get("season") is None:
+                after["season"] = item.season
         changes = []
         if after is not None:
             for name in PREVIEW_FIELDS:
@@ -525,9 +545,13 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         episode_facts = []
         if lib.lib_type == LibType.TV_SHOW:
             children = await MediaItem.filter(parent_id=item.id, lib_id=lib.id)
-            # mirror the episode refresh rule, which compares the old series ID
+            # mirror the episode refresh rule using the old source and series ID
             series_id = candidate.get("id")
-            same_series = bool(series_id) and str(series_id) == str(item.unique_id)
+            same_series = (
+                bool(series_id)
+                and str(series_id) == str(item.unique_id)
+                and candidate.get("site") == item.nfo_source
+            )
             season = candidate.get("season", item.season)
             kept = 0
             for child in children:
@@ -535,7 +559,17 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 if same_series and exists and child.season == season:
                     kept += 1
                 episode_facts.append(
-                    [child.id, child.season, child.episode, child.nfo_path, exists]
+                    [
+                        child.id,
+                        child.path,
+                        child.season,
+                        child.episode,
+                        child.nfo_path,
+                        exists,
+                        await asyncio.to_thread(
+                            _file_digest, child.nfo_path or get_nfo_path(child.path)
+                        ),
+                    ]
                 )
             episodes = {
                 "total": len(children),
@@ -547,9 +581,6 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         organization: dict[str, Any] = {"template": bool(lib.rename_template)}
         if lib.rename_template and after is not None:
             context = {**after, "parent": dict(after)}
-            for name in ("season", "year"):
-                if context.get(name) is None:
-                    context[name] = getattr(item, name)
             current_dir = Path(item.path if Path(item.path).is_dir() else item.dir)
             organization["current"] = _relative(lib, current_dir)
             try:
@@ -568,9 +599,9 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         ]
         if episodes:
             notes.append(
-                "Each refreshed episode runs this workflow with its own season and "
-                "episode; one without a result keeps its NFO. Missing numbers are not "
-                "guessed."
+                "Each refreshed episode runs this workflow with the selected season "
+                "and its stored episode number; one without a result keeps its NFO. "
+                "Missing episode numbers are not guessed."
             )
         if lib.rename_template:
             notes.append(
@@ -751,10 +782,24 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         done, _ = await asyncio.wait({task}, timeout=APPLY_WAIT)
         if task in done:
             return task.result()
+        receipt = await MediaChangeReceipt.get_or_none(key=key)
+        target = {}
+        if isinstance(body.change, LibraryScan):
+            target = {
+                "library_id": body.change.library_id,
+                "path": f"/medialibs/{body.change.library_id}",
+            }
+        elif receipt is not None:
+            target = {
+                "item_id": receipt.item_id,
+                "library_id": receipt.lib_id,
+                "path": f"/medialibs/{receipt.lib_id}/{receipt.item_id}",
+            }
         return {
             "applied": None,
             "outcome": "running",
             "action": body.change.action,
+            **target,
             "message": "Still running in the background; repeat this request later "
             "to read its outcome. Do not review it again.",
         }
@@ -776,7 +821,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         return {
             "applied": False,
             "pending": True,
-            "message": "Another call is applying this request; repeat the same "
+            "message": "A media change is still being applied; repeat this "
             "request later to read its outcome.",
         }
 
@@ -803,9 +848,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                         return await cls._replay(receipt, user)
                     if isinstance(body.change, LibraryScan):
                         return await cls._apply_scan(body, body.change, key, user)
-                    return await cls._apply_rescrape(
-                        body, body.change, key, user, receipt
-                    )
+                    # different reviews of the same item must recheck in sequence
+                    with submission_lock(f"media-item:{body.change.item_id}"):
+                        return await cls._apply_rescrape(
+                            body, body.change, key, user, receipt
+                        )
             except LockTimeout:
                 return await cls._pending(key, user)
 
@@ -911,7 +958,15 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         except KaloscopeException as error:
             if error.message != ErrorCode.SCAN_IN_PROGRESS:
                 logger.exception("Failed to scan a media library")
-                return await cls._unclaim(key, base)
+                return await cls._record(
+                    key,
+                    {
+                        "applied": None,
+                        "outcome": "uncertain",
+                        **base,
+                        "message": MEDIA_UNCERTAIN,
+                    },
+                )
             result = {
                 "applied": False,
                 "outcome": "already_scanning",
@@ -920,9 +975,6 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "message": "A scan of this library was already running; nothing new "
                 "started. Read scanning later.",
             }
-        except (ContentError, OrganizePendingError):
-            logger.exception("Failed to scan a media library")
-            return await cls._unclaim(key, base)
         except Exception:
             logger.exception("Failed to scan a media library")
             result = {
@@ -1024,7 +1076,18 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             if not progress.get("written"):
                 after = await asyncio.to_thread(_file_digest, nfo_path)
                 if after == before:
-                    return await cls._unclaim(key, base, error=code)
+                    # identical bytes cannot prove metadata or events stayed unchanged
+                    return await cls._record(
+                        key,
+                        {
+                            "applied": None,
+                            "outcome": "uncertain",
+                            **base,
+                            "error": code,
+                            "path": path,
+                            "message": MEDIA_UNCERTAIN,
+                        },
+                    )
                 result = {
                     "applied": True,
                     "outcome": "partial",
@@ -1041,7 +1104,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     **base,
                     "step": "episodes",
                     "episodes": {
-                        "refreshed": done,
+                        "attempted": done + 1,
                         "failed_episode_id": progress.get("current"),
                         "not_attempted": max(
                             0, (preview["episodes"] or {}).get("total", 0) - done - 1
