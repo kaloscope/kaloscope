@@ -478,20 +478,38 @@ def test_rendered_request_limit(monkeypatch):
     network.assert_not_awaited()
 
 
-def test_extract_before_clipping(monkeypatch):
-    payload = {"padding": "x" * 4000, "id": "last"}
+@pytest.mark.parametrize(
+    ("payload", "formatter"),
+    [
+        (
+            " " * 4000 + "last",
+            '{"id":{{ response.text[4000:4004]|tojson }}}',
+        ),
+        (
+            dumps({"padding": "x" * 4000, "id": "last"}),
+            '{"id":{{ response.text|jsonpath_first("$.id")|tojson }}}',
+        ),
+        (
+            "<html><head><!--"
+            + "x" * 4000
+            + '--></head><body><a href="/last">Result</a></body></html>',
+            '{"id":{{ (response.text|xpath_first("//body/a/@href"))[1:]|tojson }}}',
+        ),
+    ],
+)
+def test_extract_before_clipping(monkeypatch, payload, formatter):
     monkeypatch.setattr(
         authoring,
         "NetworkTransport",
         lambda **_: httpx.MockTransport(
-            lambda request: httpx.Response(200, json=payload)
+            lambda request: httpx.Response(200, content=payload)
         ),
     )
     result = asyncio.run(
         authoring.probe_http_request(
             HTTPProbe(
                 request={"url": "https://example.test"},
-                formatter='{"id":{{ response.text|jsonpath_first("$.id")|tojson }}}',
+                formatter=formatter,
             ),
             ADMIN,
         )

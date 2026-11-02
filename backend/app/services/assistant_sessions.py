@@ -393,14 +393,15 @@ class AssistantSessionService:
 
     @classmethod
     async def reviewed(cls, turn: AssistantTurn) -> set[str]:
-        """Name the change reviews the previous completed turn showed as valid.
+        """Name prior results that support continuing a review or download setup.
 
         Args:
             turn: Active turn whose conversation history is read.
 
         Returns:
-            Schedule, plan, task and media review tools whose results may be
-            confirmed or continued in this turn.
+            Review tools and download setup tools whose results may be confirmed
+            or continued in this turn. Completed creation ends download setup;
+            uncertain submissions retain its recovery tools.
         """
         previous = (
             await AssistantTurn.filter(
@@ -411,23 +412,50 @@ class AssistantSessionService:
         )
         if previous is None:
             return set()
+        calls = await AssistantToolCall.filter(
+            turn_id=previous.id,
+            name__in=[
+                "review_workflow_schedule",
+                "review_download_plan_change",
+                "review_download_task_action",
+                "review_library_scan",
+                "review_media_rescrape",
+                "review_library_config",
+                "get_download_plan_options",
+                "search_indexer",
+                "validate_download_plan",
+                "validate_download_task",
+                "create_download_plan",
+                "create_download_task",
+            ],
+        )
+        download_created = any(
+            call.name in {"create_download_plan", "create_download_task"}
+            and (data := (call.result or {}).get("data") or {}).get("created")
+            and not data.get("uncertain")
+            for call in calls
+        )
+        download_setup = {
+            "get_download_plan_options",
+            "search_indexer",
+            "validate_download_plan",
+            "validate_download_task",
+        }
         return {
             call.name
-            for call in await AssistantToolCall.filter(
-                turn_id=previous.id,
-                name__in=[
-                    "review_workflow_schedule",
-                    "review_download_plan_change",
-                    "review_download_task_action",
-                    "review_library_scan",
-                    "review_media_rescrape",
-                    "review_library_config",
-                ],
-            )
+            for call in calls
+            if not (download_created and call.name in download_setup)
+            if (call.result or {}).get("ok")
             # candidates or current settings let the user choose in this turn
             if (data := (call.result or {}).get("data") or {}).get("valid")
             or (call.name == "review_media_rescrape" and data.get("candidates"))
             or (call.name == "review_library_config" and "bindings" in data)
+            or (call.name == "get_download_plan_options" and data.get("published"))
+            or (call.name == "search_indexer" and data.get("status") == "ok")
+            or (
+                call.name in {"create_download_plan", "create_download_task"}
+                and data.get("uncertain")
+            )
         }
 
     @classmethod

@@ -1031,12 +1031,12 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                     },
                 )
             ]
-        elif step == 3:
+        elif step == 2:
             calls = [("get_workflow_reference", {"topic": "tv_scraper"})] + [
                 ("list_node_types", {"node_type": name, "include_examples": False})
                 for name in ("condition", "http", "tv_show", "episode")
             ]
-        elif step == 4:
+        elif step == 3:
             names = {tool["function"]["name"] for tool in body["tools"]}
             assert "preview_workflow_draft" in names
             assert "list_media_items" not in names
@@ -1050,12 +1050,12 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                     "https://tv.example.test/episodes?q=Wayfinder",
                 )
             ]
-        elif step == 5:
+        elif step == 4:
             wrong = EPISODE_TEMPLATE.replace(
                 "('./@data-season')|int", "('./@data-season')|tojson"
             )
             calls = [validation(wrong, "episode", {"html": EPISODE_HTML, **EPISODE})]
-        elif step == 6:
+        elif step == 5:
             assert (
                 "Correct the reported output fields" in dumps(body["messages"]).decode()
             )
@@ -1075,7 +1075,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                     {"html": EPISODE_HTML, **EPISODE, "episode": None},
                 ),
             ]
-        elif step == 7:
+        elif step == 6:
             calls = [("preview_workflow_draft", {**base, "changes": tv_changes()})]
         else:
             return response(
@@ -1095,7 +1095,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                     {
                         "role": "assistant",
                         "content": "Inspecting samples. " * 200
-                        if verbose and step >= 3
+                        if verbose and step >= 2
                         else "",
                         "tool_calls": [
                             call_delta(
@@ -1178,7 +1178,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                 )
             ]
             assert events[-1].event == "done", events[-1]
-            assert len(streams) == 8
+            assert len(streams) == 7
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
             checks = [

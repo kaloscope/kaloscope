@@ -705,7 +705,6 @@ def test_conversation(monkeypatch, verbose):
                 ),
             ],
             [
-                *unlock,
                 (
                     "read_conversation_history",
                     {"tool_call_id": fixture.get("search_call_id", ""), "limit": 8000},
@@ -713,7 +712,6 @@ def test_conversation(monkeypatch, verbose):
                 ("validate_download_task", fixture.get("check", {})),
             ],
             [
-                *unlock,
                 (
                     "create_download_task",
                     {
@@ -745,7 +743,7 @@ def test_conversation(monkeypatch, verbose):
                 fixture["check"]["resource"]["source"]
                 in dumps(body["messages"]).decode()
             )
-        if step >= 2 and number:
+        if number >= 2 or (step >= 2 and number):
             names = {item["function"]["name"] for item in body["tools"]}
             assert {"validate_download_task", "create_download_task"} <= names
         return response(
@@ -839,6 +837,52 @@ def test_conversation(monkeypatch, verbose):
                 call_id="read",
             )
             assert denied["error"]["code"] == "permission_denied"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("outcome", ["review", "created", "uncertain", "failed"])
+def test_followup_recovery(outcome):
+    from app.models.assistant import AssistantToolCall
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            previous = await Sessions.begin(
+                conversation["id"], request("previous"), owner
+            )
+            await AssistantToolCall.create(
+                turn=previous,
+                call_id="review",
+                name="validate_download_task",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": {"valid": True}},
+            )
+            if outcome != "review":
+                await AssistantToolCall.create(
+                    turn=previous,
+                    call_id="create",
+                    name="create_download_task",
+                    arguments="{}",
+                    status="complete" if outcome != "failed" else "error",
+                    result={
+                        "ok": outcome != "failed",
+                        "data": {
+                            "created": outcome != "failed",
+                            "uncertain": outcome == "uncertain",
+                        },
+                    },
+                )
+            await Sessions.finish(previous, content="Result", status="complete")
+            current = await Sessions.begin(conversation["id"], request("next"), owner)
+
+            reviewed = await Sessions.reviewed(current)
+
+            assert ("validate_download_task" in reviewed) is (outcome != "created")
+            assert ("create_download_task" in reviewed) is (outcome == "uncertain")
 
     asyncio.run(run())
 

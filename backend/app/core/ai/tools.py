@@ -609,8 +609,8 @@ TOOLS = (
     ),
     AssistantTool(
         "probe_http_request",
-        "HTTP-node probe; workflow_id reuses login. No login/cache/retry/save. "
-        "2000-char sample; object extraction <=256KiB; known secrets hidden.",
+        "HTTP probe; workflow_id reuses login. text=2000-char sample; formatter "
+        "extracts full body <=256KiB. No login/cache/retry/save; secrets hidden.",
         HTTPProbe,
         admin=True,
     ),

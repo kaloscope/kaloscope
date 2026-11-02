@@ -631,12 +631,12 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     },
                 )
             ]
-        elif step == 3:
+        elif step == 2:
             calls = [("get_workflow_reference", {"topic": "html_indexer"})] + [
                 ("list_node_types", {"node_type": name, "include_examples": False})
                 for name in ("http", "loop")
             ]
-        elif step == 4:
+        elif step == 3:
             names = {tool["function"]["name"] for tool in body["tools"]}
             assert "preview_workflow_draft" in names and "list_media_items" not in names
             calls = [
@@ -656,13 +656,13 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     },
                 ),
             ]
-        elif step == 5:
+        elif step == 4:
             calls = [
                 validation(
                     SEARCH_END.replace(".link|tojson", ".href|tojson"), page_fixture(1)
                 )
             ]
-        elif step == 6:
+        elif step == 5:
             assert "Correct the reported output fields" in text
             calls = [
                 validation(SEARCH_END, page_fixture(1)),
@@ -671,7 +671,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 validation(SEARCH_END, page_fixture(1) | {"login": True}),
                 validation(SEARCH_END, page_fixture(1, links=False)),
             ]
-        elif step == 7:
+        elif step == 6:
             assert "HTML download indexer" in text
             calls = [
                 (
@@ -702,7 +702,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     {
                         "role": "assistant",
                         "content": "Inspecting samples. " * 200
-                        if verbose and step >= 3
+                        if verbose and step >= 2
                         else "",
                         "tool_calls": [
                             call_delta(
@@ -768,7 +768,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 )
             ]
             assert events[-1].event == "done", events[-1]
-            assert len(streams) == 8
+            assert len(streams) == 7
             results = [e.data for e in events if e.event == "tool_result"]
             assert all(result["ok"] for result in results), results
             probes = [r["data"] for r in results if r["name"] == "probe_http_request"]

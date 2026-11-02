@@ -1324,7 +1324,6 @@ def test_missing_scraper_conversation(monkeypatch, tmp_path, verbose):
                 },
             )
         ],
-        lambda body: None,
         # the same review refuses the draft until the user publishes it
         lambda body: [("list_media_libraries", {})],
         review_new,

@@ -992,6 +992,62 @@ def test_history_page_compaction(oversized):
         assert loads(facts["data"])["after"] == "edited"
 
 
+@pytest.mark.parametrize("count", [0, 6])
+def test_workflow_choices_compaction(count):
+    result = {
+        "id": "workflow-page",
+        "name": "list_workflows",
+        "ok": True,
+        "data": {
+            "total": count,
+            "page_num": 1,
+            "page_size": 25,
+            "page_counts": {"returned": count},
+            "items": [
+                {
+                    "id": index + 1,
+                    "name": "Nyaa " + "长" * 100,
+                    "category": "indexer",
+                    "state": "published" if index == 0 else "draft",
+                    "editable": True,
+                    "downloadable_search": index == 0,
+                    "updated_at": "2026-11-02T00:00:00Z",
+                    "average_time": 123.45,
+                }
+                for index in range(count)
+            ],
+        },
+    }
+    exchange = [
+        {
+            "role": "assistant",
+            "content": "Looking up workflows. " * 500,
+            "tool_calls": [{"id": "list"}],
+        },
+        {"role": "tool", "tool_call_id": "list", "content": dumps(result).decode()},
+    ]
+
+    compact = history.compact_exchanges(exchange, 8, 3000)
+    record = loads(compact[0]["content"].split("\n", 1)[1])["tools"][0]
+    facts = record["data"]
+
+    assert len(dumps(compact)) <= 3000
+    assert record["id"] == "workflow-page" and record["historical"] is False
+    assert facts["total"] == facts["page_counts"]["returned"] == count
+    assert facts["page_num"] == 1 and facts["page_size"] == 25
+    assert len(facts["items"]) + facts["omitted_items"] == count
+    assert tool_facts(result)["data"]["items"] == facts["items"]
+    if count:
+        selected = facts["items"][0]
+        assert selected["id"] == 1 and selected["state"] == "published"
+        assert selected["downloadable_search"] is True
+        assert selected["name"].startswith("Nyaa") and selected["name_truncated"]
+        assert len(selected["name"]) == 80
+        assert "average_time" not in selected
+    else:
+        assert facts["items"] == []
+
+
 def test_compact_exchange_pairing():
     old = {
         "role": "assistant",
@@ -1413,7 +1469,8 @@ def test_summary_failure_preserves_history(monkeypatch, malformed):
 
 
 @pytest.mark.parametrize("source_ids", [[1, 2], [2, 999999]])
-def test_rolling_summary_sources(monkeypatch, source_ids):
+@pytest.mark.parametrize("preset", [AIProviderPreset.DEEPSEEK, None])
+def test_rolling_summary_sources(monkeypatch, source_ids, preset):
     monkeypatch.setattr(history, "budgets", lambda _: (12000, 1000))
     usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
     create = AsyncMock(
@@ -1458,7 +1515,7 @@ def test_rolling_summary_sources(monkeypatch, source_ids):
             turn = await Sessions.begin(conversation["id"], request("active"), owner)
             turn.usage = usage
             messages, used, compacted = await history.prepare_context(
-                client, turn, owner, "system", [], None
+                client, turn, owner, "system", [], preset
             )
 
             assert used == usage
@@ -1470,6 +1527,11 @@ def test_rolling_summary_sources(monkeypatch, source_ids):
             assert saved.summary["constraints"] == ["Keep original scripts"]
             create.assert_awaited_once()
             assert create.call_args.kwargs["max_tokens"] == 1000
+            assert create.call_args.kwargs["extra_body"] == (
+                {"thinking": {"type": "disabled"}}
+                if preset == AIProviderPreset.DEEPSEEK
+                else None
+            )
 
     asyncio.run(run())
 
@@ -2119,12 +2181,12 @@ def test_created_draft_schemas(monkeypatch, narration):
                 ),
                 ("list_node_types", {"category": "schedule"}),
             ]
-        elif len(streams) == 3:
+        elif len(streams) == 2:
             calls = [
                 ("list_node_types", {"category": "schedule"}),
                 ("get_workflow", {"workflow_id": 1}),
             ]
-        elif len(streams) == 4:
+        elif len(streams) == 3:
             calls = [
                 ("list_node_types", {"node_type": name})
                 for name in ("schedule_start", "http", "schedule_end")
@@ -2143,7 +2205,7 @@ def test_created_draft_schemas(monkeypatch, narration):
                 chunk(
                     {
                         "role": "assistant",
-                        "content": narration if len(streams) == 4 else "",
+                        "content": narration if len(streams) == 3 else "",
                         "tool_calls": [
                             call_delta(name, dumps(args).decode(), str(index), index)
                             for index, (name, args) in enumerate(calls)
@@ -2201,7 +2263,7 @@ def test_created_draft_schemas(monkeypatch, narration):
             ]
 
             assert generated[-1].event == "done", generated[-1]
-            assert len(streams) == 5
+            assert len(streams) == 4
             assert (
                 history.context_size(streams[-1]["messages"], tools.tool_schemas(owner))
                 <= 32000 - 4096
@@ -2877,12 +2939,12 @@ def test_authoring_build(monkeypatch, narration, designer):
                     },
                 )
             ]
-        elif step == 3:
+        elif step == 2:
             calls = [
                 ("list_node_types", {"node_type": name})
                 for name in ("search_start", "http", "search_end")
             ]
-        elif step == 4:
+        elif step == 3:
             calls = [
                 (
                     "probe_http_request",
@@ -2895,14 +2957,14 @@ def test_authoring_build(monkeypatch, narration, designer):
                     },
                 )
             ]
-        elif step == 5:
+        elif step == 4:
             calls = [
                 (
                     "validate_workflow_template",
                     {"template": template, "context": expected, "mode": "object"},
                 )
             ]
-        elif step == 6:
+        elif step == 5:
             assert "preview_workflow_draft" in {
                 tool["function"]["name"] for tool in body["tools"]
             }
@@ -2927,7 +2989,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                 chunk(
                     {
                         "role": "assistant",
-                        "content": narration if step >= 3 else "",
+                        "content": narration if step >= 2 else "",
                         "tool_calls": [
                             call_delta(
                                 name, dumps(args).decode(), f"{step}-{index}", index
@@ -3055,7 +3117,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                     for item in streams
                 ],
             )
-            assert len(streams) == 7
+            assert len(streams) == 6
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
             probe = next(
