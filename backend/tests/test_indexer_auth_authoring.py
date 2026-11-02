@@ -891,7 +891,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     },
                 )
             ]
-        elif step == 3:
+        elif step == 2:
             calls = [
                 ("get_workflow_reference", {"topic": topic})
                 for topic in ("json_indexer", "indexer_auth")
@@ -899,7 +899,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 ("list_node_types", {"node_type": name, "include_examples": False})
                 for name in ("auth_start", "auth_end", "http")
             ]
-        elif step == 4:
+        elif step == 3:
             names = {tool["function"]["name"] for tool in body["tools"]}
             assert "preview_workflow_draft" in names
             assert "list_media_items" not in names
@@ -924,7 +924,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     },
                 )
             ]
-        elif step == 5:
+        elif step == 4:
             calls = [
                 validation(
                     TOKEN_AUTH.replace("profile.nickname", "nickname"),
@@ -933,7 +933,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     config=TOKEN_CONFIG,
                 )
             ]
-        elif step == 6:
+        elif step == 5:
             assert "Correct the reported output fields" in text
             calls = (
                 [
@@ -961,7 +961,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     for item in (detail, {"resource": None})
                 ]
             )
-        elif step == 7:
+        elif step == 6:
             assert "preview_workflow_draft" in {
                 tool["function"]["name"] for tool in body["tools"]
             }
@@ -997,7 +997,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     {
                         "role": "assistant",
                         "content": "Inspecting samples. " * 200
-                        if verbose and step >= 3
+                        if verbose and step >= 2
                         else "",
                         "tool_calls": [
                             call_delta(
@@ -1080,7 +1080,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 )
             ]
             assert events[-1].event == "done", events[-1]
-            assert len(streams) == 8
+            assert len(streams) == 7
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
             probe = next(r for r in results if r["name"] == "probe_http_request")

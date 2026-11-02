@@ -482,6 +482,48 @@ def test_keyless_client(monkeypatch):
     assert json.loads(requests[0].content)["max_tokens"] == 4096
 
 
+@pytest.mark.parametrize("preset", [AIProviderPreset.DEEPSEEK, None])
+def test_thinking_mode(monkeypatch, preset):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return response([chunk({"role": "assistant", "content": "ok"}, "stop")])
+
+    configure(monkeypatch, handler, preset=preset)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert requests[0]["max_tokens"] == 4096
+    if preset == AIProviderPreset.DEEPSEEK:
+        assert requests[0]["thinking"] == {"type": "disabled"}
+    else:
+        assert "thinking" not in requests[0]
+
+
+@pytest.mark.parametrize("designer", [False, True])
+def test_download_followup_tools(monkeypatch, designer):
+    def handler(request):
+        body = json.loads(request.content)
+        names = {tool["function"]["name"] for tool in body["tools"]}
+        assert ("validate_download_task" in names) is not designer
+        assert ("create_download_task" in names) is not designer
+        assert ("preview_workflow_draft" in names) is designer
+        return response([chunk({"role": "assistant", "content": "ok"}, "stop")])
+
+    configure(monkeypatch, handler)
+    monkeypatch.setattr(
+        service.AssistantSessionService,
+        "reviewed",
+        AsyncMock(return_value={"validate_download_task"}),
+    )
+    context = {"page_type": "workflow_designer"} if designer else None
+
+    events = asyncio.run(collect(make_turn(context=context)))
+
+    assert events[-1].event == "done"
+
+
 def test_provider_failure(monkeypatch):
     configure(monkeypatch, lambda _: pytest.fail("unexpected upstream request"))
     monkeypatch.setattr(
@@ -492,6 +534,40 @@ def test_provider_failure(monkeypatch):
     events = asyncio.run(collect())
 
     assert events[-1].data == {"code": "ai_provider_disabled"}
+
+
+def test_created_draft_ends_turn(monkeypatch):
+    requests = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert len(requests) == 1
+        return response(
+            [
+                chunk(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [call_delta("create_workflow_draft")],
+                    },
+                    "tool_calls",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+    execute = AsyncMock(return_value={"ok": True, "data": {"workflow_id": 42}})
+    monkeypatch.setattr(service, "execute_tool", execute)
+
+    events = asyncio.run(collect(make_turn("Create an indexer for example.test.")))
+
+    assert events[-1].event == "done"
+    assert events[-1].data["tool_calls"] == 1
+    assert len(requests) == 1
+    execute.assert_awaited_once()
+    assert next(e.data for e in events if e.event == "tool_result")["data"] == {
+        "workflow_id": 42
+    }
 
 
 @pytest.mark.parametrize("limit", ["MAX_MODEL_TURNS", "MAX_TOOL_CALLS"])

@@ -598,8 +598,6 @@ def test_conversation(monkeypatch, verbose):
                 ("search_indexer", {"workflow_id": flow, "keyword": "Lantern"}),
             ],
             [
-                ("get_workflow", {"workflow_id": flow}),
-                ("get_download_plan_options", {"workflow_id": flow}),
                 (
                     "search_indexer",
                     {
@@ -611,8 +609,6 @@ def test_conversation(monkeypatch, verbose):
                 ("validate_download_plan", {"plan": fixture["plan"]}),
             ],
             [
-                ("get_workflow", {"workflow_id": flow}),
-                ("get_download_plan_options", {"workflow_id": flow}),
                 (
                     "create_download_plan",
                     {
@@ -641,7 +637,7 @@ def test_conversation(monkeypatch, verbose):
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
         name, args = actions[step]
-        if step >= 2 and number:
+        if number >= 2 or (step >= 2 and number):
             names = {item["function"]["name"] for item in body["tools"]}
             assert {
                 "search_indexer",

@@ -4,7 +4,7 @@ JSONC example: `{"title": {{ title|tojson }}}`. Fields render text; condition/lo
 
 - `var(name, default=None)`: read context, including reserved keys: `{{ var('$auth').token }}`. Does not load saved state.
 - `jsonpath_first(expr)` / `jsonpath_all(expr)`: JSON text/object -> first match or null / list.
-- `xpath_first(expr)` / `xpath_all(expr)`: HTML/XML, namespaces removed; same forms, also scalars. `/text()` or `/@href` extracts text.
+- `xpath_first(expr)` / `xpath_all(expr)`: HTML/XML, namespaces removed; same forms, also scalars. Element matches stay nodes: apply another XPath or extract `/text()`, `/@href`, `string(.)`. `string`/`tojson` do not serialize HTML. Slice filtered lists with parentheses: `(html|xpath_all('//tr'))[:3]`.
 - `regex_first(expr)` / `regex_all(expr)`: first capture or null / matches (tuples for multiple captures). Parentheses required for first; DOTALL/MULTILINE.
 - `jsonpath(expr, limit='auto')`, `xpath`, `regex`: null/scalar/list for zero/one/many. `'first'`/`'all'` force form; integer >0 slices a list, <=0 selects first.
 - `trim(chars=None)`, `ltrim`, `rtrim`: deep-strip strings. `{{ ' x '|trim }}` -> `x`.

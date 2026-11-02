@@ -172,7 +172,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     },
                 )
             ]
-        elif step == 3:
+        elif step == 2:
             names = (
                 ("ingest_start", "http", "movie")
                 if movie
@@ -190,7 +190,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
             ]
             if read_back:
                 calls.append(("get_workflow", {"workflow_id": base["workflow_id"]}))
-        elif step == 4:
+        elif step == 3:
             names = {tool["function"]["name"] for tool in body["tools"]}
             assert "preview_workflow_draft" in names
             assert "list_media_items" not in names
@@ -222,7 +222,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     ),
                 ]
             )
-        elif step == 5:
+        elif step == 4:
             calls = (
                 [
                     validation(
@@ -249,7 +249,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     ),
                 ]
             )
-        elif step == 6:
+        elif step == 5:
             assert (
                 "Correct the reported output fields" in dumps(body["messages"]).decode()
             )
@@ -281,7 +281,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     )
                 ]
             )
-        elif step == 7:
+        elif step == 6:
             assert "preview_workflow_draft" in {
                 tool["function"]["name"] for tool in body["tools"]
             }
@@ -304,7 +304,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     {
                         "role": "assistant",
                         "content": "Inspecting samples. " * 200
-                        if verbose and step >= 3
+                        if verbose and step >= 2
                         else "",
                         "tool_calls": [
                             call_delta(
@@ -386,7 +386,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                 events[-1],
                 [(len(s["messages"]), s.get("tool_choice")) for s in streams],
             )
-            assert len(streams) == 8
+            assert len(streams) == 7
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
             checks = [

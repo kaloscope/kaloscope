@@ -312,6 +312,7 @@ def tool_facts(result: dict) -> dict:
         A bounded projection with exact counts, paths, readiness, and source IDs.
         Saved workflow reads retain explicit draft provenance, including records
         written before `graph_source` was introduced.
+        Workflow lists retain named choices for selection in a later turn.
     """
     data = result.get("data", {})
     if not isinstance(data, dict):
@@ -350,6 +351,28 @@ def tool_facts(result: dict) -> dict:
         if key == "source_facts":
             # history reads already project and flatten the original tool facts
             facts[key] = value
+        elif key == "items" and result.get("name") == "list_workflows":
+            # keep usable choices instead of reducing each workflow to field names
+            choices = []
+            for item in value[:5]:
+                choice = {
+                    key: item[key]
+                    for key in (
+                        "id",
+                        "category",
+                        "state",
+                        "editable",
+                        "downloadable_search",
+                    )
+                    if key in item
+                }
+                name = item.get("name", "")
+                choice["name"] = name[:80]
+                if len(name) > 80:
+                    choice["name_truncated"] = True
+                choices.append(choice)
+            facts[key] = choices
+            facts["omitted_items"] = len(value) - len(choices)
         elif key == "runs":
             facts[key] = [
                 {k: v for k, v in run.items() if k not in {"output", "errors"}}

@@ -130,6 +130,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
     Returns:
         A bounded tail where possible, preserving recent details and call pairing.
         Node schemas and authoring references read in this turn remain complete.
+        Workflow listings retain a bounded set of named choices and search support.
         Active plan, task and media reviews retain exact changes, consequences,
         search inputs and candidates.
         Long assistant narration retains a source reference without a text sample.
@@ -244,6 +245,9 @@ async def prepare_context(
     continuation: list[dict] | None = None,
 ) -> tuple[list[dict], dict[str, int], bool]:
     """Compact completed prefixes and atomically checkpoint their summaries.
+
+    Request DeepSeek summaries without thinking so the bounded output budget
+    remains available for the JSON checkpoint.
 
     Args:
         client: Current isolated SDK client with its selected provider credentials.
@@ -466,6 +470,10 @@ async def prepare_context(
                 if preset == AIProviderPreset.OPENAI
                 else omit,
                 max_tokens=omit if preset == AIProviderPreset.OPENAI else output_budget,
+                # reserve the bounded output for the summary itself
+                extra_body={"thinking": {"type": "disabled"}}
+                if preset == AIProviderPreset.DEEPSEEK
+                else None,
             )
             if completion.usage:
                 for key in usage:
