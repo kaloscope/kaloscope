@@ -7,10 +7,11 @@ import stat
 import tempfile
 import unicodedata
 from contextlib import suppress
+from copy import copy
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote, urlsplit
 
 from lxml import etree
@@ -1584,6 +1585,103 @@ async def _season_groups(
     return list(groups.items())
 
 
+async def _group_of(
+    lib: MediaLib, item: MediaItem
+) -> tuple[MediaItem | None, list[MediaItem]]:
+    """Find the directory item and videos organized together with an item.
+
+    Args:
+        lib: Library containing the item.
+        item: Video, directory or reading item.
+
+    Returns:
+        The group's directory item, if any, and its members.
+    """
+    parent = None
+    if item.parent_id is not None:
+        parent = await MediaItem.filter(id=item.parent_id).first()
+    elif Path(item.path).is_dir() and (
+        lib.lib_type not in (LibType.NOVEL, LibType.COMIC) or item.format is None
+    ):
+        parent = item
+    group = (
+        await MediaItem.filter(parent_id=parent.id, lib_id=lib.id) if parent else [item]
+    )
+    return parent, group
+
+
+async def preview_organization(
+    lib: MediaLib, template: str, item: MediaItem
+) -> dict[str, Any]:
+    """Plan one work under a template as organization would, changing nothing.
+
+    Uses the organizer's own grouping, path rendering and conflict checks on an
+    unsaved copy of the library. Recovery, transfer backfill and journals are left
+    out, and the library lock is not held, so results describe the moment of the
+    call rather than a guaranteed future organization.
+
+    Args:
+        lib: Video library; it is not modified.
+        template: Validated naming template to plan with.
+        item: Top-level work to plan.
+
+    Returns:
+        `status` (`moves`, `unchanged`, `deferred`, `skipped` or `blocked`),
+        videos' current and proposed `paths`, the planned `moved_files` count and
+        an `issue` naming why a group would not be organized.
+    """
+    proposed = copy(lib)
+    proposed.rename_template = template
+    parent, group = await _group_of(proposed, item)
+    paths: list[dict[str, str]] = []
+    moved_files = 0
+    changed = False
+    status = None
+    issue = None
+    try:
+        groups = await _season_groups(proposed, group, parent) if group else []
+    except ValueError as error:
+        groups, status, issue = [], "blocked", str(error)
+    except (OSError, etree.LxmlError):
+        groups, status = [], "skipped"
+        issue = "metadata is missing or unreadable"
+    for season, subgroup in groups:
+        if len(groups) > 1:
+            # organization saves these seasons first; this copy stays in memory
+            for row in subgroup:
+                if row.season is None:
+                    row.season = season
+        try:
+            payload = await _plan(
+                proposed, subgroup, parent, season=season, split=len(groups) > 1
+            )
+        except OrganizeDeferredError as error:
+            status, issue = "deferred", str(error)
+            continue
+        except ValueError as error:
+            status, issue = "blocked", str(error)
+            continue
+        except (OSError, etree.LxmlError):
+            status = status or "skipped"
+            issue = issue or "metadata is missing or unreadable"
+            continue
+        moved_files += len(payload["moves"])
+        changed = changed or any(
+            payload.get(key) for key in ("moves", "creates", "nfo_edits", "edits")
+        )
+        current = {row.id: row.path for row in subgroup}
+        paths.extend(
+            {"current": current[update["id"]], "proposed": update["path"]}
+            for update in payload["updates"]
+        )
+    return {
+        "status": status or ("moves" if changed else "unchanged"),
+        "paths": paths,
+        "moved_files": moved_files,
+        "issue": issue,
+    }
+
+
 async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
     """Organize metadata-backed groups while holding the library lock throughout.
 
@@ -1613,22 +1711,11 @@ async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
         item = await MediaItem.filter(id=item_id, lib_id=lib.id).first()
         if item is None:
             continue
-        parent = None
-        if item.parent_id is not None:
-            parent = await MediaItem.filter(id=item.parent_id).first()
-        elif Path(item.path).is_dir() and (
-            lib.lib_type not in (LibType.NOVEL, LibType.COMIC) or item.format is None
-        ):
-            parent = item
+        parent, group = await _group_of(lib, item)
         key = parent.id if parent else item.id
         if key in processed:
             continue
         processed.add(key)
-        group = (
-            await MediaItem.filter(parent_id=parent.id, lib_id=lib.id)
-            if parent
-            else [item]
-        )
         if not group:
             continue
         try:

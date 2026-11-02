@@ -43,7 +43,7 @@ export function assistantDestination(
     path = result.data.path ?? (result.data.task as { path?: unknown } | null | undefined)?.path;
     target = { page: path === downloadPaths.completed_downloads ? 'completed_downloads' : 'active_downloads' };
   } else if (result.name === 'apply_media_change' && result.data.applied !== false) {
-    // a rescrape opens its item; a scan opens its library
+    // a rescrape opens its item; a scan or new settings open the library
     path = result.data.path;
     target =
       typeof result.data.item_id === 'number'

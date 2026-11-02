@@ -421,11 +421,13 @@ class AssistantSessionService:
                     "review_download_task_action",
                     "review_library_scan",
                     "review_media_rescrape",
+                    "review_library_config",
                 ],
             )
-            # a candidate list lets the user pick one in this turn
+            # candidates or current settings let the user choose in this turn
             if (data := (call.result or {}).get("data") or {}).get("valid")
             or (call.name == "review_media_rescrape" and data.get("candidates"))
+            or (call.name == "review_library_config" and "bindings" in data)
         }
 
     @classmethod

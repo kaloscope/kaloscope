@@ -299,6 +299,21 @@ class MediaRescrapeReviewResult(Result):
     library_id: int
 
 
+class MediaConfigReviewResult(Result):
+    """Show a library's ingestion settings or a previewed change; nothing is saved."""
+
+    valid: bool
+    issues: list[dict[str, str]]
+    library_id: int = Field(description="Library ID, not an item ID.")
+    library_name: str
+    bindings: list[dict[str, JSONType]] = Field(
+        description="Sample of current bindings in execution order; binding_count "
+        "is the total and binding_order lists up to 50 IDs."
+    )
+    revision: str = Field(description="Reviewed revision; pass it back when applying.")
+    notes: list[str] = Field(description="Scope and timing to show before confirming.")
+
+
 class MediaChangeApplyResult(Result):
     """Describe an applied, running, replayed, refused or uncertain media change."""
 

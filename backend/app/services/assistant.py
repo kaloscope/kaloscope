@@ -23,10 +23,12 @@ from app.core.ai.history import budgets, context_size, prepare_context
 from app.core.ai.tools import (
     CREATE_TOOL,
     MEDIA_CHANGE_TOOLS,
+    MEDIA_REVIEW_TOOLS,
     PLAN_CHANGE_TOOLS,
     SCHEDULE_TOOLS,
     TASK_ACTION_TOOLS,
     execute_tool,
+    media_change_workflows,
     media_resources,
     tool_schemas,
 )
@@ -357,7 +359,11 @@ class AssistantService:
         schedule_ready = "review_workflow_schedule" in reviewed
         plan_change = "review_download_plan_change" in reviewed
         task_action = "review_download_task_action" in reviewed
-        media_change = bool(reviewed & {"review_library_scan", "review_media_rescrape"})
+        # a follow-up turn keeps room for history by offering only its own kind
+        media_reviews = reviewed & MEDIA_REVIEW_TOOLS
+        media_change = (
+            media_reviews | {"apply_media_change"} if media_reviews else False
+        )
         schemas = tool_schemas(
             user,
             schedule=schedule_ready,
@@ -686,7 +692,7 @@ class AssistantService:
                         media_change=media_change,
                     )
                 if (
-                    not media_change
+                    media_change is not True
                     and result["ok"]
                     and call.function.name
                     in {"list_media_libraries", "list_media_items", "get_media_item"}
@@ -878,12 +884,7 @@ class AssistantService:
                         data = result["data"]
                         if isinstance(data.get("library_id"), int):
                             resource_ids.append(media_resource(data["library_id"]))
-                        resource_ids.extend(
-                            entry["workflow_id"]
-                            for entry in [data, *data.get("workflows", [])]
-                            + data.get("bindings", [])
-                            if isinstance(entry.get("workflow_id"), int)
-                        )
+                        resource_ids.extend(media_change_workflows(data))
                     if result["ok"] and call.function.name == "list_download_plans":
                         # each listed plan reveals its indexer and transfer library
                         for item in result["data"]["items"]:

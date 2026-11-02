@@ -258,10 +258,19 @@ export type TaskActionOutcome = {
   failed?: boolean;
 };
 
-/** Outcome of applying a reviewed library scan or video rescrape. */
+/** Outcome of applying a reviewed library scan, video rescrape or configuration. */
 export type MediaChangeOutcome = {
   applied: boolean | null;
-  outcome?: 'scanned' | 'submitted' | 'already_scanning' | 'rescraped' | 'partial' | 'running' | 'absent' | 'uncertain';
+  outcome?:
+    | 'scanned'
+    | 'submitted'
+    | 'already_scanning'
+    | 'rescraped'
+    | 'configured'
+    | 'partial'
+    | 'running'
+    | 'absent'
+    | 'uncertain';
   library_id?: number;
   item_id?: number;
   path?: string;
