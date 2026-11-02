@@ -79,8 +79,12 @@
 
   onMount(() => {
     getAll();
+    // show settings the assistant saved; an open editor keeps its own form
+    const changed = () => getAll();
+    window.addEventListener('media-library-changed', changed);
     return () => {
       disposed = true;
+      window.removeEventListener('media-library-changed', changed);
       if (retryTimer) clearTimeout(retryTimer);
     };
   });

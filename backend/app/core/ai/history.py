@@ -171,6 +171,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 "apply_download_task_action",
                 "review_library_scan",
                 "review_media_rescrape",
+                "review_library_config",
                 "apply_media_change",
             } and source.get("ok"):
                 # the next reply must explain the actual change before confirmation
@@ -184,9 +185,27 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                     "bindings",
                     "workflows",
                     "nfo",
+                    "proposed_bindings",
+                    "binding_order",
+                    "binding_count",
+                    "proposed_binding_order",
+                    "proposed_binding_count",
+                    "more_bindings",
+                    "settings",
+                    "bindings_change",
+                    "language",
+                    "rename_template",
+                    "naming",
+                    "scope",
+                    "next",
                 ):
                     if key in source["data"]:
                         fact["data"][key] = source["data"][key]
+                if (
+                    source["name"] == "apply_media_change"
+                    and "current" in source["data"]
+                ):
+                    fact["data"]["current"] = source["data"]["current"]
                 fact["data"].pop("omitted_changes", None)
             elif source.get("name") == "read_conversation_history":
                 page = source.get("data", {}).get("data")

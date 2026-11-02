@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PositiveInt,
+    field_validator,
     model_validator,
 )
 from tortoise.fields import (
@@ -106,10 +107,12 @@ class MediaAction(StrEnum):
 
     `scan`: Reconcile one library's files and queue its existing ingestion work.
     `rescrape`: Replace one movie or show's metadata with a reviewed candidate.
+    `configure`: Change one library's ingestion bindings, language or naming template.
     """
 
     SCAN = auto()
     RESCRAPE = auto()
+    CONFIGURE = auto()
 
 
 # -------------------- ORM Models --------------------
@@ -448,12 +451,59 @@ class MediaRescrape(BaseModel):
     )
 
 
+class WorkflowReplacement(BaseModel):
+    """Swap one bound workflow in place, keeping its position and execution mode."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    workflow_id: PositiveInt
+    new_workflow_id: PositiveInt
+
+
+class LibraryConfig(BaseModel):
+    """Change one movie or TV library's ingestion settings; omitted fields stay."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    action: Literal["configure"] = "configure"
+    library_id: PositiveInt = Field(description="Library ID, not an item ID.")
+    add_workflow_ids: list[PositiveInt] = Field(
+        default_factory=list, max_length=20, description="Append to the order."
+    )
+    replace_workflows: list[WorkflowReplacement] = Field(
+        default_factory=list, max_length=20, description="Keeps position and mode."
+    )
+    remove_workflow_ids: list[PositiveInt] = Field(default_factory=list, max_length=20)
+    order_workflow_ids: list[PositiveInt] | None = Field(
+        default=None,
+        max_length=50,
+        description="Every resulting binding once, in run order.",
+    )
+    language: Language | None = Field(default=None, description="null clears.")
+    rename_template: str | None = Field(
+        default=None, max_length=1024, description="null clears."
+    )
+
+    @field_validator("rename_template")
+    @classmethod
+    def blank_template(cls, value: str | None) -> str | None:
+        """Treat a blank template as clearing it, as the library editor does.
+
+        Args:
+            value: Requested template.
+
+        Returns:
+            The stripped template, or `None` when blank.
+        """
+        return (value or "").strip() or None
+
+
 class MediaChangeApply(BaseModel):
     """Apply one reviewed media change; repeat the same request to read its outcome."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
-    change: Annotated[LibraryScan | MediaRescrape, Field(discriminator="action")]
+    change: Annotated[
+        LibraryScan | MediaRescrape | LibraryConfig, Field(discriminator="action")
+    ]
     revision: str = Field(max_length=64, description="Reviewed revision.")
     confirmed: bool = Field(
         default=False,

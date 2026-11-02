@@ -29,6 +29,7 @@
         apply_download_task_action: 'task_action',
         review_library_scan: 'media_change',
         review_media_rescrape: 'media_change',
+        review_library_config: 'media_change',
         apply_media_change: 'media_change'
       } as Record<string, string>
     )[tool.name]
@@ -51,7 +52,9 @@
     if (changeStatus && ['pending', 'queued', 'submitted', 'running'].includes(changeStatus)) return icons.clock;
     if (
       changeStatus &&
-      !['created', 'updated', 'enabled', 'paused', 'deleted', 'changed', 'scanned', 'rescraped'].includes(changeStatus)
+      !['created', 'updated', 'enabled', 'paused', 'deleted', 'changed', 'scanned', 'rescraped', 'configured'].includes(
+        changeStatus
+      )
     ) {
       return icons.warning;
     }

@@ -63,6 +63,7 @@ from app.models.mcp import (
     LibraryStatus,
     MCPTokenScope,
     MediaChangeApplyResult,
+    MediaConfigReviewResult,
     MediaDetails,
     MediaRescrapeReviewResult,
     MediaResult,
@@ -89,7 +90,13 @@ from app.models.mcp import (
     WorkflowResult,
     WorkflowRunResult,
 )
-from app.models.media import LibraryScan, MediaChangeApply, MediaQuery, MediaRescrape
+from app.models.media import (
+    LibraryConfig,
+    LibraryScan,
+    MediaChangeApply,
+    MediaQuery,
+    MediaRescrape,
+)
 from app.models.user import UserInfo
 from app.models.workflow_authoring import (
     HTTPProbe,
@@ -165,6 +172,7 @@ _READ_TOOLS = frozenset(
         "review_download_task_action",
         "review_library_scan",
         "review_media_rescrape",
+        "review_library_config",
     }
 )
 _WRITE_TOOLS = frozenset(
@@ -351,7 +359,9 @@ def create_server() -> MCPServer:
             "Library scans use review_library_scan; movie/show rescrapes use "
             "review_media_rescrape. For rescrapes, list candidates, let the user "
             "choose one key, then review it. Show the review and call "
-            "apply_media_change only after approval. "
+            "apply_media_change only after approval. Library "
+            "bindings, language and naming template use review_library_config; "
+            "saving starts no scan, rescrape or organization. "
             "Task pause/resume/retry/delete also follows them for one listed task; "
             "delete files only on explicit request. A queued action is not done; "
             "list the task later instead of waiting. "
@@ -1738,6 +1748,38 @@ def create_server() -> MCPServer:
             await _read(MediaChangeService.review_rescrape(change, _user(ctx)))
         )
 
+    @server.tool(annotations=READ_ONLY)
+    async def review_library_config(
+        ctx: Context,
+        change: Annotated[
+            LibraryConfig,
+            Field(
+                description="One movie or TV library. library_id alone reads its "
+                "settings; omitted fields stay and null clears language or template."
+            ),
+        ],
+    ) -> MediaConfigReviewResult:
+        """Read a library's ingestion settings or preview changing them; saves nothing.
+
+        Summarize settings, binding order, naming samples and notes in the user's
+        language, not raw JSON, and wait for confirmation. Saving starts no scan,
+        rescrape or organization. If no compatible scraper exists, build one with
+        the movie_scraper or tv_scraper recipe; the user publishes it first.
+
+        Args:
+            ctx: Administrator request context.
+            change: Library plus the settings and bindings to change, if any.
+
+        Returns:
+            Current settings and bindings in execution order, workflow choices, the
+            requested changes and resulting order, naming samples, scope and timing
+            notes, located issues, `revision` and, when valid, a `request_id` bound
+            to this exact review. Page list_workflows for choices beyond the sample.
+        """
+        return MediaConfigReviewResult.model_validate(
+            await _read(MediaChangeService.review_config(change, _user(ctx)))
+        )
+
     @server.tool(
         annotations=ToolAnnotations(
             read_only_hint=False,
@@ -1757,17 +1799,18 @@ def create_server() -> MCPServer:
             ),
         ],
     ) -> MediaChangeApplyResult:
-        """Apply a reviewed scan or rescrape once and answer within seconds.
+        """Apply a reviewed scan, rescrape or configuration once within seconds.
 
         Args:
             ctx: Administrator context with a read-write token.
             application: The reviewed request and the user's confirmation.
 
         Returns:
-            A `scanned`, `submitted`, `already_scanning`, `rescraped`, `partial`
-            or `running` outcome, `replayed` outcomes, or a `conflict`, `pending`,
-            `stale`, `confirmation_required`, `absent`, `failed` or `uncertain`
-            outcome. Background ingestion and organization are never awaited.
+            A `scanned`, `submitted`, `already_scanning`, `rescraped`, `partial`,
+            `configured` or `running` outcome, `replayed` outcomes, or a `conflict`,
+            `pending`, `stale`, `confirmation_required`, `absent`, `failed` or
+            `uncertain` outcome. Background ingestion and organization are never
+            awaited.
         """
         return MediaChangeApplyResult.model_validate(
             await _read(MediaChangeService.apply_change(application, _user(ctx)))

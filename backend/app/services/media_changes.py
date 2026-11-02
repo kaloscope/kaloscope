@@ -14,6 +14,7 @@ import orjson
 from filelock import Timeout as LockTimeout
 from sanic import Sanic
 from sanic.log import logger
+from tortoise.transactions import in_transaction
 
 from app.core.dl.syncer import submission_lock
 from app.core.exceptions import (
@@ -24,15 +25,23 @@ from app.core.exceptions import (
 )
 from app.core.flow.context import MANUAL_KEY
 from app.core.media.common import ContentError
-from app.core.media.naming import render_directory, render_filename
+from app.core.media.naming import render_directory, render_filename, validate_template
+from app.core.media.organizer import preview_organization
 from app.core.media.shelver import (
     get_nfo_path,
     get_nfo_type,
     preview_nfo,
     read_nfo,
 )
-from app.models.flow import FlowGraph, FlowTrigger, GraphCategory, GraphState
+from app.models.flow import (
+    FlowGraph,
+    FlowTrigger,
+    GraphCategory,
+    GraphRef,
+    GraphState,
+)
 from app.models.media import (
+    LibraryConfig,
     LibraryScan,
     LibType,
     MediaAction,
@@ -46,7 +55,15 @@ from app.models.media import (
 )
 from app.models.user import UserInfo, UserRole
 from app.services.base import BaseService
-from app.services.media import MediaItemService, MediaLibService, output_issue
+from app.services.flow import FlowTriggerService
+from app.services.media import (
+    INGESTION_SCOPE,
+    TV_INGESTION_LAYOUT,
+    MediaItemService,
+    MediaLibService,
+    output_issue,
+    workflow_fact,
+)
 from app.utils.extractor import extract_title
 from app.utils.json import dumps, loads
 
@@ -54,6 +71,11 @@ VIDEO_TYPES = (LibType.MOVIE, LibType.TV_SHOW)
 # a long scan or episode refresh keeps running after the tool answers
 APPLY_WAIT = 8
 CANDIDATE_LIMIT = 5
+# a naming preview samples works and a few of their videos; it never covers everything
+NAMING_SAMPLES = 3
+NAMING_PATHS = 2
+# the change model accepts at most 50 IDs for an explicit binding order
+BINDING_ORDER_LIMIT = 50
 PREVIEW_FIELDS = (
     "title",
     "originaltitle",
@@ -171,14 +193,39 @@ def candidate_key(candidate: dict[str, Any]) -> str:
     return hashlib.sha256(dumps(identity, option=orjson.OPT_SORT_KEYS)).hexdigest()[:12]
 
 
+def _change_facts(change: LibraryScan | MediaRescrape | LibraryConfig) -> dict:
+    """Read the fields that identify a reviewed change.
+
+    Args:
+        change: Reviewed change.
+
+    Returns:
+        JSON fields. A configuration keeps only what was requested, so an omitted
+        setting differs from an explicitly cleared one. Empty add/remove/replace
+        lists are no-ops, while an explicit empty order requires no bindings.
+    """
+    if not isinstance(change, LibraryConfig):
+        return change.model_dump(mode="json")
+    return {
+        "action": change.action,
+        **{
+            name: value
+            for name, value in change.model_dump(
+                mode="json", exclude_unset=True
+            ).items()
+            if value != [] or name == "order_workflow_ids"
+        },
+    }
+
+
 class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeReceipt):
-    """Review and apply one library scan or video rescrape at a time."""
+    """Review and apply one library scan, video rescrape or configuration at a time."""
 
     @classmethod
     def change_request(
         cls,
         user_id: int,
-        change: LibraryScan | MediaRescrape,
+        change: LibraryScan | MediaRescrape | LibraryConfig,
         revision: str,
         nonce: bytes | None = None,
     ) -> UUID:
@@ -186,7 +233,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
 
         Args:
             user_id: Reviewing account.
-            change: Reviewed scan or rescrape, including the chosen candidate.
+            change: Reviewed scan, rescrape with its candidate, or configuration.
             revision: Reviewed revision.
             nonce: Random half of an existing ID being checked; `None` issues one.
 
@@ -194,7 +241,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             A new ID, or the only ID this nonce can have for the same review.
         """
         nonce = nonce or os.urandom(8)
-        digest = _digest(change.model_dump(mode="json"))
+        digest = _digest(_change_facts(change))
         tag = hashlib.sha256(nonce + f"{user_id}:{digest}:{revision}".encode())
         return UUID(bytes=nonce + tag.digest()[:8])
 
@@ -737,12 +784,517 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         return loads(dumps(result))
 
     @classmethod
-    async def apply_change(cls, body: MediaChangeApply, user: UserInfo) -> dict:
-        """Apply a confirmed scan or rescrape at most once and answer promptly.
+    async def _naming_preview(cls, lib: MediaLib, template: str) -> dict[str, Any]:
+        """Show sample works' current and proposed paths under a template.
 
-        A receipt is claimed before any effect, so retries read the recorded
-        outcome. Work still running after a few seconds continues in the
-        background and records its outcome later.
+        Args:
+            lib: Video library, left unchanged.
+            template: Validated proposed template.
+
+        Returns:
+            Bounded samples using the organizer's own plans, how many works exist,
+            and whether a pending organization could still change these paths.
+        """
+        works = await MediaItem.filter(lib_id=lib.id, parent_id__isnull=True).order_by(
+            "id"
+        )
+        # show works with metadata and one without, whose problem would otherwise hide
+        chosen = [work for work in works if work.nfo_path][: NAMING_SAMPLES - 1]
+        chosen += [work for work in works if not work.nfo_path][:1]
+        chosen += [work for work in works if work not in chosen]
+        samples = []
+
+        def shown(text: str | None) -> str | None:
+            """Hide the library root in an organizer message.
+
+            Args:
+                text: Organizer message.
+
+            Returns:
+                The bounded message without absolute library paths.
+            """
+            return _short(text.replace(f"{lib.dir}/", ""), 160) if text else None
+
+        for work in chosen[:NAMING_SAMPLES]:
+            plan = await preview_organization(lib, template, work)
+            samples.append(
+                {
+                    "item_id": work.id,
+                    "title": _short(work.title or work.name, 80),
+                    "status": plan["status"],
+                    "paths": [
+                        {
+                            "current": _short(_relative(lib, entry["current"]), 160),
+                            "proposed": _short(_relative(lib, entry["proposed"]), 160),
+                        }
+                        for entry in plan["paths"][:NAMING_PATHS]
+                    ],
+                    "more_paths": max(0, len(plan["paths"]) - NAMING_PATHS),
+                    "moved_files": plan["moved_files"],
+                    "issue": shown(plan["issue"]),
+                }
+            )
+        return {
+            "template": template,
+            "sampled_works": len(samples),
+            "total_works": len(works),
+            "samples": samples,
+            "pending_organization": await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists(),
+        }
+
+    @classmethod
+    async def _review_config(
+        cls, change: LibraryConfig, user: UserInfo, *, preview: bool = True
+    ) -> tuple[dict[str, Any], MediaLib, dict[str, Any], list[GraphRef] | None]:
+        """Check one library configuration against current settings and workflows.
+
+        Args:
+            change: Requested settings and binding changes.
+            user: Current administrator.
+            preview: Whether to plan sample paths for a new naming template.
+
+        Returns:
+            The review, the library, the settings to write and the complete
+            resulting bindings, or `None` when they stay unchanged.
+
+        Raises:
+            ForbiddenException: If the account cannot configure libraries.
+            NotFoundException: If the library does not exist.
+        """
+        _require_admin(user)
+        lib = await MediaLibService.get_accessible(change.library_id, user)
+        issues: list[dict[str, str]] = []
+        if lib.lib_type not in VIDEO_TYPES:
+            issues.append(
+                {
+                    "path": "library_id",
+                    "message": "Only movie and TV libraries are configured here.",
+                }
+            )
+        rows = (
+            await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=lib.id)
+            .order_by("priority")
+            .select_related("graph")
+        )
+        graphs = {row.graph_id: row.graph for row in rows}
+        modes = {row.graph_id: row.asynchronous for row in rows}
+        order = [row.graph_id for row in rows]
+        added: list[int] = []
+        removed: list[int] = []
+        replaced: list[tuple[int, int]] = []
+        new_ids: list[tuple[str, int]] = []
+
+        def problem(path: str, message: str):
+            """Record one located issue.
+
+            Args:
+                path: Argument the issue belongs to.
+                message: What to correct.
+            """
+            issues.append({"path": path, "message": message})
+
+        for swap in change.replace_workflows:
+            path = "replace_workflows"
+            if swap.workflow_id not in order:
+                problem(path, f"Workflow {swap.workflow_id} is not bound.")
+            elif swap.new_workflow_id in order:
+                problem(path, f"Workflow {swap.new_workflow_id} is already bound.")
+            else:
+                order[order.index(swap.workflow_id)] = swap.new_workflow_id
+                # the replacement keeps the execution mode of what it replaces
+                modes[swap.new_workflow_id] = modes[swap.workflow_id]
+                replaced.append((swap.workflow_id, swap.new_workflow_id))
+                new_ids.append((path, swap.new_workflow_id))
+        for workflow_id in change.remove_workflow_ids:
+            if workflow_id in order:
+                order.remove(workflow_id)
+                removed.append(workflow_id)
+            else:
+                problem("remove_workflow_ids", f"Workflow {workflow_id} is not bound.")
+        for workflow_id in change.add_workflow_ids:
+            if workflow_id in order:
+                problem("add_workflow_ids", f"Workflow {workflow_id} is already bound.")
+            else:
+                order.append(workflow_id)
+                modes[workflow_id] = False
+                added.append(workflow_id)
+                new_ids.append(("add_workflow_ids", workflow_id))
+        reordered = False
+        if change.order_workflow_ids is not None:
+            if sorted(change.order_workflow_ids) != sorted(order):
+                problem(
+                    "order_workflow_ids",
+                    "List every resulting binding exactly once.",
+                )
+            else:
+                reordered = change.order_workflow_ids != order
+                order = list(change.order_workflow_ids)
+        new_graphs = []
+        for path, workflow_id in new_ids:
+            try:
+                found, _ = await MediaLibService.ingestion_check(
+                    lib.id, workflow_id, user
+                )
+            except NotFoundException:
+                problem(path, f"Workflow {workflow_id} does not exist.")
+                continue
+            issues.extend(
+                {"path": path, "message": f"Workflow {workflow_id}: {entry['message']}"}
+                for entry in found
+                if entry["path"] == "ingest_workflow_id"
+            )
+            graphs[workflow_id] = await FlowGraph.get(id=workflow_id)
+            new_graphs.append(graphs[workflow_id])
+
+        writes: dict[str, Any] = {}
+        settings = []
+        if "language" in change.model_fields_set and change.language != lib.language:
+            writes["language"] = change.language
+            settings.append(
+                {"field": "language", "before": lib.language, "after": change.language}
+            )
+        template = lib.rename_template
+        if "rename_template" in change.model_fields_set:
+            try:
+                template = validate_template(change.rename_template or "", lib.lib_type)
+            except ValueError as error:
+                problem("rename_template", str(error)[:200])
+                template = lib.rename_template
+            if template != lib.rename_template:
+                writes["rename_template"] = template
+                settings.append(
+                    {
+                        "field": "rename_template",
+                        "before": lib.rename_template,
+                        "after": template,
+                    }
+                )
+        bindings = None
+        if order != [row.graph_id for row in rows]:
+            bindings = [
+                GraphRef(graph_id=workflow_id, asynchronous=modes[workflow_id])
+                for workflow_id in order
+            ]
+        if not (writes or bindings is not None or issues):
+            problem(
+                "library_id",
+                "No change requested; show the current settings and ask what to "
+                "change.",
+            )
+
+        def named(workflow_id: int) -> dict[str, Any]:
+            """Identify a workflow in the binding change summary.
+
+            Args:
+                workflow_id: Workflow that exists in the review.
+
+            Returns:
+                Its ID and name, when known.
+            """
+            graph = graphs.get(workflow_id)
+            return {
+                "workflow_id": workflow_id,
+                "workflow_name": graph.name if graph else None,
+            }
+
+        available = await MediaLibService.ingestion_bindings(lib.id, user)
+        notes = [
+            "Saving changes only this library's configuration; it starts no scan, "
+            "rescrape, download or organization. Those keep their own reviews."
+        ]
+        if bindings is not None:
+            notes.append(
+                "Bindings are read when each ingest request fires: queued items not "
+                "yet started use this order, running workflows finish unchanged, and "
+                "existing items are not scraped again."
+            )
+            if added:
+                notes.append("New bindings run synchronously, the editor's default.")
+            if replaced:
+                notes.append(
+                    "A replacement keeps the replaced binding's position and mode."
+                )
+            if not order:
+                notes.append(
+                    "With no bindings, new items run no ingest workflows; existing "
+                    "NFO files can still supply metadata."
+                )
+        if "language" in writes:
+            notes.append(
+                "Language applies to requests created after saving; queued ingest "
+                "work keeps its recorded language and existing NFOs stay as they are."
+            )
+        if "rename_template" in writes:
+            notes.append(
+                "Files do not move on save. A work is organized under the current "
+                "template when its metadata next changes, such as a new ingest, an "
+                "NFO change or a rescrape; organization already planned finishes on "
+                "its own paths."
+                if template
+                else "Clearing stops future renames; files stay where they are."
+            )
+            if template and lib.lib_type == LibType.TV_SHOW:
+                notes.append(
+                    "Episodes without readable metadata keep their file names; "
+                    "numbers are never guessed."
+                )
+        if any(not graph_fact["executable"] for graph_fact in available["bindings"]):
+            notes.append(
+                "Unpublished bindings stay stored and do not run until published."
+            )
+        naming = None
+        if preview and template and "rename_template" in writes and not issues:
+            naming = await cls._naming_preview(lib, template)
+        revision = _digest(
+            [
+                lib.id,
+                lib.dir,
+                lib.lib_type,
+                lib.language,
+                lib.rename_template,
+                [
+                    [
+                        row.graph_id,
+                        row.priority,
+                        row.asynchronous,
+                        row.graph.state,
+                        row.graph.revision,
+                        _digest(row.graph.definition),
+                    ]
+                    for row in rows
+                ],
+                [
+                    [graph.id, graph.state, graph.revision, _digest(graph.definition)]
+                    for graph in new_graphs
+                ],
+            ]
+        )
+        result: dict[str, Any] = {
+            "valid": not issues,
+            "issues": issues[:12],
+            "action": MediaAction.CONFIGURE,
+            "library_id": lib.id,
+            "library_name": lib.name,
+            "lib_type": lib.lib_type,
+            "language": lib.language,
+            "rename_template": lib.rename_template,
+            "bindings": available["bindings"],
+            "binding_count": available["binding_count"],
+            "binding_order": [row.graph_id for row in rows[:BINDING_ORDER_LIMIT]],
+            "settings": settings,
+            "bindings_change": {
+                "added": [named(entry) for entry in added],
+                "removed": [named(entry) for entry in removed],
+                "replaced": [
+                    {
+                        **named(old),
+                        "new_workflow_id": new,
+                        "new_workflow_name": graphs[new].name
+                        if new in graphs
+                        else None,
+                    }
+                    for old, new in replaced
+                ],
+                "reordered": reordered,
+            }
+            if bindings is not None
+            else None,
+            "proposed_bindings": [
+                {
+                    **workflow_fact(graphs[entry.graph_id], lib.lib_type),
+                    "order": index,
+                    "asynchronous": entry.asynchronous,
+                }
+                for index, entry in enumerate(bindings[:20], 1)
+                if entry.graph_id in graphs
+            ]
+            if bindings is not None
+            else None,
+            "workflows": available["workflows"],
+            "proposed_binding_count": len(order) if bindings is not None else None,
+            "proposed_binding_order": order[:BINDING_ORDER_LIMIT]
+            if bindings is not None
+            else None,
+            "workflow_count": available["workflow_count"],
+            "unpublished_workflows": available["unpublished_workflows"][:5],
+            "unpublished_count": available["unpublished_count"],
+            "naming": naming,
+            "queued_events": await MediaEvent.filter(lib_id=lib.id).count(),
+            "scope": INGESTION_SCOPE
+            + (TV_INGESTION_LAYOUT if lib.lib_type == LibType.TV_SHOW else ""),
+            "notes": notes,
+            "revision": revision,
+        }
+        if len(rows) > BINDING_ORDER_LIMIT or len(order) > BINDING_ORDER_LIMIT:
+            result["more_bindings"] = (
+                "Binding order lists contain only the first 50 IDs; counts include "
+                "all bindings. Use the library editor to reorder more than 50."
+            )
+        if available["workflow_count"] > len(available["workflows"]):
+            result["more_workflows"] = (
+                "These are a sample; page list_workflows with category=ingest. Any "
+                "published compatible ID is accepted."
+            )
+        if not available["workflow_count"] and not any(
+            entry["compatible"] for entry in available["bindings"]
+        ):
+            result["next"] = (
+                "No compatible published scraper exists. Ask only for missing source "
+                "details, build one with the movie_scraper or tv_scraper recipe "
+                "(create_workflow_draft, validate, trial). The user publishes it; "
+                "then review this change again."
+            )
+        if not issues:
+            result["request_id"] = str(cls.change_request(user.id, change, revision))
+        return loads(dumps(result)), lib, writes, bindings
+
+    @classmethod
+    async def review_config(cls, change: LibraryConfig, user: UserInfo) -> dict:
+        """Read a library's ingestion settings, or preview changing them.
+
+        Nothing is saved. A naming template is previewed with the organizer's own
+        path planning on sample works, without touching files or metadata.
+
+        Args:
+            change: Library plus the settings and bindings to change, if any.
+            user: Current administrator.
+
+        Returns:
+            Current settings and bindings in execution order, workflow choices, the
+            requested setting and binding changes, resulting order, naming samples,
+            scope and timing notes, located issues, the `revision` and, when valid,
+            a `request_id` for this exact review.
+
+        Raises:
+            ForbiddenException: If the account cannot configure libraries.
+            NotFoundException: If the library does not exist.
+        """
+        result, _, _, _ = await cls._review_config(change, user)
+        return result
+
+    @classmethod
+    async def _library_state(cls, lib: MediaLib) -> dict[str, Any]:
+        """Read a library's stored ingestion settings.
+
+        Args:
+            lib: Stored library.
+
+        Returns:
+            Language, naming template and bound workflow IDs in order.
+        """
+        return {
+            "language": lib.language,
+            "rename_template": lib.rename_template,
+            "workflow_ids": await FlowTrigger.filter(
+                category=GraphCategory.INGEST, rel_id=lib.id
+            )
+            .order_by("priority")
+            .values_list("graph_id", flat=True),
+        }
+
+    @classmethod
+    async def _apply_config(
+        cls, body: MediaChangeApply, change: LibraryConfig, key: str, user: UserInfo
+    ) -> dict[str, Any]:
+        """Recheck and save one configuration together with its receipt.
+
+        Args:
+            body: Confirmed request.
+            change: Reviewed configuration.
+            key: Account-scoped request identity.
+            user: Current administrator.
+
+        Returns:
+            Shared outcome described by `apply_change`.
+        """
+        base: dict[str, Any] = {
+            "action": MediaAction.CONFIGURE,
+            "library_id": change.library_id,
+        }
+        try:
+            review, lib, _, _ = await cls._review_config(
+                change, user, preview=not body.confirmed
+            )
+        except NotFoundException:
+            if not await MediaLib.exists(id=change.library_id):
+                return {
+                    "applied": False,
+                    "outcome": "absent",
+                    **base,
+                    "message": "The library no longer exists; nothing was saved.",
+                }
+            raise
+        base["library_name"] = lib.name
+        refused = await cls._checked(body, review, base)
+        if refused is not None:
+            return refused
+        try:
+            async with in_transaction():
+                # the library editor may have saved since the check above
+                current, _, writes, bindings = await cls._review_config(
+                    change, user, preview=False
+                )
+                refused = await cls._checked(body, current, base)
+                if refused is not None:
+                    return refused
+                if writes:
+                    await MediaLib.filter(id=lib.id).update(**writes)
+                if bindings is not None:
+                    await FlowTriggerService.bind_triggers(
+                        GraphCategory.INGEST, lib.id, bindings
+                    )
+                result = loads(
+                    dumps(
+                        {
+                            "applied": True,
+                            "outcome": "configured",
+                            **base,
+                            "settings": current["settings"],
+                            "bindings_change": current["bindings_change"],
+                            "proposed_bindings": current["proposed_bindings"],
+                            "proposed_binding_count": current["proposed_binding_count"],
+                            "proposed_binding_order": current["proposed_binding_order"],
+                            "path": f"/medialibs/{lib.id}",
+                            "message": "Saved; nothing was scanned, rescraped or "
+                            "organized. Later work uses these settings as reviewed.",
+                        }
+                    )
+                )
+                await MediaChangeReceipt.create(
+                    key=key,
+                    action=MediaAction.CONFIGURE,
+                    lib_id=lib.id,
+                    claimed=True,
+                    result=result,
+                )
+        except Exception:
+            logger.exception("Failed to save a library configuration")
+            try:
+                receipt = await MediaChangeReceipt.get_or_none(key=key)
+            except Exception:
+                return {
+                    "applied": None,
+                    "outcome": "uncertain",
+                    **base,
+                    "message": "The save outcome could not be read. Repeat this "
+                    "request to recover; committed saves are replayed, and a "
+                    "rolled-back save can be retried safely.",
+                }
+            if receipt is not None:
+                return await cls._replay(receipt, user)
+            return cls._failed(base)
+        return {**result, "replayed": False}
+
+    @classmethod
+    async def apply_change(cls, body: MediaChangeApply, user: UserInfo) -> dict:
+        """Apply a confirmed scan, rescrape or configuration at most once.
+
+        Scans and rescrapes claim a receipt before dispatch; configuration writes
+        and their receipt commit together. Retries replay committed outcomes.
+        Work still running after a few seconds continues in the background and
+        records its outcome later.
 
         Args:
             body: Request ID, the exact reviewed change and revision, and the
@@ -750,8 +1302,8 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             user: Current administrator; permissions and inputs are rechecked.
 
         Returns:
-            `scanned`, `submitted`, `already_scanning`, `rescraped` or `partial`
-            outcomes, `running` work, `replayed` outcomes, or `conflict`,
+            `scanned`, `submitted`, `already_scanning`, `rescraped`, `partial` or
+            `configured` outcomes, `running` work, `replayed` outcomes, or `conflict`,
             `pending`, `stale`, `confirmation_required`, located issues, an
             `absent` target, a `failed` change known not to have applied, or an
             `uncertain` outcome to inspect rather than repeat.
@@ -784,7 +1336,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             return task.result()
         receipt = await MediaChangeReceipt.get_or_none(key=key)
         target = {}
-        if isinstance(body.change, LibraryScan):
+        if isinstance(body.change, LibraryScan | LibraryConfig):
             target = {
                 "library_id": body.change.library_id,
                 "path": f"/medialibs/{body.change.library_id}",
@@ -848,6 +1400,10 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                         return await cls._replay(receipt, user)
                     if isinstance(body.change, LibraryScan):
                         return await cls._apply_scan(body, body.change, key, user)
+                    if isinstance(body.change, LibraryConfig):
+                        # different reviews of one library must recheck in sequence
+                        with submission_lock(f"media-library:{body.change.library_id}"):
+                            return await cls._apply_config(body, body.change, key, user)
                     # different reviews of the same item must recheck in sequence
                     with submission_lock(f"media-item:{body.change.item_id}"):
                         return await cls._apply_rescrape(
@@ -868,8 +1424,8 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
 
         Returns:
             The recorded outcome, or `uncertain` for a claim without one, with
-            the library's scan state or the item's title now, or `None` once
-            removed.
+            the library's scan state or settings or the item's title now, or `None`
+            once removed. Later edits are reported, never overwritten.
 
         Raises:
             ForbiddenException: If the account can no longer read the library.
@@ -884,12 +1440,15 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 current = {
                     "scanning": Sanic.get_app().ctx.lib_watcher.is_scanning(lib.dir)
                 }
+        elif receipt.action == MediaAction.CONFIGURE:
+            if lib := await MediaLib.get_or_none(id=receipt.lib_id):
+                current = await cls._library_state(lib)
         elif item := await MediaItem.get_or_none(id=receipt.item_id):
             current = {"title": item.title, "year": item.year}
         target = (
-            {"library_id": receipt.lib_id}
-            if receipt.action == MediaAction.SCAN
-            else {"item_id": receipt.item_id, "library_id": receipt.lib_id}
+            {"item_id": receipt.item_id, "library_id": receipt.lib_id}
+            if receipt.action == MediaAction.RESCRAPE
+            else {"library_id": receipt.lib_id}
         )
         return loads(
             dumps(

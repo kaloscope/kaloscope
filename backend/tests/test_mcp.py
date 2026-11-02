@@ -253,6 +253,7 @@ def test_protocol(mode):
                 "apply_download_task_action",
                 "review_library_scan",
                 "review_media_rescrape",
+                "review_library_config",
                 "apply_media_change",
             }
             for tool in result.tools:
@@ -369,7 +370,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 39
+            assert len(response_json(response)["result"]["tools"]) == 40
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

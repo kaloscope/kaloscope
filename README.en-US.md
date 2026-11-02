@@ -206,8 +206,8 @@ and downloader credentials. Provider results include disabled configurations to 
 
 After connecting, an AI client can inspect logs and media, generate, validate, preview, save and restore workflow drafts,
 search indexers, create download plans or one-time downloads, update or delete download plans, manage workflow schedules,
-and pause, resume, retry or delete individual download tasks. Movie and TV libraries support confirmed scans and rescraping
-with a user-selected candidate.
+and pause, resume, retry or delete individual download tasks. Movie and TV libraries support confirmed scans, rescraping
+with a user-selected candidate, and changes to ingestion bindings, metadata language and naming templates.
 
 Present changes for the user's confirmation before applying them. Reuse the original request identity when retrying to
 read its recorded outcome. HTTP probes make real requests; candidate searches and workflow trials can execute HTTP,

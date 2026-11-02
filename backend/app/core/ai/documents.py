@@ -272,7 +272,7 @@ TASK_ACTION_FACTS = (
     "message",
 )
 
-# scan and rescrape identities, choices and outcomes retained for confirmation
+# media change identities, choices and outcomes retained for confirmation
 MEDIA_CHANGE_FACTS = (
     "valid",
     "issues",
@@ -286,6 +286,8 @@ MEDIA_CHANGE_FACTS = (
     "query",
     "candidates",
     "candidate",
+    "settings",
+    "bindings_change",
     "revision",
     "request_id",
     "applied",
@@ -330,6 +332,7 @@ def tool_facts(result: dict) -> dict:
     elif result.get("name") in {
         "review_library_scan",
         "review_media_rescrape",
+        "review_library_config",
         "apply_media_change",
     }:
         data = {key: data[key] for key in MEDIA_CHANGE_FACTS if key in data}

@@ -163,7 +163,7 @@ class Migration(migrations.Migration):
                 ('created_at', fields.DatetimeField(null=True, auto_now=False, auto_now_add=True)),
                 ('updated_at', fields.DatetimeField(null=True, auto_now=True, auto_now_add=False)),
                 ('key', fields.CharField(unique=True, max_length=64)),
-                ('action', fields.CharEnumField(description='SCAN: scan\nRESCRAPE: rescrape', enum_type=MediaAction, max_length=16)),
+                ('action', fields.CharEnumField(description='SCAN: scan\nRESCRAPE: rescrape\nCONFIGURE: configure', enum_type=MediaAction, max_length=16)),
                 ('lib_id', fields.IntField()),
                 ('item_id', fields.IntField(null=True)),
                 ('graph_id', fields.IntField(null=True)),

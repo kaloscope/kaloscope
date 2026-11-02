@@ -1588,6 +1588,28 @@ def _binding_revision(rows: list[FlowTrigger]) -> str:
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
+def workflow_fact(graph: FlowGraph, lib_type: LibType) -> dict[str, Any]:
+    """Describe a workflow's usability for a library, apart from any binding.
+
+    Args:
+        graph: Workflow to describe.
+        lib_type: Type of the library.
+
+    Returns:
+        Workflow identity, whether normal ingestion runs it now and whether its
+        published definition produces this library's metadata (`compatible`).
+    """
+    executable = graph.category == GraphCategory.INGEST and graph.state != (
+        GraphState.DRAFT
+    )
+    return {
+        "workflow_id": graph.id,
+        "workflow_name": graph.name,
+        "executable": executable,
+        "compatible": executable and output_issue(lib_type, graph.definition) is None,
+    }
+
+
 def _binding_fact(row: FlowTrigger, lib_type: LibType) -> dict[str, Any]:
     """Describe one stored binding, separating configuration from executability.
 
@@ -1596,21 +1618,12 @@ def _binding_fact(row: FlowTrigger, lib_type: LibType) -> dict[str, Any]:
         lib_type: Type of the bound library.
 
     Returns:
-        Workflow identity, order and execution settings, whether normal ingestion
-        runs it now and whether its published definition produces this library's
-        metadata (`compatible`).
+        Workflow facts with the binding's order and execution settings.
     """
-    graph = row.graph
-    executable = graph.category == GraphCategory.INGEST and graph.state != (
-        GraphState.DRAFT
-    )
     return {
-        "workflow_id": graph.id,
-        "workflow_name": graph.name,
+        **workflow_fact(row.graph, lib_type),
         "order": row.priority,
         "asynchronous": row.asynchronous,
-        "executable": executable,
-        "compatible": executable and output_issue(lib_type, graph.definition) is None,
     }
 
 

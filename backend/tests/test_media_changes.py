@@ -1257,7 +1257,9 @@ def test_rescrape_conversation(monkeypatch, tmp_path, verbose):
     assert [done.event for done, _ in turns] == ["done", "done", "error", "done"]
     # media changes appear after reading media, or after a shown review or list
     assert offered[0] == set()
-    assert offered[1] == offered[3] == offered[6] == tools.MEDIA_CHANGE_TOOLS
+    assert offered[1] == tools.MEDIA_CHANGE_TOOLS
+    # a follow-up turn offers only the kind it continues, keeping room for history
+    assert offered[3] == offered[6] == {"review_media_rescrape", "apply_media_change"}
     candidates = listed[1]["data"]["candidates"]
     assert len(candidates) == 3 and "request_id" not in listed[1]["data"]
     preview, same_turn = reviewed[0]["data"], reviewed[1]["data"]
@@ -1511,11 +1513,15 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
         schema["function"]["name"]: schema
         for schema in tools.tool_schemas(admin, media_change=True)
     }
-    added = [schemas[name] for name in sorted(tools.MEDIA_CHANGE_TOOLS)]
+    added = [
+        schemas[name]
+        for name in sorted(tools.MEDIA_CHANGE_TOOLS - {"review_library_config"})
+    ]
 
     # results stay small; the tools cost context only once unlocked
     assert len(dumps(listed)) < 1500 and len(dumps(preview)) < 2500
     assert len(dumps(scan)) < 1500 and len(dumps(added)) < 2100
+    assert len(dumps(schemas["review_library_config"])) < 1500
     assert not tools.MEDIA_CHANGE_TOOLS & {
         schema["function"]["name"] for schema in tools.tool_schemas(admin)
     }
