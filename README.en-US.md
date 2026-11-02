@@ -147,12 +147,18 @@ The parameters used above are described below.
 - Installable on desktop and mobile devices as a [`PWA`](https://web.dev/explore/progressive-web-apps)
 - PWA Theme color stays synchronized with the active application Theme
 
-## Read-only MCP Access
+## MCP Access
 
 MCP clients can connect directly to Kaloscope over Streamable HTTP to inspect workflows,
 media libraries and metadata, download progress, schedules, and AI provider settings. The `/_api/mcp` endpoint uses Kaloscope's
 existing port; clients do not need Python, a source checkout, or a bridge process. MCP reuses the application's
-business services and user permissions through independent access tokens. It exposes no editing, publishing, or execution tools.
+business services and user permissions through independent access tokens. It also supports draft editing, workflow trials,
+and confirmed changes to plans, download tasks, and media.
+
+Tokens default to read-only access. Choose read-write access for tools that save drafts, probe HTTP requests, search
+indexers, run workflow trials, or apply changes. Account permissions still apply: workflow editing, plan management,
+task deletion and media changes require an administrator; task pause, resume and retry follow existing download permissions.
+Read-only access includes validation and preview tools; rescrape candidate previews actually run the scraper workflow.
 
 After signing in, create and copy a token under **Personal Settings → Access Tokens**. The page provides
 your instance's MCP URL and authentication instructions, shows token status and last use, and lets you delete tokens.
@@ -179,6 +185,8 @@ Signing out of the web application does not invalidate MCP tokens. After expirat
 generate a replacement and update the client configuration.
 Keep tokens out of tool arguments and project files. Use HTTPS for remote connections.
 
+Common query tools are listed below; discover the full tool list and argument definitions through your client.
+
 | Tool                   | Purpose                                                                            |
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | `list_workflows`       | Page through accessible workflows, filtered by name, category, and state           |
@@ -196,9 +204,16 @@ Paginated tools return at most 100 items per page. Media and schedules follow th
 permissions. Download tasks retain the download page's shared visibility, but exclude source links, file lists,
 and downloader credentials. Provider results include disabled configurations to help diagnose invalid AI nodes.
 
-After connecting, ask your AI assistant to diagnose workflow failures, compare AI node settings with configured providers,
-find indexed media, or summarize failed downloads. All tools are read-only: none edit, publish, execute,
-download, scan, or run model inference.
+After connecting, an AI client can inspect logs and media, generate, validate, preview, save and restore workflow drafts,
+search indexers, create download plans or one-time downloads, update or delete download plans, manage workflow schedules,
+and pause, resume, retry or delete individual download tasks. Movie and TV libraries support confirmed scans and rescraping
+with a user-selected candidate.
+
+Present changes for the user's confirmation before applying them. Reuse the original request identity when retrying to
+read its recorded outcome. HTTP probes make real requests; candidate searches and workflow trials can execute HTTP,
+script, file and AI nodes. A queued or submitted operation does not establish download, scraping or ingestion completion.
+Workflow publication and indexer login remain user actions in the web interface. No tool directly deletes workflows or
+cancels running workflows.
 
 ## Star History
 
