@@ -142,6 +142,50 @@ def apply_changes(document: dict, changes: list[GraphEdit]) -> GraphDocument:
     return GraphDocument(nodes=list(nodes.values()), edges=list(edges.values()))
 
 
+def graph_outline(document: dict) -> dict:
+    """Outline a proposed graph so a later round need not reread it.
+
+    Args:
+        document: Complete graph with nodes and edges.
+
+    Returns:
+        Each node's type and authored fields, and every edge's endpoints. Short
+        values appear verbatim and longer ones as their length, so decisions stay
+        visible after their tool call is compacted. Large graphs omit field values.
+    """
+
+    def outline(limit: int) -> dict:
+        """Render the graph with field values up to a size.
+
+        Args:
+            limit: Longest verbatim field value in bytes; 0 omits every value.
+
+        Returns:
+            JSON-compatible graph outline.
+        """
+        nodes = {}
+        for node in document["nodes"]:
+            fields = {}
+            for key, value in node["data"].items():
+                encoded = value if isinstance(value, str) else dumps(value).decode()
+                fields[key] = (
+                    encoded if len(encoded) <= limit else f"<{len(encoded)} bytes>"
+                )
+            fields["$schema"] = str(node["data"].get("$schema"))
+            nodes[node["id"]] = fields
+        return {
+            "nodes": nodes,
+            "edges": [
+                f"{edge['source']}.{edge.get('sourceHandle')}>"
+                f"{edge['target']}.{edge.get('targetHandle')}"
+                for edge in document["edges"]
+            ],
+        }
+
+    result = outline(160)
+    return result if len(dumps(result)) <= 2000 else outline(0)
+
+
 def value_summary(value: Any, *, limit: int = 1200) -> Any:
     """Describe large values without confusing a sample with a complete value.
 
@@ -406,6 +450,8 @@ def tool_facts(result: dict) -> dict:
                 if len(dumps([*facts[key], item])) > 1200:
                     break
                 facts[key].append(item)
+        elif key == "canvas":
+            facts[key] = value_summary(value, limit=2000)
         elif key == "readiness":
             facts[key] = _readiness_facts(value)
         elif key == "validation":

@@ -529,7 +529,7 @@
                     </li>
                   {/each}
                 </ul>
-              {:else if /^\s*<(?:tool_calls|function_calls|invoke)(?:[\s>]|$)/.test(segment.text)}
+              {:else if /^\s*<(?:｜|(?:tool_calls|function_calls|invoke)(?:[\s>]|$))/.test(segment.text)}
                 <p class="text-sm leading-6 text-base-content/70">{$_('assistant.invalid_tool_call')}</p>
               {:else}
                 <AssistantMarkdown source={segment.text} />

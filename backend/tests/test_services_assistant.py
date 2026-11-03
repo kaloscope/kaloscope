@@ -735,6 +735,27 @@ def test_protocol_text(monkeypatch, size, tag):
     execute.assert_not_awaited()
 
 
+@pytest.mark.parametrize("size", [1, 3, 300])
+def test_native_protocol_text(monkeypatch, size):
+    token = "\uff5c\uff5cDSML\uff5c\uff5c"
+    content = f'\n\n<{token} calls>\n<{token} invoke name="x">'
+    configure(
+        monkeypatch,
+        lambda _: response(
+            [
+                chunk({"content": content[i : i + size]})
+                for i in range(0, len(content), size)
+            ]
+            + [chunk(finish="stop")]
+        ),
+    )
+
+    events = asyncio.run(collect())
+
+    assert events[-1].data == {"code": "ai_response_invalid"}
+    assert not any(event.event == "text_delta" for event in events)
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -788,6 +809,93 @@ def test_canvas_context_exhausted(monkeypatch):
     assert events[-1].data == {"code": "assistant_context_limit"}
     assert prepare.await_count == 2
     execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "code", [ErrorCode.ASSISTANT_CONTEXT_LIMIT, ErrorCode.ASSISTANT_COMPACTION_FAILED]
+)
+def test_canvas_final_reply(monkeypatch, code):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            call = call_delta("preview_workflow_draft")
+            return response([chunk({"tool_calls": [call]}, "tool_calls")])
+        return response([chunk({"role": "assistant", "content": "Kept."}, "stop")])
+
+    configure(monkeypatch, handler)
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    prompt = [{"role": "user", "content": "Build the canvas"}]
+    prepare = AsyncMock(
+        side_effect=[
+            (list(prompt), usage, False),
+            KaloscopeException(code),
+            (list(prompt), usage, True),
+        ]
+    )
+    monkeypatch.setattr(service, "prepare_context", prepare)
+    execute = AsyncMock(
+        return_value={
+            "ok": True,
+            "data": {"proposal_snapshot_id": 9, "sample": "x" * 40000},
+        }
+    )
+    monkeypatch.setattr(service, "execute_tool", execute)
+    turn = make_turn(
+        context={"page_type": "workflow_designer", "editable": True, "snapshot_id": 1}
+    )
+
+    events = asyncio.run(collect(turn))
+
+    assert events[-1].event == "done", events[-1].data
+    assert requests[-1]["tool_choice"] == "none"
+    assert "tool-call syntax" in requests[-1]["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("topic", "hidden"), [("html_indexer", True), ("json_indexer", False)]
+)
+def test_recipe_catalog(monkeypatch, topic, hidden):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                call_delta(
+                                    "get_workflow_reference",
+                                    json.dumps({"topic": topic}),
+                                )
+                            ],
+                        },
+                        "tool_calls",
+                    )
+                ]
+            )
+        return response([chunk({"role": "assistant", "content": "ok"}, "stop")])
+
+    configure(monkeypatch, handler)
+    context = {
+        "page_type": "workflow_designer",
+        "resource_id": 7,
+        "draft_version": 0,
+        "editable": True,
+        "snapshot_id": 3,
+    }
+
+    events = asyncio.run(collect(make_turn(context=context)))
+
+    assert events[-1].event == "done"
+    names = {tool["function"]["name"] for tool in requests[1]["tools"]}
+    assert "preview_workflow_draft" in names and "list_workflows" not in names
+    assert ("list_node_types" not in names) is hidden
+    assert ("get_workflow" not in names) is hidden
 
 
 @pytest.mark.parametrize("designer", [False, True])

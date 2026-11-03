@@ -23,6 +23,7 @@ from app.core.ai.documents import (
     GraphProposal,
     GraphReference,
     apply_changes,
+    graph_outline,
     tool_facts,
     value_summary,
 )
@@ -43,7 +44,11 @@ from app.core.ai.queries import (
 )
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
-from app.core.flow.reference import compact_node_schemas, get_workflow_reference
+from app.core.flow.reference import (
+    SELF_CONTAINED_RECIPES,
+    compact_node_schemas,
+    get_workflow_reference,
+)
 from app.models.assistant import (
     DOWNLOAD_PATHS,
     MEDIA_PATH,
@@ -1285,7 +1290,15 @@ async def execute_tool(
                                 "draft_version": args.draft_version,
                                 "snapshot_id": args.snapshot_id,
                             },
-                            **value_page(value, args.offset, args.limit),
+                            # the default counts items; a field needs its whole text
+                            **value_page(
+                                value,
+                                args.offset,
+                                2000
+                                if isinstance(value, str)
+                                and "limit" not in args.model_fields_set
+                                else args.limit,
+                            ),
                         }
                     elif isinstance(args, WorkflowValidation):
                         result = (
@@ -1308,7 +1321,7 @@ async def execute_tool(
                                 "workflow/version and the latest successful "
                                 "proposal_snapshot_id, or the page snapshot for "
                                 "the first edit. Do not use a saved or historical "
-                                "base.",
+                                f"base. Current snapshot_id: {canvas_snapshot_id}.",
                             )
                         proposal = apply_changes(document, args.changes)
                         (
@@ -1340,6 +1353,7 @@ async def execute_tool(
                             "snapshot_id": args.snapshot_id,
                         }
                         result["requested_change_count"] = len(args.changes)
+                        result["canvas"] = graph_outline(proposal.model_dump())
                         result["comparison"] = "saved_draft"
                         result["pre_existing_change_count"] = baseline_changes
                         result["base_kind"] = (
@@ -1390,7 +1404,11 @@ async def execute_tool(
                         args.workflow_id, user, conversation_id
                     )
                 case ReferenceQuery():
-                    result = get_workflow_reference(args.topic, args.include_nodes)
+                    # the model's budget cannot afford a bundle the text already covers
+                    result = get_workflow_reference(
+                        args.topic,
+                        args.include_nodes and args.topic not in SELF_CONTAINED_RECIPES,
+                    )
                 case HTTPProbe():
                     result = await probe_http_request(args, user)
                 case TemplateValidation():

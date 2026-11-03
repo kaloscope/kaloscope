@@ -766,6 +766,71 @@ def test_extraction_budget(monkeypatch, size, valid):
         assert "exceeds 8000 bytes" in result.formatted.error
 
 
+def probe_rows(monkeypatch, formatter, rows=75):
+    """Probe a page of long rows through the real formatter path.
+
+    Args:
+        monkeypatch: Pytest fixture replacing the network transport.
+        formatter: Exact formatter under test.
+        rows: Rows in the page.
+
+    Returns:
+        Probe result.
+    """
+    page = "".join(
+        f'<tr><td><a href="/view/{n}" title="T{n}">{"x" * 300}</a></td></tr>'
+        for n in range(rows)
+    )
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(200, text=f"<table>{page}</table>")
+        ),
+    )
+    return asyncio.run(
+        authoring.probe_http_request(
+            HTTPProbe(request={"url": "https://example.test"}, formatter=formatter),
+            ADMIN,
+        )
+    )
+
+
+def test_probe_long_list(monkeypatch):
+    result = probe_rows(
+        monkeypatch,
+        '{"pages": 1, "cards": [{% for r in response.text|xpath_all("//tr") %}'
+        '{% if not loop.first %},{% endif %}{"id": {{ loop.index }}, '
+        '"title": {{ r|xpath_first("string(.)")|tojson }}}{% endfor %}]}',
+    )
+
+    formatted = result.formatted
+    assert formatted.valid
+    assert [card["id"] for card in formatted.value["cards"]] == [1, 2, 3]
+    assert formatted.value["pages"] == 1
+    assert formatted.omitted_items == {"cards": 72}
+
+
+def test_probe_short_list(monkeypatch):
+    result = probe_rows(
+        monkeypatch,
+        '{"ids": {{ response.text|xpath_all("//a/@title")|tojson }}}',
+        rows=5,
+    )
+
+    assert result.formatted.value == {"ids": ["T0", "T1", "T2", "T3", "T4"]}
+    assert result.formatted.omitted_items is None
+
+
+def test_probe_formatter_shape(monkeypatch):
+    result = probe_rows(
+        monkeypatch, '{{ response.text|xpath_first("//a")|outer_html|tojson }}'
+    )
+
+    assert result.formatted.error.startswith("Expected a JSON object.")
+    assert '{"row":' in result.formatted.error
+
+
 def test_response_headers(monkeypatch):
     monkeypatch.setattr(
         authoring,

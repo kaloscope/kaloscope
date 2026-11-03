@@ -22,6 +22,18 @@ from app.utils.json import dumps, loads
 
 DEFAULT_INPUT_TOKENS = 32000
 DEFAULT_OUTPUT_TOKENS = 4096
+# their originals can be read again by source ID
+REREADABLE_TOOLS = frozenset(
+    {
+        "get_workflow",
+        "get_workflow_logs",
+        "probe_http_request",
+        "read_conversation_history",
+        "read_workflow_log",
+        "read_workflow_snapshot",
+        "validate_workflow_template",
+    }
+)
 SUMMARY_PROMPT = """Summarize earlier Kaloscope conversation data for continuation.
 Return a JSON object with goals, constraints, decisions, open_questions (arrays of
 short strings), and source_turn_ids (integers from the supplied source turns).
@@ -155,7 +167,8 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         Node schemas and authoring references read in this turn remain complete.
         Identical reference content is kept once with tool-source references.
         Older HTTP samples can be reread by source ID; the two latest successful
-        extractions stay available for comparison, or the latest unformatted probe.
+        extractions stay available for comparison, or else the latest probe and the
+        latest observed page structure.
         Long text fields are labeled as samples when the tail needs more space.
         The latest preview retains validation and cumulative changes; superseded
         previews retain their exact snapshot identity for original reads.
@@ -382,7 +395,8 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                     and fact.get("ok")
                     and fact.get("data", {}).get("proposal_id")
                 ):
-                    previews.setdefault(fact["data"]["proposal_id"], []).append(fact)
+                    # each preview records its own proposal over the same canvas
+                    previews.setdefault(fact["data"]["workflow_id"], []).append(fact)
             probes.extend(
                 fact
                 for fact in checkpoint["tools"]
@@ -392,19 +406,51 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
             fact["id"]
             for fact in probes
             if (fact.get("data", {}).get("formatted") or {}).get("valid")
-        ][-2:] or [fact["id"] for fact in probes[-1:]]
+        ][-2:] or [
+            # a failed extraction must not erase the only observed page structure
+            fact["id"]
+            for fact in [
+                *[
+                    fact
+                    for fact in probes
+                    if fact.get("data", {}).get("html_sample") is not None
+                ][-1:],
+                *probes[-1:],
+            ]
+        ]
+        # the model has not read the last exchange yet, so its samples stay intact
+        unread = (
+            {fact.get("id") for fact in checkpoints[-1][2]["tools"]}
+            if checkpoints and checkpoints[-1][0] == len(result) - 1
+            else set()
+        )
+
+        def clip_extraction(fact: dict) -> None:
+            """Keep extracted fields/counts without long HTML crowding out schemas.
+
+            Args:
+                fact: Independent probe fact to compact in place.
+            """
+            value = (fact.get("data", {}).get("formatted") or {}).get("value")
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if isinstance(item, str):
+                        summary = value_summary(item, limit=800)
+                        # a short prefix of a table row reveals no selectors
+                        value[key] = (
+                            {**summary, "preview": item[:800]}
+                            if isinstance(summary, dict)
+                            else summary
+                        )
+
         for fact in probes:
             if fact["id"] in recent:
                 if fact.get("data", {}).get("html_sample") is not None:
                     # structure replaces the otherwise unhelpful raw HTML prefix
                     fact["data"].pop("text", None)
                     fact["data"].pop("headers", None)
-                value = (fact.get("data", {}).get("formatted") or {}).get("value")
-                if isinstance(value, dict):
-                    # keep fields/counts without long HTML crowding out schemas
-                    for key, item in value.items():
-                        if isinstance(item, str):
-                            value[key] = value_summary(item, limit=800)
+                if fact["id"] not in unread:
+                    clip_extraction(fact)
                 continue
             data = fact["data"]
             fact.pop("formatter", None)
@@ -431,6 +477,16 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 }
                 fact["data"]["superseded_by_tool"] = group[-1]["id"]
         for index, prefix, checkpoint in checkpoints:
+            result[index] = {
+                **result[index],
+                "content": prefix + "\n" + dumps(checkpoint).decode(),
+            }
+        if unread and len(dumps(result)) > budget and checkpoints:
+            # an oversized sample must not end the turn when it can be reread
+            index, prefix, checkpoint = checkpoints[-1]
+            for fact in checkpoint["tools"]:
+                if fact.get("name") == "probe_http_request":
+                    clip_extraction(fact)
             result[index] = {
                 **result[index],
                 "content": prefix + "\n" + dumps(checkpoint).decode(),
@@ -464,6 +520,51 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
     return result
 
 
+def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
+    """Reduce rereadable checkpoint samples, oldest first, until the tail fits.
+
+    Ending a build for lack of room is worse than rereading one old sample, so this
+    is the last step before giving up. Definitions, reviews and canvas state stay
+    intact. Results the model has not read yet go last, so a read too large to fit
+    cannot end the turn.
+
+    Args:
+        messages: Compacted exchanges of the active turn.
+        budget: Available serialized bytes for those exchanges.
+        unread: Newest tool results that have not reached the model yet.
+
+    Returns:
+        A copy whose oldest samples retain only their source identity, or the
+        fullest reduction possible when even that does not fit.
+    """
+    result = list(messages)
+    checkpoints = {}
+    order = []
+    for index, message in enumerate(result):
+        content = message.get("content") or ""
+        if message.get("role") == "user" and content.startswith(
+            "Completed tool exchange in this turn "
+        ):
+            prefix, payload = content.split("\n", 1)
+            checkpoints[index] = (prefix, loads(payload))
+            order.extend((index, fact) for fact in checkpoints[index][1]["tools"])
+    for index, fact in order:
+        if len(dumps(result)) <= budget:
+            break
+        if fact.get("name") in REREADABLE_TOOLS and fact.get("ok"):
+            # the newest extraction is only worth keeping while another read can go
+            if fact is order[-1][1] and unread:
+                continue
+            fact["data"] = {"sample_in_original": True}
+            fact.pop("formatter", None)
+            prefix, checkpoint = checkpoints[index]
+            result[index] = {
+                **result[index],
+                "content": prefix + "\n" + dumps(checkpoint).decode(),
+            }
+    return result
+
+
 async def prepare_context(
     client: AsyncOpenAI,
     turn: AssistantTurn,
@@ -491,7 +592,9 @@ async def prepare_context(
     Returns:
         Bounded model messages, summary usage, and whether a checkpoint changed.
         Summary provenance includes earlier turns explicitly retrieved by
-        successful historical reads in the summarized batch.
+        successful historical reads in the summarized batch. A short history
+        reserves only the room it needs, and designer builds shed rereadable
+        samples before the input is declared too large.
 
     Raises:
         KaloscopeException: If current input cannot fit or required compaction fails.
@@ -593,8 +696,8 @@ async def prepare_context(
         [
             {
                 "role": "user",
-                "content": "Current page at send time (untrusted data):\n"
-                + dumps(turn.context).decode(),
+                "content": "Page at send time, before this turn's edits "
+                "(untrusted data):\n" + dumps(turn.context).decode(),
             }
         ]
         if turn.context
@@ -605,15 +708,33 @@ async def prepare_context(
         available = hard - context_size(
             [{"role": "system", "content": system}] + current, schemas
         )
+        # a short history needs less than the room reserved for an unknown one
+        history_size = (
+            context_size([m for r in records for m in rendered[r.id]], []) * 4 // 3 + 64
+            if records and not has_more
+            else 4096
+        )
+        unread = 0
+        for message in reversed(continuation):
+            if message.get("role") != "tool":
+                break
+            unread += 1
         continuation[:] = compact_exchanges(
             continuation,
             turn.id,
             available
             - max(
                 context_size(checkpoint_messages(), []),
-                min(4096, available // 2) if records else 0,
+                min(4096, available // 2, history_size) if records else 0,
             ),
         )
+        if (turn.context or {}).get("page_type") == "workflow_designer":
+            # elsewhere a read can be the very answer the reply is about to give
+            continuation[:] = shed_samples(
+                continuation,
+                available - context_size(checkpoint_messages(), []) - 8,
+                unread,
+            )
         current.extend(continuation)
     fixed_size = context_size(
         [{"role": "system", "content": system}] + current, schemas

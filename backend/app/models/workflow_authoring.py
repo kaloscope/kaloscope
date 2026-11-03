@@ -107,6 +107,11 @@ class TemplateResult(BaseModel):
         exclude_if=lambda value: value is None,
         description="Valid mode=auth result: whether login succeeds and saves $auth.",
     )
+    omitted_items: dict[str, int] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Probe extraction: list items left out of each sampled key.",
+    )
 
 
 class HTTPProbeResult(BaseModel):
