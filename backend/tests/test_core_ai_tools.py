@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 from tortoise import Tortoise
 
 from app.core.ai import tools
+from app.core.ai.documents import graph_outline
 from app.core.exceptions import ErrorCode
 from app.models.assistant import (
     AssistantConversation,
@@ -582,6 +583,53 @@ def test_compact_node_knowledge():
         == original
     )
     assert len(tools.dumps(result)) < len(original) / 2
+
+
+def test_graph_outline():
+    document = {
+        "nodes": [
+            {
+                "id": "fetch",
+                "data": {"$schema": "http", "url": "https://a.test", "body": "x" * 200},
+            },
+            {"id": "end", "data": {"$schema": "search_end"}},
+        ],
+        "edges": [
+            {
+                "source": "fetch",
+                "sourceHandle": "output",
+                "target": "end",
+                "targetHandle": "input",
+            }
+        ],
+    }
+
+    assert graph_outline(document) == {
+        "nodes": {
+            "fetch": {
+                "$schema": "http",
+                "url": "https://a.test",
+                "body": "<200 bytes>",
+            },
+            "end": {"$schema": "search_end"},
+        },
+        "edges": ["fetch.output>end.input"],
+    }
+
+
+def test_graph_outline_large():
+    document = {
+        "nodes": [
+            {"id": f"node-{index}", "data": {"$schema": "http", "url": "u" * 100}}
+            for index in range(30)
+        ],
+        "edges": [],
+    }
+
+    outline = graph_outline(document)
+
+    assert len(outline["nodes"]) == 30
+    assert outline["nodes"]["node-0"]["url"] == "<100 bytes>"
 
 
 def test_preview_budget():

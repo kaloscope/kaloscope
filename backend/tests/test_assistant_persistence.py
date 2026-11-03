@@ -470,7 +470,7 @@ def test_direct_edit_eligibility(monkeypatch, case):
             page = next(
                 message["content"]
                 for message in requests[0]["messages"]
-                if str(message.get("content")).startswith("Current page")
+                if str(message.get("content")).startswith("Page at send time")
             )
 
             assert events[-1].event == "done"
@@ -1226,7 +1226,7 @@ def test_reasoning_history():
 
 @pytest.mark.parametrize("context_first", [False, True])
 def test_duplicate_references(context_first):
-    bundle = get_workflow_reference("html_indexer", include_nodes=True).model_dump(
+    bundle = get_workflow_reference("json_indexer", include_nodes=True).model_dump(
         mode="json", exclude_none=True
     )
     context = get_workflow_reference("context").model_dump(
@@ -1263,7 +1263,7 @@ def test_duplicate_references(context_first):
         )
     original = dumps(exchanges)
 
-    compact = history.compact_exchanges(exchanges, 5, 11000)
+    compact = history.compact_exchanges(exchanges, 5, 9000)
 
     facts = [
         fact
@@ -1276,7 +1276,7 @@ def test_duplicate_references(context_first):
         )
     ]
     data = [fact["data"] for fact in facts]
-    assert len(dumps(compact)) <= 11000
+    assert len(dumps(compact)) <= 9000
     assert sum(item.get("nodes") == bundle["nodes"] for item in data) == 1
     assert sum(item.get("content") == bundle["content"] for item in data) == 1
     assert (
@@ -1294,7 +1294,7 @@ def test_duplicate_references(context_first):
     assert data[2]["context_in_tool"] == "0"
     assert data[3] == {"node_sources": {"http": "1" if context_first else "0"}}
     assert dumps(exchanges) == original
-    assert history.compact_exchanges(compact, 5, 11000) == compact
+    assert history.compact_exchanges(compact, 5, 9000) == compact
 
 
 @pytest.mark.parametrize("changed", [False, True])
@@ -1368,7 +1368,7 @@ def test_schema_examples_compaction(changed):
 
 @pytest.mark.parametrize("markup", [False, True])
 def test_recipe_probe_compaction(markup):
-    bundle = get_workflow_reference("html_indexer", include_nodes=True).model_dump(
+    bundle = get_workflow_reference("json_indexer", include_nodes=True).model_dump(
         mode="json"
     )
     observed = {
@@ -1382,7 +1382,7 @@ def test_recipe_probe_compaction(markup):
         "page_size": 75,
     }
     if markup:
-        observed["row"] = "<tr><td>Observed content</td></tr>" * 70
+        observed["row"] = "<tr><td>Observed content</td></tr>" * 100
     results = [
         {"id": "recipe", "name": "get_workflow_reference", "ok": True, "data": bundle},
         {
@@ -1445,7 +1445,7 @@ def test_recipe_probe_compaction(markup):
     if markup:
         assert value["row"]["truncated"] is True
         assert value["row"]["bytes"] == len(dumps(observed["row"]))
-        assert value["row"]["preview"] == observed["row"][:200]
+        assert value["row"]["preview"] == observed["row"][:800]
         assert {key: item for key, item in value.items() if key != "row"} == {
             key: item for key, item in observed.items() if key != "row"
         }
@@ -1527,8 +1527,177 @@ def test_html_probe_compaction():
     assert dumps(exchanges) == original
 
 
+def probe_exchange(source, formatter=None):
+    """Build one assistant tool exchange around a probe result.
+
+    Args:
+        source: Probe result with its identity.
+        formatter: Formatter argument sent by the model.
+
+    Returns:
+        Paired assistant and tool messages.
+    """
+    return [
+        {
+            "role": "assistant",
+            "reasoning_content": "Private reasoning " * 300,
+            "tool_calls": [
+                {
+                    "id": source["id"],
+                    "function": {
+                        "name": source["name"],
+                        "arguments": dumps(
+                            {"formatter": formatter} if formatter else {}
+                        ).decode(),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": source["id"],
+            "content": dumps(source).decode(),
+        },
+    ]
+
+
+def compact_facts(exchanges, budget=1):
+    """Compact exchanges and flatten their tool facts.
+
+    Args:
+        exchanges: Assistant tool groups.
+        budget: Serialized byte allowance.
+
+    Returns:
+        Tool facts in order.
+    """
+    return [
+        fact
+        for message in history.compact_exchanges(exchanges, 1, budget)
+        for fact in loads(message["content"].split("\n", 1)[1])["tools"]
+    ]
+
+
+def test_failed_probe_keeps_structure():
+    sample = {"table": {"observed_rows": 75, "first_row": ["cell"]}, "sampled": True}
+    sampled = {
+        "id": "sampled",
+        "name": "probe_http_request",
+        "ok": True,
+        "data": {"status_code": 200, "text": "x" * 500, "html_sample": sample},
+    }
+    failed = {
+        "id": "failed",
+        "name": "probe_http_request",
+        "ok": True,
+        "data": {
+            "status_code": 200,
+            "formatted": {"valid": False, "error": "Expected a JSON object."},
+        },
+    }
+
+    facts = compact_facts([*probe_exchange(sampled), *probe_exchange(failed)])
+
+    assert facts[0]["data"]["html_sample"] == sample
+    assert facts[1]["data"]["formatted"]["error"] == "Expected a JSON object."
+
+
+def test_unread_extraction():
+    row = "<tr><td>Observed row</td></tr>" * 60
+    earlier = {
+        "id": "earlier",
+        "name": "probe_http_request",
+        "ok": True,
+        "data": {"formatted": {"valid": True, "value": {"row": row}}},
+    }
+    newest = {**earlier, "id": "newest"}
+    exchanges = [*probe_exchange(earlier), *probe_exchange(newest)]
+
+    facts = compact_facts(exchanges, 3700)
+
+    assert facts[0]["data"]["formatted"]["value"]["row"]["preview"] == row[:800]
+    assert facts[1]["data"]["formatted"]["value"]["row"] == row
+
+
+def test_unread_extraction_overflow():
+    row = "<tr><td>Observed row</td></tr>" * 60
+    newest = {
+        "id": "newest",
+        "name": "probe_http_request",
+        "ok": True,
+        "data": {"formatted": {"valid": True, "value": {"row": row}}},
+    }
+
+    facts = compact_facts(probe_exchange(newest), 1)
+
+    assert facts[0]["data"]["formatted"]["value"]["row"]["preview"] == row[:800]
+
+
+def test_superseded_canvas_previews():
+    outline = {"nodes": {"start": {"$schema": "search_start"}}, "edges": []}
+    previews = [
+        {
+            "id": f"preview-{index}",
+            "name": "preview_workflow_draft",
+            "ok": True,
+            "data": {
+                "workflow_id": 1,
+                "draft_version": 0,
+                "proposal_id": index + 1,
+                "proposal_snapshot_id": index + 10,
+                "base": {"workflow_id": 1, "draft_version": 0, "snapshot_id": 3},
+                "canvas": outline,
+                "validation": {"valid": True, "issues": []},
+            },
+        }
+        for index in range(2)
+    ]
+
+    facts = compact_facts(
+        [message for preview in previews for message in probe_exchange(preview)]
+    )
+
+    assert facts[0]["data"]["superseded_by_tool"] == "preview-1"
+    assert "canvas" not in facts[0]["data"]
+    assert facts[1]["data"]["canvas"] == outline
+
+
+def test_shed_samples():
+    recipe = {
+        "id": "recipe",
+        "name": "get_workflow_reference",
+        "ok": True,
+        "data": {"topic": "html_indexer", "content": "r" * 2000},
+    }
+    probes = [
+        {
+            "id": f"probe-{index}",
+            "name": "probe_http_request",
+            "ok": True,
+            "data": {"formatted": {"valid": True, "value": {"row": "x" * 700}}},
+        }
+        for index in range(3)
+    ]
+    exchanges = [
+        message for source in (recipe, *probes) for message in probe_exchange(source)
+    ]
+    compact = history.compact_exchanges(exchanges, 1, 1)
+
+    shed = history.shed_samples(compact, 3500, 1)
+    facts = [
+        fact
+        for message in shed
+        for fact in loads(message["content"].split("\n", 1)[1])["tools"]
+    ]
+
+    assert facts[0]["data"] == recipe["data"]
+    assert facts[1]["data"] == {"sample_in_original": True}
+    assert facts[3]["data"]["formatted"]["value"]["row"] == "x" * 700
+    assert history.shed_samples(compact, 10**6, 1) == compact
+
+
 def test_incremental_generation_budget():
-    bundle = get_workflow_reference("html_indexer", include_nodes=True).model_dump(
+    bundle = get_workflow_reference("json_indexer", include_nodes=True).model_dump(
         mode="json", exclude_none=True
     )
     sources = [
@@ -2317,6 +2486,104 @@ def test_partial_reply_is_durable(monkeypatch):
             assert record["status"] == "interrupted"
             assert not (await Sessions.owned(conversation["id"], owner)).active_request
             assert source.closed
+
+    asyncio.run(run())
+
+
+def test_short_history_room():
+    source = {
+        "id": "probe",
+        "name": "probe_http_request",
+        "ok": True,
+        "data": {"formatted": {"valid": True, "value": {"row": "x" * 2000}}},
+    }
+    continuation = probe_exchange(source)
+    active = dumps(continuation)
+    # less than the room once reserved for any history, more than this one needs
+    system = "s" * (27904 - len(active) - 1800)
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            earlier = await Sessions.begin(
+                conversation["id"], request("earlier"), owner
+            )
+            await Sessions.finish(earlier, content="Created.", status="complete")
+            current = await Sessions.begin(
+                conversation["id"], request("current"), owner
+            )
+            create = AsyncMock(side_effect=AssertionError("Nothing to summarize"))
+
+            messages, _, _ = await history.prepare_context(
+                completion_client(create),
+                current,
+                owner,
+                system,
+                [],
+                None,
+                continuation,
+            )
+
+            assert continuation[0]["role"] == "assistant"
+            assert continuation[0]["reasoning_content"]
+            assert history.context_size(messages, []) <= 27904
+            create.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_context_sheds_samples():
+    sources = [
+        {
+            "id": f"history-{index}",
+            "name": "read_conversation_history",
+            "ok": True,
+            "data": {"turn_id": 1, "data": "h" * 3000},
+        }
+        for index in range(3)
+    ]
+    recipe = {
+        "id": "recipe",
+        "name": "get_workflow_reference",
+        "ok": True,
+        "data": {"topic": "html_indexer", "content": "r" * 2000},
+    }
+    continuation = [
+        message for source in (recipe, *sources) for message in probe_exchange(source)
+    ]
+    system = "s" * (27904 - 9000)
+
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            current = await Sessions.begin(
+                conversation["id"], request("current"), owner
+            )
+            current.context = {"page_type": "workflow_designer"}
+
+            messages, _, _ = await history.prepare_context(
+                completion_client(AsyncMock()),
+                current,
+                owner,
+                system,
+                [],
+                None,
+                continuation,
+            )
+            facts = [
+                fact
+                for message in continuation
+                for fact in loads(message["content"].split("\n", 1)[1])["tools"]
+            ]
+
+            assert history.context_size(messages, []) <= 27904
+            assert facts[0]["data"] == recipe["data"]
+            assert facts[1]["data"] == {"sample_in_original": True}
+            assert facts[-1]["data"]["data"] == "h" * 3000
 
     asyncio.run(run())
 

@@ -1,6 +1,7 @@
 """Tests for HTML download-indexer authoring, validation and plan readiness."""
 
 import asyncio
+import re
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
@@ -502,6 +503,220 @@ def test_engine_feeds_plans(monkeypatch, runtime):
             )
 
     asyncio.run(run())
+
+
+RECIPE_ROWS = [
+    # the first row of a page may start with a comments link in the same cell
+    {
+        "id": str(100 + index),
+        "comments": index % 2 == 0,
+        "magnet": index % 3 != 0,
+    }
+    for index in range(7)
+]
+
+
+def recipe_page(rows):
+    """Render one fixed-capacity results page for the recipe's own selectors.
+
+    Args:
+        rows: Rows shown on this page.
+
+    Returns:
+        HTML where comment links and missing magnets vary between rows.
+    """
+    cells = "".join(
+        '<tr class="default"><td>cat</td><td>'
+        + (
+            f'<a href="/view/{row["id"]}#comments" title="2 comments">2</a>'
+            if row["comments"]
+            else ""
+        )
+        + f'<a href="/view/{row["id"]}" title="Title {row["id"]}">Title</a></td><td>'
+        + f'<a href="/download/{row["id"]}.torrent">t</a>'
+        + (
+            f'<a href="magnet:?xt=urn:btih:{row["id"] * 13}a">m</a>'
+            if row["magnet"]
+            else ""
+        )
+        + "</td><td> 1 GiB </td></tr>"
+        for row in rows
+    )
+    head = "<thead><tr><th>h</th></tr></thead>"
+    return f'<table class="results">{head}<tbody>{cells}</tbody></table>'
+
+
+def recipe_graph():
+    """Fill the published recipe's own templates for the synthetic site.
+
+    Returns:
+        Graph definition built only from the recipe text and site selectors.
+    """
+    guide = get_workflow_reference("html_indexer").content
+
+    def block(label):
+        """Read a template that follows its label on the next line.
+
+        Args:
+            label: Line prefix naming the template.
+
+        Returns:
+            Template text between its backticks.
+        """
+        return re.search(label + r"[^\n]*:\n`([^\n]*)`", guide).group(1)
+
+    formatter = block("FORMATTER")
+    for name, xpath in {
+        "ROW": "//table[contains(@class,'results')]/tbody/tr",
+        "HREF": ".//a[contains(@href,'/view/')][not(contains(@href,'#'))]/@href",
+        "TITLE": ".//a[contains(@href,'/view/')][not(contains(@href,'#'))]/@title",
+        "MAGNET": ".//a[starts-with(@href,'magnet:')]/@href",
+        "TORRENT": ".//a[contains(@href,'.torrent')]/@href",
+        "SIZE": "normalize-space(./td[4])",
+    }.items():
+        formatter = formatter.replace(name, f'"{xpath}"')
+    nodes = {
+        "start": {
+            "$schema": "search_start",
+            "config": re.search(r"config `([^`]*)`", guide)
+            .group(1)
+            .replace("\\n", "\n"),
+        },
+        "pages": {
+            "$schema": "loop",
+            "expression": re.search(r"expression `([^`]*)`", guide)
+            .group(1)
+            .replace("//N", "//3"),
+            "varname": "source_page",
+        },
+        "fetch": {
+            "$schema": "http",
+            "url": re.search(r"url `([^`]*)`", guide)
+            .group(1)
+            .replace("URL", "https://tracker.test/"),
+            "formatter": formatter,
+        },
+        "end": {
+            "$schema": "search_end",
+            "response": block("RESPONSE").replace("%N", "%3"),
+        },
+    }
+    edges = re.findall(r"(\w+)\.(\w+) -> (\w+)\.(\w+)", guide.split("Edges", 1)[1])
+    return {
+        "nodes": [
+            {"id": key, "type": "node", "position": {"x": 0, "y": 0}, "data": data}
+            for key, data in nodes.items()
+        ],
+        "edges": [
+            {
+                "id": f"{source}-{target}-{target_handle}",
+                "source": source,
+                "sourceHandle": handle,
+                "target": target,
+                "targetHandle": target_handle,
+            }
+            for source, handle, target, target_handle in edges
+            if source != "source"
+        ],
+    }
+
+
+def test_recipe_templates(monkeypatch, runtime):
+    requests = []
+
+    def endpoint(request):
+        requests.append(request)
+        page = int(parse_qs(urlsplit(str(request.url)).query)["p"][0])
+        return httpx.Response(
+            200, text=recipe_page(RECIPE_ROWS[(page - 1) * 3 : page * 3])
+        )
+
+    async def run():
+        async with (
+            database() as (owner, _),
+            httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client,
+        ):
+            runtime.ctx.httpx = client
+            runtime.ctx.flow_engine = FlowEngine.__new__(FlowEngine)
+            monkeypatch.setattr(Sanic, "get_app", lambda *_, **__: runtime)
+            graph, _, _ = await fixture_plan()
+            document = recipe_graph()
+            validation = await FlowGraphService.validate_graph(
+                graph.id, GraphDocument(**document), owner
+            )
+            assert validation.valid, validation
+            await FlowGraph.filter(id=graph.id).update(
+                definition=document, state="published"
+            )
+
+            async def search(page_num, page_size):
+                """Run the published entry for one requested page.
+
+                Args:
+                    page_num: One-based requested page.
+                    page_size: Requested items per page.
+
+                Returns:
+                    Search output.
+                """
+                requests.clear()
+                return await execute(
+                    graph.id,
+                    **{"$start": "search_start"},
+                    keyword="a b/c",
+                    page_num=page_num,
+                    page_size=page_size,
+                )
+
+            first = await search(1, 2)
+            crossing = await search(2, 2)
+            pages = len(requests)
+            across = await search(2, 3)
+            past = await search(4, 3)
+
+            assert [item["id"] for item in first["items"]] == ["100", "101"]
+            assert [item["title"] for item in first["items"]] == [
+                "Title 100",
+                "Title 101",
+            ]
+            # a requested page crossing a source page reads both, in order
+            assert [item["id"] for item in crossing["items"]] == ["102", "103"]
+            assert pages == 2
+            assert [item["id"] for item in across["items"]] == ["103", "104", "105"]
+            assert past == {"items": []}
+            links = {item["id"]: item["link"] for item in first["items"]}
+            assert links["100"] == "https://tracker.test/download/100.torrent"
+            assert links["101"].startswith("magnet:?xt=urn:btih:101")
+            assert first["items"][0]["size"] == "1 GiB"
+            assert "a%20b%2Fc" in str(requests[0].url)
+            assert not check(
+                graph_field(document, "end", "response"),
+                {
+                    "cards": first["items"],
+                    "errors": [],
+                    "downloads": True,
+                    "page_num": 1,
+                    "page_size": 2,
+                },
+            ).issues
+
+    asyncio.run(run())
+
+
+def graph_field(document, node_id, field_id):
+    """Read one field from a graph definition.
+
+    Args:
+        document: Graph definition.
+        node_id: Node to read.
+        field_id: Field to read.
+
+    Returns:
+        Field value.
+    """
+    return next(
+        node["data"][field_id] for node in document["nodes"] if node["id"] == node_id
+    )
 
 
 def test_login_wall(monkeypatch, runtime):

@@ -33,6 +33,7 @@ from app.core.ai.tools import (
     tool_schemas,
 )
 from app.core.exceptions import ErrorCode, KaloscopeException
+from app.core.flow.reference import SELF_CONTAINED_RECIPES
 from app.core.network import NetworkTransport
 from app.models.ai import AIModelSelection, AIProvider, AIProviderPreset
 from app.models.assistant import (
@@ -57,9 +58,12 @@ MAX_CONTEXT_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 FINAL_ANSWER_PROMPT = (
     "End this turn without more tools; tools remain available in later turns. "
-    "Report known facts, remaining unknowns and incomplete work. "
+    "Report known facts, remaining unknowns and incomplete work in plain text, "
+    "without tool-call syntax. "
     "Never invent results or claim unperformed actions succeeded."
 )
+# DeepSeek's native tool-call tokens begin with a full-width bar
+NATIVE_CALL_MARKER = "<\uff5c"
 
 SYSTEM_PROMPT = """You are Kaloscope's workflow assistant. Reply in the user's language.
 Use tools for facts and authorized actions. Never save the canvas, publish,
@@ -71,10 +75,9 @@ New workflow without a canvas: infer name/category/purpose; create_workflow_draf
 FIRST, before reads/probes. End for designer/build handoff. Use supplied/default
 values; ask only missing required inputs, leave unknowns empty. Layout: columns
 >=800px, rows >=600. In designer probe URL first: HTML -> html_indexer, JSON ->
-json_indexer; indexer_auth only for login. Read recipe with include_nodes=true once
-for schemas/context. Empty canvas: add only the start node before planning others.
-Add each ready node
-and its edges sequentially; intermediate graphs may be incomplete. Use each new
+json_indexer; indexer_auth only for login. Read recipe with include_nodes=true once.
+Reasoning may not persist; canvas/results do: put all nodes and edges on canvas
+early, fill fields next; incomplete graphs are fine. Use each new
 proposal_snapshot_id. Validate the complete graph last; don't reread definitions.
 New plans: list_workflows, then get_download_plan_options.creation_rules.
 Edit/delete plans: get_download_plan, review_download_plan_change, await confirmation.
@@ -341,7 +344,9 @@ class AssistantService:
         Keep provider reasoning on active tool exchanges until the whole exchange
         becomes a factual checkpoint. Never stream or persist reasoning as a reply.
         Canvas/recipe generation has a separate output allowance for all providers.
-        Input compaction retains the ordinary context budget.
+        Input compaction retains the ordinary context budget. A self-contained
+        recipe hides schema rereads, and once the canvas has advanced, a context or
+        history-summary failure ends with a tools-free reply instead of an error.
 
         Args:
             client: Isolated SDK client with automatic retries disabled.
@@ -392,6 +397,7 @@ class AssistantService:
             media_change=media_change,
         )
         workflow_authoring = False
+        self_contained = False
         ingestion_authoring = False
         trial_ready = False
         # only a server-confirmed editable designer receives saveable direct edits
@@ -454,7 +460,12 @@ class AssistantService:
                             canvas is not None
                             and canvas_snapshot_id == canvas["snapshot_id"]
                         )
-                        or error.message != ErrorCode.ASSISTANT_CONTEXT_LIMIT
+                        # a failed history summary must not discard the visible canvas
+                        or error.message
+                        not in {
+                            ErrorCode.ASSISTANT_CONTEXT_LIMIT,
+                            ErrorCode.ASSISTANT_COMPACTION_FAILED,
+                        }
                     ):
                         raise
                     finish_only = True
@@ -517,7 +528,7 @@ class AssistantService:
                             text_prefix += delta
                             candidate = text_prefix.lstrip()
                             markers = ("<tool_calls", "<function_calls", "<invoke")
-                            if any(
+                            if candidate.startswith(NATIVE_CALL_MARKER) or any(
                                 candidate.startswith(marker)
                                 and len(candidate) > len(marker)
                                 and candidate[len(marker)] in "> \t\r\n"
@@ -525,7 +536,10 @@ class AssistantService:
                             ):
                                 # protocol text is not an executable call
                                 raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-                            if any(marker.startswith(candidate) for marker in markers):
+                            if any(
+                                marker.startswith(candidate)
+                                for marker in (*markers, NATIVE_CALL_MARKER)
+                            ):
                                 continue
                             delta, text_prefix, text_started = text_prefix, "", True
                         text_length += len(delta.encode("utf-16-le")) // 2
@@ -539,6 +553,7 @@ class AssistantService:
                     "<tool_calls",
                     "<function_calls",
                     "<invoke",
+                    NATIVE_CALL_MARKER,
                 ):
                     raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
                 text_length += len(text_prefix.encode("utf-16-le")) // 2
@@ -804,6 +819,7 @@ class AssistantService:
                 ):
                     # keep full domain catalogs for ordinary turns, focus recipe builds
                     workflow_authoring = True
+                    self_contained |= result["data"]["topic"] in SELF_CONTAINED_RECIPES
                     schemas = tool_schemas(
                         user,
                         authoring=True,
@@ -1003,6 +1019,16 @@ class AssistantService:
                     schema
                     for schema in schemas
                     if schema["function"]["name"]
-                    not in {"list_workflows", "create_workflow_draft", "navigate"}
+                    not in {
+                        "list_workflows",
+                        "create_workflow_draft",
+                        "navigate",
+                        # a self-contained recipe leaves these reads nothing to add
+                        *(
+                            ("list_node_types", "get_workflow")
+                            if self_contained
+                            else ()
+                        ),
+                    }
                 ]
         raise KaloscopeException(ErrorCode.AI_ASSISTANT_LIMIT)

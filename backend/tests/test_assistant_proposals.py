@@ -510,7 +510,57 @@ def test_canvas_chained_edits():
             )
             assert not stale["ok"]
             assert stale["error"]["code"] == "assistant_canvas_changed"
+            assert f"snapshot_id: {latest}" in stale["error"]["guidance"]
             assert await AssistantProposal.filter(call_id="stale-edit").count() == 0
+
+    asyncio.run(run())
+
+
+def test_canvas_outline():
+    async def run():
+        async with database() as env:
+            data = await preview(env, [set_url()], key="outline-edit")
+
+            assert data["canvas"]["nodes"]["http"]["url"] == "https://new.test"
+            assert data["canvas"]["nodes"]["http"]["$schema"] == "http"
+            assert data["canvas"]["edges"] == ["first.output>second.input"]
+
+    asyncio.run(run())
+
+
+def test_snapshot_field_text():
+    async def run():
+        async with database() as env:
+            long_url = "https://new.test/" + "x" * 100
+            data = await preview(env, [set_url(long_url)], key="long-edit")
+            reference = {
+                "workflow_id": env.graph.id,
+                "draft_version": 0,
+                "snapshot_id": data["proposal_snapshot_id"],
+                "node_id": "http",
+            }
+
+            async def read(**arguments):
+                """Read one field through the assistant tool.
+
+                Args:
+                    **arguments: Query arguments added to the shared reference.
+
+                Returns:
+                    Tool data.
+                """
+                result = await tools.execute_tool(
+                    "read_workflow_snapshot",
+                    json.dumps({**reference, **arguments}),
+                    env.owner,
+                    conversation_id=env.conversation,
+                    call_id=f"read-{len(arguments)}",
+                )
+                assert result["ok"], result
+                return result["data"]
+
+            assert (await read(field_id="url"))["data"] == long_url
+            assert (await read(field_id="url", limit=5))["data"] == long_url[:5]
 
     asyncio.run(run())
 

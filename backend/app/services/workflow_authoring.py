@@ -42,6 +42,9 @@ from app.utils.json import dumps, loads_jsonc
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_SAMPLE_CHARS = 2000
 MAX_RENDER_BYTES = 8000
+# a long probe extraction proves its selectors through a few items per list
+MAX_PROBE_VALUE_BYTES = 2000
+PROBE_LIST_SAMPLES = 3
 RESPONSE_HEADERS = {
     "content-type",
     "content-length",
@@ -135,7 +138,9 @@ def validate_workflow_template(
             `auth` also checks the supplied `auth_start` configuration.
         response: Detached probe response for HTTP formatter evaluation only.
             The probe redacts formatter errors before clipping their messages.
-            Probe results retain the parsed value without a duplicate rendering.
+            Probe results retain the parsed value without a duplicate rendering;
+            long lists keep their first items and report the rest in
+            `omitted_items`, so an exact formatter can be tested unchanged.
             Without it, a `response` fixture object with `text` (and optional
             `url`, `status_code`, `headers`) becomes a detached response, so
             formatters using `response.url.join(...)` check supplied page samples.
@@ -165,7 +170,11 @@ def validate_workflow_template(
             else rendered
         )
         if args.mode == "object" and not isinstance(value, dict):
-            return TemplateResult(valid=False, error="Expected a JSON object.")
+            return TemplateResult(
+                valid=False,
+                error="Expected a JSON object."
+                + (' Wrap values, e.g. {"row": {{ value|tojson }}}.' if probed else ""),
+            )
         if args.mode == "array" and not isinstance(value, list):
             return TemplateResult(valid=False, error="Expected a JSON array.")
         business = args.mode in {
@@ -196,6 +205,24 @@ def validate_workflow_template(
         )
         try:
             encoded = orjson.dumps(result.model_dump())
+            if (
+                probed
+                and isinstance(value, dict)
+                and len(orjson.dumps(value)) > MAX_PROBE_VALUE_BYTES
+            ):
+                # an exact formatter returning every row can be tested unchanged
+                omitted = {
+                    key: len(item) - PROBE_LIST_SAMPLES
+                    for key, item in value.items()
+                    if isinstance(item, list) and len(item) > PROBE_LIST_SAMPLES
+                }
+                if omitted:
+                    result.value = {
+                        key: item[:PROBE_LIST_SAMPLES] if key in omitted else item
+                        for key, item in value.items()
+                    }
+                    result.omitted_items = omitted
+                    encoded = orjson.dumps(result.model_dump())
         except TypeError:
             return TemplateResult(
                 valid=False,

@@ -576,8 +576,7 @@ def test_history_permissions(monkeypatch, source):
             )
             assert "Private schedule" not in dumps(messages).decode()
             assert not any(
-                "Current page at send time" in message["content"]
-                for message in messages
+                "Page at send time" in message["content"] for message in messages
             )
             assert (await Sessions.owned(conversation["id"], owner)).summary == {}
             create.assert_not_awaited()

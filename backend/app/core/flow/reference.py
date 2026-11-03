@@ -7,6 +7,9 @@ from app.models.mcp import WorkflowReference
 from app.services.flow import FlowGraphService
 from app.utils.json import dumps, loads
 
+# recipes whose text names every node, field and handle they use
+SELF_CONTAINED_RECIPES = frozenset({"html_indexer"})
+
 
 def get_workflow_reference(
     topic: Literal[

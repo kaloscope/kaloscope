@@ -101,7 +101,7 @@ def test_node_contract(schema):
 
 @pytest.mark.parametrize(
     "topic",
-    ["json_indexer", "html_indexer", "indexer_auth", "movie_scraper", "tv_scraper"],
+    ["json_indexer", "indexer_auth", "movie_scraper", "tv_scraper"],
 )
 def test_recipe_nodes(topic):
     async def run():
@@ -124,6 +124,52 @@ def test_recipe_nodes(topic):
         assert dumps(FlowGraphService.get_node_schemas()) == original
 
     asyncio.run(run())
+
+
+def test_self_contained_recipe():
+    async def run():
+        result = await query(
+            "get_workflow_reference", {"topic": "html_indexer", "include_nodes": True}
+        )
+        # the assistant's budget cannot afford what the text already covers
+        assert result["data"] == get_workflow_reference("html_indexer").model_dump()
+        assert get_workflow_reference("html_indexer", include_nodes=True).nodes
+
+    asyncio.run(run())
+
+
+def test_recipe_graph_contract():
+    guide = get_workflow_reference("html_indexer").content
+    graph = guide[guide.index("GRAPH (id,") : guide.index("FORMATTER, with")]
+    schemas = {
+        node["node_type"]: node
+        for nodes in loads(
+            dumps(FlowGraphService.get_node_schemas(include_examples=False))
+        ).values()
+        for node in nodes
+    }
+    nodes = dict(re.findall(r"^(\w+), (\w+), \d+,\d+", graph, re.M))
+    assert set(nodes.values()) == {"search_start", "loop", "http", "search_end"}
+    for field in re.findall(r"(\w+) `", graph):
+        assert any(
+            item["id"] == field
+            for schema in schemas.values()
+            for item in schema["fields"]
+        ), field
+    edges = re.findall(r"(\w+)\.(\w+) -> (\w+)\.(\w+);?", graph.split(": ", 5)[-1])
+    edges = [edge for edge in edges if edge[0] != "source"]
+    assert len(edges) == 4
+    for source, output, target, target_input in edges:
+        assert output in {
+            handle["id"]
+            for handle in schemas[nodes[source]]["handles"]
+            if handle["handle_type"] == "source"
+        }
+        assert target_input in {
+            handle["id"]
+            for handle in schemas[nodes[target]]["handles"]
+            if handle["handle_type"] == "target"
+        }
 
 
 @pytest.mark.parametrize(("node_type", "field"), EXAMPLES, ids=[n for n, _ in EXAMPLES])
