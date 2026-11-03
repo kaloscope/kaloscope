@@ -508,6 +508,16 @@ class WorkflowReference(Result):
         "tv_scraper",
     ]
     content: str = Field(description="Complete English Markdown reference.")
+    nodes: dict[str, list[dict[str, JSONType]]] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Optional registered node fields, defaults and connection handles.",
+    )
+    context: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Shared context-passing rules included with recipe nodes.",
+    )
 
 
 class LogEntry(Result):

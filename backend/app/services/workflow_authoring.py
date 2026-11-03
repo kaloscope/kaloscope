@@ -3,7 +3,7 @@
 import asyncio
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AsyncExitStack, suppress
 from copy import copy
 from http.cookiejar import Cookie, CookieJar
@@ -14,17 +14,19 @@ import httpx
 import orjson
 from curl_cffi import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
-from jinja2 import TemplateError
+from jinja2 import TemplateError, TemplateSyntaxError
 from jinja2.utils import htmlsafe_json_dumps
+from lxml import etree
 from sanic import Sanic
 
+from app.core.ai.documents import value_summary
 from app.core.exceptions import ForbiddenException
 from app.core.flow.context import AUTH_KEY
 from app.core.flow.nodes.base import start_config
 from app.core.flow.nodes.general.http import HTTPNode
 from app.core.flow.outputs import check_auth, check_output
 from app.core.network import NetworkTransport
-from app.core.renderer import render
+from app.core.renderer import render, xpath_all, xpath_first
 from app.models.flow import FlowGraph, GraphCategory
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import (
@@ -133,6 +135,7 @@ def validate_workflow_template(
             `auth` also checks the supplied `auth_start` configuration.
         response: Detached probe response for HTTP formatter evaluation only.
             The probe redacts formatter errors before clipping their messages.
+            Probe results retain the parsed value without a duplicate rendering.
             Without it, a `response` fixture object with `text` (and optional
             `url`, `status_code`, `headers`) becomes a detached response, so
             formatters using `response.url.join(...)` check supplied page samples.
@@ -181,7 +184,7 @@ def validate_workflow_template(
             issues, warnings = check_output(args.mode, value, args.context)
         result = TemplateResult(
             valid=not issues,
-            rendered=None if business else rendered,
+            rendered=None if business or probed else rendered,
             value=value,
             value_type=type(value).__name__,
             issues=issues,
@@ -207,6 +210,10 @@ def validate_workflow_template(
         return result
     except Exception as exc:
         message = str(exc)
+        if isinstance(exc, TemplateSyntaxError) and "got '['" in message:
+            message += (
+                " Parenthesize filters before indexing/slicing: (value|filter)[:3]."
+            )
         return TemplateResult(
             valid=False,
             error=f"{type(exc).__name__}: " + (message if probed else message[:300]),
@@ -247,7 +254,9 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
 
     Returns:
         Observed status, final URL, selected headers and a bounded text sample.
-        Optional extraction uses the complete bounded body before sample clipping.
+        Complete HTML without a formatter includes sampled forms/table/pagination.
+        Successful extraction returns its object instead of duplicate raw and
+        rendered text, using the complete bounded body before sample clipping.
         Non-2xx responses remain HTTP observations, not transport failures. An
         explicit indexer supplies a snapshot of the cookie jar used by HTTP nodes,
         where normal cookie domain/path rules still apply, and its unexpired
@@ -327,7 +336,12 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
             for ascii_only in (False, True)
         }
     )
-    return _redact_probe_result(result, secrets)
+    result = _redact_probe_result(result, secrets)
+    if result.formatted is not None and result.formatted.valid:
+        # keep the extracted object, not three copies of the same observation
+        result.text = ""
+        result.text_truncated = result.bytes_read > 0
+    return result
 
 
 def _request_hosts(graph: FlowGraph) -> set[str]:
@@ -417,6 +431,14 @@ def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProb
 
     result.url = redact(result.url)
     result.text = redact(result.text)
+    if (
+        result.formatted is None
+        and result.body_complete
+        and result.text.strip()
+        and "html" in result.headers.get("content-type", "").lower()
+    ):
+        with suppress(etree.LxmlError, ValueError, TypeError):
+            result.html_sample = _html_sample(result.text, redact)
     if len(result.text) > MAX_SAMPLE_CHARS:
         result.text = result.text[:MAX_SAMPLE_CHARS]
         result.text_truncated = True
@@ -433,6 +455,82 @@ def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProb
                 valid=False, error="Redacted extraction exceeds 8000 bytes."
             )
     return result
+
+
+def _html_sample(text: str, redact: Callable[[Any], Any]) -> dict:
+    """Sample observed HTML structure without guessing selectors or running scripts.
+
+    Args:
+        text: Complete bounded response text.
+        redact: Existing credential redactor, applied after decoding HTML entities.
+
+    Returns:
+        Bounded form names, first table row and pagination links. Row counts refer
+        only to the observed table, never the site's total or fixed page capacity.
+        Long strings use explicit truncation metadata; original probes still
+        support formatter extraction for exact values.
+    """
+    root = xpath_first(text, "/*")
+    if root is None:
+        return {"sampled": True}
+    forms = xpath_all(root, "//form")
+    tables = xpath_all(root, "//table[.//tr[td]]")
+    links = xpath_all(
+        root,
+        '//a[@rel="next" or ancestor::*[contains(@class,"pagination")]]',
+    )
+    sample = {
+        "forms": [
+            {
+                "action": form.get("action", ""),
+                "method": form.get("method", "get"),
+                "fields": xpath_all(form, ".//input/@name | .//select/@name")[:12],
+            }
+            for form in forms[:2]
+        ],
+        "pagination": [
+            {"text": link.xpath("string(.)").strip(), "href": link.get("href")}
+            for link in links[:4]
+        ],
+        "sampled": True,
+    }
+    if tables:
+        table = tables[0]
+        rows = xpath_all(table, ".//tr[td]")
+        sample["table"] = {
+            "id": table.get("id"),
+            "class": table.get("class"),
+            "observed_rows": len(rows),
+            "headers": [
+                item.xpath("string(.)").strip() for item in table.xpath(".//th")[:10]
+            ],
+            "first_row": [
+                {
+                    "text": cell.xpath("string(.)").strip(),
+                    "links": xpath_all(cell, ".//a/@href")[:2],
+                }
+                for cell in rows[0].xpath("./td")[:10]
+            ],
+        }
+
+    def bound(value):
+        """Bound decoded observations while preserving their structure.
+
+        Args:
+            value: Redacted HTML observation.
+
+        Returns:
+            JSON-compatible sample with explicit truncation for long strings.
+        """
+        if isinstance(value, str):
+            return value_summary(value, limit=300)
+        if isinstance(value, list):
+            return [bound(item) for item in value]
+        if isinstance(value, dict):
+            return {key: bound(item) for key, item in value.items()}
+        return value
+
+    return value_summary(bound(redact(sample)), limit=4000)
 
 
 def _body_size(options: dict, client: str) -> int:

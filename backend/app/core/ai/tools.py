@@ -43,7 +43,7 @@ from app.core.ai.queries import (
 )
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
-from app.core.flow.reference import get_workflow_reference
+from app.core.flow.reference import compact_node_schemas, get_workflow_reference
 from app.models.assistant import (
     DOWNLOAD_PATHS,
     MEDIA_PATH,
@@ -250,6 +250,7 @@ class ReferenceQuery(ToolArguments):
         "movie_scraper",
         "tv_scraper",
     ]
+    include_nodes: bool = False
 
 
 class WorkflowValidation(GraphReference):
@@ -604,13 +605,15 @@ TOOLS = (
     ),
     AssistantTool(
         "get_workflow_reference",
-        "Read context/template rules or recipes.",
+        "Read rules/recipes. Recipe include_nodes=true bundles needed fields, "
+        "defaults, handles and context rules; no separate schema reads needed.",
         ReferenceQuery,
     ),
     AssistantTool(
         "probe_http_request",
-        "HTTP probe; workflow_id reuses login. text=2000-char sample; formatter "
-        "extracts full body <=256KiB. No login/cache/retry/save; secrets hidden.",
+        "HTTP probe; workflow_id reuses login. formatter returns an object from "
+        "body <=256KiB, otherwise text=2000-char sample plus HTML structure. "
+        "No login/cache/retry/save; secrets hidden.",
         HTTPProbe,
         admin=True,
     ),
@@ -636,9 +639,9 @@ TOOLS = (
     ),
     AssistantTool(
         "preview_workflow_draft",
-        "Preview exact-base edits; changes=[] reads unchanged. Designer: Keep/Revert; "
-        "elsewhere reference only. Never saves/publishes. On conflict, revert and "
-        "load the latest draft before editing. Remove edges before their nodes.",
+        "Apply nodes/edges incrementally; incomplete graphs allowed. [] reads. "
+        "No save/publish; final Keep/Revert. Outside designer: reference only. "
+        "Conflict: revert/reload. Remove edges first.",
         WorkflowPreview,
         admin=True,
     ),
@@ -1387,7 +1390,7 @@ async def execute_tool(
                         args.workflow_id, user, conversation_id
                     )
                 case ReferenceQuery():
-                    result = get_workflow_reference(args.topic)
+                    result = get_workflow_reference(args.topic, args.include_nodes)
                 case HTTPProbe():
                     result = await probe_http_request(args, user)
                 case TemplateValidation():
@@ -1413,37 +1416,7 @@ async def execute_tool(
                             for group, nodes in result.items()
                         }
                     else:
-                        # omit editor decoration, retaining field constraints and widths
-                        for nodes in result.values():
-                            for node in nodes:
-                                node.pop("icon")
-                                node.pop("order")
-                                node.pop("name")
-                                node.pop("group")
-                                if node["width"] is None:
-                                    node.pop("width")
-                                for handle in node["handles"]:
-                                    handle.pop("style", None)
-                                    handle.pop("position", None)
-                                    if handle.get("tag") is None:
-                                        handle.pop("tag", None)
-                                for field in node["fields"]:
-                                    for key in (
-                                        "span",
-                                        "tabsize",
-                                        "lineLength",
-                                        "collapse",
-                                        "darkmode",
-                                        "copier",
-                                        "resetter",
-                                        "formatter",
-                                        "label",
-                                        "tooltip",
-                                    ):
-                                        field.pop(key, None)
-                                    for key, value in list(field.items()):
-                                        if value is None and key != "default":
-                                            field.pop(key)
+                        result = compact_node_schemas(result)
                 case HistoryQuery():
                     result = await read_history(args, conversation_id, user)
         encoded = dumps(

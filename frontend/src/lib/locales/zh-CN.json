@@ -1074,6 +1074,7 @@
     "saved": "已保存",
     "generating": "正在生成...",
     "incomplete": "回复未完成",
+    "invalid_tool_call": "工具调用格式无效，请重试",
     "retry": "按当前页面重试",
     "request_failed": "请求失败，请重试",
     "input": "发送给助手的消息",

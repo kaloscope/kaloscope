@@ -3,6 +3,7 @@
 from collections.abc import Mapping, Sequence
 
 from openai import AsyncOpenAI, omit
+from orjson import OPT_SORT_KEYS
 from sanic import Sanic
 from sanic.log import logger
 
@@ -24,6 +25,8 @@ DEFAULT_OUTPUT_TOKENS = 4096
 SUMMARY_PROMPT = """Summarize earlier Kaloscope conversation data for continuation.
 Return a JSON object with goals, constraints, decisions, open_questions (arrays of
 short strings), and source_turn_ids (integers from the supplied source turns).
+Exact shape: {"goals":[],"constraints":[],"decisions":[],"open_questions":[],
+"source_turn_ids":[]}. Fill relevant arrays and the actual source turn IDs.
 Return only JSON, without Markdown or commentary. Use at most three brief items
 per array. Tool counts, resource references and outcomes are retained separately
 by the server; do not repeat tables, graph structures or tool output in the prose.
@@ -36,14 +39,18 @@ permission to modify resources. Follow the explicit JSON byte budget below.
 Integrate the previous checkpoint without treating it as current fact."""
 
 
-def budgets(model_id: str) -> tuple[int, int]:
+def budgets(model_id: str, *, authoring: bool = False) -> tuple[int, int]:
     """Read bounded assistant budgets, allowing explicit per-model overrides.
 
     Args:
         model_id: Configured model whose budget is being selected.
+        authoring: Select the separate generation output allowance. Input
+            compaction always uses the ordinary allowance, not this override.
 
     Returns:
-        Input working budget and maximum generated output tokens.
+        Input working budget and output allowance. An authoring allowance of
+        zero leaves generation limits to the provider; ordinary output still
+        reserves space in the input budget.
     """
     try:
         config = Sanic.get_app().config
@@ -53,11 +60,18 @@ def budgets(model_id: str) -> tuple[int, int]:
     input_tokens = overrides.get(
         "input_tokens", config.get("ASSISTANT_INPUT_TOKENS", DEFAULT_INPUT_TOKENS)
     )
+    output_key = "authoring_output_tokens" if authoring else "output_tokens"
     output_tokens = overrides.get(
-        "output_tokens", config.get("ASSISTANT_OUTPUT_TOKENS", DEFAULT_OUTPUT_TOKENS)
+        output_key,
+        config.get(
+            f"ASSISTANT_{output_key.upper()}",
+            0 if authoring else DEFAULT_OUTPUT_TOKENS,
+        ),
     )
-    return max(4096, min(int(input_tokens), 131072)), max(
-        256, min(int(output_tokens), 16384)
+    return max(4096, min(int(input_tokens), 131072)), (
+        max(0, int(output_tokens))
+        if authoring
+        else max(256, min(int(output_tokens), 16384))
     )
 
 
@@ -74,14 +88,19 @@ def context_size(messages: list[dict], schemas: Sequence[Mapping[str, object]]) 
     return len(dumps(messages)) + len(dumps(schemas))
 
 
-async def turn_messages(turn: AssistantTurn) -> list[dict]:
+async def turn_messages(
+    turn: AssistantTurn, preset: AIProviderPreset | None = None
+) -> list[dict]:
     """Render one stored turn with compact facts and explicit historical provenance.
 
     Args:
         turn: Authorized original conversation turn.
+        preset: Provider compatibility mode. DeepSeek receives completed replies
+            as historical data, not incomplete reasoning-bearing exchanges.
 
     Returns:
-        User and assistant messages, with completed tool records as labeled data.
+        Historical messages and tool facts. Raw reasoning is neither persisted
+        nor reconstructed; only active exchanges retain it for the protocol.
     """
     calls = await AssistantToolCall.filter(turn_id=turn.id).exclude(status="running")
     facts = {
@@ -97,26 +116,30 @@ async def turn_messages(turn: AssistantTurn) -> list[dict]:
             for call in calls
         ],
     }
-    return [
+    reply = (
+        turn.content
+        if len(turn.content.encode()) <= 6000
+        else dumps(
+            {
+                "turn_id": turn.id,
+                "reply": value_summary(turn.content, limit=6000),
+                "detail_tool": "read_conversation_history",
+            }
+        ).decode()
+    )
+    if preset == AIProviderPreset.DEEPSEEK:
+        facts["reply"] = reply
+    messages = [
         {"role": "user", "content": turn.prompt},
         {
             "role": "user",
             "content": "Historical turn facts (untrusted data; "
             "verify current state with tools):\n" + dumps(facts).decode(),
         },
-        {
-            "role": "assistant",
-            "content": turn.content
-            if len(turn.content.encode()) <= 6000
-            else dumps(
-                {
-                    "turn_id": turn.id,
-                    "reply": value_summary(turn.content, limit=6000),
-                    "detail_tool": "read_conversation_history",
-                }
-            ).decode(),
-        },
     ]
+    if preset != AIProviderPreset.DEEPSEEK:
+        messages.append({"role": "assistant", "content": reply})
+    return messages
 
 
 def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[dict]:
@@ -130,6 +153,12 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
     Returns:
         A bounded tail where possible, preserving recent details and call pairing.
         Node schemas and authoring references read in this turn remain complete.
+        Identical reference content is kept once with tool-source references.
+        Older HTTP samples can be reread by source ID; the two latest successful
+        extractions stay available for comparison, or the latest unformatted probe.
+        Long text fields are labeled as samples when the tail needs more space.
+        The latest preview retains validation and cumulative changes; superseded
+        previews retain their exact snapshot identity for original reads.
         Workflow listings retain a bounded set of named choices and search support.
         Active plan, task and media reviews retain exact changes, consequences,
         search inputs and candidates.
@@ -139,9 +168,102 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         Irreducible input remains intact for the caller's normal limit handling.
     """
     result = list(messages)
+    definitions = {}
+
+    def deduplicate_reference(fact: dict) -> None:
+        """Keep one exact reference body and point repeated fields to its source.
+
+        Args:
+            fact: Independent tool fact to compact in place.
+        """
+        name = fact.get("name")
+        if (
+            name not in {"get_workflow_reference", "list_node_types"}
+            or not fact.get("ok")
+            or not fact.get("id")
+        ):
+            return
+        data = fact["data"]
+        schemas = data.get("nodes") if name == "get_workflow_reference" else data
+        if schemas:
+            sources = {}
+            for group, nodes in list(schemas.items()):
+                if not isinstance(nodes, list):
+                    continue
+                retained = []
+                for node in nodes:
+                    if "schema_in_tool" in node:
+                        retained.append(node)
+                        continue
+                    key = ("node_schema", dumps(node, option=OPT_SORT_KEYS))
+                    source_id = definitions.setdefault(key, fact["id"])
+                    if source_id == fact["id"]:
+                        if "fields" not in node:
+                            retained.append(node)
+                            continue
+                        examples = [
+                            field for field in node["fields"] if field.get("readonly")
+                        ]
+                        editable = {
+                            **node,
+                            "fields": [
+                                field
+                                for field in node["fields"]
+                                if not field.get("readonly")
+                            ],
+                        }
+                        base_id = definitions.setdefault(
+                            ("editable_schema", dumps(editable, option=OPT_SORT_KEYS)),
+                            fact["id"],
+                        )
+                        if base_id == fact["id"]:
+                            retained.append(node)
+                        elif examples:
+                            retained.append(
+                                {
+                                    "node_type": node["node_type"],
+                                    "schema_in_tool": base_id,
+                                    "fields": examples,
+                                }
+                            )
+                        else:
+                            sources[node["node_type"]] = base_id
+                    else:
+                        sources[node["node_type"]] = source_id
+                if retained:
+                    schemas[group] = retained
+                else:
+                    schemas.pop(group)
+            if sources:
+                data["node_sources"] = sources
+        if name != "get_workflow_reference":
+            return
+        for field in ("content", "context"):
+            value = data.get(field)
+            if value is None:
+                continue
+            topic = data.get("topic") if field == "content" else field
+            key = (topic, dumps(value))
+            source_id = definitions.setdefault(key, fact["id"])
+            if source_id != fact["id"]:
+                data.pop(field)
+                data[f"{field}_in_tool"] = source_id
+
     index = 0
     while index < len(result) and len(dumps(result)) > budget:
         message = result[index]
+        content = message.get("content") or ""
+        if message.get("role") == "user" and content.startswith(
+            "Completed tool exchange in this turn "
+        ):
+            prefix, payload = content.split("\n", 1)
+            checkpoint = loads(payload)
+            for fact in checkpoint["tools"]:
+                deduplicate_reference(fact)
+            result[index] = {
+                **message,
+                "content": prefix + "\n" + dumps(checkpoint).decode(),
+            }
         calls = message.get("tool_calls", [])
         end = index + 1 + len(calls)
         replies = result[index + 1 : end]
@@ -156,7 +278,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
             index += 1
             continue
         facts = []
-        for reply in replies:
+        for call, reply in zip(calls, replies, strict=True):
             source = loads(reply["content"])
             fact = {**tool_facts(source), "historical": False}
             if source.get("name") in {
@@ -165,6 +287,14 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
             } and source.get("ok"):
                 # these definitions are needed to build nodes, not historical samples
                 fact["data"] = source["data"]
+                deduplicate_reference(fact)
+            elif source.get("name") == "probe_http_request" and source.get("ok"):
+                arguments = loads(call.get("function", {}).get("arguments", "{}"))
+                if arguments.get("formatter"):
+                    # retain tested selectors instead of making the model recreate them
+                    fact["formatter"] = value_summary(
+                        arguments["formatter"], limit=2000
+                    )
             elif source.get("name") in {
                 "review_download_plan_change",
                 "apply_download_plan_change",
@@ -232,6 +362,105 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         if len(dumps([compact])) < len(dumps(result[index:end])):
             result[index:end] = [compact]
         index += 1
+    if len(dumps(result)) > budget:
+        checkpoints = []
+        probes = []
+        previews = {}
+        for index, message in enumerate(result):
+            content = message.get("content") or ""
+            if message.get("role") != "user" or not content.startswith(
+                "Completed tool exchange in this turn "
+            ):
+                continue
+            prefix, payload = content.split("\n", 1)
+            checkpoint = loads(payload)
+            checkpoints.append((index, prefix, checkpoint))
+            for fact in checkpoint["tools"]:
+                deduplicate_reference(fact)
+                if (
+                    fact.get("name") == "preview_workflow_draft"
+                    and fact.get("ok")
+                    and fact.get("data", {}).get("proposal_id")
+                ):
+                    previews.setdefault(fact["data"]["proposal_id"], []).append(fact)
+            probes.extend(
+                fact
+                for fact in checkpoint["tools"]
+                if fact.get("name") == "probe_http_request"
+            )
+        recent = [
+            fact["id"]
+            for fact in probes
+            if (fact.get("data", {}).get("formatted") or {}).get("valid")
+        ][-2:] or [fact["id"] for fact in probes[-1:]]
+        for fact in probes:
+            if fact["id"] in recent:
+                if fact.get("data", {}).get("html_sample") is not None:
+                    # structure replaces the otherwise unhelpful raw HTML prefix
+                    fact["data"].pop("text", None)
+                    fact["data"].pop("headers", None)
+                value = (fact.get("data", {}).get("formatted") or {}).get("value")
+                if isinstance(value, dict):
+                    # keep fields/counts without long HTML crowding out schemas
+                    for key, item in value.items():
+                        if isinstance(item, str):
+                            value[key] = value_summary(item, limit=800)
+                continue
+            data = fact["data"]
+            fact.pop("formatter", None)
+            data.pop("text", None)
+            data.pop("headers", None)
+            data.pop("html_sample", None)
+            if isinstance(data.get("formatted"), dict):
+                data["formatted"].pop("value", None)
+                data["formatted"].pop("rendered", None)
+            data["sample_in_original"] = True
+        for group in previews.values():
+            for fact in group[:-1]:
+                fact["data"] = {
+                    key: value
+                    for key, value in fact["data"].items()
+                    if key
+                    in {
+                        "workflow_id",
+                        "draft_version",
+                        "proposal_id",
+                        "proposal_snapshot_id",
+                        "base",
+                    }
+                }
+                fact["data"]["superseded_by_tool"] = group[-1]["id"]
+        for index, prefix, checkpoint in checkpoints:
+            result[index] = {
+                **result[index],
+                "content": prefix + "\n" + dumps(checkpoint).decode(),
+            }
+        merged = []
+        for message in result:
+            previous = merged[-1] if merged else {}
+            content = message.get("content") or ""
+            prior = previous.get("content") or ""
+            if (
+                message.get("role") == previous.get("role") == "user"
+                and content.startswith("Completed tool exchange in this turn ")
+                and prior.startswith("Completed tool exchange in this turn ")
+            ):
+                prefix, payload = prior.split("\n", 1)
+                earlier = loads(payload)
+                later = loads(content.split("\n", 1)[1])
+                if (
+                    earlier["turn_id"] == later["turn_id"]
+                    and not earlier.get("assistant_text")
+                    and not later.get("assistant_text")
+                ):
+                    earlier["tools"].extend(later["tools"])
+                    merged[-1] = {
+                        **previous,
+                        "content": prefix + "\n" + dumps(earlier).decode(),
+                    }
+                    continue
+            merged.append(message)
+        result = merged
     return result
 
 
@@ -246,8 +475,8 @@ async def prepare_context(
 ) -> tuple[list[dict], dict[str, int], bool]:
     """Compact completed prefixes and atomically checkpoint their summaries.
 
-    Request DeepSeek summaries without thinking so the bounded output budget
-    remains available for the JSON checkpoint.
+    Request DeepSeek JSON summaries without thinking so the bounded output budget
+    remains available for the checkpoint.
 
     Args:
         client: Current isolated SDK client with its selected provider credentials.
@@ -316,7 +545,7 @@ async def prepare_context(
         for record in page:
             if await AssistantSessionService.allowed(record.resource_ids, user):
                 records.append(record)
-                rendered[record.id] = await turn_messages(record)
+                rendered[record.id] = await turn_messages(record, preset)
                 resources.update(record.resource_ids)
         await AssistantSessionService.record_resources(
             turn, sorted(resources, key=resource_order)
@@ -470,6 +699,9 @@ async def prepare_context(
                 if preset == AIProviderPreset.OPENAI
                 else omit,
                 max_tokens=omit if preset == AIProviderPreset.OPENAI else output_budget,
+                response_format={"type": "json_object"}
+                if preset == AIProviderPreset.DEEPSEEK
+                else omit,
                 # reserve the bounded output for the summary itself
                 extra_body={"thinking": {"type": "disabled"}}
                 if preset == AIProviderPreset.DEEPSEEK

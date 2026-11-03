@@ -144,6 +144,11 @@ def test_invalid_response_fixture(fields):
     [
         ("{{ missing }}", {"strict": True}, "UndefinedError"),
         ("{{ }}", {}, "TemplateSyntaxError"),
+        (
+            "{{ items|list[:3] }}",
+            {"context": {"items": [1, 2, 3, 4]}},
+            "Parenthesize filters",
+        ),
         ('{"bad":}', {"mode": "json"}, "JSONDecodeError"),
         ("[]", {"mode": "object"}, "Expected a JSON object"),
         ("{}", {"mode": "array"}, "Expected a JSON array"),
@@ -516,8 +521,162 @@ def test_extract_before_clipping(monkeypatch, payload, formatter):
     )
 
     assert result.body_complete and result.text_truncated
-    assert "last" not in result.text
+    assert result.text == ""
+    assert result.formatted.rendered is None
     assert result.formatted.value == {"id": "last"}
+
+
+def test_html_inspection(monkeypatch):
+    payload = (
+        "<html><head><!--"
+        + "x" * 4000
+        + '--></head><body><table><tr><td><a href="/42">Observed</a>'
+        '<input value="private-cookie"></td></tr></table></body></html>'
+    )
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text=payload,
+                headers={"set-cookie": "sid=private-cookie; HttpOnly"},
+            )
+        ),
+    )
+    result = asyncio.run(
+        authoring.probe_http_request(
+            HTTPProbe(
+                request={"url": "https://example.test"},
+                formatter='{"row":{{ response.text|xpath_first("//tr[td]")'
+                "|outer_html|tojson }}}",
+            ),
+            ADMIN,
+        )
+    )
+
+    assert result.formatted.valid and result.text_truncated and result.body_complete
+    assert '<a href="/42">Observed</a>' in result.formatted.value["row"]
+    assert "private-cookie" not in dumps(result.model_dump()).decode()
+    assert result.redacted
+
+
+def test_html_probe_sample(monkeypatch):
+    payload = (
+        "<html><head><!--" + "x" * 4000 + "--></head><body>"
+        '<form action="/search" method="get"><input name="q" value="hidden-value">'
+        '<select name="category"><option>All</option></select></form>'
+        '<table class="results"><tr><th>Name</th></tr>'
+        '<tr><td><a href="/download/42.torrent">Observed</a></td>'
+        "<td>cookie&#45;secret</td></tr></table>"
+        '<ul class="pagination"><li><a href="?page=2">Next</a></li></ul>'
+        "</body></html>"
+    )
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text=payload,
+                headers={
+                    "content-type": "text/html",
+                    "set-cookie": "sid=cookie-secret; HttpOnly",
+                },
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        authoring.probe_http_request(
+            HTTPProbe(request={"url": "https://example.test"}), ADMIN
+        )
+    )
+
+    sample = result.html_sample
+    assert sample["sampled"]
+    assert sample["forms"] == [
+        {"action": "/search", "method": "get", "fields": ["q", "category"]}
+    ]
+    assert sample["table"]["observed_rows"] == 1
+    assert sample["table"]["first_row"] == [
+        {"text": "Observed", "links": ["/download/42.torrent"]},
+        {"text": "[redacted]", "links": []},
+    ]
+    assert sample["pagination"] == [{"text": "Next", "href": "?page=2"}]
+    assert "hidden-value" not in dumps(sample).decode()
+    assert "cookie-secret" not in dumps(result.model_dump()).decode()
+    assert result.redacted and result.text_truncated and result.body_complete
+    assert result.formatted is None
+    assert (
+        tools.tool_facts({"name": "probe_http_request", "data": result.model_dump()})[
+            "data"
+        ]["html_sample"]
+        == sample
+    )
+
+
+@pytest.mark.parametrize(
+    "payload", ["", "<!doctype html>", "<?xml malformed", "<p>" + "长" * 5000]
+)
+def test_html_probe_without_table(monkeypatch, payload):
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, text=payload, headers={"content-type": "text/html"}
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        authoring.probe_http_request(
+            HTTPProbe(request={"url": "https://example.test"}), ADMIN
+        )
+    )
+
+    assert result.error is None
+    assert result.body_complete
+    assert len(dumps(result.html_sample)) <= 4000
+
+
+def test_html_probe_sample_bounds():
+    sample = authoring._html_sample(
+        '<table><tr><td><a href="/'
+        + "x" * 1000
+        + '">'
+        + "标题" * 1000
+        + "</a></td></tr></table>",
+        lambda value: value,
+    )
+
+    row = sample["table"]["first_row"][0]
+    assert row["text"]["truncated"]
+    assert row["links"][0]["truncated"]
+    assert len(dumps(sample)) <= 4000
+
+
+@pytest.mark.parametrize("formatter", [None, "not JSON", '{"missing": {{ missing }} }'])
+def test_probe_keeps_failed_sample(monkeypatch, formatter):
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(200, text="Observed response")
+        ),
+    )
+
+    result = asyncio.run(
+        authoring.probe_http_request(
+            HTTPProbe(request={"url": "https://example.test"}, formatter=formatter),
+            ADMIN,
+        )
+    )
+
+    assert result.text == "Observed response"
+    assert result.body_complete and not result.text_truncated
+    assert result.formatted is None or not result.formatted.valid
 
 
 def test_compressed_response(monkeypatch):
@@ -569,12 +728,42 @@ def test_formatter_result(monkeypatch, formatter):
     )
 
     assert result.status_code == 404 and result.error is None
-    assert result.text == "missing"
+    assert result.text == ("" if result.formatted.valid else "missing")
+    assert result.text_truncated == result.formatted.valid
     if formatter == "invalid":
         assert not result.formatted.valid
         assert "JSONDecodeError" in result.formatted.error
     else:
         assert result.formatted.value == {"url": "https://example.test"}
+
+
+@pytest.mark.parametrize(("size", "valid"), [(5000, True), (9000, False)])
+def test_extraction_budget(monkeypatch, size, valid):
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(200, text="x" * size)
+        ),
+    )
+
+    result = asyncio.run(
+        authoring.probe_http_request(
+            HTTPProbe(
+                request={"url": "https://example.test"},
+                formatter='{"value": {{ response.text|tojson }}}',
+            ),
+            ADMIN,
+        )
+    )
+
+    assert result.formatted.valid is valid
+    assert result.formatted.rendered is None
+    assert len(dumps(result.formatted.model_dump())) <= authoring.MAX_RENDER_BYTES
+    if valid:
+        assert result.formatted.value == {"value": "x" * size}
+    else:
+        assert "exceeds 8000 bytes" in result.formatted.error
 
 
 def test_response_headers(monkeypatch):

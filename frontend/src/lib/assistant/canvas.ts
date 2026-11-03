@@ -247,7 +247,7 @@ function isTransient(error: unknown): boolean {
 }
 
 /**
- * Apply the final successful edit once after the model finishes its summary.
+ * Apply a generated step immediately, unlocking decisions only after completion.
  *
  * @param turnId - Request that owns the canvas lock.
  * @param conversationId - Conversation owning the generated edit.
@@ -255,15 +255,17 @@ function isTransient(error: unknown): boolean {
  * @param snapshotId - Original captured canvas identity, preserved across tool calls.
  * @param decision - Callback updating the conversation's recorded outcome.
  * @param fail - Callback reporting why a completed reply's edit was not applied.
+ * @param complete - Whether generation finished and Keep/Revert can be offered.
  * @returns A promise resolving after the canvas is ready, retryable, or restored.
  */
-export async function finishAssistantCanvas(
+export async function updateAssistantCanvas(
   turnId: string,
   conversationId: number,
   proposalId: number,
   snapshotId: number,
   decision: (proposal: AssistantProposal) => void,
-  fail: (code: string) => void
+  fail: (code: string) => void,
+  complete: boolean
 ): Promise<void> {
   const edit = active;
   if (!edit || edit.turnId !== turnId) return;
@@ -271,16 +273,17 @@ export async function finishAssistantCanvas(
   edit.snapshotId = snapshotId;
   edit.decision = decision;
   edit.fail = fail;
-  await loadEdit(edit);
+  await loadEdit(edit, complete);
 }
 
 /**
  * Validate and apply a live edit, keeping transient failures retryable.
  *
- * @param edit - Live edit whose reply has completed.
+ * @param edit - Live edit with the latest generated checkpoint to read.
+ * @param complete - Whether this load ends generation and enables decisions.
  * @returns A promise resolving after applying, pausing for retry, or restoring the canvas.
  */
-async function loadEdit(edit: Edit): Promise<void> {
+async function loadEdit(edit: Edit, complete: boolean): Promise<void> {
   try {
     const result = await readResult(edit);
     if (!result.editable) throw new Error('assistant_canvas_readonly');
@@ -293,34 +296,47 @@ async function loadEdit(edit: Edit): Promise<void> {
     ) {
       throw new Error('assistant_canvas_changed');
     }
-    if (!result.canvas) throw new Error('assistant_canvas_invalid');
+    if (!result.canvas) {
+      // leave an invalid intermediate step undisplayed while the model can repair it
+      if (!complete) return;
+      throw new Error('assistant_canvas_invalid');
+    }
     const current = edit.editor.read();
-    if (!current || !sameCanvas(current.canvas, edit.context.canvas)) throw new Error('assistant_canvas_changed');
+    if (!current || !sameCanvas(current.canvas, edit.result?.canvas ?? edit.context.canvas)) {
+      throw new Error('assistant_canvas_changed');
+    }
     edit.result = result;
     edit.decision?.(result.proposal);
     // the count compares with the captured canvas, so a no-op leaves nothing to keep or revert
-    if (!result.change_count) {
+    if (complete && !result.change_count) {
       release(edit);
       return;
     }
-    edit.editor.apply(result.canvas);
+    // keep the comparison base independent of renderer measurements and selections
+    edit.editor.apply(structuredClone(result.canvas));
     assistantCanvas.update(
       (state) =>
         state && {
           ...state,
-          phase: 'review',
+          phase: complete ? 'review' : 'editing',
           changes: result.change_count,
           issues: result.validation.issues.length + result.validation.readiness.warning_count
         }
     );
   } catch (error) {
     if (active !== edit) return;
-    if (!edit.result && isTransient(error)) {
-      assistantCanvas.update((state) => state && { ...state, phase: 'failed', error: 'assistant_canvas_load_failed' });
+    if (isTransient(error)) {
+      // a later checkpoint or the final load can recover a missed progress update
+      if (complete) {
+        assistantCanvas.update(
+          (state) => state && { ...state, phase: 'failed', error: 'assistant_canvas_load_failed' }
+        );
+      }
       return;
     }
     // a stale or invalid edit can never apply to this canvas, so release it for a fresh request
     release(edit);
+    if (!complete) edit.stop();
     edit.fail?.(errorCode(error, 'assistant_canvas_not_applied'));
   }
 }
@@ -335,7 +351,7 @@ export async function retryAssistantCanvas(): Promise<void> {
   const state = get(assistantCanvas);
   if (!edit?.path || state?.phase !== 'failed') return;
   assistantCanvas.set({ ...state, phase: 'editing', error: null });
-  await loadEdit(edit);
+  await loadEdit(edit, true);
 }
 
 /**

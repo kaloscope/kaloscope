@@ -1074,6 +1074,7 @@
     "saved": "Saved",
     "generating": "Generating...",
     "incomplete": "Incomplete reply",
+    "invalid_tool_call": "Invalid tool call format. Please retry.",
     "retry": "Retry with Current Page",
     "request_failed": "The request failed. Try again.",
     "input": "Message to Assistant",

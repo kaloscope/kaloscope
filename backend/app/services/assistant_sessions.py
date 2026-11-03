@@ -18,6 +18,7 @@ from app.core.exceptions import (
 from app.core.flow.validation import compress_document
 from app.models.assistant import (
     MAX_SNAPSHOT_BYTES,
+    TURN_TIMEOUT,
     AssistantConversation,
     AssistantSnapshot,
     AssistantToolCall,
@@ -34,7 +35,8 @@ from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
 from app.utils.json import dumps
 
-LEASE_SECONDS = 180
+# retain ownership while a reasoning model has no public text to checkpoint
+LEASE_SECONDS = TURN_TIMEOUT + 60
 
 
 def resource_order(resource_id: int | str) -> tuple[bool, int | str]:

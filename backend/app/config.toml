@@ -2,6 +2,8 @@
 # assistant budgets use conservative local estimates; override individual models when needed
 assistant_input_tokens = 32000
 assistant_output_tokens = 4096
+# 0 uses the provider's generation limit; input compaction stays unchanged
+assistant_authoring_output_tokens = 0
 assistant_model_budgets = {}
 # authentication
 token_expiration_hours = 120

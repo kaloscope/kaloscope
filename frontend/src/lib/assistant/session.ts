@@ -24,9 +24,9 @@ import {
   assistantEditorRevision,
   beginAssistantCanvas,
   endAssistantCanvas,
-  finishAssistantCanvas,
   readAssistantEditor,
-  resetAssistantCanvas
+  resetAssistantCanvas,
+  updateAssistantCanvas
 } from './canvas';
 import { errorCode } from './errors';
 import { assistantDestination, workflowPath } from './navigation';
@@ -795,7 +795,8 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
     timedOut = true;
     controller.abort();
   };
-  const deadline = setTimeout(timeout, 150000);
+  // allow the backend's ten-minute turn deadline plus transport cleanup
+  const deadline = setTimeout(timeout, 630000);
   let generating = true;
   const activity = () => {
     if (!generating) return;
@@ -811,7 +812,9 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
   activity();
   let started = false;
   let submittedConversationId: number | null = null;
+  let submittedContext: AssistantStoredContext | null = null;
   let created: number | null = null;
+  let canvasUpdates = Promise.resolve();
 
   /**
    * Publish a turn update only while its original account and request are current.
@@ -908,7 +911,10 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           break;
         }
         case 'done':
-          if (!value.content.trim() || value.tools.some((tool) => tool.status === 'running')) {
+          if (
+            (!value.content.trim() && createdWorkflow(value) === null) ||
+            value.tools.some((tool) => tool.status === 'running')
+          ) {
             throw new Error('assistant_stream_invalid');
           }
           value.status = 'complete';
@@ -919,6 +925,35 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           break;
       }
     });
+    if (
+      event.event === 'tool_result' &&
+      event.data.name === 'preview_workflow_draft' &&
+      event.data.ok &&
+      submittedConversationId !== null &&
+      submittedContext?.page_type === 'workflow_designer' &&
+      submittedContext.snapshot_id
+    ) {
+      const preview = get(assistant)
+        .turns.find((item) => item.id === turn.id)
+        ?.tools.find((tool) => tool.id === event.data.id);
+      if (preview && isSaveablePreview(preview)) {
+        const proposalId = preview.result!.data!.proposal_id as number;
+        const conversationId = submittedConversationId;
+        const snapshotId = submittedContext.snapshot_id;
+        // keep checkpoint reads ordered without blocking model events or heartbeat reads
+        canvasUpdates = canvasUpdates.then(() =>
+          updateAssistantCanvas(
+            turn.id,
+            conversationId,
+            proposalId,
+            snapshotId,
+            recordAssistantProposal,
+            (code) => recordCanvasError(turn.id, code),
+            false
+          )
+        );
+      }
+    }
     if (event.event === 'done' || event.event === 'error') disarm();
   }
 
@@ -938,7 +973,6 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       rememberConversation(data.id);
       assistant.update((value) => ({ ...value, conversation: data }));
     }
-    let submittedContext: AssistantStoredContext | null;
     if (context?.page_type === 'workflow_designer') {
       const { canvas, ...metadata } = context;
       const { data } = await api
@@ -978,6 +1012,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       throw new Error('assistant_stream_invalid');
     }
     const terminal = await consumeAssistantStream(response.body, receive, activity);
+    if (terminal === 'done') await canvasUpdates;
     const completed =
       terminal === 'done' && active === controller
         ? get(assistant).turns.find((item) => item.id === turn.id && item.status === 'complete')
@@ -987,13 +1022,14 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       // the backend advances its snapshot chain only after successful previews
       const preview = completed.tools.filter(isSaveablePreview).at(-1);
       if (preview) {
-        await finishAssistantCanvas(
+        await updateAssistantCanvas(
           turn.id,
           conversation.id,
           preview.result!.data!.proposal_id as number,
           submittedContext.snapshot_id,
           recordAssistantProposal,
-          (code) => recordCanvasError(turn.id, code)
+          (code) => recordCanvasError(turn.id, code),
+          true
         );
       }
     }

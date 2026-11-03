@@ -496,9 +496,298 @@ def test_thinking_mode(monkeypatch, preset):
     assert events[-1].event == "done"
     assert requests[0]["max_tokens"] == 4096
     if preset == AIProviderPreset.DEEPSEEK:
-        assert requests[0]["thinking"] == {"type": "disabled"}
+        assert requests[0]["thinking"] == {"type": "enabled"}
     else:
         assert "thinking" not in requests[0]
+    assert "reasoning_effort" not in requests[0]
+
+
+@pytest.mark.parametrize("preset", [*AIProviderPreset, None])
+def test_reasoning_replay(monkeypatch, preset):
+    requests = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk({"role": "assistant", "reasoning_content": "private "}),
+                    chunk({"reasoning_content": "protocol trace"}),
+                    chunk({"content": "Read the schema."}),
+                    chunk(
+                        {
+                            "tool_calls": [
+                                call_delta(
+                                    arguments='{"node_type":"http","include_examples":false}'
+                                )
+                            ]
+                        },
+                        "tool_calls",
+                    ),
+                ]
+            )
+        assert body["messages"][-2]["reasoning_content"] == "private protocol trace"
+        assert body["messages"][-1]["tool_call_id"] == "call-one"
+        return response([chunk({"role": "assistant", "content": "Done."}, "stop")])
+
+    configure(monkeypatch, handler, preset=preset)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert len(requests) == 2
+    assert "private protocol trace" not in json.dumps(
+        [event.model_dump() for event in events]
+    )
+
+
+@pytest.mark.parametrize("preset", [AIProviderPreset.GOOGLE, None])
+def test_thought_signature(monkeypatch, preset):
+    requests = []
+    metadata = {"google": {"thought_signature": "opaque-signature"}}
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            call = call_delta()
+            call["extra_content"] = metadata
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "extra_content": metadata,
+                            "tool_calls": [call],
+                        },
+                        "tool_calls",
+                    )
+                ]
+            )
+        replay = body["messages"][-2]
+        assert replay["extra_content"] == metadata
+        assert replay["tool_calls"][0]["extra_content"] == metadata
+        return response([chunk({"role": "assistant", "content": "Done."}, "stop")])
+
+    configure(monkeypatch, handler, preset=preset)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert len(requests) == 2
+    assert "opaque-signature" not in json.dumps(
+        [event.model_dump() for event in events]
+    )
+
+
+def test_structured_reasoning(monkeypatch):
+    requests = []
+    fragments = [
+        {
+            "type": "reasoning.text",
+            "text": text,
+            "id": "reasoning-one",
+            "format": "anthropic-claude-v1",
+            "index": 0,
+        }
+        for text in ("private ", "protocol trace")
+    ] + [
+        {
+            "type": "reasoning.encrypted",
+            "data": "opaque-data",
+            "id": "reasoning-two",
+            "format": "anthropic-claude-v1",
+            "index": 1,
+        }
+    ]
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk({"role": "assistant", "reasoning": "private "}),
+                    chunk({"reasoning": "protocol trace"}),
+                    *[
+                        chunk({"reasoning_details": [fragment]})
+                        for fragment in fragments
+                    ],
+                    chunk({"tool_calls": [call_delta()]}, "tool_calls"),
+                ]
+            )
+        replay = body["messages"][-2]
+        assert replay["reasoning"] == "private protocol trace"
+        assert replay["reasoning_details"] == fragments
+        return response([chunk({"role": "assistant", "content": "Done."}, "stop")])
+
+    configure(monkeypatch, handler, preset=AIProviderPreset.OPENROUTER)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert len(requests) == 2
+    serialized = json.dumps([event.model_dump() for event in events])
+    assert "private protocol trace" not in serialized
+    assert "opaque-data" not in serialized
+
+
+@pytest.mark.parametrize("allowance", [0, 65536, 8192])
+@pytest.mark.parametrize("preset", [*AIProviderPreset, None])
+def test_generation_budget(monkeypatch, allowance, preset):
+    requests = []
+    monkeypatch.setattr(
+        service,
+        "budgets",
+        lambda _, authoring=False: (32000, allowance if authoring else 4096),
+    )
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                call_delta(
+                                    "get_workflow_reference",
+                                    '{"topic":"html_indexer","include_nodes":true}',
+                                )
+                            ],
+                        },
+                        "tool_calls",
+                    )
+                ]
+            )
+        return response([chunk({"role": "assistant", "content": "Done."}, "stop")])
+
+    configure(monkeypatch, handler, preset=preset)
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert len(requests) == 2
+    key = "max_completion_tokens" if preset == AIProviderPreset.OPENAI else "max_tokens"
+    assert requests[0][key] == 4096
+    if allowance:
+        assert requests[1][key] == allowance
+    else:
+        assert "max_tokens" not in requests[1]
+        assert "max_completion_tokens" not in requests[1]
+    for request in requests:
+        if preset == AIProviderPreset.DEEPSEEK:
+            assert request["thinking"] == {"type": "enabled"}
+        else:
+            assert "thinking" not in request
+            assert "reasoning_effort" not in request
+    assert all(
+        service.context_size(request["messages"], request["tools"]) <= 27904
+        for request in requests
+    )
+
+
+@pytest.mark.parametrize(
+    "partial", [{"content": "Partial"}, {"tool_calls": [call_delta()]}]
+)
+def test_thinking_partial_output(monkeypatch, partial):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return response(
+            [
+                chunk(
+                    {"role": "assistant", "reasoning_content": "private", **partial},
+                    "length",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler, preset=AIProviderPreset.DEEPSEEK)
+    events = asyncio.run(collect())
+
+    assert len(requests) == 1
+    assert events[-1].data["code"] == "ai_output_truncated"
+    assert not any(event.event == "tool_start" for event in events)
+
+
+@pytest.mark.parametrize("size", [1, 7, 300])
+@pytest.mark.parametrize("tag", ["tool_calls", "function_calls", "invoke"])
+def test_protocol_text(monkeypatch, size, tag):
+    content = f'\n<{tag}><invoke name="read_conversation_history"/></{tag}>'
+    configure(
+        monkeypatch,
+        lambda _: response(
+            [
+                chunk({"content": content[i : i + size]})
+                for i in range(0, len(content), size)
+            ]
+            + [chunk(finish="stop")]
+        ),
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(service, "execute_tool", execute)
+
+    events = asyncio.run(collect())
+
+    assert events[-1].data == {"code": "ai_response_invalid"}
+    assert not any(event.event in {"text_delta", "tool_start"} for event in events)
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "<div>HTML</div>",
+        "```xml\n<tool_calls>example</tool_calls>\n```",
+        "<tool_callsExample/>",
+        "2 < 3",
+    ],
+)
+def test_literal_markup(monkeypatch, content):
+    configure(
+        monkeypatch,
+        lambda _: response(
+            [chunk({"content": char}) for char in content] + [chunk(finish="stop")]
+        ),
+    )
+
+    events = asyncio.run(collect())
+
+    assert events[-1].event == "done"
+    assert (
+        "".join(event.data["text"] for event in events if event.event == "text_delta")
+        == content
+    )
+
+
+def test_canvas_context_exhausted(monkeypatch):
+    configure(
+        monkeypatch,
+        lambda _: response([chunk({"tool_calls": [call_delta()]}, "tool_calls")]),
+    )
+    prepare = AsyncMock(
+        side_effect=[
+            (
+                [{"role": "user", "content": "Build the canvas"}],
+                {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                False,
+            ),
+            KaloscopeException(ErrorCode.ASSISTANT_CONTEXT_LIMIT),
+        ]
+    )
+    monkeypatch.setattr(service, "prepare_context", prepare)
+    execute = AsyncMock(return_value={"ok": True, "data": {"sample": "x" * 40000}})
+    monkeypatch.setattr(service, "execute_tool", execute)
+    turn = make_turn(
+        context={"page_type": "workflow_designer", "editable": True, "snapshot_id": 1}
+    )
+
+    events = asyncio.run(collect(turn))
+
+    assert events[-1].data == {"code": "assistant_context_limit"}
+    assert prepare.await_count == 2
+    execute.assert_awaited_once()
 
 
 @pytest.mark.parametrize("designer", [False, True])
