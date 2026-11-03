@@ -11,7 +11,7 @@ repos:
       - id: trailing-whitespace
       - id: check-added-large-files
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v4.19.0
+    rev: v4.19.3
     hooks:
       - id: commitizen
         stages: [commit-msg]
@@ -26,7 +26,7 @@ repos:
       - id: poetry-install
         args: [-C, ./backend]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.9
+    rev: v0.17.3
     hooks:
       - id: ruff-check
         args: [--fix]

@@ -90,7 +90,7 @@
             onclick={(event) => {
               if (!blank) {
                 event.preventDefault();
-                !active && hideDrawer(() => route.path && goto(route.path, { keepFocus: true }));
+                !active && hideDrawer(() => route.path && goto(route.path, { reset: false }));
               }
             }}
           >

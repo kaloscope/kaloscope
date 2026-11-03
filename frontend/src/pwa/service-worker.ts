@@ -2,12 +2,12 @@
 /// <reference no-default-lib="true"/>
 /// <reference lib="esnext" />
 /// <reference lib="webworker" />
-import { cleanupOutdatedCaches, precacheAndRoute } from 'workbox-precaching';
+import { cleanupOutdatedCaches, precacheAndRoute } from '@vite-pwa/workbox-swkit/precaching';
 import {
   KALOSCOPE_NOTIFICATION,
   type ServiceWorkerNotificationMessage,
   type ServiceWorkerNotificationPayload
-} from './lib/notifications';
+} from '../lib/notifications';
 
 declare let self: ServiceWorkerGlobalScope;
 

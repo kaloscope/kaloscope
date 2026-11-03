@@ -9,6 +9,12 @@ node_modules
 build/
 .svelte-kit/
 
+# PWA assets generated from static/logo.svg
+/static/pwa-*.png
+/static/maskable-icon-*.png
+/static/apple-touch-icon-*.png
+/static/favicon.ico
+
 # OS
 .DS_Store
 Thumbs.db

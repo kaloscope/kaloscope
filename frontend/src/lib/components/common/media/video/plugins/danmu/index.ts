@@ -10,6 +10,7 @@ const MIN_RESTART_INTERVAL = 300;
  * stall, so that internal recovery must not be handled as a user seek.
  */
 export default class DanmuWithMp4Recovery extends Danmu {
+  private lastMp4Core: Mp4Plugin['core'] = null;
   private lastMp4WaitAdjustCount = 0;
   private ignoredRecoverySeek = false;
   private restartTimer: number | null = null;
@@ -99,16 +100,25 @@ export default class DanmuWithMp4Recovery extends Danmu {
   }
 
   /**
-   * Identifies xgplayer-mp4's deterministic 0.5-second stall recovery seek
-   * through the counter incremented immediately before that internal seek.
+   * Identify the MP4 core's internal stall recovery seek.
+   *
+   * @returns Whether the recovery counter advanced since the previous seek.
    */
   private isMp4RecoverySeek() {
-    const mp4Plugin = this.player.getPlugin('mp4') as Mp4Plugin | null;
-    if (!mp4Plugin) {
+    const core = (this.player.getPlugin('mp4') as Mp4Plugin | null)?.core ?? null;
+    if (core !== this.lastMp4Core) {
+      this.lastMp4Core = core;
+      this.lastMp4WaitAdjustCount = 0;
+    }
+    if (!core) {
       return false;
     }
 
-    const adjustCount = mp4Plugin._waitAdjustTimeCnt;
+    // xgplayer-mp4 3.0.27 keeps the recovery counter on its core
+    const adjustCount: unknown = Reflect.get(core, '_waitAdjustTimeCnt');
+    if (typeof adjustCount !== 'number') {
+      return false;
+    }
     if (adjustCount < this.lastMp4WaitAdjustCount) {
       // resynchronize defensively if the plugin clears its counter
       this.lastMp4WaitAdjustCount = adjustCount;

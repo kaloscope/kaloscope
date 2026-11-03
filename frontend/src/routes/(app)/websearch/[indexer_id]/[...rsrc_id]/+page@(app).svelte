@@ -79,14 +79,14 @@
    * @returns A promise that settles after the query navigation.
    */
   async function updateChapterId(chapterId: string | null): Promise<void> {
-    const url = new URL(page.url);
+    const url = new URL(page.url.href);
     if (chapterId !== null) {
       url.searchParams.set('chapter_id', chapterId);
     } else {
       url.searchParams.delete('chapter_id');
     }
     url.searchParams.sort();
-    await goto(url, { replaceState: true, keepFocus: true, noScroll: true });
+    await goto(url, { replace: true, reset: false });
   }
 
   /**

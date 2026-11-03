@@ -174,7 +174,7 @@ export default class DefaultPreset {
       };
     }
     // prefer `ManagedMediaSource` when the browser supports it
-    options.mp4Plugin = {
+    options.mp4 = {
       preferMMS: true
     };
     options.flv = {

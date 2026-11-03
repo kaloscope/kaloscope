@@ -474,7 +474,7 @@
   }
 
   /**
-   * Ensures transcoded HLS playback has the correct media plugin.
+   * Ensure transcoded HLS playback has the correct media plugin.
    *
    * xgplayer chooses media plugins when the player is created. Local files are
    * initially mounted as `/media/stream`, so switching to `&transcode=true`
@@ -484,7 +484,7 @@
     if (!player || sniffer.isIos() || player.getPlugin('hls') || !HLS.isSupported()) {
       return;
     }
-    for (const pluginName of ['flv', 'mp4Plugin', 'ShakaPlugin']) {
+    for (const pluginName of ['flv', 'mp4', 'ShakaPlugin']) {
       player.unRegisterPlugin(pluginName, true);
     }
     player.registerPlugin(HLS);

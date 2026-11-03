@@ -1,0 +1,12 @@
+{
+  "extends": "$app/tsconfig/service-worker",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "strict": true,
+    "paths": {
+      "$lib": ["../lib"],
+      "$lib/*": ["../lib/*"]
+    }
+  },
+  "include": ["./service-worker.ts"]
+}

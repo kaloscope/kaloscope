@@ -282,10 +282,11 @@ class FlowEngine:
         self._app.add_task(self._event_consumer(), name=self._EVENT_CONSUMER)
 
     async def shutdown(self):
-        """Shutdown the flow engine."""
+        """Shut down the flow engine and tolerate repeated cleanup."""
         self._reload_flag.clear()
         await self._fetcher.shutdown()
-        self._scheduler.shutdown()
+        if self._scheduler.running:
+            self._scheduler.shutdown()
         await self._app.cancel_task(self._JOB_LISTENER)
         await self._app.cancel_task(self._EVENT_CONSUMER)
 

@@ -1,5 +1,6 @@
 """Unit tests for reading metadata parsing and field-level source precedence."""
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -51,13 +52,8 @@ def _comic(fields: str) -> bytes:
     return f"<ComicInfo>{fields}</ComicInfo>".encode()
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_comic_field_names(legacy):
-    candidate = (
-        '{"title":"Comic","page_count":0,"black_and_white":false}'
-        if legacy
-        else '{"title":"Comic","pages":0,"monochrome":false}'
-    )
+def test_comic_field_names():
+    candidate = '{"title":"Comic","pages":0,"monochrome":false}'
     fields = ReadingMetadata.model_validate_json(candidate)
     assert fields.model_dump(mode="json", exclude_defaults=True) == {
         "title": "Comic",
@@ -73,25 +69,33 @@ def test_comic_field_names(legacy):
 @pytest.mark.parametrize(
     "candidate",
     [
-        '{"pages":-1,"page_count":0}',
-        '{"monochrome":"false","black_and_white":true}',
-        '{"page_count":-1}',
-        '{"black_and_white":"false"}',
+        '{"pages":-1}',
+        '{"monochrome":"false"}',
     ],
 )
-def test_comic_alias_validation(candidate):
+def test_comic_field_validation(candidate):
     with pytest.raises(ValidationError):
         ReadingMetadata.model_validate_json(candidate)
 
 
-def test_comic_alias_priority():
-    fields = ReadingMetadata.model_validate_json(
-        '{"pages":0,"page_count":1,"monochrome":false,"black_and_white":true}'
-    )
-    assert fields.model_dump(mode="json", exclude_defaults=True) == {
-        "pages": 0,
-        "monochrome": False,
-    }
+@pytest.mark.parametrize("json_mode", [False, True])
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {"page_count": 0},
+        {"black_and_white": False},
+        {"pages": 0, "page_count": 1},
+        {"monochrome": False, "black_and_white": True},
+    ],
+)
+def test_comic_legacy_fields(json_mode, candidate):
+    with pytest.raises(ValidationError) as error:
+        if json_mode:
+            ReadingMetadata.model_validate_json(json.dumps(candidate))
+        else:
+            ReadingMetadata.model_validate(candidate)
+
+    assert {detail["type"] for detail in error.value.errors()} == {"extra_forbidden"}
 
 
 def test_opf_fields():

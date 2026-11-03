@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import multiprocessing
 import os
@@ -97,10 +98,24 @@ async def before_server_start(app: Sanic):
 
 @app.before_server_stop
 async def before_server_stop(app: Sanic):
-    """Handle the worker process shutdown event.
+    """Run worker cleanup once across repeated shutdown events.
+
+    Sanic may retry shutdown while the previous listener is still pending after
+    the event loop stops. Share its task so resources are not closed twice.
 
     Args:
         app: Application instance for the current process.
+    """
+    if not hasattr(app.ctx, "shutdown_task"):
+        app.ctx.shutdown_task = asyncio.create_task(shutdown_worker(app))
+    await asyncio.shield(app.ctx.shutdown_task)
+
+
+async def shutdown_worker(app: Sanic):
+    """Close worker resources in dependency order.
+
+    Args:
+        app: Application instance whose resources should be closed.
     """
     await close_mcp(app)
     await shutdown_monitors()

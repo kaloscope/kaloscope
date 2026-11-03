@@ -59,7 +59,7 @@
       if (password) passwordValue = password;
 
       // remove query params from URL after filling
-      const url = new URL(page.url);
+      const url = new URL(page.url.href);
       url.searchParams.delete('username');
       url.searchParams.delete('password');
       goto(url, { replaceState: true });

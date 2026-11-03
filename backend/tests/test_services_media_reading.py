@@ -3668,9 +3668,8 @@ def test_save_metadata_retry(tmp_path, monkeypatch, stage):
 
 
 @pytest.mark.parametrize("published", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("format", [None, *MediaFormat])
-def test_save_metadata_recovery(tmp_path, monkeypatch, published, legacy, format):
+def test_save_metadata_recovery(tmp_path, monkeypatch, published, format):
     async def run():
         async with _database():
             item = await _item(tmp_path, format)
@@ -3716,12 +3715,6 @@ def test_save_metadata_recovery(tmp_path, monkeypatch, published, legacy, format
                 b"</ComicInfo>"
             )
             xml.write_bytes(external)
-            if legacy:
-                # restore the candidate keys stored before the field simplification
-                fields = event.payload["metadata"]
-                fields["page_count"] = fields.pop("pages")
-                fields["black_and_white"] = fields.pop("monochrome")
-                await event.save(update_fields=["payload"])
             assert await watcher.consume_event(event)
             result = parser(xml.read_bytes()).data
             assert result.title == expected
@@ -3848,8 +3841,7 @@ def test_metadata_without_index(tmp_path, state):
 
 
 @pytest.mark.parametrize("format", [None, *MediaFormat])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_save_metadata_http(tmp_path, format, legacy):
+def test_save_metadata_http(tmp_path, format):
     async def run():
         async with _database():
             item = await _item(tmp_path, format)
@@ -3860,11 +3852,7 @@ def test_save_metadata_http(tmp_path, format, legacy):
             candidate = {"title": "Confirmed", "authors": ["Writer"]}
             comic = format not in (MediaFormat.TXT, MediaFormat.EPUB)
             if comic:
-                candidate.update(
-                    {"page_count": 12, "black_and_white": False}
-                    if legacy
-                    else {"pages": 12, "monochrome": False}
-                )
+                candidate.update(pages=12, monochrome=False)
             async with _client(user) as client:
                 response = await client.post(
                     f"/_api/media/{item.id}/metadata",
@@ -3898,6 +3886,8 @@ def test_save_metadata_http(tmp_path, format, legacy):
         ("unauthenticated", 401),
         ("missing", 404),
         ("invalid", 422),
+        ("legacy_pages", 422),
+        ("legacy_monochrome", 422),
         ("video", 422),
         ("publish", 503),
     ],
@@ -3918,6 +3908,11 @@ def test_save_metadata_http_error(tmp_path, monkeypatch, problem, status):
                     raise PermissionError("read only")
 
                 monkeypatch.setattr(writer.os, "replace", denied)
+            candidate = {} if problem == "invalid" else {"title": "Confirmed"}
+            if problem == "legacy_pages":
+                candidate["page_count"] = 12
+            elif problem == "legacy_monochrome":
+                candidate["black_and_white"] = False
             async with _client(user) as client:
                 if problem == "unauthenticated":
                     client.headers.pop("Authorization")
@@ -3925,9 +3920,7 @@ def test_save_metadata_http_error(tmp_path, monkeypatch, problem, status):
                     f"/_api/media/{item.id + (problem == 'missing')}/metadata",
                     json={
                         "graph_id": 1,
-                        "metadata": {}
-                        if problem == "invalid"
-                        else {"title": "Confirmed"},
+                        "metadata": candidate,
                     },
                 )
                 assert response.status_code == status, response.text

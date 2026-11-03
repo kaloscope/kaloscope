@@ -6,6 +6,7 @@ from queue import Queue
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.flow.context import OUTPUT_KEY, Context
 from app.core.flow.engine import EventWrapper, FlowEngine, NodeWrapper, TransientTask
@@ -50,6 +51,33 @@ def test_event_trigger(monkeypatch):
     assert call is not None
     assert call.kwargs["id"] == "2"
     assert call.args[1].run_date == run_date
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_shutdown(monkeypatch, started):
+    engine = FlowEngine.__new__(FlowEngine)
+    engine._app = Mock(cancel_task=AsyncMock())
+    engine._fetcher = Mock(shutdown=AsyncMock())
+    monkeypatch.setitem(engine.__dict__, "_reload_flag", Mock())
+
+    async def run():
+        engine._scheduler = AsyncIOScheduler()
+        if started:
+            engine._scheduler.start()
+
+        await engine.shutdown()
+        await asyncio.sleep(0)
+        await engine.shutdown()
+
+        assert not engine._scheduler.running
+
+    asyncio.run(run())
+
+    assert engine._app.cancel_task.await_count == 4
+    assert [call.args[0] for call in engine._app.cancel_task.await_args_list] == [
+        engine._JOB_LISTENER,
+        engine._EVENT_CONSUMER,
+    ] * 2
 
 
 @pytest.mark.parametrize("method", ["copy", "bind_loop"])

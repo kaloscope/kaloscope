@@ -11,7 +11,6 @@ from uuid import UUID
 
 from lxml import etree
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -101,15 +100,8 @@ class ReadingMetadata(BaseModel):
     genres: _Names = ()
     tags: _Names = ()
     rating: Decimal | None = Field(default=None, ge=0, le=10, decimal_places=2)
-    pages: int | None = Field(
-        default=None,
-        ge=0,
-        le=0x7FFFFFFF,
-        validation_alias=AliasChoices("pages", "page_count"),
-    )
-    monochrome: bool | None = Field(
-        default=None, validation_alias=AliasChoices("monochrome", "black_and_white")
-    )
+    pages: int | None = Field(default=None, ge=0, le=0x7FFFFFFF)
+    monochrome: bool | None = None
     cover: CoverReference | None = None
 
     @field_validator("*", mode="before")

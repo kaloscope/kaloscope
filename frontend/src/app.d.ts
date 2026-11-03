@@ -1,6 +1,6 @@
-import 'vite-plugin-pwa/info';
-import 'vite-plugin-pwa/pwa-assets';
-import 'vite-plugin-pwa/svelte';
+import '@unplugin-pwa/core/info';
+import '@unplugin-pwa/core/pwa-assets';
+import '@unplugin-pwa/core/svelte';
 
 // see https://svelte.dev/docs/kit/types#app.d.ts
 // for information about these interfaces
