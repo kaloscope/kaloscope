@@ -424,7 +424,8 @@ def test_encoded_credentials(monkeypatch, saved_session):
             assert result.redacted and result.formatted.valid
             assert result.formatted.value == {"token": "[redacted]"}
             assert encoded not in result.text
-            assert "priv" not in result.formatted.rendered
+            assert result.formatted.rendered is None
+            assert "priv" not in dumps(result.model_dump()).decode()
 
     asyncio.run(run())
 

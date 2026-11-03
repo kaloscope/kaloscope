@@ -1042,9 +1042,12 @@ def create_server() -> MCPServer:
                 the token with `{{ var('$auth').token }}`, as HTTP nodes do.
 
         Returns:
-            Status, final URL, selected headers, a 2000-character sample and explicit
-            completeness flags. Optional object extraction runs before clipping,
-            within a 256 KiB body cap. Saved and received credential values are
+            Status, final URL, selected headers and explicit completeness flags.
+            Successful object extraction replaces raw and rendered text with its
+            value, within a 256 KiB body cap. Otherwise a 2000-character sample is
+            returned, plus sampled forms/table/pagination for complete HTML without
+            a formatter. These samples are observations, not inferred schemas or
+            totals. Saved and received credential values are
             redacted, including the indexer's session cookie and HttpOnly cookies
             at any length. Cookie changes stay within this call; no login, retry,
             persistent caching or workflow execution is performed.
@@ -1101,19 +1104,27 @@ def create_server() -> MCPServer:
                 "or HTML movie/TV recipes."
             ),
         ],
+        include_nodes: Annotated[
+            bool,
+            Field(
+                description="Bundle recipe nodes, defaults, handles and context rules."
+            ),
+        ] = False,
     ) -> WorkflowReference:
         """Read shared workflow authoring rules without executing anything.
 
         Args:
             ctx: Authenticated request context supplied by the server.
             topic: Context, template functions, or a supported authoring recipe.
+            include_nodes: Include registered editable node schemas and context
+                rules for a recipe, avoiding separate schema reads.
 
         Returns:
-            Complete English reference. Read exact node schemas separately with
-            `list_node_types` for node purpose, fields and input/output examples.
+            Complete English reference with an optional recipe node bundle.
+            `list_node_types` provides additional nodes and full input/output examples.
         """
         _user(ctx)
-        return read_workflow_reference(topic)
+        return read_workflow_reference(topic, include_nodes)
 
     @server.tool(annotations=READ_ONLY)
     async def list_node_types(

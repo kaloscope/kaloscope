@@ -14,6 +14,7 @@ from app.core.renderer import (
     jsonpath_all,
     jsonpath_first,
     ltrim,
+    outer_html,
     parent_path,
     prefix,
     regex_all,
@@ -120,6 +121,26 @@ class TestXPathAll:
     def test_scalar(self):
         html = "<html><body><h1>Title</h1></body></html>"
         assert xpath_all(html, "string(//h1)") == ["Title"]
+
+
+class TestOuterHtml:
+    @pytest.mark.parametrize("sandboxed", [False, True])
+    def test_element(self, sandboxed):
+        html = '<div><a href="/42">标题 <b>HD</b></a>tail<span>Other</span></div>'
+        result = render(
+            "{{ html|xpath_first('//a')|outer_html }}",
+            {"html": html},
+            sandboxed=sandboxed,
+        )
+        assert result == '<a href="/42">标题 <b>HD</b></a>'
+
+    def test_missing(self):
+        assert outer_html(None) == ""
+
+    @pytest.mark.parametrize("value", ["text", [], 42])
+    def test_invalid(self, value):
+        with pytest.raises(TypeError, match="XPath element"):
+            outer_html(value)
 
 
 class TestXPath:

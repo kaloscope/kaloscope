@@ -27,8 +27,48 @@ from tests.test_workflow_outputs import (
 )
 
 
+def test_shared_html_probe(monkeypatch):
+    monkeypatch.setattr(
+        authoring,
+        "NetworkTransport",
+        lambda **_: httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text='<table><tr><td><a href="/download/42">Fixture</a>'
+                "</td></tr></table>",
+                headers={"content-type": "text/html"},
+            )
+        ),
+    )
+
+    async def run():
+        async with application() as app:
+            args = {"request": {"url": "https://example.test/search"}}
+            issued = await MCPAccessTokenService.create(
+                app.shared_ctx.sessions["admin"].id,
+                MCPAccessTokenCreate(name="fixture", scope=MCPTokenScope.READ_WRITE),
+            )
+            mcp = await call(
+                app, "probe_http_request", {"probe": args}, token=issued["token"]
+            )
+            assistant = await tools.execute_tool(
+                "probe_http_request",
+                dumps(args).decode(),
+                app.shared_ctx.sessions["admin"],
+                conversation_id=1,
+                call_id="probe",
+            )
+
+            assert assistant["ok"]
+            assert mcp["structuredContent"] == assistant["data"]
+            assert assistant["data"]["html_sample"]["table"]["observed_rows"] == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("movie", [False, True])
-def test_shared_recipe(monkeypatch, movie):
+@pytest.mark.parametrize("include_nodes", [False, True])
+def test_shared_recipe(monkeypatch, movie, include_nodes):
     execute = AsyncMock(side_effect=AssertionError("Recipes never execute workflows"))
     monkeypatch.setattr(FlowEngine, "execute", execute)
     network = []
@@ -59,9 +99,20 @@ def test_shared_recipe(monkeypatch, movie):
             token = issued["token"]
             topic = "movie_scraper" if movie else "json_indexer"
             recipe = await call(
-                app, "get_workflow_reference", {"topic": topic}, token="reader"
+                app,
+                "get_workflow_reference",
+                {"topic": topic, "include_nodes": include_nodes},
+                token="reader",
             )
             assert recipe["structuredContent"]["topic"] == topic
+            shared = await tools.execute_tool(
+                "get_workflow_reference",
+                dumps({"topic": topic, "include_nodes": include_nodes}).decode(),
+                app.shared_ctx.sessions["reader"],
+                conversation_id=1,
+                call_id="recipe",
+            )
+            assert shared["ok"] and shared["data"] == recipe["structuredContent"]
             node = await call(
                 app,
                 "list_node_types",

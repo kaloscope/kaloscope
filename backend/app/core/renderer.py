@@ -278,6 +278,25 @@ def xpath_all(obj: Any, expr: str) -> list:
     return result
 
 
+def outer_html(element: Any) -> str:
+    """Serialize one XPath element as HTML without its following sibling text.
+
+    Args:
+        element: An element returned by XPath, or `None` for a missing match.
+
+    Returns:
+        HTML markup including attributes and children, or an empty string.
+
+    Raises:
+        TypeError: If the input is neither an element nor `None`.
+    """
+    if element is None:
+        return ""
+    if not isinstance(element, etree._Element):
+        raise TypeError("outer_html requires one XPath element or None")
+    return etree.tostring(element, encoding="unicode", method="html", with_tail=False)
+
+
 def regex_first(string: str, expr: str) -> Any:
     """Find first match in a string using a regular expression.
 
@@ -603,6 +622,7 @@ ENV.filters["jsonpath_all"] = jsonpath_all
 ENV.filters["jsonpath"] = partial(_find, expr_type="jsonpath")
 ENV.filters["xpath_first"] = xpath_first
 ENV.filters["xpath_all"] = xpath_all
+ENV.filters["outer_html"] = outer_html
 ENV.filters["xpath"] = partial(_find, expr_type="xpath")
 ENV.filters["regex_first"] = regex_first
 ENV.filters["regex_all"] = regex_all

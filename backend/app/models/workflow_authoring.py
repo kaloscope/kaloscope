@@ -115,7 +115,10 @@ class HTTPProbeResult(BaseModel):
     status_code: int | None = None
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
-    text: str = ""
+    text: str = Field(
+        default="",
+        description="Up to 2000 characters; omitted after successful extraction.",
+    )
     bytes_read: int = Field(
         default=0, description="Decoded bytes observed; a lower bound when incomplete."
     )
@@ -127,7 +130,15 @@ class HTTPProbeResult(BaseModel):
         default=False,
         description="Whether text is only a sample, even if the full body was read.",
     )
-    formatted: TemplateResult | None = None
+    formatted: TemplateResult | None = Field(
+        default=None,
+        description="Object extraction; success returns value without rendered text.",
+    )
+    html_sample: dict[str, Any] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Sampled HTML forms, first table row and pagination, not a schema.",
+    )
     redacted: bool = Field(
         default=False,
         exclude_if=lambda value: not value,

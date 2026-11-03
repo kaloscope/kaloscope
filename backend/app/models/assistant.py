@@ -26,6 +26,7 @@ from app.utils.json import dumps
 MAX_PROMPT_BYTES = 128 * 1024
 MAX_PAGE_CONTEXT_BYTES = 128 * 1024
 MAX_SNAPSHOT_BYTES = 512 * 1024
+TURN_TIMEOUT = 600
 WORKFLOW_PATH = "/settings/workflows/graphs"
 WORKFLOW_JOBS_PATH = "/settings/workflows/schedules"
 MEDIA_PATH = "/medialibs"

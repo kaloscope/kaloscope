@@ -99,6 +99,33 @@ def test_node_contract(schema):
                 assert fields[original.id][key] == loads(dumps(value))
 
 
+@pytest.mark.parametrize(
+    "topic",
+    ["json_indexer", "html_indexer", "indexer_auth", "movie_scraper", "tv_scraper"],
+)
+def test_recipe_nodes(topic):
+    async def run():
+        original = dumps(FlowGraphService.get_node_schemas())
+        result = await query(
+            "get_workflow_reference", {"topic": topic, "include_nodes": True}
+        )
+        data = result["data"]
+        assert data["content"] == get_workflow_reference(topic).content
+        assert data["context"] == get_workflow_reference("context").content
+        assert data["nodes"]
+        for group, nodes in data["nodes"].items():
+            for node in nodes:
+                separate = await query(
+                    "list_node_types",
+                    {"node_type": node["node_type"], "include_examples": False},
+                )
+                assert node == separate["data"][group][0]
+                assert not any(field.get("readonly") for field in node["fields"])
+        assert dumps(FlowGraphService.get_node_schemas()) == original
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(("node_type", "field"), EXAMPLES, ids=[n for n, _ in EXAMPLES])
 def test_examples(node_type, field):
     assert field.readonly

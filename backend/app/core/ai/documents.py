@@ -41,8 +41,8 @@ class AddNode(ContextModel):
     op: Literal["add_node"]
     node: GraphNode = Field(
         description=(
-            'type="node"; data.$schema=registered node_type (e.g. "http"). '
-            "Authored fields belong inside data. Read list_node_types first."
+            'type="node"; data.$schema=node_type (e.g. "http"); fields in data. '
+            "Read schemas via list_node_types or get_workflow_reference."
         )
     )
 
@@ -348,6 +348,14 @@ def tool_facts(result: dict) -> dict:
     if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
         facts["graph_source"] = "saved_draft"
     for key, value in data.items():
+        if (
+            key == "rendered"
+            and result.get("name") == "validate_workflow_template"
+            and data.get("valid")
+            and data.get("value") is not None
+        ):
+            # the parsed value and validation issues already describe this result
+            continue
         if key == "source_facts":
             # history reads already project and flatten the original tool facts
             facts[key] = value
@@ -406,6 +414,19 @@ def tool_facts(result: dict) -> dict:
                 if k == "readiness"
                 else value_summary(v, limit=400)
                 for k, v in value.items()
+            }
+        elif key == "html_sample" and result.get("name") == "probe_http_request":
+            facts[key] = value_summary(value, limit=4000)
+        elif (
+            key == "formatted"
+            and result.get("name") == "probe_http_request"
+            and isinstance(value, dict)
+        ):
+            # keep observed fields across compaction without duplicating rendered JSON
+            facts[key] = {
+                key: value_summary(item, limit=4000) if key == "value" else item
+                for key, item in value.items()
+                if key != "rendered"
             }
         elif isinstance(value, (str, list, dict)):
             facts[key] = value_summary(value, limit=600)

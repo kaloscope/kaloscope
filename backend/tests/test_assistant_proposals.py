@@ -364,6 +364,76 @@ def test_missing_canvas_base():
     asyncio.run(run())
 
 
+def test_incremental_canvas():
+    async def run():
+        async with database() as env:
+            empty = {"nodes": [], "edges": []}
+            await FlowGraph.filter(id=env.graph.id).update(
+                category=GraphCategory.INDEXER,
+                draft=empty,
+                definition=empty,
+                state=GraphState.DRAFT,
+            )
+            capture = await Sessions.snapshot(
+                env.conversation,
+                env.graph.id,
+                0,
+                GraphDocument.model_validate(empty),
+                "canvas",
+                env.owner,
+            )
+            context = {
+                "resource_id": env.graph.id,
+                "draft_version": 0,
+                "snapshot_id": capture.id,
+            }
+            latest = capture.id
+            for index, schema in enumerate(("search_start", "search_end"), start=1):
+                result = await tools.execute_tool(
+                    "preview_workflow_draft",
+                    dumps(
+                        {
+                            "workflow_id": env.graph.id,
+                            "draft_version": 0,
+                            "snapshot_id": latest,
+                            "changes": [
+                                {
+                                    "op": "add_node",
+                                    "node": {
+                                        "id": schema,
+                                        "position": {"x": index * 800, "y": 0},
+                                        "data": {"$schema": schema},
+                                    },
+                                }
+                            ],
+                        }
+                    ).decode(),
+                    env.owner,
+                    conversation_id=env.conversation,
+                    call_id=f"increment-{index}",
+                    canvas=context,
+                    canvas_snapshot_id=latest,
+                )
+                assert result["ok"], result
+                latest = result["data"]["proposal_snapshot_id"]
+
+                view = await Proposals.canvas(
+                    env.conversation, result["data"]["proposal_id"], env.owner
+                )
+
+                assert len(view["canvas"]["nodes"]) == index
+                assert view["base_snapshot_id"] == capture.id
+                assert view["proposal"]["status"] == "pending"
+                assert (await FlowGraph.get(id=env.graph.id)).draft == empty
+                assert await revisions(env) == 0
+            original = await Sessions.read_snapshot(
+                env.conversation, capture.id, env.owner
+            )
+            assert original.document == empty
+
+    asyncio.run(run())
+
+
 def test_canvas_chained_edits():
     async def run():
         async with database() as env:
