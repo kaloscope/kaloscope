@@ -1,88 +1,132 @@
 <script lang="ts" module>
-  type Point = [number, number];
-
   export type LogoProps = {
     /** The size of the logo. */
     size?: string;
-    /** Whether to generate a random logo. */
+    /** Whether to show a random kaleidoscope instead of the logo. */
     random?: boolean;
   };
+
+  /** Colors of the bars in `logo.svg`. */
+  const COLORS = ['#5170ff', '#cb6ce6', '#ff914d', '#ffde59', '#00bf63'];
+  /** Radius of the kaleidoscope view in SVG units. */
+  const RADIUS = 120;
+
+  /**
+   * Pick a random logo color.
+   *
+   * @returns The color value.
+   */
+  function randomColor() {
+    return COLORS[Math.floor(Math.random() * COLORS.length)];
+  }
+
+  /**
+   * Create a random kaleidoscope pattern from the logo colors.
+   *
+   * @returns The mirror count, wedge angle and clip path, backdrop tint, and the beads tumbling inside one wedge.
+   */
+  function createPattern() {
+    const mirrors = 6 + 2 * Math.floor(Math.random() * 3);
+    const angle = 360 / mirrors;
+    // widen the wedge slightly so neighboring mirrors leave no seams
+    const [x1, y1, x2, y2] = [-0.5, angle + 0.5].flatMap((deg) => {
+      const rad = (deg * Math.PI) / 180;
+      return [RADIUS * Math.cos(rad), RADIUS * Math.sin(rad)];
+    });
+    const beads = Array.from({ length: 24 }, () => {
+      const width = 24 + Math.random() * 64;
+      const height = 14 + Math.random() * 28;
+      return {
+        x: -width / 2,
+        y: -height / 2,
+        width,
+        height,
+        // rounded bars like the logo, or pills
+        rx: Math.random() < 0.7 ? 9 : height / 2,
+        fill: randomColor(),
+        'fill-opacity': 0.7 + Math.random() * 0.3,
+        transform: `rotate(${Math.random() * 360}) translate(${Math.random() * RADIUS} 0) rotate(${Math.random() * 180})`
+      };
+    });
+    const clip = `M0 0L${x1} ${y1}A${RADIUS} ${RADIUS} 0 0 1 ${x2} ${y2}Z`;
+    return { mirrors, angle, clip, tint: randomColor(), beads };
+  }
 </script>
 
 <script lang="ts">
   let { size = '2.5rem', random = false }: LogoProps = $props();
-  // the refresh key
-  let refreshKey: number = $state(0);
+  // the unique clip path id of this instance
+  const clipId = $props.id();
   // the logo image source
   const src = new URL('/logo.svg', import.meta.url).href;
+  // the current kaleidoscope pattern
+  let pattern = $state.raw(createPattern());
 
   /**
-   * Trigger a refresh of the logo.
+   * Turn the kaleidoscope to a new pattern, occasionally restoring the logo.
    */
   export function spin() {
-    refreshKey = new Date().getTime();
-    random = refreshKey % 10 !== 0;
-  }
-
-  /**
-   * Generate a random SVG logo.
-   *
-   * @param svgElement - The SVG element.
-   */
-  function drawSVG(svgElement: SVGSVGElement) {
-    // draw a circle
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', '128');
-    circle.setAttribute('cy', '128');
-    circle.setAttribute('r', '122');
-    circle.setAttribute('stroke', 'gray');
-    circle.setAttribute('stroke-width', '9');
-    circle.setAttribute('fill', 'none');
-    svgElement.appendChild(circle);
-    // draw some triangles
-    const offset = Math.random() * 360;
-    for (let i = 0; i < Math.floor(Math.random() * 5) + 1; i++) {
-      svgElement.appendChild(randomTriangle(offset * i));
-    }
-  }
-
-  /**
-   * Generate a random triangle SVG element.
-   *
-   * @param offset - Triangle offset.
-   * @returns The triangle SVG element.
-   */
-  function randomTriangle(offset: number) {
-    const points: Point[] = [0, 120, 240].map((cardinal) => {
-      const theta = cardinal + offset;
-      const x = Math.cos((theta * Math.PI) / 180) * 110 + 128;
-      const y = Math.sin((theta * Math.PI) / 180) * 110 + 128;
-      return [x, y];
-    });
-    const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-    polygon.setAttribute('points', points.map(([x, y]) => `${x},${y}`).join(' '));
-    polygon.setAttribute('stroke', 'gray');
-    polygon.setAttribute('stroke-width', '3');
-    polygon.setAttribute('fill', randomGray());
-    return polygon;
-  }
-
-  /**
-   * Generate a random gray RGBA color.
-   *
-   * @returns The RGBA color string.
-   */
-  function randomGray() {
-    const brightness = 200 + Math.floor(Math.random() * 56);
-    const alpha = Math.random().toFixed(1);
-    return `rgba(${brightness},${brightness},${brightness},${alpha})`;
+    random = Math.random() >= 0.1;
+    pattern = createPattern();
   }
 </script>
 
 {#if random}
-  {#key refreshKey}
-    <svg use:drawSVG viewBox="0 0 256 256" class="animate-[spin_5s_linear_infinite]" width={size} height={size} />
+  {#key pattern}
+    <svg class="kaleidoscope" viewBox="0 0 256 256" width={size} height={size} role="img" aria-label="logo">
+      <defs>
+        <clipPath id={clipId}><path d={pattern.clip} /></clipPath>
+      </defs>
+      <g transform="translate(128 128)">
+        <circle r={RADIUS} fill={pattern.tint} fill-opacity="0.15" />
+        {#each { length: pattern.mirrors }, i (i)}
+          <!-- odd wedges reflect their even neighbors across the shared mirror -->
+          <g transform="rotate({(i + (i % 2)) * pattern.angle}) scale(1 {i % 2 ? -1 : 1})" clip-path="url(#{clipId})">
+            <g class="beads">
+              {#each pattern.beads as bead, j (j)}
+                <rect {...bead} />
+              {/each}
+            </g>
+          </g>
+        {/each}
+        <circle r="122" fill="none" stroke="gray" stroke-width="9" />
+      </g>
+    </svg>
   {/key}
 {:else}
   <img {src} alt="logo" style:width={size} style:height={size} />
 {/if}
+
+<style>
+  /* the tube turns while the beads tumble the other way between the mirrors */
+  .kaleidoscope {
+    animation:
+      kaleidoscope-open 0.6s ease-out,
+      kaleidoscope-turn 24s linear infinite;
+  }
+
+  .beads {
+    animation: kaleidoscope-turn 10s linear infinite reverse;
+  }
+
+  @keyframes kaleidoscope-open {
+    from {
+      opacity: 0;
+      rotate: -120deg;
+      scale: 0.4;
+    }
+  }
+
+  @keyframes kaleidoscope-turn {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .kaleidoscope,
+    .beads {
+      animation: none;
+    }
+  }
+</style>
