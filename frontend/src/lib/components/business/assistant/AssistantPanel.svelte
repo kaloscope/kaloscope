@@ -424,7 +424,7 @@
     aria-describedby="assistant-help"
     tabindex="-1"
     bind:this={panel}
-    class="assistant-panel @container fixed layer-1 flex flex-col rounded-box bg-blur-90 text-base-content shadow-[var(--assistant-panel-shadow)] ring-1 ring-border"
+    class="assistant-panel @container fixed layer-1 flex flex-col rounded-box bg-blur-90 text-base-content shadow-(--assistant-panel-shadow) ring-1 ring-border"
     class:compact
     style:max-height={viewportHeight ? `${Math.max(0, viewportHeight - 16)}px` : undefined}
     style:left={position ? `${position.x}px` : undefined}
@@ -471,7 +471,7 @@
 
     <ol
       bind:this={transcript}
-      class="transcript min-h-0 flex-1 [scrollbar-gutter:stable] space-y-6 overflow-y-auto overscroll-contain px-4 pt-2 pb-3"
+      class="transcript min-h-0 flex-1 scrollbar-gutter-stable space-y-6 overflow-y-auto overscroll-contain px-4 pt-2 pb-3"
       aria-label={$_('assistant.conversation')}
       onscroll={trackScroll}
     >
@@ -501,7 +501,7 @@
           <div class="flex flex-col items-end gap-1 pl-8">
             <p class="sr-only">{$_('assistant.you')}</p>
             <p
-              class="max-w-full rounded-box bg-base-content/8 px-3 py-2 text-sm leading-6 break-words whitespace-pre-wrap shadow-[var(--assistant-message-shadow)] ring-1 ring-base-content/10"
+              class="max-w-full rounded-box bg-base-content/8 px-3 py-2 text-sm leading-6 wrap-break-word whitespace-pre-wrap shadow-(--assistant-message-shadow) ring-1 ring-base-content/10"
             >
               {turn.prompt}
             </p>
@@ -645,7 +645,7 @@
         <AssistantChanges />
       {:else}
         <div
-          class="rounded-box bg-base-100 shadow-[var(--assistant-composer-shadow)] ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80"
+          class="rounded-box bg-base-100 shadow-(--assistant-composer-shadow) ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80"
         >
           <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
           <textarea
@@ -695,11 +695,11 @@
                 onclick={loadAssistantModels}
               />
             {/if}
-            <div class="flex min-w-0 shrink-[2] items-center" aria-busy={modelsBusy}>
+            <div class="flex min-w-0 shrink-2 items-center" aria-busy={modelsBusy}>
               <label class="sr-only" for="assistant-model">{$_('assistant.model')}</label>
               <Select
                 id="assistant-model"
-                class="[field-sizing:content] h-7 min-h-7 w-auto max-w-full min-w-0 select-ghost pr-7 pl-2 text-xs select-sm disabled:border-transparent disabled:bg-transparent disabled:text-base-content/60"
+                class="field-sizing-content h-7 min-h-7 w-auto max-w-full min-w-0 select-ghost pr-7 pl-2 text-xs select-sm disabled:border-transparent disabled:bg-transparent disabled:text-base-content/60"
                 disabled={$assistant.busy || modelsBusy || $assistantRestoring || !$assistant.models.length}
                 value={modelValue}
                 onchange={(event) => ($assistant.model = JSON.parse((event.currentTarget as HTMLSelectElement).value))}

@@ -84,9 +84,7 @@
   {/each}
 {/snippet}
 
-<div
-  class="assistant-markdown prose prose-sm max-w-none min-w-0 leading-6 [overflow-wrap:anywhere] text-base-content/90"
->
+<div class="assistant-markdown prose prose-sm max-w-none min-w-0 leading-6 wrap-anywhere text-base-content/90">
   {@render render(blocks)}
 </div>
 
