@@ -36,11 +36,68 @@
 
 ## Overview
 
-Kaloscope is a local media library management tool built around a visual workflow engine. Capabilities such as resource search and metadata scraping are driven by editable workflows, allowing flexible integration with any resource site or metadata source.
+Kaloscope is a local media library manager that combines an **AI assistant** with **visual workflows**, bringing resource search, downloads, metadata scraping, ingestion, and playback together.
+
+v1.0.0 brings AI into workflow creation and everyday media management. Describe what you need, review changes on the canvas, or edit nodes directly to control each step.
+
+## AI Features
+
+### :speech_balloon: Built-in AI Assistant
+
+- Use the current page and execution logs to inspect workflows, media, and download status and troubleshoot issues
+- Create and edit indexers, movie and TV scrapers, and other workflows through conversation, with validation, trial runs, and repairs
+- Watch changes appear on the node canvas, then save the draft or revert them; you decide when to publish
+- Manage download tasks and plans, workflow schedules, library scans, rescraping, and ingestion settings through conversation
+
+Download, schedule, plan, and media changes are previewed for confirmation before they run. Available actions follow your account permissions.
+
+### :robot: AI Workflow Nodes
+
+- Add model calls to workflows, using context variables for text processing, information extraction, and other tasks
+- Return text or structured JSON, with JSON Schema validation for structured results
+- Configure cloud and local models in one place through OpenAI-compatible APIs, including DeepSeek, Gemini, Ollama, and LM Studio
+
+### :link: External AI Clients
+
+Connect through [MCP](#mcp-access) to inspect media and tasks, edit workflow drafts, and manage downloads from your preferred AI client, without deploying a separate bridge service.
+
+## Features
+
+| <img align="center" src="screenshots/workflow-complex.png" /> | <img align="center" src="screenshots/danmaku-settings.png" /> | <img align="center" src="screenshots/text-viewer.png" /> | <img align="center" src="screenshots/image-viewer.png" /> |
+| ------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------- |
+
+### :wrench: Visual Workflows
+
+- Build workflows by dragging and connecting nodes for HTTP requests, Python scripts, conditions, loops, and more
+- Adapt search and scraping to resource sites and metadata sources through editable workflows
+- Import community templates from GitHub and automate execution with schedules
+
+### :mag: Search and Downloads
+
+- Search by keyword, preview details, and authenticate with indexers; global search combines results from multiple sources
+- Connect [`aria2`](https://aria2.github.io/), [`qBittorrent`](https://www.qbittorrent.org/), [`Transmission`](https://transmissionbt.com/), and other downloaders, or use [`OpenList`](https://github.com/OpenListTeam/OpenList) for cloud downloads and transfer results to local storage
+- Automate downloads with keyword and filter rules, or add magnet links and torrent files manually
+
+### :clapper: Media Libraries
+
+- Manage movie, TV, and other libraries with real-time file monitoring to discover new media
+- Use workflows for metadata scraping and ingestion, with custom naming and organization rules
+- Read and write NFO metadata and preview video, image, and text resources online
+
+### :arrow_forward: Playback
+
+- Play FLV, HLS, and MP4 with the built-in player and real-time transcoding on demand
+- Use hardware acceleration such as NVENC, VAAPI, and VideoToolbox, with configurable output quality limits
+- Enjoy danmaku, playback progress tracking, resume, and a mobile-friendly full-screen mode
+
+### :iphone: Users and Devices
+
+- Separate administrator and user roles, with access permissions for individual libraries and indexers
+- Set personal preferences, switch themes, and install the app on desktop or mobile as a PWA
 
 ## Quick Start
 
-The following example pulls and runs a standalone Kaloscope container using Docker:
+Deploy with Docker, replacing the UID, GID, and host directories to match your environment:
 
 ```bash
 docker run -d \
@@ -48,14 +105,11 @@ docker run -d \
   --add-host=host.docker.internal:host-gateway \
   -e PUID=1026 \
   -e PGID=100 \
-  -e UMASK=022 \
   -e TZ=Asia/Shanghai \
-  -e AUTO_TLS=true \
-  -e TLS_HOSTNAME=192.168.31.2 \
   -e ENABLE_ARIA2=true \
   -v /volume1/kaloscope/workspace:/workspace \
   -v /volume1/kaloscope/downloads:/downloads \
-  -v /volume1/kaloscope/anime:/anime \
+  -v /volume1/kaloscope/media:/media \
   -p 8000:8000 \
   -p 6888:6888 \
   -p 6888:6888/udp \
@@ -63,104 +117,27 @@ docker run -d \
   kaloscope/kaloscope:latest
 ```
 
-The parameters used above are described below.
+Open `http://<server-ip>:8000` and follow the setup page to create an administrator account. Use container paths when configuring downloaders and libraries:
 
-**Environment variables (`-e`)**
+| Container path | Purpose                                                     |
+| -------------- | ----------------------------------------------------------- |
+| `/workspace`   | Database and application settings; must be persisted        |
+| `/downloads`   | Downloaded files                                            |
+| `/media`       | Media library files; mount additional directories as needed |
 
-| Variable       | Default | Description                                                                                                                          |
-| -------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `PUID`         | `0`     | UID used to run the process. On a NAS, set this to the owner of the media directories                                                |
-| `PGID`         | `0`     | GID used to run the process. On a NAS, set this to the group that owns the media directories                                         |
-| `UMASK`        | `022`   | File creation mask that controls the default permissions of new files in the container                                               |
-| `TZ`           | Not set | Container timezone, such as `Asia/Shanghai` or `UTC`                                                                                 |
-| `AUTO_TLS`     | `false` | Automatically issue local TLS certificates using [`mkcert`](https://github.com/FiloSottile/mkcert), useful for HTTPS access on a LAN |
-| `TLS_HOSTNAME` | Not set | Hostname or IP address included in the TLS certificate; only applies when `AUTO_TLS=true`                                            |
-| `ENABLE_ARIA2` | `false` | Start the built-in aria2 service in the container, useful when you do not want to deploy a separate downloader                       |
+This example enables the built-in aria2 service. For an external downloader, remove `ENABLE_ARIA2` and the `6888` port mappings. See the [Deployment Guide](https://kaloscope.org/docs/deployment) for HTTPS, hardware transcoding, and other options.
 
-**Port mappings (`-p`)**
+### Enable AI
 
-| Port   | Protocol | Description                                                                     |
-| ------ | -------- | ------------------------------------------------------------------------------- |
-| `8000` | TCP      | Kaloscope Web UI                                                                |
-| `6888` | TCP/UDP  | aria2 DHT and BitTorrent listening port; only required when `ENABLE_ARIA2=true` |
+1. As an administrator, open **System → Model Providers**, add a service, enter its API URL and any required key, and select or enter model IDs
+2. Open the assistant from the top navigation bar and select a model to start chatting
+3. Add an AI node to a workflow to process workflow data with a configured model
 
-**Data volumes (`-v`)**
-
-| Container path | Required | Description                                                              |
-| -------------- | -------- | ------------------------------------------------------------------------ |
-| `/workspace`   | Yes      | Persistent storage that keeps application data across container restarts |
-
-> [!NOTE]
-> For more configuration details, see the [`Deployment Guide`](https://kaloscope.org/docs/deployment).
-
-## Features
-
-| <img align="center" src="screenshots/workflow-complex.png" /> | <img align="center" src="screenshots/danmaku-settings.png" /> | <img align="center" src="screenshots/text-viewer.png" /> | <img align="center" src="screenshots/image-viewer.png" /> |
-| ------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------- |
-
-### :wrench: Workflows
-
-- Build workflows by dragging and connecting nodes in the visual editor
-- Includes nodes for HTTP requests, Python scripts, conditional branches, loops, and more
-- Import community workflow templates from GitHub repositories to quickly reuse existing solutions
-- Use Schedules to run workflows automatically
-
-### :mag: Search
-
-- Workflow-driven Indexers that can integrate with any resource site
-- Complete search flow with keyword search, detail previews, and authentication
-- Global Search that aggregates results from multiple Indexers
-- Online previews for videos, images, text, and other resource types
-
-### :inbox_tray: Downloads
-
-- Supports Downloaders such as [`aria2`](https://aria2.github.io/), [`qBittorrent`](https://www.qbittorrent.org/), and [`Transmission`](https://transmissionbt.com/)
-- Supports assigning a cloud-storage offline download tool in [OpenList](https://github.com/OpenListTeam/OpenList) to a Downloader and pulling remote results directly to local storage
-- YAML-based Downloader configuration with extensible adapters
-- Download Plans that automatically search and dispatch tasks using Keywords and Filters
-- Manually add magnet links or torrent files
-
-### :clapper: Media Libraries
-
-- Supports multiple Media Library types, including Movie and TV Show
-- Watches the file system in real time and automatically detects newly added media files
-- Generates and parses [`NFO`](https://en.wikipedia.org/wiki/.nfo) files and synchronizes Metadata
-
-### :arrow_forward: Playback
-
-- Built-in video player with support for FLV, HLS, and MP4
-- Real-time transcoding for playback, converting videos to HLS streams on demand with output quality limits
-- Hardware-accelerated encoding with NVENC, VAAPI, VideoToolbox, and more
-- Danmaku display and a mobile-friendly styled Full Screen mode
-- Playback progress tracking and Resume support
-
-### :busts_in_silhouette: Users and Permissions
-
-- Multi-user support with Admin and User roles
-- Permissions can be assigned by Media Library and Indexer
-- Per-user Preferences and custom Avatars
-
-### :iphone: PWA Support
-
-- Installable on desktop and mobile devices as a [`PWA`](https://web.dev/explore/progressive-web-apps)
-- PWA Theme color stays synchronized with the active application Theme
+The assistant requires a model that supports tool calling. Local model services must be reachable from the container. Other media management features work without AI configuration.
 
 ## MCP Access
 
-MCP clients can connect directly to Kaloscope over Streamable HTTP to inspect workflows,
-media libraries and metadata, download progress, schedules, and AI provider settings. The `/_api/mcp` endpoint uses Kaloscope's
-existing port; clients do not need Python, a source checkout, or a bridge process. MCP reuses the application's
-business services and user permissions through independent access tokens. It also supports draft editing, workflow trials,
-and confirmed changes to plans, download tasks, and media.
-
-Tokens default to read-only access. Choose read-write access for tools that save drafts, probe HTTP requests, search
-indexers, run workflow trials, or apply changes. Account permissions still apply: workflow editing, plan management,
-task deletion and media changes require an administrator; task pause, resume and retry follow existing download permissions.
-Read-only access includes validation and preview tools; rescrape candidate previews actually run the scraper workflow.
-
-After signing in, create and copy a token under **Personal Settings → Access Tokens**. The page provides
-your instance's MCP URL and authentication instructions, shows token status and last use, and lets you delete tokens.
-In an MCP client that supports Streamable HTTP and Bearer authentication, add a server with these settings:
+Create a token under **Personal → Access Tokens**, then enter these settings in an MCP client that supports Streamable HTTP and Bearer authentication:
 
 | Setting              | Value                                                                                        |
 | -------------------- | -------------------------------------------------------------------------------------------- |
@@ -168,50 +145,7 @@ In an MCP client that supports Streamable HTTP and Bearer authentication, add a 
 | MCP URL              | `http://127.0.0.1:8000/_api/mcp`, replaced with an instance address reachable by your client |
 | Authorization header | `Authorization: Bearer <token>`, replacing `<token>` with the full token                     |
 
-If your client has a **Bearer Token** field, enter only the full token without the `Bearer` prefix.
-For custom request headers, use `Authorization` as the name and `Bearer <token>` as the value.
-Configuration file formats and field names vary by client; use these connection details according to your client's
-MCP setup instructions. Authentication currently uses access tokens; OAuth sign-in is not available.
-
-The full credential is shown only once, at creation.
-Choose a fixed lifetime of 30, 90, or 365 days; the default is 90 days, and use does not extend it.
-Use `GET /_api/mcp/token/list` to inspect your tokens and `POST /_api/mcp/token/<id>/delete` to delete one,
-both authenticated with your web login session. MCP tokens work only at `/_api/mcp`, which does not accept
-web login tokens or cookies. Both active and expired tokens can be deleted. Deletion removes the record
-from the list and immediately invalidates the token; it cannot be undone.
-Signing out of the web application does not invalidate MCP tokens. After expiration or deletion,
-generate a replacement and update the client configuration.
-Keep tokens out of tool arguments and project files. Use HTTPS for remote connections.
-
-Common query tools are listed below; discover the full tool list and argument definitions through your client.
-
-| Tool                   | Purpose                                                                            |
-| ---------------------- | ---------------------------------------------------------------------------------- |
-| `list_workflows`       | Page through accessible workflows, filtered by name, category, and state           |
-| `get_workflow`         | Read a workflow's metadata, draft, and published definition                        |
-| `list_node_types`      | Read fields, defaults, constraints, and handles, filtered by category or node type |
-| `get_workflow_logs`    | Read retained workflow execution logs without running the workflow                 |
-| `list_workflow_jobs`   | Query accessible schedules by workflow name, state, and trigger                    |
-| `list_media_libraries` | List accessible libraries and their current scan status without starting a scan    |
-| `list_media_items`     | Search indexed media by title or filename, library, or an existing item's path     |
-| `get_media_item`       | Read metadata issues and visible children without playback or reindexing           |
-| `list_download_tasks`  | Read stored download progress and error summaries without polling downloaders      |
-| `list_ai_providers`    | Let administrators inspect configured models and provider states without API keys  |
-
-Paginated tools return at most 100 items per page. Media and schedules follow the account's library and workflow
-permissions. Download tasks retain the download page's shared visibility, but exclude source links, file lists,
-and downloader credentials. Provider results include disabled configurations to help diagnose invalid AI nodes.
-
-After connecting, an AI client can inspect logs and media, generate, validate, preview, save and restore workflow drafts,
-search indexers, create download plans or one-time downloads, update or delete download plans, manage workflow schedules,
-and pause, resume, retry or delete individual download tasks. Movie and TV libraries support confirmed scans, rescraping
-with a user-selected candidate, and changes to ingestion bindings, metadata language and naming templates.
-
-Present changes for the user's confirmation before applying them. Reuse the original request identity when retrying to
-read its recorded outcome. HTTP probes make real requests; candidate searches and workflow trials can execute HTTP,
-script, file and AI nodes. A queued or submitted operation does not establish download, scraping or ingestion completion.
-Workflow publication and indexer login remain user actions in the web interface. No tool directly deletes workflows or
-cancels running workflows.
+Tokens default to read-only access. Choose read-write access to edit drafts, run workflow trials, or apply changes; account permissions still apply. The full token is shown only once at creation. If your client has a **Bearer Token** field, enter only the token itself.
 
 ## Star History
 
