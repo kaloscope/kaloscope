@@ -1,6 +1,6 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
-  import { beforeNavigate, goto } from '$app/navigation';
+  import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import {
@@ -239,12 +239,6 @@
   $effect(() => {
     if (_indexerId !== indexerId) {
       untrack(() => {
-        // check if the indexer ID is valid
-        if (!data.menus[1]?.routes.some((r) => r.path === `/websearch/${indexerId}`)) {
-          const route = data.menus[0]?.routes[0]?.path;
-          route && goto(route, { replaceState: true });
-          return;
-        }
         outerLoading.start();
         // get supported view modes from config
         const modes = display?.view_modes ?? [];
