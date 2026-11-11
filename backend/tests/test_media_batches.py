@@ -793,3 +793,179 @@ def test_organize_changed(monkeypatch, tmp_path):
             assert (Path(env.show.dir) / "S01E01.mkv").is_file()
 
     asyncio.run(run())
+
+
+async def second_folder(env, **fields) -> tuple[MediaItem, list[MediaItem]]:
+    """Add another folder of the same show with a new, a duplicate and a later episode.
+
+    Args:
+        env: Stored libraries from `media`.
+        **fields: Extra fields of the folder's directory item.
+
+    Returns:
+        The folder's directory item and its episodes.
+    """
+    folder = Path(env.shows.dir) / "Old Show Part 2"
+    folder.mkdir()
+    parent = await MediaItem.create(
+        lib=env.shows,
+        path=str(folder),
+        dir=str(folder),
+        name=folder.name,
+        season=1,
+        **fields,
+    )
+    episodes = []
+    for name, season, episode in (
+        ("S01E02", 1, 2),
+        ("S01E03", 1, 3),
+        ("S02E01", 2, 1),
+    ):
+        video = folder / f"{name}.mkv"
+        video.write_bytes(name.encode())
+        episodes.append(
+            await MediaItem.create(
+                lib=env.shows,
+                parent=parent,
+                path=str(video),
+                dir=str(folder),
+                name=name,
+                season=season,
+                episode=episode,
+            )
+        )
+    write(folder, "S01E03.zh.ass", "poster.jpg")
+    return parent, episodes
+
+
+def moving(lib: MediaLib, destination: str, **fields) -> MediaBatch:
+    return MediaBatch(
+        library_id=lib.id, operation="move", destination=destination, **fields
+    )
+
+
+def test_merge_episodes(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            parent, episodes = await second_folder(env)
+            root = Path(env.shows.dir)
+            change = moving(env.shows, "Old Show", item_ids=[parent.id])
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            moved = await MediaItem.get(id=episodes[1].id)
+
+            assert review["planned"]["units"] == 2
+            assert review["blocked"]["reasons"] == {"duplicate_episode": 1}
+            assert result["outcome"] == "completed"
+            assert (root / "Old Show/S01E03.mkv").is_file()
+            assert (root / "Old Show/S01E03.zh.ass").is_file()
+            assert (root / "Old Show/S02E01.mkv").is_file()
+            assert moved.parent_id == env.show.id
+            assert moved.path == str(root / "Old Show/S01E03.mkv")
+            # the duplicate stays, so its folder and directory item stay too
+            assert (root / "Old Show Part 2/S01E02.mkv").is_file()
+            assert (root / "Old Show Part 2/poster.jpg").is_file()
+            assert await MediaItem.exists(id=parent.id)
+            assert (root / "Old Show/S01E02.mkv").read_bytes() == b"episode"
+
+    asyncio.run(run())
+
+
+def test_move_by_season(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            parent, episodes = await second_folder(env)
+            await MediaItem.filter(id=episodes[0].id).delete()
+            (Path(parent.path) / "S01E02.mkv").unlink()
+            (Path(parent.path) / "poster.jpg").unlink()
+            root = Path(env.shows.dir)
+            change = moving(env.shows, "Old Show", item_ids=[parent.id], by_season=True)
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            season = await MediaItem.get(path=str(root / "Old Show/Season 02"))
+            later = await MediaItem.get(id=episodes[2].id)
+
+            assert review["planned"]["units"] == 2
+            assert result["outcome"] == "completed"
+            assert (root / "Old Show/Season 01/S01E03.mkv").is_file()
+            assert (root / "Old Show/Season 02/S02E01.mkv").is_file()
+            assert (season.season, season.title) == (2, None)
+            assert later.parent_id == season.id
+            # the emptied folder and its directory item are gone
+            assert not (root / "Old Show Part 2").exists()
+            assert not await MediaItem.exists(id=parent.id)
+
+    asyncio.run(run())
+
+
+def test_move_folder(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            root = Path(env.shows.dir)
+            change = moving(env.shows, "Renamed Show", item_ids=[env.show.id])
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            show_item = await MediaItem.get(id=env.show.id)
+            episode = await MediaItem.get(id=env.episodes[0].id)
+
+            assert review["planned"] == {
+                "units": 1,
+                "files": 3,
+                "bytes": 0,
+                "by_owner": {"indexed": 1},
+            }
+            assert review["sample"][0]["dst"] == "Renamed Show"
+            assert result["outcome"] == "completed"
+            assert not (root / "Old Show").exists()
+            assert (root / "Renamed Show/Renamed Show.nfo").is_file()
+            assert (show_item.path, show_item.name) == (
+                str(root / "Renamed Show"),
+                "Renamed Show",
+            )
+            assert show_item.nfo_path == str(root / "Renamed Show/Renamed Show.nfo")
+            assert episode.path == str(root / "Renamed Show/S01E01.mkv")
+            assert episode.nfo_path == str(root / "Renamed Show/S01E01.nfo")
+            assert episode.parent_id == env.show.id
+
+    asyncio.run(run())
+
+
+def test_move_refusals(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            parent, _ = await second_folder(env, unique_id="999", nfo_source="tmdb")
+
+            mismatch = await MediaBatchService.review(
+                moving(env.shows, "Old Show", item_ids=[parent.id]), env.owner
+            )
+            taken = await MediaBatchService.review(
+                moving(env.movies, "Old Movie", item_ids=[env.movie.id]), env.owner
+            )
+            video = await MediaBatchService.review(
+                moving(env.movies, "Elsewhere", item_ids=[501]), env.owner
+            )
+            deep = await MediaBatchService.review(
+                moving(env.shows, "A/B/C", item_ids=[parent.id]), env.owner
+            )
+            books = await MediaBatchService.review(
+                moving(env.books, "Work", name="*"), env.owner
+            )
+            await MediaLib.filter(id=env.shows.id).update(rename_template=TV_TEMPLATE)
+            templated = await MediaBatchService.review(
+                moving(env.shows, "Old Show", item_ids=[parent.id]), env.owner
+            )
+
+            assert mismatch["blocked"]["reasons"] == {"identity_mismatch": 3}
+            assert taken["issues"][0]["message"].startswith("Every selected")
+            assert video["blocked"]["reasons"] == {"unsupported_move": 1}
+            assert deep["issues"][0]["path"] == "destination"
+            assert books["issues"][0]["path"] == "library_id"
+            assert templated["issues"][0]["path"] == "library_id"
+            assert not any(
+                r["valid"] for r in (mismatch, taken, video, deep, books, templated)
+            )
+
+    asyncio.run(run())

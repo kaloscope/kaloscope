@@ -263,7 +263,7 @@ export type MediaBatch = {
   id: number;
   library_id: number;
   library_name: string | null;
-  operation: 'delete' | 'organize' | 'rename' | null;
+  operation: 'delete' | 'organize' | 'rename' | 'move' | null;
   deletion: 'trash' | 'permanent' | null;
   planned: { units: number; files: number; bytes: number; by_owner: Record<string, number> };
   blocked: { units: number; reasons: Record<string, number> };

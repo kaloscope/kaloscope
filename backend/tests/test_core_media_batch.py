@@ -349,6 +349,11 @@ def test_prune_directories(tmp_path):
         {"name": "*", "replacement": "y"},
         {"operation": "organize", "extensions": ["mkv"]},
         {"operation": "move", "name": "*"},
+        {"operation": "move", "item_ids": [1], "destination": "/abs"},
+        {"operation": "move", "item_ids": [1], "destination": "../out"},
+        {"operation": "move", "destination": "Show"},
+        {"operation": "delete", "name": "*", "destination": "Show"},
+        {"name": "*", "by_season": True},
     ],
 )
 def test_invalid_selector(fields):

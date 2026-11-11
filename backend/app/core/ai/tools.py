@@ -716,7 +716,7 @@ TOOLS = (
     AssistantTool(
         "list_media_items",
         "Page visible media in library order; keyword filters titles (omit for all). "
-        "No path=top-level works. Unlocks file delete/rename/organize.",
+        "No path=top-level works. Unlocks file delete/rename/move.",
         MediaItemList,
     ),
     AssistantTool(
@@ -823,7 +823,7 @@ TOOLS = (
         "review_media_batch",
         "Find files in one library by extension, name, size or items; without "
         "operation it only counts and samples them. With operation it reviews "
-        "a delete/rename/organize batch that apply_media_change performs after "
+        "a delete/rename/organize/move batch that apply_media_change performs after "
         "confirmation. owners defaults to loose files; other classes must be "
         "named. Summarize planned, blocked, samples and notes in the user's "
         "language, not JSON. End the turn for confirmation.",

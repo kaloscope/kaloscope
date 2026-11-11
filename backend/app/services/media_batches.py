@@ -43,7 +43,11 @@ from app.core.media.organizer import (
     OrganizeDeferredError,
     OrganizePendingError,
     _fingerprint,
+    move_directory,
+    move_episode,
     organize_items,
+    plan_directory_move,
+    plan_relocation,
     preview_organization,
     recover_organizing,
     rename_item,
@@ -53,6 +57,7 @@ from app.models.base import Pageable
 from app.models.download import DownloadTask
 from app.models.media import (
     FileOwner,
+    LibType,
     MediaAction,
     MediaBatch,
     MediaBatchEntry,
@@ -78,6 +83,31 @@ BATCH_UNCERTAIN = (
     "The server stopped while this batch was running. Counts show what is known; "
     "review again to continue with what remains."
 )
+
+
+def _merge_reason(source: MediaItem | None, target: MediaItem | None) -> str | None:
+    """Decide whether episodes of one directory item may join another.
+
+    Args:
+        source: Directory item the episodes leave, if indexed.
+        target: Directory item of the destination show or season, if indexed.
+
+    Returns:
+        `None` when the destination is new, the same item, shares the source's
+        external identity, or the source was never scraped. Otherwise the
+        reason: differing visibility, or a scraped source whose identity the
+        destination does not share.
+    """
+    if source is None or target is None or source.id == target.id:
+        return None
+    if source.visible != target.visible:
+        return "visibility_differs"
+    if source.unique_id and (source.nfo_source, source.unique_id) != (
+        target.nfo_source,
+        target.unique_id,
+    ):
+        return "identity_mismatch"
+    return None
 
 
 def _tally(values: Iterable[Any]) -> Counter[str]:
@@ -187,6 +217,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             entries, issues, unchanged, cut = await cls._organize_plan(
                 index, items, change, lib
             )
+        elif change.operation == "move":
+            entries, issues, unchanged = await cls._move_plan(index, items, change, lib)
         elif change.item_ids and change.operation != "rename":
             entries, issues = await cls._selected(index, items, change, lib)
         else:
@@ -311,6 +343,17 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "Each video's NFO, subtitles, artwork and danmaku cache take its "
                 "new name; nothing is moved to another folder."
             )
+        elif change.operation == "move":
+            notes.append(
+                "Videos move with their NFO, subtitles, artwork and danmaku cache. "
+                "A folder they leave keeps its own NFO and artwork and is removed "
+                "only when empty; no scan or rescrape starts."
+            )
+            if reasons["duplicate_episode"]:
+                notes.append(
+                    f"{reasons['duplicate_episode']} episodes already exist in "
+                    "the destination and stay where they are."
+                )
         else:
             notes.append(
                 "Works are renamed and moved as the naming template and their "
@@ -561,6 +604,242 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             item_entries, index, top, children, busy_items=busy_items
         )
         return entries, issues
+
+    @classmethod
+    async def _move_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], int]:
+        """Plan moving selected videos or work folders to one destination folder.
+
+        A whole directory item moving to a folder that does not exist is a folder
+        rename. Otherwise TV episodes move one by one into the destination show
+        or season, which merges two folders of one series.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Selection, destination and season layout.
+            lib: Movie or TV library without a naming template.
+
+        Returns:
+            One `item` unit per folder or episode that would move; blocked
+            matches with reasons for unknown seasons, differing identities or
+            visibility, duplicate episodes, taken names, busy items and moves
+            the organizer refuses; located issues; and the number already in
+            place.
+        """
+        issues: list[dict[str, str]] = []
+        if lib.lib_type not in (LibType.MOVIE, LibType.TV_SHOW):
+            issues.append(
+                {
+                    "path": "library_id",
+                    "message": "Moves are available in movie and TV libraries.",
+                }
+            )
+        elif lib.rename_template:
+            issues.append(
+                {
+                    "path": "library_id",
+                    "message": "This library is organized by its naming template; "
+                    "correct the metadata and use organize instead.",
+                }
+            )
+        tv = lib.lib_type == LibType.TV_SHOW
+        destination = index.root / (change.destination or "")
+        depth = len(Path(change.destination or "").parts)
+        if tv and depth != 1 and (change.by_season or depth != 2):
+            issues.append(
+                {
+                    "path": "destination",
+                    "message": "Use a series folder, or series/season without "
+                    "by_season; other folders are not indexed.",
+                }
+            )
+        rows = {item.id: item for item in items}
+        selected: list[MediaItem] = []
+        entries: list[PlanEntry] = []
+        if change.item_ids:
+            missing = [item_id for item_id in change.item_ids if item_id not in rows]
+            if missing:
+                issues.append(
+                    {
+                        "path": "item_ids",
+                        "message": "Not items of this library: "
+                        + ", ".join(map(str, missing[:10])),
+                    }
+                )
+            selected = [rows[i] for i in change.item_ids if i in rows]
+        elif not issues:
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files,
+                    index,
+                    directory=change.directory,
+                    extensions=change.extensions,
+                    name=change.name,
+                    min_size=change.min_size,
+                    max_size=change.max_size,
+                )
+            except (OSError, ValueError):
+                scan = FileScan(truncated=True)
+            if scan.truncated:
+                issues.append(
+                    {
+                        "path": "directory",
+                        "message": "This selection could not be read completely; "
+                        "choose a narrower directory.",
+                    }
+                )
+            for match in scan.matches:
+                if match.owner == FileOwner.INDEXED and match.item_id in rows:
+                    selected.append(rows[match.item_id])
+                else:
+                    entries.append(
+                        PlanEntry(
+                            "file",
+                            match.owner,
+                            relative(index.root, match.path),
+                            match.size,
+                            match.identity,
+                            match.item_id,
+                            status="blocked",
+                            reason="follows_item"
+                            if match.owner == FileOwner.COMPANION
+                            else "owner_excluded",
+                        )
+                    )
+        if issues:
+            return [], issues, 0
+
+        children: dict[int, list[MediaItem]] = {}
+        by_path = {item.path: item for item in items}
+        for item in items:
+            if item.parent_id is not None:
+                children.setdefault(item.parent_id, []).append(item)
+        busy_items, _ = await cls._busy(lib)
+        unchanged = 0
+        videos: dict[int, MediaItem] = {}
+        folders: list[MediaItem] = []
+        occupied = destination.exists() or str(destination) in by_path
+        for item in sorted(selected, key=lambda row: row.path):
+            if item.path != item.dir:
+                videos[item.id] = item
+            elif tv and (change.by_season or occupied):
+                videos.update((row.id, row) for row in children.get(item.id, []))
+            else:
+                folders.append(item)
+        taken: dict[str, set[tuple[int, int]]] = {}
+        async with shared_validation(lib):
+            for item in folders:
+                if Path(item.path) == destination:
+                    unchanged += 1
+                    continue
+                rows_below = children.get(item.id, [])
+                sizes = [row.size for row in rows_below if row.size is not None]
+                entry = PlanEntry(
+                    "item",
+                    FileOwner.INDEXED,
+                    relative(index.root, item.path),
+                    sum(sizes) if sizes else item.size,
+                    sorted(row.id for row in rows_below),
+                    item.id,
+                    files=len(rows_below) or 1,
+                    dst=change.destination,
+                )
+                reason = None
+                if occupied:
+                    reason = "destination_exists"
+                elif {item.id, *(row.id for row in rows_below)} & busy_items:
+                    reason = "ingesting"
+                else:
+                    try:
+                        await plan_directory_move(lib, item, destination)
+                    except OrganizeDeferredError:
+                        reason = "organize_deferred"
+                    except (ValueError, OSError):
+                        reason = (
+                            "unindexable_destination"
+                            if len(Path(entry.src).parts) != depth
+                            else "organize_blocked"
+                        )
+                if reason:
+                    entry.status, entry.reason = "blocked", reason
+                else:
+                    # a second folder cannot take the same new name
+                    occupied = True
+                entries.append(entry)
+            for item in sorted(videos.values(), key=lambda row: row.path):
+                path = Path(item.path)
+                folder = destination
+                reason = None
+                if not tv:
+                    reason = "unsupported_move"
+                elif change.by_season:
+                    if item.season is None:
+                        reason = "unknown_season"
+                    else:
+                        folder = destination / f"Season {item.season:02d}"
+                if reason is None and Path(item.dir) == folder:
+                    unchanged += 1
+                    continue
+                try:
+                    identity = await asyncio.to_thread(_fingerprint, path)
+                except OSError:
+                    identity, reason = None, reason or "missing"
+                entry = PlanEntry(
+                    "item",
+                    FileOwner.INDEXED,
+                    relative(index.root, path),
+                    item.size,
+                    identity,
+                    item.id,
+                    dst=relative(index.root, folder / path.name),
+                )
+                if reason is None:
+                    target = by_path.get(str(folder))
+                    # a new season folder joins the series it is created under
+                    series = target or by_path.get(
+                        str(index.root / Path(change.destination or "").parts[0])
+                    )
+                    numbers = (
+                        (item.season, item.episode)
+                        if item.season is not None and item.episode is not None
+                        else None
+                    )
+                    if str(folder) not in taken:
+                        taken[str(folder)] = {
+                            (row.season, row.episode)
+                            for row in children.get(target.id if target else 0, [])
+                            if row.season is not None and row.episode is not None
+                        }
+                    reason = _merge_reason(rows.get(item.parent_id or 0), series)
+                    if reason is None and numbers in taken[str(folder)]:
+                        reason = "duplicate_episode"
+                    elif reason is None and item.id in busy_items:
+                        reason = "ingesting"
+                    elif reason is None:
+                        try:
+                            await plan_relocation(
+                                lib, item, folder / path.name, parent_id=0
+                            )
+                        except OrganizeDeferredError:
+                            reason = "organize_deferred"
+                        except (ValueError, OSError):
+                            reason = (
+                                "destination_exists"
+                                if (folder / path.name).exists()
+                                else "organize_blocked"
+                            )
+                    if reason is None and numbers is not None:
+                        taken[str(folder)].add(numbers)
+                if reason:
+                    entry.status, entry.reason = "blocked", reason
+                entries.append(entry)
+        return entries, [], unchanged
 
     @classmethod
     async def _organize_plan(
@@ -992,6 +1271,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         chunk[0].id: await (
                             cls._rename_item(chunk[0], lib, root)
                             if operation == "rename"
+                            else cls._move_item(chunk[0], lib, root)
+                            if operation == "move"
                             else cls._delete_item(chunk[0], root)
                         )
                     }
@@ -1161,6 +1442,82 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 ):
                     return "content_changed"
                 await rename_item(current, item, Path(entry.dst or "").stem)
+            except FileNotFoundError:
+                return "missing"
+            except OrganizeDeferredError:
+                return "organize_deferred"
+            except OrganizePendingError:
+                return "organize_pending"
+            except ValueError:
+                return "organize_blocked"
+            except OSError:
+                return "io_error"
+        return "done"
+
+    @staticmethod
+    async def _move_item(entry: MediaBatchEntry, lib: MediaLib, root: Path) -> str:
+        """Move one reviewed folder or episode if it is still as it was shown.
+
+        Args:
+            entry: Item entry marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            `done`, or the reason the item was not moved.
+        """
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (
+                current.dir,
+                current.lib_type,
+                current.rename_template,
+            ) != (lib.dir, lib.lib_type, lib.rename_template):
+                return "library_changed"
+            await recover_organizing(current)
+            item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+            if item is None:
+                return "missing"
+            if item.path != str(root / entry.src):
+                return "item_changed"
+            target = root / (entry.dst or "")
+            try:
+                if item.path == item.dir:
+                    below = await MediaItem.filter(parent_id=item.id).values_list(
+                        "id", flat=True
+                    )
+                    if sorted(below) != (entry.identity or []):
+                        return "content_changed"
+                    await move_directory(current, item, target)
+                    return "done"
+                if await asyncio.to_thread(_fingerprint, Path(item.path)) != (
+                    entry.identity or []
+                ):
+                    return "content_changed"
+                folder = target.parent
+                owner = await MediaItem.filter(lib_id=lib.id, path=str(folder)).first()
+                series = (
+                    owner
+                    or await MediaItem.filter(
+                        lib_id=lib.id,
+                        path=str(root / folder.relative_to(root).parts[0]),
+                    ).first()
+                )
+                source = await MediaItem.get_or_none(id=item.parent_id)
+                if reason := _merge_reason(source, series):
+                    return reason
+                if (
+                    owner is not None
+                    and item.season is not None
+                    and item.episode is not None
+                    and await MediaItem.filter(
+                        parent_id=owner.id, season=item.season, episode=item.episode
+                    )
+                    .exclude(id=item.id)
+                    .exists()
+                ):
+                    return "duplicate_episode"
+                await move_episode(current, item, folder)
             except FileNotFoundError:
                 return "missing"
             except OrganizeDeferredError:

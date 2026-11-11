@@ -553,7 +553,7 @@ class MediaBatch(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     action: Literal["batch"] = "batch"
     library_id: PositiveInt = Field(description="Library ID, not an item ID.")
-    operation: Literal["delete", "organize", "rename"] | None = Field(
+    operation: Literal["delete", "organize", "rename", "move"] | None = Field(
         default=None,
         description="Omit to list matches. organize applies the naming template.",
     )
@@ -588,6 +588,16 @@ class MediaBatch(BaseModel):
         description="May use {{ title }}, {{ year }}, {{ season }}, {{ episode }}.",
     )
 
+    destination: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        description="move: library-relative folder; existing show merges.",
+    )
+    by_season: bool = Field(
+        default=False, description="move: use Season NN subfolders."
+    )
+
     @field_validator("extensions")
     @classmethod
     def normalize_extensions(cls, value: list[str]) -> list[str]:
@@ -610,7 +620,7 @@ class MediaBatch(BaseModel):
             result.add(extension)
         return sorted(result)
 
-    @field_validator("directory")
+    @field_validator("directory", "destination")
     @classmethod
     def relative_directory(cls, value: str | None) -> str | None:
         """Keep the search directory inside the library.
@@ -639,8 +649,8 @@ class MediaBatch(BaseModel):
             The validated selector.
 
         Raises:
-            ValueError: If item IDs are mixed with file filters, a deletion or
-                rename has no selector, a rename rule is missing or misplaced,
+            ValueError: If item IDs are mixed with file filters, a deletion, rename
+                or move has no selector, a rule or destination is missing or misplaced,
                 organization is given file filters, or the size bounds are reversed.
         """
         filtered = (
@@ -652,8 +662,14 @@ class MediaBatch(BaseModel):
         )
         if self.item_ids and filtered:
             raise ValueError("Use item_ids or file filters, not both.")
-        if self.operation in ("delete", "rename") and not (self.item_ids or filtered):
+        if self.operation in ("delete", "rename", "move") and not (
+            self.item_ids or filtered
+        ):
             raise ValueError("This operation needs item_ids or a file filter.")
+        if (self.operation == "move") != (self.destination is not None):
+            raise ValueError("destination is required for move and only used there.")
+        if self.by_season and self.operation != "move":
+            raise ValueError("by_season is only used by move.")
         if (self.operation == "rename") != (self.pattern is not None):
             raise ValueError("pattern is required for rename and only used there.")
         if self.operation != "rename" and self.replacement:

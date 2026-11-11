@@ -732,12 +732,19 @@
         "organize_deferred": "Waiting for a download",
         "organize_skipped": "Metadata missing or unreadable",
         "organize_blocked": "Organizer refused the move",
-        "organize_moves": "Still not in place"
+        "organize_moves": "Still not in place",
+        "identity_mismatch": "Belongs to a different work",
+        "visibility_differs": "Visibility differs from the destination",
+        "duplicate_episode": "Episode already in the destination",
+        "unknown_season": "Season unknown",
+        "unsupported_move": "Move the whole folder instead",
+        "unindexable_destination": "Destination would not be indexed"
       },
       "operation": {
         "delete": "Delete",
         "rename": "Rename",
-        "organize": "Organize by template"
+        "organize": "Organize by template",
+        "move": "Move"
       }
     }
   },
