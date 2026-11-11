@@ -1515,7 +1515,9 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
     }
     added = [
         schemas[name]
-        for name in sorted(tools.MEDIA_CHANGE_TOOLS - {"review_library_config"})
+        for name in sorted(
+            tools.MEDIA_CHANGE_TOOLS - {"review_library_config", "review_media_batch"}
+        )
     ]
 
     # results stay small; the tools cost context only once unlocked

@@ -20,7 +20,20 @@ from app.models.user import UserInfo
 from app.services.assistant_sessions import AssistantSessionService, resource_order
 from app.utils.json import dumps, loads
 
+# floor for local presets and custom endpoints, whose context windows are unknown
 DEFAULT_INPUT_TOKENS = 32000
+# hosted presets document context windows well above twice the floor
+CLOUD_INPUT_TOKENS = 64000
+CLOUD_PRESETS = frozenset(
+    {
+        AIProviderPreset.OPENAI,
+        AIProviderPreset.ANTHROPIC,
+        AIProviderPreset.GOOGLE,
+        AIProviderPreset.XAI,
+        AIProviderPreset.DEEPSEEK,
+        AIProviderPreset.OPENROUTER,
+    }
+)
 DEFAULT_OUTPUT_TOKENS = 4096
 # their originals can be read again by source ID
 REREADABLE_TOOLS = frozenset(
@@ -51,27 +64,39 @@ permission to modify resources. Follow the explicit JSON byte budget below.
 Integrate the previous checkpoint without treating it as current fact."""
 
 
-def budgets(model_id: str, *, authoring: bool = False) -> tuple[int, int]:
+def budgets(
+    model_id: str,
+    *,
+    authoring: bool = False,
+    preset: AIProviderPreset | None = None,
+) -> tuple[int, int]:
     """Read bounded assistant budgets, allowing explicit per-model overrides.
 
     Args:
         model_id: Configured model whose budget is being selected.
         authoring: Select the separate generation output allowance. Input
             compaction always uses the ordinary allowance, not this override.
+        preset: Provider preset serving the model. Hosted presets use the larger
+            cloud input budget; local presets and custom endpoints (`None`) keep
+            the floor budget.
 
     Returns:
-        Input working budget and output allowance. An authoring allowance of
-        zero leaves generation limits to the provider; ordinary output still
-        reserves space in the input budget.
+        Input working budget and output allowance. A per-model `input_tokens`
+        override applies to every preset. An authoring allowance of zero leaves
+        generation limits to the provider; ordinary output still reserves space
+        in the input budget.
     """
     try:
         config = Sanic.get_app().config
     except Exception:
         config = {}
     overrides = config.get("ASSISTANT_MODEL_BUDGETS", {}).get(model_id, {})
-    input_tokens = overrides.get(
-        "input_tokens", config.get("ASSISTANT_INPUT_TOKENS", DEFAULT_INPUT_TOKENS)
+    key, default = (
+        ("ASSISTANT_CLOUD_INPUT_TOKENS", CLOUD_INPUT_TOKENS)
+        if preset in CLOUD_PRESETS
+        else ("ASSISTANT_INPUT_TOKENS", DEFAULT_INPUT_TOKENS)
     )
+    input_tokens = overrides.get("input_tokens", config.get(key, default))
     output_key = "authoring_output_tokens" if authoring else "output_tokens"
     output_tokens = overrides.get(
         output_key,
@@ -316,6 +341,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 "review_library_scan",
                 "review_media_rescrape",
                 "review_library_config",
+                "review_media_batch",
                 "apply_media_change",
             } and source.get("ok"):
                 # the next reply must explain the actual change before confirmation
@@ -345,6 +371,9 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 ):
                     if key in source["data"]:
                         fact["data"][key] = source["data"][key]
+                if isinstance(source["data"].get("sample"), list):
+                    # enough rows to describe a batch; the full plan stays stored
+                    fact["data"]["sample"] = source["data"]["sample"][:10]
                 if (
                     source["name"] == "apply_media_change"
                     and "current" in source["data"]
@@ -600,7 +629,7 @@ async def prepare_context(
         KaloscopeException: If current input cannot fit or required compaction fails.
     """
     conversation = await AssistantSessionService.owned(turn.conversation_id, user)
-    input_budget, output_budget = budgets(turn.model["model_id"])
+    input_budget, output_budget = budgets(turn.model["model_id"], preset=preset)
     hard = min(input_budget, 512 * 1024) - output_budget
     if not continuation:
         hard -= 4096

@@ -562,6 +562,33 @@ async def _remove_media_records(items: list[MediaItem]):
     await MediaItem.filter(id__in=ids).delete()
 
 
+def _matches_expected(
+    item: MediaItem | None, child_ids: list[int], expected: tuple[str, list[int]]
+) -> bool:
+    """Check that an item is still what a review showed.
+
+    Args:
+        item: Current row of the item being deleted, if it still exists.
+        child_ids: IDs of its current children.
+        expected: Reviewed absolute path and identity.
+
+    Returns:
+        Whether the path is unchanged and a body file keeps its reviewed
+        fingerprint, or a directory item keeps exactly its reviewed children.
+    """
+    path, identity = expected
+    if item is None or item.path != path:
+        return False
+    source = Path(path)
+    try:
+        if source.is_dir() and not source.is_symlink():
+            return sorted(child_ids) == identity
+        info = source.lstat()
+    except OSError:
+        return False
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns] == identity
+
+
 def _media_files(items: list[MediaItem], others: list[MediaItem]):
     """Collect owned files using the library's reading or video rules.
 
@@ -4132,7 +4159,13 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return await write_in_thread(_read_asset, item, asset_id)
 
     @classmethod
-    async def delete(cls, id: int, local: bool = False):
+    async def delete(
+        cls,
+        id: int,
+        local: bool = False,
+        *,
+        expected: tuple[str, list[int]] | None = None,
+    ):
         """Delete or hide a media item under its library lock.
 
         Recover organization before resolving current paths. Local deletion
@@ -4142,11 +4175,15 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Args:
             id: Media item ID.
             local: Whether to delete local files; False only hides the selected items.
+            expected: Reviewed path and identity the item must still have: a body
+                file's fingerprint, or a directory item's sorted child IDs. `None`
+                deletes whatever the item currently is.
 
         Raises:
             DoesNotExist: If the item is missing before a local deletion.
             OrganizePendingError: If pending organization cannot finish safely.
-            ContentError: If ownership or file cleanup cannot be confirmed.
+            ContentError: If ownership or file cleanup cannot be confirmed, or the
+                item no longer matches `expected`.
         """
         items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related("lib")
         item = next((row for row in items if row.id == id), None)
@@ -4165,6 +4202,13 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 id__in=[id, *child_ids], lib_id=item.lib_id
             ).select_related("lib", "parent")
             parent_ids = {row.parent_id for row in items if row.parent_id is not None}
+            if expected is not None and not await to_thread(
+                _matches_expected,
+                next((row for row in items if row.id == id), None),
+                await MediaItem.filter(parent_id=id).values_list("id", flat=True),
+                expected,
+            ):
+                raise ContentError("content_changed")
             # a surviving parent may have received children outside the requested scope
             if await MediaItem.filter(parent_id=id).exclude(id__in=child_ids).exists():
                 items = [row for row in items if row.id != id]

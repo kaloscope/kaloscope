@@ -258,6 +258,58 @@ export type TaskActionOutcome = {
   failed?: boolean;
 };
 
+/** Stored plan, progress and outcome of one reviewed library batch. */
+export type MediaBatch = {
+  id: number;
+  library_id: number;
+  library_name: string | null;
+  operation: 'delete' | null;
+  deletion: 'trash' | 'permanent';
+  planned: { units: number; files: number; bytes: number; by_owner: Record<string, number> };
+  blocked: { units: number; reasons: Record<string, number> };
+  more: boolean;
+  state: 'reviewed' | 'running' | 'finished';
+  stop_requested: boolean;
+  counts: { done: number; skipped: number; failures: number; uncertain: number; remaining: number };
+  outcome: MediaBatchOutcome['outcome'] | null;
+  created_at: string | null;
+};
+
+/** One unit of a library batch, or a match it left alone. */
+export type MediaBatchEntry = {
+  seq: number;
+  kind: 'file' | 'item' | 'group';
+  owner: 'loose' | 'companion' | 'unindexed' | 'page' | 'indexed';
+  item_id: number | null;
+  src: string;
+  dst: string | null;
+  files: number;
+  size: number | null;
+  status: 'planned' | 'blocked' | 'started' | 'done' | 'skipped' | 'failed' | 'uncertain';
+  reason: string | null;
+};
+
+/** Outcome of applying a reviewed library batch. */
+export type MediaBatchOutcome = {
+  applied: boolean | null;
+  action: 'batch';
+  outcome?: 'completed' | 'partial' | 'cancelled' | 'interrupted' | 'running' | 'absent';
+  library_id?: number;
+  batch_id?: number;
+  done?: number;
+  skipped?: number;
+  failures?: number;
+  uncertain?: number;
+  remaining?: number;
+  replayed?: boolean;
+  valid?: boolean;
+  confirmation_required?: boolean;
+  stale?: boolean;
+  conflict?: boolean;
+  pending?: boolean;
+  failed?: boolean;
+};
+
 /** Outcome of applying a reviewed library scan, video rescrape or configuration. */
 export type MediaChangeOutcome = {
   applied: boolean | null;

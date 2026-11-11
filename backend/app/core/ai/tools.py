@@ -96,9 +96,11 @@ from app.models.flow import (
 )
 from app.models.mcp import NodeTypesResult
 from app.models.media import (
+    FileOwner,
     Language,
     LibraryConfig,
     LibraryScan,
+    MediaBatch,
     MediaChangeApply,
     MediaQuery,
     MediaRescrape,
@@ -108,6 +110,7 @@ from app.models.workflow_authoring import HTTPProbe, TemplateValidation
 from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.services.workflow_authoring import (
     probe_http_request,
@@ -129,9 +132,22 @@ MEDIA_REVIEWS = {
     "review_library_scan": LibraryScan,
     "review_media_rescrape": MediaRescrape,
     "review_library_config": LibraryConfig,
+    "review_media_batch": MediaBatch,
 }
 MEDIA_REVIEW_TOOLS = frozenset(MEDIA_REVIEWS)
 MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
+# a batch conversation needs room for its plan, so it keeps only these tools
+BATCH_FOCUS = frozenset(
+    {
+        "list_media_libraries",
+        "list_media_items",
+        "get_media_item",
+        "review_media_batch",
+        "apply_media_change",
+        "read_conversation_history",
+        "navigate",
+    }
+)
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -466,6 +482,17 @@ class ConfigReview(LibraryConfig):
     )
 
 
+class BatchReview(MediaBatch):
+    """List library files, or review deleting them as one batch."""
+
+    action: SkipJsonSchema[Literal["batch"]] = "batch"
+    owners: list[Annotated[FileOwner, plain_enum(FileOwner)]] = Field(
+        default_factory=lambda: [FileOwner.LOOSE],
+        min_length=1,
+        description="File classes the operation may touch.",
+    )
+
+
 class MediaConfirm(ToolArguments):
     """Apply a media change review from an earlier turn of this conversation."""
 
@@ -793,6 +820,16 @@ TOOLS = (
         admin=True,
     ),
     AssistantTool(
+        "review_media_batch",
+        "Find files in one library by extension, name, size or items; without "
+        "operation it only counts and samples them. With operation it previews "
+        "a batch and changes nothing. owners defaults to loose files; other "
+        "classes must be named. Summarize planned, blocked, deletion mode and "
+        "notes in the user's language, not JSON. End the turn for confirmation.",
+        BatchReview,
+        admin=True,
+    ),
+    AssistantTool(
         "apply_media_change",
         "Apply a prior turn's valid scan/rescrape/config review after the user "
         "confirms it; returns quickly (submitted/running is not done). Repeat the "
@@ -910,6 +947,7 @@ def tool_schemas(
     plan_change: bool = False,
     task_action: bool = False,
     media_change: bool | Collection[str] = False,
+    batch: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -929,6 +967,8 @@ def tool_schemas(
             a review in the previous turn.
         media_change: Offer media changes: `True` for all after reading media this
             turn, or the named tools continuing a review from the previous turn.
+        batch: Focus on a batch after its first listing or review, or when the
+            previous turn ended with one. Other tools return in a later turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -937,6 +977,8 @@ def tool_schemas(
     """
     schemas = []
     for tool in available_tools(user).values():
+        if batch and tool.name not in BATCH_FOCUS:
+            continue
         if tool.name == "run_workflow" and not trial:
             continue
         if tool.name in SCHEDULE_TOOLS and not schedule:
@@ -945,9 +987,13 @@ def tool_schemas(
             continue
         if tool.name in TASK_ACTION_TOOLS and not task_action:
             continue
-        if tool.name in MEDIA_CHANGE_TOOLS and (
-            not media_change
-            or (media_change is not True and tool.name not in media_change)
+        if (
+            not batch
+            and tool.name in MEDIA_CHANGE_TOOLS
+            and (
+                not media_change
+                or (media_change is not True and tool.name not in media_change)
+            )
         ):
             continue
         if tool.name in {
@@ -1094,7 +1140,9 @@ def media_resources(name: str, arguments: dict, data: dict) -> list[str]:
         ids = [item["lib_id"] for item in data["items"] if item["lib_id"]]
         if isinstance(arguments.get("library_id"), int):
             ids.append(arguments["library_id"])
-    elif name == "get_media_item" or (name == "navigate" and data.get("library_id")):
+    elif name in {"get_media_item", "review_media_batch"} or (
+        name == "navigate" and data.get("library_id")
+    ):
         ids = [data["library_id"]]
     return [media_resource(library_id) for library_id in ids]
 
@@ -1181,6 +1229,8 @@ async def execute_tool(
                     result = await MediaChangeService.review_rescrape(args, user)
                 case LibraryConfig():
                     result = await MediaChangeService.review_config(args, user)
+                case MediaBatch():
+                    result = await MediaBatchService.review(args, user)
                 case MediaConfirm():
                     result = await apply_media_change(args, conversation_id, user)
                 case PlanList():

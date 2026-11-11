@@ -1,5 +1,5 @@
 from enum import StrEnum, auto
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
@@ -108,11 +108,30 @@ class MediaAction(StrEnum):
     `scan`: Reconcile one library's files and queue its existing ingestion work.
     `rescrape`: Replace one movie or show's metadata with a reviewed candidate.
     `configure`: Change one library's ingestion bindings, language or naming template.
+    `batch`: Apply one reviewed plan to many files or items of one library.
     """
 
     SCAN = auto()
     RESCRAPE = auto()
     CONFIGURE = auto()
+    BATCH = auto()
+
+
+class FileOwner(StrEnum):
+    """Classify a library file by what owns it.
+
+    `loose`: Nothing in the library uses it.
+    `companion`: Metadata, subtitles or artwork of an indexed item.
+    `unindexed`: Content of the library's type that no item owns.
+    `page`: One page image of a directory comic.
+    `indexed`: The body file of an item; deleting it deletes the item.
+    """
+
+    LOOSE = auto()
+    COMPANION = auto()
+    UNINDEXED = auto()
+    PAGE = auto()
+    INDEXED = auto()
 
 
 # -------------------- ORM Models --------------------
@@ -223,9 +242,41 @@ class MediaChangeReceipt(TortoiseModel):
     # a claim without an outcome may already have taken effect
     claimed = BooleanField(default=False)
     result = JSONField[dict[str, Any] | None](null=True)
+    # the frozen header of a reviewed batch; its units are `MediaBatchEntry` rows
+    plan = JSONField[dict[str, Any] | None](null=True)
+    # relational fields
+    entries: ReverseRelation["MediaBatchEntry"]
 
     class Meta:
         table = "media_change_receipt"
+
+
+class MediaBatchEntry(TortoiseModel):
+    """Keep one unit of a reviewed batch and what happened to it."""
+
+    receipt_id: int
+    receipt: ForeignKeyRelation[MediaChangeReceipt] = ForeignKeyField(
+        "models.MediaChangeReceipt", related_name="entries", db_index=True
+    )
+    seq = IntField()
+    kind = CharField(max_length=16)
+    owner = CharField(max_length=16)
+    # removed items keep their identities
+    item_id = IntField(null=True)
+    # library-relative paths
+    src = CharField(max_length=4096)
+    dst = CharField(max_length=4096, null=True)
+    files = IntField(default=1)
+    size = BigIntField(null=True)
+    identity = JSONField[list[Any] | None](null=True)
+    status = CharField(max_length=16)
+    reason = CharField(max_length=64, null=True)
+
+    class Meta:
+        table = "media_batch_entry"
+        ordering = ["seq"]
+        unique_together = (("receipt", "seq"),)
+        indexes = (("receipt_id", "status"),)
 
 
 # -------------------- Pydantic Models --------------------
@@ -496,13 +547,119 @@ class LibraryConfig(BaseModel):
         return (value or "").strip() or None
 
 
+class MediaBatch(BaseModel):
+    """Find files or items in one library, or delete them as one batch."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    action: Literal["batch"] = "batch"
+    library_id: PositiveInt = Field(description="Library ID, not an item ID.")
+    operation: Literal["delete"] | None = Field(
+        default=None, description="Omit to list matches only."
+    )
+    item_ids: list[PositiveInt] = Field(
+        default_factory=list, max_length=200, description="Instead of file filters."
+    )
+    directory: str | None = Field(
+        default=None, max_length=1024, description="Library-relative; default root."
+    )
+    extensions: list[Annotated[str, Field(min_length=1, max_length=16)]] = Field(
+        default_factory=list, max_length=20
+    )
+    name: str | None = Field(
+        default=None, min_length=1, max_length=255, description="File name glob."
+    )
+    owners: list[FileOwner] = Field(
+        default_factory=lambda: [FileOwner.LOOSE],
+        min_length=1,
+        description="File classes the operation may touch.",
+    )
+    min_size: int | None = Field(default=None, ge=0, description="Bytes.")
+    max_size: int | None = Field(default=None, ge=0)
+
+    @field_validator("extensions")
+    @classmethod
+    def normalize_extensions(cls, value: list[str]) -> list[str]:
+        """Compare extensions without case or a leading dot.
+
+        Args:
+            value: Requested extensions, with or without dots.
+
+        Returns:
+            Sorted lower-case extensions that each start with one dot.
+
+        Raises:
+            ValueError: If an extension contains a path separator.
+        """
+        result = set()
+        for entry in value:
+            extension = "." + entry.strip().lstrip(".").casefold()
+            if len(extension) == 1 or "/" in extension or "\\" in extension:
+                raise ValueError("Extensions are plain suffixes such as mkv.")
+            result.add(extension)
+        return sorted(result)
+
+    @field_validator("directory")
+    @classmethod
+    def relative_directory(cls, value: str | None) -> str | None:
+        """Keep the search directory inside the library.
+
+        Args:
+            value: Requested directory.
+
+        Returns:
+            A normalized relative POSIX path, or `None` for the library root.
+
+        Raises:
+            ValueError: If the path is absolute or leaves the library.
+        """
+        if value is None:
+            return None
+        path = PurePosixPath(value.strip().replace("\\", "/"))
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("directory is relative to the library root.")
+        return None if str(path) in ("", ".") else str(path)
+
+    @model_validator(mode="after")
+    def check_selector(self) -> Self:
+        """Require one kind of selector and consistent bounds.
+
+        Returns:
+            The validated selector.
+
+        Raises:
+            ValueError: If item IDs are mixed with file filters, a deletion has
+                no selector, or the size bounds are reversed.
+        """
+        filtered = (
+            self.directory is not None
+            or self.extensions
+            or self.name is not None
+            or self.min_size is not None
+            or self.max_size is not None
+        )
+        if self.item_ids and filtered:
+            raise ValueError("Use item_ids or file filters, not both.")
+        if self.operation is not None and not (self.item_ids or filtered):
+            raise ValueError("An operation needs item_ids or a file filter.")
+        if (
+            self.min_size is not None
+            and self.max_size is not None
+            and self.min_size > self.max_size
+        ):
+            raise ValueError("min_size exceeds max_size.")
+        self.item_ids = sorted(set(self.item_ids))
+        self.owners = sorted(set(self.owners))
+        return self
+
+
 class MediaChangeApply(BaseModel):
     """Apply one reviewed media change; repeat the same request to read its outcome."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
     change: Annotated[
-        LibraryScan | MediaRescrape | LibraryConfig, Field(discriminator="action")
+        LibraryScan | MediaRescrape | LibraryConfig | MediaBatch,
+        Field(discriminator="action"),
     ]
     revision: str = Field(max_length=64, description="Reviewed revision.")
     confirmed: bool = Field(

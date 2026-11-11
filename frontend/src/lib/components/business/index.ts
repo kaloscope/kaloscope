@@ -20,6 +20,7 @@ export { default as JobEditor } from './flow/JobEditor.svelte';
 export { markFavorites, default as SearchHit } from './indexer/SearchHit.svelte';
 export { default as Uploader } from './indexer/Uploader.svelte';
 
+export { default as BatchPlanDialog } from './library/BatchPlanDialog.svelte';
 export { default as DanmakuMatcher } from './library/DanmakuMatcher.svelte';
 export { default as MediaActions } from './library/MediaActions.svelte';
 export { default as MediaDelConfirm } from './library/MediaDelConfirm.svelte';

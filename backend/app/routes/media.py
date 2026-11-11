@@ -30,7 +30,7 @@ from app.core.transcode import (
     read_m3u8,
     stop_tasks,
 )
-from app.models.base import IDs, Range
+from app.models.base import IDs, Pageable, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
     MediaAssetQuery,
@@ -48,6 +48,7 @@ from app.models.media import (
 from app.models.user import UserRole
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.media_batches import MediaBatchService
 from app.utils.extractor import extract_title
 from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
 
@@ -190,6 +191,59 @@ async def delete_items(_, body: MediaDel) -> HTTPResponse:
                 raise
             logger.error("Failed to delete the media item: %s", id, exc_info=True)
     return empty()
+
+
+class BatchEntryQuery(Pageable):
+    """Page one batch's entries, optionally by status."""
+
+    status: str | None = None
+
+
+@media.get("/batch/<id:int>")
+@authorize(role=UserRole.ADMIN)
+async def get_batch(_, id: int) -> HTTPResponse:
+    """Read a reviewed batch's plan, progress and outcome.
+
+    Args:
+        _: Unused request.
+        id: Batch ID.
+
+    Returns:
+        Response containing the batch details.
+    """
+    return json(await MediaBatchService.details(id))
+
+
+@media.get("/batch/<id:int>/entries")
+@authorize(role=UserRole.ADMIN)
+@validate(query=BatchEntryQuery)
+async def list_batch_entries(_, query: BatchEntryQuery, id: int) -> HTTPResponse:
+    """List one page of a batch's entries.
+
+    Args:
+        _: Unused request.
+        query: Page and optional status filter.
+        id: Batch ID.
+
+    Returns:
+        Response containing the total and the requested entries.
+    """
+    return json(await MediaBatchService.entries(id, query, query.status))
+
+
+@media.post("/batch/<id:int>/cancel")
+@authorize(role=UserRole.ADMIN)
+async def cancel_batch(_, id: int) -> HTTPResponse:
+    """Ask a running batch to stop before its next unit.
+
+    Args:
+        _: Unused request.
+        id: Batch ID.
+
+    Returns:
+        Response containing the batch details after the request.
+    """
+    return json(await MediaBatchService.cancel(id))
 
 
 @media.get("/<id:int>")

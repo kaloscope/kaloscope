@@ -1,6 +1,9 @@
 [app]
-# assistant budgets use conservative local estimates; override individual models when needed
+# assistant budgets count UTF-8 bytes as a conservative token estimate; override individual models when needed
+# local presets (Ollama, LM Studio) and custom endpoints
 assistant_input_tokens = 32000
+# hosted presets (OpenAI, Anthropic, Gemini, xAI, DeepSeek, OpenRouter)
+assistant_cloud_input_tokens = 64000
 assistant_output_tokens = 4096
 # 0 uses the provider's generation limit; input compaction stays unchanged
 assistant_authoring_output_tokens = 0

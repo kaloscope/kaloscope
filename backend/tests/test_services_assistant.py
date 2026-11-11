@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from app.core.ai import tools
+from app.core.ai import history, tools
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.ai import AIProviderPreset
 from app.models.assistant import AssistantTurn
@@ -145,7 +145,14 @@ def response(events, *, wait=False):
     )
 
 
-def configure(monkeypatch, handler, *, secret: str | None = "private-key", preset=None):
+def configure(
+    monkeypatch,
+    handler,
+    *,
+    secret: str | None = "private-key",
+    preset=None,
+    cloud_budget: bool = False,
+):
     """Bind the provider and upstream transport to isolated test doubles.
 
     Args:
@@ -153,10 +160,16 @@ def configure(monkeypatch, handler, *, secret: str | None = "private-key", prese
         handler: Mock upstream request handler.
         secret: Decrypted credential, or `None` for a keyless provider.
         preset: Optional provider preset controlling SDK request fields.
+        cloud_budget: Whether hosted presets get their larger input budget.
+            The default pins every preset to the floor, so conversations prove
+            the assistant works within the smallest supported allowance.
 
     Returns:
         Provider substitute returned by model resolution.
     """
+    if not cloud_budget:
+        # an application left registered by other tests cannot widen the budget
+        monkeypatch.setattr(history, "CLOUD_PRESETS", frozenset())
     provider = SimpleNamespace(
         base_url="https://example.test/v1", preset=preset, api_key="ciphertext"
     )
@@ -637,7 +650,7 @@ def test_generation_budget(monkeypatch, allowance, preset):
     monkeypatch.setattr(
         service,
         "budgets",
-        lambda _, authoring=False: (32000, allowance if authoring else 4096),
+        lambda _, authoring=False, **__: (32000, allowance if authoring else 4096),
     )
 
     def handler(request):
@@ -684,6 +697,36 @@ def test_generation_budget(monkeypatch, allowance, preset):
         service.context_size(request["messages"], request["tools"]) <= 27904
         for request in requests
     )
+
+
+@pytest.mark.parametrize(
+    ("preset", "cloud_budget", "sent"),
+    [
+        (AIProviderPreset.DEEPSEEK, True, True),
+        (AIProviderPreset.DEEPSEEK, False, False),
+        (AIProviderPreset.OLLAMA, True, False),
+        (None, True, False),
+    ],
+)
+def test_cloud_budget(monkeypatch, preset, cloud_budget, sent):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return response([chunk({"role": "assistant", "content": "Done."}, "stop")])
+
+    configure(monkeypatch, handler, preset=preset, cloud_budget=cloud_budget)
+    # 30,000 bytes exceed the floor allowance alone and fit the hosted one
+    events = asyncio.run(collect(make_turn("长" * 10000)))
+
+    if sent:
+        assert events[-1].event == "done"
+        size = service.context_size(requests[0]["messages"], requests[0]["tools"])
+        assert 27904 < size <= 59904
+    else:
+        assert events[-1].event == "error"
+        assert events[-1].data == {"code": ErrorCode.ASSISTANT_CONTEXT_LIMIT}
+        assert requests == []
 
 
 @pytest.mark.parametrize(

@@ -51,3 +51,23 @@ export function fixedNumber(
   }
   return num.toFixed(decimals);
 }
+
+/**
+ * Format a byte count with a binary unit.
+ *
+ * @param bytes - Number of bytes, or `null` or `undefined` when unknown.
+ * @returns The size with at most one decimal, or an empty string when unknown.
+ */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) {
+    return '';
+  }
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}

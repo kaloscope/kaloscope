@@ -654,6 +654,75 @@
       "refresh": "Refresh",
       "forward": "Forward",
       "live_tip": "Live"
+    },
+    "batch": {
+      "title": "Batch Plan",
+      "unavailable": "This plan is no longer available.",
+      "planned": "{0} planned · {1}",
+      "blocked": "{0} left alone",
+      "progress": "{0} done · {1} skipped or failed · {2} remaining",
+      "more": "More files match than one batch holds. Review the same selection again afterwards for the rest.",
+      "all": "All entries",
+      "empty": "No entries",
+      "stop": "Stop",
+      "stopping": "Stopping…",
+      "deletion": {
+        "trash": "Moves to the system trash",
+        "permanent": "Deletes permanently"
+      },
+      "state": {
+        "reviewed": "Not applied",
+        "running": "Running",
+        "finished": "Finished"
+      },
+      "outcome": {
+        "completed": "Completed",
+        "partial": "Partly applied",
+        "cancelled": "Stopped",
+        "interrupted": "Interrupted",
+        "running": "Running",
+        "absent": "Library removed"
+      },
+      "column": {
+        "path": "Path",
+        "size": "Size",
+        "owner": "Kind",
+        "status": "Status"
+      },
+      "status": {
+        "planned": "Planned",
+        "blocked": "Left alone",
+        "started": "In progress",
+        "done": "Done",
+        "skipped": "Skipped",
+        "failed": "Failed",
+        "uncertain": "Unconfirmed"
+      },
+      "owner": {
+        "loose": "Loose file",
+        "companion": "Item companion",
+        "unindexed": "Unindexed content",
+        "page": "Comic page",
+        "indexed": "Library item"
+      },
+      "reason": {
+        "owner_excluded": "Not in the selected kinds",
+        "linked": "Used by a link",
+        "download_active": "Download in progress",
+        "ingesting": "Being ingested",
+        "empties_item": "Would remove every page",
+        "not_writable": "Folder is read-only",
+        "missing": "No longer exists",
+        "content_changed": "Changed after the review",
+        "item_changed": "Became a library item",
+        "library_changed": "Library changed",
+        "unsafe_path": "Outside the library",
+        "io_error": "Could not be deleted",
+        "organize_pending": "Organization unfinished",
+        "media_source_unavailable": "Source unavailable",
+        "interrupted": "Interrupted",
+        "error": "Unexpected error"
+      }
     }
   },
   "metadata": {
@@ -1135,6 +1204,7 @@
       "apply_download_task_action": "Apply Task Action",
       "review_library_scan": "Review Library Scan",
       "review_library_config": "Review Library Settings",
+      "review_media_batch": "Review File Batch",
       "review_media_rescrape": "Review Rescrape",
       "apply_media_change": "Apply Media Change",
       "get_workflow": "Read Workflow",
@@ -1326,6 +1396,23 @@
       "stale": "Not applied: the target, settings or metadata changed after review.",
       "conflict": "Not applied: this request does not match its review.",
       "pending": "Still being applied. Confirm again later to read the result.",
+      "failed": "Not applied; nothing was changed. Confirm again to retry.",
+      "invalid": "Not applied. Expand the details to see the issues.",
+      "refused": "Not applied; nothing was changed."
+    },
+    "media_batch": {
+      "reviewed": "Not applied yet. Confirm this plan to apply it.",
+      "view_plan": "View Full Plan",
+      "completed": "Batch finished: {0} done",
+      "partial": "Batch finished: {0} done, {1} skipped or failed. Open the plan for reasons.",
+      "cancelled": "Batch stopped: {0} done, {2} not touched",
+      "interrupted": "Batch interrupted: {0} done, {2} not confirmed. Review again to continue.",
+      "running": "Still running in the background: {0} done, {2} remaining",
+      "absent": "The library no longer exists; nothing was changed",
+      "confirmation_required": "Not applied. Confirm the latest plan first.",
+      "stale": "Not applied: the plan expired or the library changed after review.",
+      "conflict": "Not applied: this request does not match its review.",
+      "pending": "Another batch is running. Confirm again later.",
       "failed": "Not applied; nothing was changed. Confirm again to retry.",
       "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was changed."

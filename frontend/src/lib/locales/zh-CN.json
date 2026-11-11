@@ -654,6 +654,75 @@
       "refresh": "刷新",
       "forward": "快进中",
       "live_tip": "直播"
+    },
+    "batch": {
+      "title": "批量计划",
+      "unavailable": "此计划已不可用",
+      "planned": "计划处理 {0} 项，共 {1}",
+      "blocked": "{0} 项不处理",
+      "progress": "已完成 {0} 项，跳过或失败 {1} 项，剩余 {2} 项",
+      "more": "匹配的文件超出单次批量上限，执行后请对相同条件再次预览以处理其余部分",
+      "all": "全部条目",
+      "empty": "暂无条目",
+      "stop": "停止",
+      "stopping": "停止中",
+      "deletion": {
+        "trash": "移入系统回收站",
+        "permanent": "永久删除"
+      },
+      "state": {
+        "reviewed": "尚未执行",
+        "running": "执行中",
+        "finished": "已结束"
+      },
+      "outcome": {
+        "completed": "已完成",
+        "partial": "部分执行",
+        "cancelled": "已停止",
+        "interrupted": "已中断",
+        "running": "执行中",
+        "absent": "媒体库已移除"
+      },
+      "column": {
+        "path": "路径",
+        "size": "大小",
+        "owner": "类别",
+        "status": "状态"
+      },
+      "status": {
+        "planned": "计划处理",
+        "blocked": "不处理",
+        "started": "处理中",
+        "done": "已完成",
+        "skipped": "已跳过",
+        "failed": "失败",
+        "uncertain": "待确认"
+      },
+      "owner": {
+        "loose": "零散文件",
+        "companion": "条目附属文件",
+        "unindexed": "未入库内容",
+        "page": "漫画页",
+        "indexed": "媒体条目"
+      },
+      "reason": {
+        "owner_excluded": "不在所选类别内",
+        "linked": "被链接引用",
+        "download_active": "下载进行中",
+        "ingesting": "正在入库",
+        "empties_item": "会删除全部页面",
+        "not_writable": "目录只读",
+        "missing": "已不存在",
+        "content_changed": "预览后已变更",
+        "item_changed": "已成为媒体条目",
+        "library_changed": "媒体库已变更",
+        "unsafe_path": "不在媒体库内",
+        "io_error": "无法删除",
+        "organize_pending": "整理尚未完成",
+        "media_source_unavailable": "来源不可用",
+        "interrupted": "已中断",
+        "error": "意外错误"
+      }
     }
   },
   "metadata": {
@@ -1135,6 +1204,7 @@
       "apply_download_task_action": "执行下载任务操作",
       "review_library_scan": "检查媒体库扫描",
       "review_library_config": "检查媒体库设置",
+      "review_media_batch": "检查文件批量操作",
       "review_media_rescrape": "检查重新刮削",
       "apply_media_change": "执行媒体变更",
       "get_workflow": "读取工作流",
@@ -1326,6 +1396,23 @@
       "stale": "未执行：目标、设置或元数据在预览后已变更",
       "conflict": "未执行：请求与预览内容不一致",
       "pending": "仍在执行中，请稍后再次确认以读取结果",
+      "failed": "未执行，未做任何更改，可再次确认重试",
+      "invalid": "未执行，请展开工具详情查看问题",
+      "refused": "未执行，未做任何更改"
+    },
+    "media_batch": {
+      "reviewed": "尚未执行，请确认此计划后再执行",
+      "view_plan": "查看完整计划",
+      "completed": "批量操作已完成：成功 {0} 项",
+      "partial": "批量操作已结束：成功 {0} 项，跳过或失败 {1} 项，可打开计划查看原因",
+      "cancelled": "批量操作已停止：成功 {0} 项，{2} 项未处理",
+      "interrupted": "批量操作被中断：成功 {0} 项，{2} 项待确认，请重新预览后继续",
+      "running": "仍在后台执行：已完成 {0} 项，剩余 {2} 项",
+      "absent": "媒体库已不存在，未做任何更改",
+      "confirmation_required": "尚未执行，请先确认最新的计划",
+      "stale": "未执行：计划已过期或媒体库在预览后已变更",
+      "conflict": "未执行：请求与预览内容不一致",
+      "pending": "另一个批量操作正在执行，请稍后再次确认",
       "failed": "未执行，未做任何更改，可再次确认重试",
       "invalid": "未执行，请展开工具详情查看问题",
       "refused": "未执行，未做任何更改"

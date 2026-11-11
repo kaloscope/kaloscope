@@ -2,7 +2,14 @@
   import type { AssistantTool } from '$lib/assistant/session';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { MediaChangeOutcome, PlanChangeOutcome, ScheduleChangeOutcome, TaskActionOutcome } from '$lib/types';
+  import type {
+    MediaBatchOutcome,
+    MediaChangeOutcome,
+    PlanChangeOutcome,
+    ScheduleChangeOutcome,
+    TaskActionOutcome
+  } from '$lib/types';
+  import BatchPlanDialog from '../library/BatchPlanDialog.svelte';
 
   const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
   const trialStatus = $derived.by(() => {
@@ -19,26 +26,35 @@
   });
   // reviewed schedule, plan, task and media changes share their review and outcome lines
   const changeKind = $derived(
-    (
-      {
-        review_workflow_schedule: 'schedule',
-        apply_workflow_schedule: 'schedule',
-        review_download_plan_change: 'plan_change',
-        apply_download_plan_change: 'plan_change',
-        review_download_task_action: 'task_action',
-        apply_download_task_action: 'task_action',
-        review_library_scan: 'media_change',
-        review_media_rescrape: 'media_change',
-        review_library_config: 'media_change',
-        apply_media_change: 'media_change'
-      } as Record<string, string>
-    )[tool.name]
+    // batches share the media apply tool but report unit counts, not one target
+    tool.name === 'review_media_batch' || tool.result?.data?.action === 'batch'
+      ? 'media_batch'
+      : (
+          {
+            review_workflow_schedule: 'schedule',
+            apply_workflow_schedule: 'schedule',
+            review_download_plan_change: 'plan_change',
+            apply_download_plan_change: 'plan_change',
+            review_download_task_action: 'task_action',
+            apply_download_task_action: 'task_action',
+            review_library_scan: 'media_change',
+            review_media_rescrape: 'media_change',
+            review_library_config: 'media_change',
+            apply_media_change: 'media_change'
+          } as Record<string, string>
+        )[tool.name]
   );
+  const batch = $derived(
+    changeKind === 'media_batch' && tool.result?.ok ? (tool.result.data as unknown as MediaBatchOutcome) : null
+  );
+  // the stored plan a review or an outcome refers to
+  const batchId = $derived(batch?.batch_id ?? null);
+  let planDialog: BatchPlanDialog | undefined = $state();
   // applied outcomes name themselves; other replies say why nothing changed
   const changeStatus = $derived.by(() => {
     if (!changeKind || !tool.name.startsWith('apply_') || !tool.result?.ok || !tool.result.data) return null;
     const result = tool.result.data as unknown as
-      ScheduleChangeOutcome | PlanChangeOutcome | TaskActionOutcome | MediaChangeOutcome;
+      ScheduleChangeOutcome | PlanChangeOutcome | TaskActionOutcome | MediaChangeOutcome | MediaBatchOutcome;
     if (result.outcome) return result.outcome;
     for (const key of ['confirmation_required', 'stale', 'conflict', 'pending', 'failed'] as const) {
       if ((result as Record<string, unknown>)[key]) return key;
@@ -52,9 +68,18 @@
     if (changeStatus && ['pending', 'queued', 'submitted', 'running'].includes(changeStatus)) return icons.clock;
     if (
       changeStatus &&
-      !['created', 'updated', 'enabled', 'paused', 'deleted', 'changed', 'scanned', 'rescraped', 'configured'].includes(
-        changeStatus
-      )
+      ![
+        'created',
+        'updated',
+        'enabled',
+        'paused',
+        'deleted',
+        'changed',
+        'scanned',
+        'rescraped',
+        'configured',
+        'completed'
+      ].includes(changeStatus)
     ) {
       return icons.warning;
     }
@@ -154,7 +179,21 @@
 {#if changeKind && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{$_(`assistant.${changeKind}.reviewed`)}</p>
 {/if}
-{#if changeStatus}
+{#if batchId !== null}
+  <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={() => planDialog?.showModal(batchId)}>
+    {$_('assistant.media_batch.view_plan')}
+  </button>
+  <BatchPlanDialog bind:this={planDialog} />
+{/if}
+{#if changeStatus && batch}
+  <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
+    {$_(`assistant.media_batch.${changeStatus}`, [
+      Number(batch.done ?? 0),
+      Number(batch.skipped ?? 0) + Number(batch.failures ?? 0) + Number(batch.uncertain ?? 0),
+      Number(batch.remaining ?? 0)
+    ])}
+  </p>
+{:else if changeStatus}
   <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
     {$_(`assistant.${changeKind}.${changeStatus}`, [
       Number(

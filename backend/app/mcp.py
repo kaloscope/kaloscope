@@ -25,6 +25,7 @@ from app.core.exceptions import (
 )
 from app.core.flow.reference import get_workflow_reference as read_workflow_reference
 from app.models.assistant import DownloadPlanOrdering
+from app.models.base import Pageable
 from app.models.download import (
     DownloadPlanApply,
     DownloadPlanChange,
@@ -62,6 +63,8 @@ from app.models.mcp import (
     LibraryIngestionResult,
     LibraryStatus,
     MCPTokenScope,
+    MediaBatchResult,
+    MediaBatchReviewResult,
     MediaChangeApplyResult,
     MediaConfigReviewResult,
     MediaDetails,
@@ -93,6 +96,7 @@ from app.models.mcp import (
 from app.models.media import (
     LibraryConfig,
     LibraryScan,
+    MediaBatch,
     MediaChangeApply,
     MediaQuery,
     MediaRescrape,
@@ -113,7 +117,8 @@ from app.services.flow import (
     FlowRunService,
 )
 from app.services.media import MediaItemService, MediaLibService
-from app.services.media_changes import MediaChangeService
+from app.services.media_batches import MediaBatchService
+from app.services.media_changes import MediaChangeService, _require_admin
 from app.services.workflow_authoring import (
     probe_http_request as probe_request,
 )
@@ -173,6 +178,8 @@ _READ_TOOLS = frozenset(
         "review_library_scan",
         "review_media_rescrape",
         "review_library_config",
+        "review_media_batch",
+        "get_media_batch",
     }
 )
 _WRITE_TOOLS = frozenset(
@@ -362,6 +369,12 @@ def create_server() -> MCPServer:
             "apply_media_change only after approval. Library "
             "bindings, language and naming template use review_library_config; "
             "saving starts no scan, rescrape or organization. "
+            "Library files of any library type: review_media_batch without an "
+            "operation lists matches by extension, name or size; with "
+            "operation=delete it stores a plan. Show planned and blocked counts, "
+            "the deletion mode and notes, page the plan with get_media_batch, and "
+            "apply only after approval. A running batch is not done; repeat the "
+            "apply call to read its outcome. "
             "Task pause/resume/retry/delete also follows them for one listed task; "
             "delete files only on explicit request. A queued action is not done; "
             "list the task later instead of waiting. "
@@ -1791,6 +1804,81 @@ def create_server() -> MCPServer:
             await _read(MediaChangeService.review_config(change, _user(ctx)))
         )
 
+    @server.tool(annotations=READ_ONLY)
+    async def review_media_batch(
+        ctx: Context,
+        change: Annotated[
+            MediaBatch,
+            Field(
+                description="One library of any type and either item_ids or file "
+                "filters. Omit operation to list matches; owners defaults to "
+                "loose files, and other file classes must be named."
+            ),
+        ],
+    ) -> MediaBatchReviewResult:
+        """List library files, or review deleting them as one batch; deletes nothing.
+
+        Files are classified as `loose` (nothing uses them), `companion` (metadata,
+        subtitles or artwork of an item), `unindexed` (content without an item),
+        `page` (one page of a directory comic) or `indexed` (an item's body, whose
+        deletion removes the item). Summarize planned and blocked counts, the
+        deletion mode and notes in the user's language, and wait for confirmation.
+
+        Args:
+            ctx: Administrator request context.
+            change: Library, selector and optional operation.
+
+        Returns:
+            Without an operation: counts by class and extension and a sample.
+            With one: `planned` and `blocked` units with reasons, whether more
+            matches remain beyond this batch, `deletion` (`trash` or
+            `permanent`), notes, located issues, `revision` and, when valid, a
+            `request_id` and `batch_id` bound to this exact stored plan.
+        """
+        return MediaBatchReviewResult.model_validate(
+            await _read(MediaBatchService.review(change, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_media_batch(
+        ctx: Context,
+        batch_id: Annotated[
+            _ResourceID, Field(description="`batch_id` from review_media_batch.")
+        ],
+        status: Annotated[
+            Literal["planned", "blocked", "done", "skipped", "failed", "uncertain"]
+            | None,
+            Field(description="Only entries with this status; null lists all."),
+        ] = None,
+        page_num: _PageNumber = 1,
+        page_size: _PageSize = 50,
+    ) -> MediaBatchResult:
+        """Read a stored batch plan, its progress and one page of its entries.
+
+        Args:
+            ctx: Administrator request context.
+            batch_id: Batch returned by a review.
+            status: Entry status to list, or `None` for every entry.
+            page_num: One-based page number.
+            page_size: Maximum entries per page, from 1 to 100.
+
+        Returns:
+            The plan header, its `state`, unit `counts`, the recorded `outcome`
+            once finished, and entries with their status and reason.
+        """
+
+        async def read() -> dict:
+            user = _user(ctx)
+            _require_admin(user)
+            details = await MediaBatchService.details(batch_id)
+            await MediaLibService.get_accessible(details["library_id"], user)
+            page = await MediaBatchService.entries(
+                batch_id, Pageable(page_num=page_num, page_size=page_size), status
+            )
+            return {**details, **page}
+
+        return MediaBatchResult.model_validate(await _read(read()))
+
     @server.tool(
         annotations=ToolAnnotations(
             read_only_hint=False,
@@ -1810,7 +1898,7 @@ def create_server() -> MCPServer:
             ),
         ],
     ) -> MediaChangeApplyResult:
-        """Apply a reviewed scan, rescrape or configuration once within seconds.
+        """Apply a reviewed scan, rescrape, configuration or batch once.
 
         Args:
             ctx: Administrator context with a read-write token.
@@ -1820,8 +1908,9 @@ def create_server() -> MCPServer:
             A `scanned`, `submitted`, `already_scanning`, `rescraped`, `partial`,
             `configured` or `running` outcome, `replayed` outcomes, or a `conflict`,
             `pending`, `stale`, `confirmation_required`, `absent`, `failed` or
-            `uncertain` outcome. Background ingestion and organization are never
-            awaited.
+            `uncertain` outcome. A batch answers `completed`, `partial`,
+            `cancelled` or `interrupted` with unit counts, or `running` while it
+            continues. Background ingestion and organization are never awaited.
         """
         return MediaChangeApplyResult.model_validate(
             await _read(MediaChangeService.apply_change(application, _user(ctx)))
