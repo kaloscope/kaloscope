@@ -2,6 +2,7 @@
 
 import mimetypes
 import os
+import re
 import stat
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -15,13 +16,21 @@ from app.core.media.handlers.reading import (
     IMAGE_EXTENSIONS,
     is_ignored_name,
 )
+from app.core.media.naming import _RESERVED, _UNSAFE
 from app.core.media.organizer import (
     _SUBTITLES,
     _fingerprint,
     _reference_key,
     _safe_path,
 )
+from app.core.renderer import is_template, render
 from app.models.media import FileOwner, LibType, MediaFormat, MediaItem, MediaLib
+from app.utils.extractor import (
+    extract_episode,
+    extract_season,
+    extract_title,
+    extract_year,
+)
 
 # a review answers within the tool timeout, so a walk stops at either bound
 SCAN_LIMIT = 200_000
@@ -108,6 +117,7 @@ class PlanEntry:
     files: int = 1
     status: str = "planned"
     reason: str | None = None
+    dst: str | None = None
 
 
 def build_index(lib: MediaLib, items: list[MediaItem]) -> LibraryIndex:
@@ -616,3 +626,215 @@ def prune_directories(root: Path, directories: set[Path], kept: set[str]):
         except OSError:
             # a directory that still holds files stays
             continue
+
+
+def item_matches(index: LibraryIndex, items: list[MediaItem]) -> FileScan:
+    """Describe the body files of explicitly selected items as matches.
+
+    Run in a worker thread; it reads file attributes.
+
+    Args:
+        index: Library lookups.
+        items: Selected items and the children of selected directory items.
+
+    Returns:
+        One indexed match per body file that still exists, in path order.
+    """
+    scan = FileScan()
+    for item in sorted(items, key=lambda row: row.path):
+        if item.path not in index.bodies:
+            continue
+        path = Path(item.path)
+        try:
+            identity = _fingerprint(path)
+        except OSError:
+            continue
+        scan.matches.append(
+            FileMatch(path, identity[2], FileOwner.INDEXED, item.id, identity)
+        )
+    return scan
+
+
+def rename_target(pattern: str, replacement: str, name: str) -> str | None:
+    """Apply a rename rule to one file name, keeping its extension.
+
+    Args:
+        pattern: Regular expression replaced in the name without its extension.
+        replacement: Replacement, optionally a template using the `title`, `year`,
+            `season` and `episode` read from the old name.
+        name: Current file name.
+
+    Returns:
+        The new file name, or `None` when the result is empty, hidden, reserved,
+        too long or contains characters a file name cannot hold.
+
+    Raises:
+        re.error: If the pattern or the rendered replacement is invalid.
+        jinja2.TemplateError: If the replacement template cannot be rendered.
+    """
+    path = Path(name)
+    if is_template(replacement):
+        # the same fields a download transfer rule reads from a file name
+        replacement = render(
+            replacement,
+            context={
+                "title": extract_title(path.stem),
+                "year": extract_year(path.stem),
+                "season": extract_season(path.stem),
+                "episode": extract_episode(path.stem),
+            },
+            sandboxed=True,
+        )
+    stem = re.sub(pattern, replacement, path.stem).strip()
+    target = stem + path.suffix
+    if (
+        not stem
+        or stem.startswith(".")
+        or "/" in stem
+        or _UNSAFE.search(stem)
+        or _RESERVED.match(stem)
+        or len(target.encode()) > 255
+    ):
+        return None
+    return target
+
+
+def plan_renames(
+    index: LibraryIndex,
+    scan: FileScan,
+    owners: list[FileOwner],
+    pattern: str,
+    replacement: str,
+    *,
+    templated: bool,
+    busy_items: set[int],
+    busy_paths: set[str],
+) -> tuple[list[PlanEntry], int]:
+    """Turn matched files into rename units and blocked matches.
+
+    Args:
+        index: Library lookups used for the walk.
+        scan: Matches and guards from a whole-library walk or an item selection.
+        owners: Classes the rename may touch.
+        pattern: Regular expression replaced in each name without its extension.
+        replacement: Replacement text or template.
+        templated: Whether the library names indexed items from a template.
+        busy_items: Items with a queued or running ingest workflow.
+        busy_paths: Files of downloads that are still downloading or transferring.
+
+    Returns:
+        Entries in path order and the number of matches the rule leaves
+        unchanged. An indexed video becomes an `item` unit whose companions
+        follow it; a loose or unindexed file a `file` unit. Companions and comic
+        pages cannot be renamed on their own, a templated library keeps its
+        indexed names, and names that are invalid, taken or produced twice are
+        blocked.
+
+    Raises:
+        re.error: If the pattern or the rendered replacement is invalid.
+        jinja2.TemplateError: If the replacement template cannot be rendered.
+    """
+    allowed = set(owners)
+    entries: list[PlanEntry] = []
+    unchanged = 0
+    targets: dict[str, list[PlanEntry]] = {}
+    for match in scan.matches:
+        entry = PlanEntry(
+            "item" if match.owner == FileOwner.INDEXED else "file",
+            match.owner,
+            relative(index.root, match.path),
+            match.size,
+            match.identity,
+            match.item_id,
+        )
+        reason = None
+        if match.owner not in allowed:
+            reason = "owner_excluded"
+        elif match.owner == FileOwner.COMPANION:
+            reason = "follows_item"
+        elif match.owner == FileOwner.PAGE:
+            reason = "page_order"
+        elif match.owner == FileOwner.INDEXED and index.lib_type in READING_TYPES:
+            reason = "unsupported_library"
+        elif match.owner == FileOwner.INDEXED and templated:
+            reason = "template_managed"
+        else:
+            target = rename_target(pattern, replacement, match.path.name)
+            if target == match.path.name:
+                unchanged += 1
+                continue
+            destination = match.path.with_name(target) if target else None
+            if destination is None:
+                reason = "invalid_name"
+            else:
+                entry.dst = relative(index.root, destination)
+                # a case-only rename of the same file is not a conflict
+                if os.path.lexists(destination) and not (
+                    target.casefold() == match.path.name.casefold()
+                    and os.path.samefile(destination, match.path)
+                ):
+                    reason = "destination_exists"
+                elif str(match.path) in busy_paths:
+                    reason = "download_active"
+                elif match.item_id in busy_items:
+                    reason = "ingesting"
+                elif match.path.is_symlink() or is_linked(match.path, scan.links):
+                    reason = "linked"
+                elif not os.access(match.path.parent, os.W_OK | os.X_OK):
+                    reason = "not_writable"
+                else:
+                    targets.setdefault(str(destination).casefold(), []).append(entry)
+        if reason:
+            entry.status, entry.reason = "blocked", reason
+        entries.append(entry)
+    for group in targets.values():
+        if len(group) > 1:
+            for entry in group:
+                entry.status, entry.reason = "blocked", "name_conflict"
+    return entries, unchanged
+
+
+def rename_files(
+    root: Path, units: list[tuple[int, str, str, list[int]]]
+) -> dict[int, str]:
+    """Rename reviewed files whose attributes still match, under the library lock.
+
+    Run with `write_in_thread`; a rename in progress finishes before cancellation.
+
+    Args:
+        root: Absolute library root.
+        units: Entry ID, library-relative source and destination, and the
+            reviewed fingerprint of each.
+
+    Returns:
+        Each entry's outcome: `done`, or the reason it was skipped or failed.
+    """
+    from app.utils.disk import rename_exclusive
+
+    outcomes = {}
+    for entry_id, source, destination, identity in units:
+        path, target = root / source, root / destination
+        try:
+            _safe_path(root, path)
+            _safe_path(root, target)
+            if _fingerprint(path) != identity:
+                outcomes[entry_id] = "content_changed"
+                continue
+            if path.parent != target.parent:
+                outcomes[entry_id] = "unsafe_path"
+                continue
+            if source.casefold() == destination.casefold():
+                # exclusive renaming refuses a name that differs only by case
+                os.rename(path, target)
+            else:
+                rename_exclusive(path, target)
+            outcomes[entry_id] = "done"
+        except FileNotFoundError:
+            outcomes[entry_id] = "missing"
+        except FileExistsError:
+            outcomes[entry_id] = "destination_exists"
+        except ValueError:
+            outcomes[entry_id] = "unsafe_path"
+        except OSError:
+            outcomes[entry_id] = "io_error"
+    return outcomes

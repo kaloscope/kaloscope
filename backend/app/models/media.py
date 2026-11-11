@@ -548,13 +548,14 @@ class LibraryConfig(BaseModel):
 
 
 class MediaBatch(BaseModel):
-    """Find files or items in one library, or delete them as one batch."""
+    """Find files or items in one library, or change them as one batch."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     action: Literal["batch"] = "batch"
     library_id: PositiveInt = Field(description="Library ID, not an item ID.")
-    operation: Literal["delete"] | None = Field(
-        default=None, description="Omit to list matches only."
+    operation: Literal["delete", "organize", "rename"] | None = Field(
+        default=None,
+        description="Omit to list matches. organize applies the naming template.",
     )
     item_ids: list[PositiveInt] = Field(
         default_factory=list, max_length=200, description="Instead of file filters."
@@ -575,6 +576,17 @@ class MediaBatch(BaseModel):
     )
     min_size: int | None = Field(default=None, ge=0, description="Bytes.")
     max_size: int | None = Field(default=None, ge=0)
+    pattern: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="rename: regex replaced in each file name without extension.",
+    )
+    replacement: str = Field(
+        default="",
+        max_length=256,
+        description="May use {{ title }}, {{ year }}, {{ season }}, {{ episode }}.",
+    )
 
     @field_validator("extensions")
     @classmethod
@@ -627,8 +639,9 @@ class MediaBatch(BaseModel):
             The validated selector.
 
         Raises:
-            ValueError: If item IDs are mixed with file filters, a deletion has
-                no selector, or the size bounds are reversed.
+            ValueError: If item IDs are mixed with file filters, a deletion or
+                rename has no selector, a rename rule is missing or misplaced,
+                organization is given file filters, or the size bounds are reversed.
         """
         filtered = (
             self.directory is not None
@@ -639,8 +652,19 @@ class MediaBatch(BaseModel):
         )
         if self.item_ids and filtered:
             raise ValueError("Use item_ids or file filters, not both.")
-        if self.operation is not None and not (self.item_ids or filtered):
-            raise ValueError("An operation needs item_ids or a file filter.")
+        if self.operation in ("delete", "rename") and not (self.item_ids or filtered):
+            raise ValueError("This operation needs item_ids or a file filter.")
+        if (self.operation == "rename") != (self.pattern is not None):
+            raise ValueError("pattern is required for rename and only used there.")
+        if self.operation != "rename" and self.replacement:
+            raise ValueError("replacement is only used by rename.")
+        if self.operation == "organize" and (
+            self.extensions
+            or self.name is not None
+            or self.min_size is not None
+            or self.max_size is not None
+        ):
+            raise ValueError("organize selects works by item_ids or directory only.")
         if (
             self.min_size is not None
             and self.max_size is not None

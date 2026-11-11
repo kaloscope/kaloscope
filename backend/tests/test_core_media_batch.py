@@ -344,6 +344,11 @@ def test_prune_directories(tmp_path):
         {"min_size": 5, "max_size": 1},
         {"owners": []},
         {"operation": "rename", "name": "*"},
+        {"operation": "rename", "pattern": "x"},
+        {"operation": "delete", "name": "*", "pattern": "x"},
+        {"name": "*", "replacement": "y"},
+        {"operation": "organize", "extensions": ["mkv"]},
+        {"operation": "move", "name": "*"},
     ],
 )
 def test_invalid_selector(fields):
@@ -363,3 +368,38 @@ def test_selector_normalization():
     assert change.extensions == [".mkv", ".url"]
     assert change.owners == [FileOwner.INDEXED, FileOwner.LOOSE]
     assert MediaBatch(library_id=1, directory=".").directory is None
+
+
+@pytest.mark.parametrize(
+    ("pattern", "replacement", "name", "expected"),
+    [
+        (
+            r"^\[.*?\]\s*",
+            "",
+            "[Group] Show.A.S01E02.1080p.mkv",
+            "Show.A.S01E02.1080p.mkv",
+        ),
+        (
+            "^.*$",
+            "{{ title }} - S{{ '%02d' % season }}E{{ '%02d' % episode }}",
+            "Show.A.S01E02.1080p.mkv",
+            "Show A - S01E02.mkv",
+        ),
+        ("x", "y", "same.mkv", "same.mkv"),
+        ("^.*$", "", "gone.mkv", None),
+        ("^.*$", "a/b", "nested.mkv", None),
+        ("^.*$", ".hidden", "dot.mkv", None),
+        ("^.*$", "CON", "reserved.mkv", None),
+        ("^.*$", "a" * 300, "long.mkv", None),
+    ],
+)
+def test_rename_target(pattern, replacement, name, expected):
+    assert batch.rename_target(pattern, replacement, name) == expected
+
+
+def test_organize_selector():
+    whole = MediaBatch(library_id=1, operation="organize")
+    scoped = MediaBatch(library_id=1, operation="organize", directory="Shows")
+
+    assert (whole.item_ids, whole.directory) == ([], None)
+    assert scoped.directory == "Shows"

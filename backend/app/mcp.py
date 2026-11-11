@@ -370,11 +370,14 @@ def create_server() -> MCPServer:
             "bindings, language and naming template use review_library_config; "
             "saving starts no scan, rescrape or organization. "
             "Library files of any library type: review_media_batch without an "
-            "operation lists matches by extension, name or size; with "
-            "operation=delete it stores a plan. Show planned and blocked counts, "
-            "the deletion mode and notes, page the plan with get_media_batch, and "
-            "apply only after approval. A running batch is not done; repeat the "
-            "apply call to read its outcome. "
+            "operation lists matches by extension, name or size; with an "
+            "operation it stores a plan: delete, rename (a regex on each file "
+            "name without extension; an indexed video's NFO, subtitles and artwork "
+            "follow it) or organize (apply the saved naming template to works). "
+            "Show planned and blocked counts, sample paths, the deletion mode and "
+            "notes, page the plan with get_media_batch, and apply only after "
+            "approval. A running batch is not done; repeat the apply call to read "
+            "its outcome. "
             "Task pause/resume/retry/delete also follows them for one listed task; "
             "delete files only on explicit request. A queued action is not done; "
             "list the task later instead of waiting. "
@@ -1816,7 +1819,7 @@ def create_server() -> MCPServer:
             ),
         ],
     ) -> MediaBatchReviewResult:
-        """List library files, or review deleting them as one batch; deletes nothing.
+        """List library files, or review one batch change to them; changes nothing.
 
         Files are classified as `loose` (nothing uses them), `companion` (metadata,
         subtitles or artwork of an item), `unindexed` (content without an item),
@@ -1830,9 +1833,10 @@ def create_server() -> MCPServer:
 
         Returns:
             Without an operation: counts by class and extension and a sample.
-            With one: `planned` and `blocked` units with reasons, whether more
-            matches remain beyond this batch, `deletion` (`trash` or
-            `permanent`), notes, located issues, `revision` and, when valid, a
+            With one: `planned` and `blocked` units with reasons, source and
+            destination samples, `unchanged` names left out, whether more matches
+            remain beyond this batch, `deletion` (`trash` or `permanent`, null
+            unless deleting), notes, located issues, `revision` and, when valid, a
             `request_id` and `batch_id` bound to this exact stored plan.
         """
         return MediaBatchReviewResult.model_validate(

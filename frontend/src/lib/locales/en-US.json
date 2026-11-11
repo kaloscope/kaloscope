@@ -721,7 +721,23 @@
         "organize_pending": "Organization unfinished",
         "media_source_unavailable": "Source unavailable",
         "interrupted": "Interrupted",
-        "error": "Unexpected error"
+        "error": "Unexpected error",
+        "follows_item": "Follows its video",
+        "page_order": "Page order depends on names",
+        "unsupported_library": "Not supported in this library",
+        "template_managed": "Named by the template",
+        "invalid_name": "Result is not a valid name",
+        "name_conflict": "Same new name twice",
+        "destination_exists": "Name already taken",
+        "organize_deferred": "Waiting for a download",
+        "organize_skipped": "Metadata missing or unreadable",
+        "organize_blocked": "Organizer refused the move",
+        "organize_moves": "Still not in place"
+      },
+      "operation": {
+        "delete": "Delete",
+        "rename": "Rename",
+        "organize": "Organize by template"
       }
     }
   },

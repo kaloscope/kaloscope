@@ -483,7 +483,7 @@ class ConfigReview(LibraryConfig):
 
 
 class BatchReview(MediaBatch):
-    """List library files, or review deleting them as one batch."""
+    """List library files, or review changing them as one batch."""
 
     action: SkipJsonSchema[Literal["batch"]] = "batch"
     owners: list[Annotated[FileOwner, plain_enum(FileOwner)]] = Field(
@@ -716,7 +716,7 @@ TOOLS = (
     AssistantTool(
         "list_media_items",
         "Page visible media in library order; keyword filters titles (omit for all). "
-        "No path=top-level works. total=all matches; page_counts=this page.",
+        "No path=top-level works. Unlocks file delete/rename/organize.",
         MediaItemList,
     ),
     AssistantTool(
@@ -822,16 +822,17 @@ TOOLS = (
     AssistantTool(
         "review_media_batch",
         "Find files in one library by extension, name, size or items; without "
-        "operation it only counts and samples them. With operation it previews "
-        "a batch and changes nothing. owners defaults to loose files; other "
-        "classes must be named. Summarize planned, blocked, deletion mode and "
-        "notes in the user's language, not JSON. End the turn for confirmation.",
+        "operation it only counts and samples them. With operation it reviews "
+        "a delete/rename/organize batch that apply_media_change performs after "
+        "confirmation. owners defaults to loose files; other classes must be "
+        "named. Summarize planned, blocked, samples and notes in the user's "
+        "language, not JSON. End the turn for confirmation.",
         BatchReview,
         admin=True,
     ),
     AssistantTool(
         "apply_media_change",
-        "Apply a prior turn's valid scan/rescrape/config review after the user "
+        "Apply a prior turn's valid scan/rescrape/config/batch review after the user "
         "confirms it; returns quickly (submitted/running is not done). Repeat the "
         "same request_id after errors; never re-review to retry.",
         MediaConfirm,

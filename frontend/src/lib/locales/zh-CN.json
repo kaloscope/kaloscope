@@ -721,7 +721,23 @@
         "organize_pending": "整理尚未完成",
         "media_source_unavailable": "来源不可用",
         "interrupted": "已中断",
-        "error": "意外错误"
+        "error": "意外错误",
+        "follows_item": "随所属视频改名",
+        "page_order": "页序依赖文件名",
+        "unsupported_library": "此媒体库暂不支持",
+        "template_managed": "由命名模板管理",
+        "invalid_name": "结果不是有效文件名",
+        "name_conflict": "新名称重复",
+        "destination_exists": "名称已被占用",
+        "organize_deferred": "等待下载完成",
+        "organize_skipped": "元数据缺失或无法读取",
+        "organize_blocked": "整理被拒绝",
+        "organize_moves": "仍未就位"
+      },
+      "operation": {
+        "delete": "删除",
+        "rename": "重命名",
+        "organize": "按模板整理"
       }
     }
   },

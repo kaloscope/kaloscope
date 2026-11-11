@@ -32,6 +32,7 @@ from app.services.mcp import MCPAccessTokenService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from tests.test_download_plan_changes import latest_request
+from tests.test_library_config import TV_TEMPLATE
 from tests.test_mcp import application, call
 from tests.test_media_changes import MODEL, Sessions, media, monitor_for, store
 from tests.test_services_assistant import configure
@@ -636,5 +637,159 @@ def test_routes(tmp_path):
             assert cancelled.json()["data"]["stop_requested"] is False
             assert missing.status_code == 404
             assert denied.status_code == 403
+
+    asyncio.run(run())
+
+
+def renaming(
+    lib: MediaLib, pattern: str, replacement: str = "", **fields
+) -> MediaBatch:
+    return MediaBatch(
+        library_id=lib.id,
+        operation="rename",
+        pattern=pattern,
+        replacement=replacement,
+        **fields,
+    )
+
+
+def test_rename_videos(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            folder = Path(env.show.dir)
+            write(folder, "S01E01.zh.ass", "S01E01-thumb.jpg", ".S01E01.json")
+            change = renaming(env.shows, "^S01", "Old Show S01", item_ids=[env.show.id])
+
+            review = await MediaBatchService.review(change, env.owner)
+            before = sorted(path.name for path in folder.iterdir())
+            result = await confirm(review, change, env.owner)
+            first = await MediaItem.get(id=env.episodes[0].id)
+
+            assert review["planned"]["units"] == 2
+            assert review["unchanged"] == 1
+            assert review["deletion"] is None
+            assert review["sample"][0]["dst"] == "Old Show/Old Show S01E01.mkv"
+            assert "S01E01.mkv" in before
+            assert result["outcome"] == "completed"
+            assert sorted(path.name for path in folder.iterdir()) == [
+                ".Old Show S01E01.json",
+                "Extra.mkv",
+                "Old Show S01E01-thumb.jpg",
+                "Old Show S01E01.mkv",
+                "Old Show S01E01.nfo",
+                "Old Show S01E01.zh.ass",
+                "Old Show S01E02.mkv",
+                "Old Show.nfo",
+            ]
+            assert first.name == "Old Show S01E01"
+            assert first.path == str(folder / "Old Show S01E01.mkv")
+            assert first.nfo_path == str(folder / "Old Show S01E01.nfo")
+            assert first.parent_id == env.show.id
+            assert (await confirm(review, change, env.owner))["replayed"] is True
+
+    asyncio.run(run())
+
+
+def test_rename_files(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            root = Path(env.shows.dir)
+            write(
+                root,
+                "[x] a.txt",
+                "[y] a.txt",
+                "[x] b.txt",
+                "b.txt",
+                "[x] c.txt",
+                "Old Show/S01E01.srt",
+            )
+            change = renaming(
+                env.shows,
+                r"^\[\w\] ",
+                extensions=["txt", "srt", "nfo"],
+                owners=["loose", "companion"],
+            )
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+
+            assert review["planned"]["units"] == 1
+            assert review["blocked"]["reasons"] == {
+                "name_conflict": 2,
+                "destination_exists": 1,
+                "follows_item": 3,
+            }
+            assert result["outcome"] == "completed"
+            assert (root / "c.txt").exists() and not (root / "[x] c.txt").exists()
+            assert (root / "[x] a.txt").exists() and (root / "[x] b.txt").exists()
+
+    asyncio.run(run())
+
+
+def test_rename_refusals(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            invalid = await MediaBatchService.review(
+                renaming(env.shows, "(", item_ids=[env.show.id]), env.owner
+            )
+            emptied = await MediaBatchService.review(
+                renaming(env.shows, "^.*$", item_ids=[env.show.id]), env.owner
+            )
+            await MediaLib.filter(id=env.shows.id).update(rename_template=TV_TEMPLATE)
+            templated = await MediaBatchService.review(
+                renaming(env.shows, "^S01", "S1", item_ids=[env.show.id]), env.owner
+            )
+
+            assert invalid["issues"][0]["path"] == "pattern"
+            assert emptied["blocked"]["reasons"] == {"invalid_name": 3}
+            assert templated["blocked"]["reasons"] == {"template_managed": 3}
+            assert not any(r["valid"] for r in (invalid, emptied, templated))
+
+    asyncio.run(run())
+
+
+def test_organize(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            root = Path(env.shows.dir)
+            change = MediaBatch(library_id=env.shows.id, operation="organize")
+
+            missing = await MediaBatchService.review(change, env.owner)
+            await MediaLib.filter(id=env.shows.id).update(rename_template=TV_TEMPLATE)
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            again = await MediaBatchService.review(change, env.owner)
+
+            assert not missing["valid"]
+            assert missing["issues"][0]["path"] == "library_id"
+            assert review["planned"]["units"] == 1
+            assert review["sample"][0]["dst"] == "Old Show/Season 01"
+            assert result["outcome"] == "completed"
+            assert (root / "Old Show/Season 01/S01E01 - Pilot.mkv").is_file()
+            assert (root / "Old Show/Season 01/S01E02.mkv").is_file()
+            # organized works are left out of the next review
+            assert not again["valid"]
+            assert again["unchanged"] == 1
+
+    asyncio.run(run())
+
+
+def test_organize_changed(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            await MediaLib.filter(id=env.shows.id).update(rename_template=TV_TEMPLATE)
+            change = MediaBatch(
+                library_id=env.shows.id, operation="organize", item_ids=[env.show.id]
+            )
+            review = await MediaBatchService.review(change, env.owner)
+            nfo = Path(env.episodes[0].nfo_path)
+            nfo.write_text(nfo.read_text().replace("Pilot", "Renamed"))
+
+            result = await confirm(review, change, env.owner)
+
+            # the work would no longer move as it was shown, so it stays put
+            assert result["outcome"] == "partial"
+            assert result["reasons"] == {"content_changed": 1}
+            assert (Path(env.show.dir) / "S01E01.mkv").is_file()
 
     asyncio.run(run())

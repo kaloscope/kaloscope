@@ -118,9 +118,14 @@
       {#if batch.blocked.units}
         <span class="text-base-content/60">{$_('media.batch.blocked', $number(batch.blocked.units))}</span>
       {/if}
-      <span class={batch.deletion === 'permanent' ? 'text-warning' : 'text-base-content/60'}>
-        {$_(`media.batch.deletion.${batch.deletion}`)}
-      </span>
+      {#if batch.operation}
+        <span class="text-base-content/60">{$_(`media.batch.operation.${batch.operation}`)}</span>
+      {/if}
+      {#if batch.deletion}
+        <span class={batch.deletion === 'permanent' ? 'text-warning' : 'text-base-content/60'}>
+          {$_(`media.batch.deletion.${batch.deletion}`)}
+        </span>
+      {/if}
     </div>
     {#if batch.state !== 'reviewed'}
       <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" role="status">
@@ -180,7 +185,12 @@
         <tbody>
           {#each entries as entry (entry.seq)}
             <tr>
-              <td class="font-mono text-xs break-all">{entry.src}</td>
+              <td class="font-mono text-xs break-all">
+                {entry.src}
+                {#if entry.dst}
+                  <span class="block text-base-content/60">→ {entry.dst}</span>
+                {/if}
+              </td>
               <td class="text-right text-xs whitespace-nowrap">{formatBytes(entry.size)}</td>
               <td class="text-xs whitespace-nowrap">{$_(`media.batch.owner.${entry.owner}`)}</td>
               <td class="text-xs">

@@ -6,7 +6,9 @@ import re
 import stat
 import tempfile
 import unicodedata
-from contextlib import suppress
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -54,6 +56,15 @@ _METADATA = {
     "backdrop": "backdrop",
     "rating": "rating",
 }
+
+
+# one library walk and one task query shared by many plans of a batch review
+_LINKS: ContextVar[list[tuple[str, str, str | None]] | None] = ContextVar(
+    "organizer_links", default=None
+)
+_TASKS: ContextVar[list[DownloadTask] | None] = ContextVar(
+    "organizer_tasks", default=None
+)
 
 
 class OrganizePendingError(RuntimeError):
@@ -225,22 +236,77 @@ def _validate_link_references(root: Path, moves: dict[str, str]):
     source_directories = {
         str(parent) for source in sources for parent in Path(source).parents
     }
+    links = _LINKS.get()
+    if links is None:
+        links = _library_links(root)
+    for path, target, directory in links:
+        if path in moves:
+            continue
+        if target in sources or (
+            directory is not None and directory in source_directories
+        ):
+            raise ValueError(
+                f"moving a file would break a symlink outside the group: {path}"
+            )
+
+
+def _library_links(root: Path) -> list[tuple[str, str, str | None]]:
+    """List a library's symlinks with their normalized targets.
+
+    Args:
+        root: Absolute media library root to inspect without following links.
+
+    Returns:
+        Each link's path, its target's reference key and, for a directory link,
+        the resolved target directory's reference key.
+
+    Raises:
+        OSError: If a directory or symlink cannot be inspected.
+    """
+    links = []
     directories = [root]
     while directories:
         for path in directories.pop().iterdir():
             if path.is_symlink():
-                if str(path) in moves:
-                    continue
                 target = path.parent / os.readlink(path)
-                if _reference_key(target) in sources or (
-                    path.is_dir()
-                    and _reference_key(target.resolve()) in source_directories
-                ):
-                    raise ValueError(
-                        f"moving a file would break a symlink outside the group: {path}"
+                links.append(
+                    (
+                        str(path),
+                        _reference_key(target),
+                        _reference_key(target.resolve()) if path.is_dir() else None,
                     )
+                )
             elif path.is_dir():
                 directories.append(path)
+    return links
+
+
+@asynccontextmanager
+async def shared_validation(lib: MediaLib) -> AsyncGenerator[None]:
+    """Share one symlink walk and one download query across many plans.
+
+    Planning validates every group against the library's symlinks and download
+    tasks. A batch review plans many groups at one moment, so it reads both once.
+    Plans made inside describe that moment, as previews already do.
+
+    Args:
+        lib: Library whose plans are being previewed.
+
+    Yields:
+        Control while validators reuse the snapshot.
+
+    Raises:
+        OSError: If the library cannot be walked.
+    """
+    links = _LINKS.set(
+        await asyncio.to_thread(_library_links, Path(lib.dir).absolute())
+    )
+    tasks = _TASKS.set(await DownloadTask.all())
+    try:
+        yield
+    finally:
+        _LINKS.reset(links)
+        _TASKS.reset(tasks)
 
 
 def _relocate_reference(
@@ -490,7 +556,8 @@ async def _validate_downloads(lib: MediaLib, affected_paths: set[str]):
         OrganizeDeferredError: If an affected download is still transferring.
         ValueError: If the plan would modify an original download source.
     """
-    for task in await DownloadTask.all():
+    tasks = _TASKS.get()
+    for task in tasks if tasks is not None else await DownloadTask.all():
         targets = task.transfer_targets or {}
         if (
             task.transfer_lib_id == lib.id
@@ -1760,3 +1827,125 @@ async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
     if deferred is not None:
         raise deferred
     return mapping
+
+
+async def plan_rename(lib: MediaLib, item: MediaItem, stem: str) -> dict:
+    """Plan renaming one indexed video and the files that follow its name.
+
+    The video keeps its directory and extension. Its same-stem NFO, `stem.*`
+    subtitles, `stem-*` artwork and danmaku cache take the new stem, and local
+    references in the NFO and the index follow them.
+
+    Args:
+        lib: Video library whose lock the caller holds when applying.
+        item: Indexed video file to rename.
+        stem: New file name without its extension.
+
+    Returns:
+        A journal compatible with the existing organization executor.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        ValueError: If the rename is unsafe, conflicts with an existing file,
+            involves a symlink or would modify an original download source.
+    """
+    root = Path(lib.dir).absolute()
+    old = Path(item.path)
+    _safe_path(root, old)
+    if item.path == item.dir or not old.is_file():
+        raise ValueError("only an indexed video file can be renamed")
+    destination = old.with_name(stem + old.suffix)
+    moves = {str(old): str(destination)}
+    for companion in _companions(old):
+        moves[str(companion)] = str(
+            old.parent / (stem + companion.name[len(old.stem) :])
+        )
+    for sibling in old.parent.iterdir():
+        if (
+            sibling.name.startswith(f"{old.stem}-")
+            and sibling.is_file()
+            and (mimetypes.guess_file_type(sibling)[0] or "").startswith("image/")
+        ):
+            moves[str(sibling)] = str(
+                old.parent / (stem + sibling.name[len(old.stem) :])
+            )
+    cache = old.parent / f".{old.stem}.json"
+    if cache.is_file() or cache.is_symlink():
+        moves[str(cache)] = str(old.parent / f".{stem}.json")
+    if any(Path(source).is_symlink() for source in moves):
+        raise ValueError("renaming a linked file is not supported")
+    await _validate_moves(root, moves)
+
+    own_nfo = Path(item.nfo_path) if item.nfo_path else old.with_suffix(".nfo")
+    new_nfo = Path(moves.get(str(own_nfo), str(own_nfo)))
+    data: dict[str, Any] = {
+        "id": item.id,
+        "path": str(destination),
+        "dir": item.dir,
+        "name": stem,
+    }
+    for name in ("nfo_path", "danmaku_path"):
+        value = getattr(item, name)
+        if value in moves:
+            data[name] = moves[value]
+    for name in ("poster", "backdrop"):
+        value = getattr(item, name)
+        updated = _relocate_reference(value, own_nfo, new_nfo, moves)
+        if updated != value:
+            data[name] = updated
+    updates = [data]
+    # a movie folder is registered on its video's NFO
+    for other in await MediaItem.filter(lib_id=lib.id, nfo_path__in=list(moves)):
+        if other.id != item.id:
+            updates.append(
+                {"id": other.id, "path": other.path, "nfo_path": moves[other.nfo_path]}
+            )
+    nfo_edits = await asyncio.to_thread(_nfo_edits, moves)
+    await _validate_downloads(
+        lib, set(moves) | set(moves.values()) | {edit["path"] for edit in nfo_edits}
+    )
+    await _validate_updates(lib, updates)
+    return {
+        "moves": [
+            {"src": src, "dst": dst, "identity": _fingerprint(Path(src))}
+            for src, dst in moves.items()
+        ],
+        "updates": updates,
+        "parent": None,
+        "delete_parent": None,
+        "mapping": dict(moves),
+        "nfo_edits": nfo_edits,
+        "symlinks": [],
+        "creates": [],
+        "cleanup": None,
+    }
+
+
+async def rename_item(lib: MediaLib, item: MediaItem, stem: str) -> dict[str, str]:
+    """Rename one indexed video with its companions through a recoverable journal.
+
+    Args:
+        lib: Video library whose lock is held by the caller.
+        item: Indexed video file to rename.
+        stem: New file name without its extension.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        OrganizePendingError: If the persisted plan cannot finish.
+        ValueError: If the rename is unsafe or conflicts with an existing file.
+    """
+    payload = await plan_rename(lib, item, stem)
+    event = await MediaEvent.create(
+        lib_id=lib.id,
+        event_type="organize",
+        src_path=item.path,
+        dest_path=None,
+        is_directory=False,
+        payload=payload,
+    )
+    return await _finish(lib, event)
