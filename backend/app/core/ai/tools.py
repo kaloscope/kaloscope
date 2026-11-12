@@ -489,7 +489,7 @@ class BatchReview(MediaBatch):
     owners: list[Annotated[FileOwner, plain_enum(FileOwner)]] = Field(
         default_factory=lambda: [FileOwner.LOOSE],
         min_length=1,
-        description="File classes the operation may touch.",
+        description="File classes it may touch.",
     )
 
 
@@ -823,10 +823,11 @@ TOOLS = (
         "review_media_batch",
         "Find files in one library by extension, name, size or items; without "
         "operation it only counts and samples them. With operation it reviews "
-        "a delete/rename/organize/move batch that apply_media_change performs after "
-        "confirmation. owners defaults to loose files; other classes must be "
-        "named. Summarize planned, blocked, samples and notes in the user's "
-        "language, not JSON. End the turn for confirmation.",
+        "a delete/rename/organize/move batch (move also renames a whole work "
+        "folder) that apply_media_change performs after confirmation. owners "
+        "defaults to loose files; name other classes. Summarize planned, "
+        "blocked, samples and notes in the user's language, not JSON. End the "
+        "turn for confirmation.",
         BatchReview,
         admin=True,
     ),

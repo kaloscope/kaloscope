@@ -638,31 +638,40 @@ def item_matches(index: LibraryIndex, items: list[MediaItem]) -> FileScan:
         items: Selected items and the children of selected directory items.
 
     Returns:
-        One indexed match per body file that still exists, in path order.
+        One indexed match per body file that still exists, in path order. In a
+        reading library a collection, directory comic or chapter directory is
+        also a match, identified by its item so that page changes do not matter.
     """
     scan = FileScan()
+    reading = index.lib_type in READING_TYPES
     for item in sorted(items, key=lambda row: row.path):
-        if item.path not in index.bodies:
-            continue
         path = Path(item.path)
-        try:
-            identity = _fingerprint(path)
-        except OSError:
+        if item.path in index.bodies:
+            try:
+                identity = _fingerprint(path)
+            except OSError:
+                continue
+            size = identity[2]
+        elif reading and path.is_dir() and not path.is_symlink():
+            identity, size = [item.id], item.size or 0
+        else:
             continue
-        scan.matches.append(
-            FileMatch(path, identity[2], FileOwner.INDEXED, item.id, identity)
-        )
+        scan.matches.append(FileMatch(path, size, FileOwner.INDEXED, item.id, identity))
     return scan
 
 
-def rename_target(pattern: str, replacement: str, name: str) -> str | None:
+def rename_target(
+    pattern: str, replacement: str, name: str, *, directory: bool = False
+) -> str | None:
     """Apply a rename rule to one file name, keeping its extension.
 
     Args:
         pattern: Regular expression replaced in the name without its extension.
         replacement: Replacement, optionally a template using the `title`, `year`,
             `season` and `episode` read from the old name.
-        name: Current file name.
+        name: Current file or directory name.
+        directory: Whether the name is a directory's, which has no extension
+            even when it contains dots.
 
     Returns:
         The new file name, or `None` when the result is empty, hidden, reserved,
@@ -672,21 +681,21 @@ def rename_target(pattern: str, replacement: str, name: str) -> str | None:
         re.error: If the pattern or the rendered replacement is invalid.
         jinja2.TemplateError: If the replacement template cannot be rendered.
     """
-    path = Path(name)
+    old, suffix = (name, "") if directory else (Path(name).stem, Path(name).suffix)
     if is_template(replacement):
         # the same fields a download transfer rule reads from a file name
         replacement = render(
             replacement,
             context={
-                "title": extract_title(path.stem),
-                "year": extract_year(path.stem),
-                "season": extract_season(path.stem),
-                "episode": extract_episode(path.stem),
+                "title": extract_title(old),
+                "year": extract_year(old),
+                "season": extract_season(old),
+                "episode": extract_episode(old),
             },
             sandboxed=True,
         )
-    stem = re.sub(pattern, replacement, path.stem).strip()
-    target = stem + path.suffix
+    stem = re.sub(pattern, replacement, old).strip()
+    target = stem + suffix
     if (
         not stem
         or stem.startswith(".")
@@ -754,17 +763,24 @@ def plan_renames(
             reason = "follows_item"
         elif match.owner == FileOwner.PAGE:
             reason = "page_order"
-        elif match.owner == FileOwner.INDEXED and index.lib_type in READING_TYPES:
-            reason = "unsupported_library"
         elif match.owner == FileOwner.INDEXED and templated:
             reason = "template_managed"
         else:
-            target = rename_target(pattern, replacement, match.path.name)
+            target = rename_target(
+                pattern,
+                replacement,
+                match.path.name,
+                directory=match.owner == FileOwner.INDEXED
+                and str(match.path) not in index.bodies,
+            )
             if target == match.path.name:
                 unchanged += 1
                 continue
             destination = match.path.with_name(target) if target else None
-            if destination is None:
+            if destination is None or (
+                index.lib_type in READING_TYPES and is_ignored_name(target or "")
+            ):
+                # a hidden or temporary name would drop out of a reading library
                 reason = "invalid_name"
             else:
                 entry.dst = relative(index.root, destination)
@@ -838,3 +854,64 @@ def rename_files(
         except OSError:
             outcomes[entry_id] = "io_error"
     return outcomes
+
+
+def relocate_reading(root: Path, source: Path, target: Path) -> list[tuple[Path, Path]]:
+    """Rename a reading body file or container on disk, under the library lock.
+
+    Run with `write_in_thread`. A body file takes its same-stem OPF along. The
+    index is updated afterwards by the service that carries an observed move.
+
+    Args:
+        root: Absolute library root.
+        source: Body file, work directory or chapter directory to rename.
+        target: New path, which must not exist and whose parent must exist.
+
+    Returns:
+        The renames performed, so the caller can undo them if the index refuses.
+
+    Raises:
+        FileExistsError: If the target is taken.
+        FileNotFoundError: If the source or the target's parent is missing.
+        ValueError: If a path is unsafe or the source is a symlink.
+        OSError: If a rename fails; renames already done are undone first.
+    """
+    from app.utils.disk import rename_exclusive
+
+    _safe_path(root, source)
+    _safe_path(root, target)
+    if source.is_symlink():
+        raise ValueError("renaming a linked source is not supported")
+    if not os.path.lexists(source) or not target.parent.is_dir():
+        raise FileNotFoundError(str(source))
+    renames = [(source, target)]
+    if source.is_file():
+        wanted = f"{source.stem}.opf".casefold()
+        for sibling in source.parent.iterdir():
+            if sibling.name.casefold() == wanted and sibling.is_file():
+                renames.append((sibling, target.with_suffix(sibling.suffix)))
+    if any(os.path.lexists(new) for _, new in renames):
+        raise FileExistsError(str(target))
+    done: list[tuple[Path, Path]] = []
+    try:
+        for old, new in renames:
+            rename_exclusive(old, new)
+            done.append((old, new))
+    except OSError:
+        restore_reading(done)
+        raise
+    return done
+
+
+def restore_reading(renames: list[tuple[Path, Path]]):
+    """Undo renames made by `relocate_reading`, newest first.
+
+    Args:
+        renames: Renames that were performed.
+    """
+    for old, new in reversed(renames):
+        try:
+            os.rename(new, old)
+        except OSError:
+            # the watcher reconciles whatever could not be put back
+            continue

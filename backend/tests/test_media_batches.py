@@ -22,6 +22,7 @@ from app.models.media import (
     MediaBatchEntry,
     MediaChangeApply,
     MediaChangeReceipt,
+    MediaEvent,
     MediaFormat,
     MediaItem,
     MediaLib,
@@ -967,5 +968,203 @@ def test_move_refusals(monkeypatch, tmp_path):
             assert not any(
                 r["valid"] for r in (mismatch, taken, video, deep, books, templated)
             )
+
+    asyncio.run(run())
+
+
+def png(color: int) -> bytes:
+    """Build a tiny valid PNG so comic pages pass source checks.
+
+    Args:
+        color: Red channel value distinguishing pages.
+
+    Returns:
+        Encoded image bytes.
+    """
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = b"".join(b"\x00" + bytes((color, 0, 0)) * 4 for _ in range(4))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+async def comics(tmp_path: Path) -> SimpleNamespace:
+    """Create a comic library with two collections and a standalone comic.
+
+    Args:
+        tmp_path: Isolated filesystem root.
+
+    Returns:
+        The library, both collections, their chapters and the standalone comic.
+    """
+    root = tmp_path / "comics"
+    lib = await MediaLib.create(
+        lib_type=LibType.COMIC, dir=str(root), name="Comics", priority=9
+    )
+
+    async def chapter(parent: MediaItem, name: str) -> MediaItem:
+        folder = Path(parent.path) / name
+        folder.mkdir(parents=True)
+        for page in range(2):
+            (folder / f"{page:03}.png").write_bytes(png(page))
+        return await MediaItem.create(
+            lib=lib,
+            parent=parent,
+            dir=str(folder),
+            path=str(folder),
+            name=name,
+            format=MediaFormat.DIR,
+        )
+
+    async def collection(name: str) -> MediaItem:
+        (root / name).mkdir(parents=True)
+        return await MediaItem.create(
+            lib=lib, dir=str(root / name), path=str(root / name), name=name
+        )
+
+    first = await collection("Manga")
+    second = await collection("[Scan] Manga 2")
+    chapters = [
+        await chapter(first, "Vol 1"),
+        await chapter(second, "Vol 1"),
+        await chapter(second, "[Scan] Vol 2"),
+    ]
+    single = root / "One Shot"
+    single.mkdir()
+    (single / "000.png").write_bytes(png(9))
+    alone = await MediaItem.create(
+        lib=lib,
+        dir=str(single),
+        path=str(single),
+        name="One Shot",
+        format=MediaFormat.DIR,
+    )
+    return SimpleNamespace(
+        lib=lib, first=first, second=second, chapters=chapters, alone=alone
+    )
+
+
+def test_comic_rename(tmp_path):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            root = Path(env.lib.dir)
+            change = renaming(
+                env.lib,
+                r"^\[Scan\] ",
+                item_ids=[env.second.id, env.chapters[2].id, env.alone.id],
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+            second = await MediaItem.get(id=env.second.id)
+            later = await MediaItem.get(id=env.chapters[2].id)
+            events = await MediaEvent.filter(lib_id=env.lib.id).count()
+
+            assert review["planned"]["units"] == 2
+            assert review["unchanged"] == 1
+            assert sorted(row["dst"] for row in review["sample"]) == [
+                "Manga 2",
+                "[Scan] Manga 2/Vol 2",
+            ]
+            assert result["outcome"] == "completed"
+            assert (root / "Manga 2/Vol 2/000.png").is_file()
+            assert not (root / "[Scan] Manga 2").exists()
+            assert (second.path, second.name) == (str(root / "Manga 2"), "Manga 2")
+            assert later.path == str(root / "Manga 2/Vol 2")
+            assert later.parent_id == env.second.id
+            assert later.index_state == "pending"
+            # the library's own reconcile is asked to index the renamed works
+            assert events >= 2
+
+    asyncio.run(run())
+
+
+def test_comic_merge(tmp_path):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            root = Path(env.lib.dir)
+            change = moving(
+                env.lib,
+                "Manga",
+                item_ids=[env.chapters[1].id, env.chapters[2].id, env.alone.id],
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+            moved = await MediaItem.get(id=env.chapters[2].id)
+
+            assert review["planned"]["units"] == 1
+            # a same-named chapter stays, and a standalone comic cannot become one
+            assert review["blocked"]["reasons"] == {
+                "destination_exists": 1,
+                "layout_change": 1,
+            }
+            assert result["outcome"] == "completed"
+            assert (root / "Manga/[Scan] Vol 2/001.png").is_file()
+            assert (root / "[Scan] Manga 2/Vol 1/000.png").is_file()
+            assert moved.parent_id == env.first.id
+            assert moved.path == str(root / "Manga/[Scan] Vol 2")
+
+    asyncio.run(run())
+
+
+def test_reading_work_move(tmp_path):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            root = tmp_path / "books"
+            write(root, "Old Title/Book.txt", "Old Title/Book.opf", "Old Title/a.url")
+            books = await MediaLib.create(
+                lib_type=LibType.NOVEL, dir=str(root), name="Books", priority=8
+            )
+            book = await MediaItem.create(
+                lib=books,
+                dir=str(root / "Old Title"),
+                path=str(root / "Old Title/Book.txt"),
+                name="Book",
+                format=MediaFormat.TXT,
+            )
+            folder = moving(books, "New Title", item_ids=[book.id])
+            body = renaming(books, "^Book$", "Novel", item_ids=[book.id])
+
+            moved = await confirm(await MediaBatchService.review(folder, ADMIN), folder)
+            renamed = await confirm(await MediaBatchService.review(body, ADMIN), body)
+            current = await MediaItem.get(id=book.id)
+            orphan = await MediaBatchService.review(
+                moving(env.lib, "Nowhere", item_ids=[env.chapters[0].id]), ADMIN
+            )
+            taken = await MediaBatchService.review(
+                moving(env.lib, "Manga", item_ids=[env.second.id]), ADMIN
+            )
+            deep = await MediaBatchService.review(
+                moving(env.lib, "A/B", item_ids=[env.alone.id]), ADMIN
+            )
+
+            assert moved["outcome"] == renamed["outcome"] == "completed"
+            assert sorted(p.name for p in (root / "New Title").iterdir()) == [
+                "Novel.opf",
+                "Novel.txt",
+                "a.url",
+            ]
+            assert (current.path, current.dir, current.name) == (
+                str(root / "New Title/Novel.txt"),
+                str(root / "New Title"),
+                "Novel",
+            )
+            # chapters need an existing collection; a collection cannot join another
+            assert orphan["blocked"]["reasons"] == {"unindexable_destination": 1}
+            assert taken["blocked"]["reasons"] == {"layout_change": 1}
+            assert deep["issues"][0]["path"] == "destination"
 
     asyncio.run(run())

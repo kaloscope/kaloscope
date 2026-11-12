@@ -738,7 +738,8 @@
         "duplicate_episode": "Episode already in the destination",
         "unknown_season": "Season unknown",
         "unsupported_move": "Move the whole folder instead",
-        "unindexable_destination": "Destination would not be indexed"
+        "unindexable_destination": "Destination would not be indexed",
+        "layout_change": "Cannot switch between a standalone comic and a chapter"
       },
       "operation": {
         "delete": "Delete",

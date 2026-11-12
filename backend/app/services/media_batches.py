@@ -33,12 +33,14 @@ from app.core.media.batch import (
     plan_renames,
     prune_directories,
     relative,
+    relocate_reading,
     rename_files,
+    restore_reading,
     scan_files,
     shown,
 )
 from app.core.media.common import ContentError
-from app.core.media.coordination import library_lock
+from app.core.media.coordination import library_lock, notify_media_events
 from app.core.media.organizer import (
     OrganizeDeferredError,
     OrganizePendingError,
@@ -63,6 +65,7 @@ from app.models.media import (
     MediaBatchEntry,
     MediaChangeApply,
     MediaChangeReceipt,
+    MediaEvent,
     MediaItem,
     MediaLib,
 )
@@ -206,6 +209,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "library_name": lib.name,
             "lib_type": lib.lib_type,
         }
+        reading = lib.lib_type in (LibType.NOVEL, LibType.COMIC)
         if change.operation is not None:
             base = {"action": MediaAction.BATCH, "operation": change.operation, **base}
         issues: list[dict[str, str]] = []
@@ -230,14 +234,16 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     [
                         item
                         for item in items
-                        if item.id in chosen or item.parent_id in chosen
+                        if item.id in chosen
+                        # a show brings its episodes; a collection is renamed alone
+                        or (item.parent_id in chosen and not reading)
                     ],
                 )
                 if not scan.matches:
                     issues.append(
                         {
                             "path": "item_ids",
-                            "message": "No video file of this library is selected.",
+                            "message": "No item of this library is selected.",
                         }
                     )
             else:
@@ -316,6 +322,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             unique.append(entry)
         more = cut or len(unique) > BATCH_LIMIT
         planned = unique[:BATCH_LIMIT]
+        if reading and change.operation == "rename":
+            # a chapter is renamed before the collection that holds it
+            planned.sort(key=lambda entry: -len(Path(entry.src).parts))
         if not planned and not issues:
             issues.append(
                 {
@@ -338,10 +347,22 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 if trash
                 else "Files are deleted permanently; this cannot be undone."
             )
+        elif change.operation == "rename" and reading:
+            notes.append(
+                "A book or archive takes its same-name OPF along; folders are "
+                "renamed in place. Renamed works are indexed again afterwards."
+            )
         elif change.operation == "rename":
             notes.append(
                 "Each video's NFO, subtitles, artwork and danmaku cache take its "
                 "new name; nothing is moved to another folder."
+            )
+        elif change.operation == "move" and reading:
+            notes.append(
+                "A work folder is renamed as a whole; chapters join the "
+                "destination collection and are indexed again. A collection left "
+                "empty stays in place, and reading history stays with the work it "
+                "was recorded under."
             )
         elif change.operation == "move":
             notes.append(
@@ -633,14 +654,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             place.
         """
         issues: list[dict[str, str]] = []
-        if lib.lib_type not in (LibType.MOVIE, LibType.TV_SHOW):
-            issues.append(
-                {
-                    "path": "library_id",
-                    "message": "Moves are available in movie and TV libraries.",
-                }
-            )
-        elif lib.rename_template:
+        if lib.lib_type in (LibType.NOVEL, LibType.COMIC) and not lib.rename_template:
+            return await cls._reading_move_plan(index, items, change, lib)
+        if lib.rename_template:
             issues.append(
                 {
                     "path": "library_id",
@@ -839,6 +855,143 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 if reason:
                     entry.status, entry.reason = "blocked", reason
                 entries.append(entry)
+        return entries, [], unchanged
+
+    @classmethod
+    async def _reading_move_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], int]:
+        """Plan moving novel or comic works and comic chapters to one folder.
+
+        A work moves as its whole folder to a name that is not taken, which is a
+        folder rename. A comic chapter moves into another existing collection,
+        which merges two folders of one series.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Selection and destination.
+            lib: Novel or comic library without a naming template.
+
+        Returns:
+            One `item` unit per work folder or chapter that would move; blocked
+            matches for taken names, a destination that is not a collection, and
+            a work that would have to become a chapter; located issues; and the
+            number already in place.
+        """
+        issues: list[dict[str, str]] = []
+        relative_destination = Path(change.destination or "")
+        if len(relative_destination.parts) != 1:
+            issues.append(
+                {
+                    "path": "destination",
+                    "message": "Use a work folder directly below the library root.",
+                }
+            )
+        rows = {item.id: item for item in items}
+        selected: list[MediaItem] = []
+        if change.item_ids:
+            missing = [item_id for item_id in change.item_ids if item_id not in rows]
+            if missing:
+                issues.append(
+                    {
+                        "path": "item_ids",
+                        "message": "Not items of this library: "
+                        + ", ".join(map(str, missing[:10])),
+                    }
+                )
+            selected = [rows[i] for i in change.item_ids if i in rows]
+        elif not issues:
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files,
+                    index,
+                    directory=change.directory,
+                    extensions=change.extensions,
+                    name=change.name,
+                    min_size=change.min_size,
+                    max_size=change.max_size,
+                )
+            except (OSError, ValueError):
+                scan = FileScan(truncated=True)
+            if scan.truncated:
+                issues.append(
+                    {
+                        "path": "directory",
+                        "message": "This selection could not be read completely; "
+                        "choose a narrower directory.",
+                    }
+                )
+            selected = [
+                rows[match.item_id]
+                for match in scan.matches
+                if match.owner == FileOwner.INDEXED and match.item_id in rows
+            ]
+        if issues:
+            return [], issues, 0
+
+        root = index.root
+        destination = root / relative_destination
+        collection = next(
+            (item for item in items if item.path == str(destination)), None
+        )
+        merging = (
+            collection is not None
+            and collection.format is None
+            and collection.parent_id is None
+        )
+        busy_items, _ = await cls._busy(lib)
+        occupied = await asyncio.to_thread(destination.exists) or any(
+            Path(item.dir) == destination for item in items
+        )
+        entries: list[PlanEntry] = []
+        unchanged = 0
+        claimed: set[str] = set()
+        seen: set[Path] = set()
+        for item in sorted(selected, key=lambda row: row.path):
+            container = Path(item.dir)
+            if container in seen:
+                continue
+            seen.add(container)
+            chapter = item.parent_id is not None
+            target = destination / container.name if chapter else destination
+            if (container.parent if chapter else container) == destination:
+                unchanged += 1
+                continue
+            entry = PlanEntry(
+                "item",
+                FileOwner.INDEXED,
+                relative(root, container),
+                item.size,
+                [item.id],
+                item.id,
+                dst=relative(root, target),
+            )
+            reason = None
+            if chapter and not merging:
+                reason = "unindexable_destination"
+            elif not chapter and merging:
+                reason = "layout_change"
+            elif (
+                (not chapter and occupied)
+                or await asyncio.to_thread(target.exists)
+                or str(target).casefold() in claimed
+            ):
+                reason = "destination_exists"
+            elif item.id in busy_items:
+                reason = "ingesting"
+            elif await asyncio.to_thread(container.is_symlink):
+                reason = "linked"
+            if reason:
+                entry.status, entry.reason = "blocked", reason
+            else:
+                claimed.add(str(target).casefold())
+                occupied = occupied or not chapter
+            entries.append(entry)
         return entries, [], unchanged
 
     @classmethod
@@ -1422,6 +1575,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         Returns:
             `done`, or the reason the video was not renamed.
         """
+        if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+            return await MediaBatchService._reading_relocate(entry, lib, root)
         async with library_lock(lib.dir):
             current = await MediaLib.get_or_none(id=lib.id)
             if current is None or (
@@ -1455,6 +1610,88 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         return "done"
 
     @staticmethod
+    async def _reading_relocate(
+        entry: MediaBatchEntry, lib: MediaLib, root: Path
+    ) -> str:
+        """Rename or move one novel or comic source and carry its item along.
+
+        The file or folder is renamed under the library lock, then the index is
+        updated by the same service that follows a rename seen on disk, so the
+        item keeps its ID, history and caches. If the index refuses, the rename
+        is undone. Affected works are queued for the library's own reconcile.
+
+        Args:
+            entry: Item entry marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            `done`, or the reason the source was not relocated.
+        """
+        source, target = root / entry.src, root / (entry.dst or "")
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (
+                current.dir,
+                current.lib_type,
+                current.rename_template,
+            ) != (lib.dir, lib.lib_type, lib.rename_template):
+                return "library_changed"
+            await recover_organizing(current)
+            item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+            if item is None:
+                return "missing"
+            try:
+                directory = await asyncio.to_thread(source.is_dir)
+                if directory:
+                    if Path(item.dir) != source:
+                        return "item_changed"
+                elif item.path != str(source):
+                    return "item_changed"
+                elif await asyncio.to_thread(_fingerprint, source) != (
+                    entry.identity or []
+                ):
+                    return "content_changed"
+                renames = await write_in_thread(relocate_reading, root, source, target)
+            except FileNotFoundError:
+                return "missing"
+            except FileExistsError:
+                return "destination_exists"
+            except ValueError:
+                return "unsafe_path"
+            except OSError:
+                return "io_error"
+        try:
+            moved = await (
+                MediaItemService.move_reading_directory(lib.id, source, target)
+                if directory
+                else MediaItemService.move_reading_file(lib.id, source, target)
+            )
+        except (ContentError, ValueError, DoesNotExist):
+            async with library_lock(lib.dir):
+                await write_in_thread(restore_reading, renames)
+            return "organize_blocked"
+        if not moved:
+            # the watcher may have carried the item first; anything else is unknown
+            refreshed = await MediaItem.get_or_none(id=entry.item_id)
+            if refreshed is None or not Path(refreshed.path).is_relative_to(
+                target if directory else target.parent
+            ):
+                return "error"
+        for work in {
+            root / Path(entry.src).parts[0],
+            root / Path(entry.dst or entry.src).parts[0],
+        }:
+            await MediaEvent.create(
+                lib_id=lib.id,
+                event_type="modified",
+                src_path=str(work),
+                is_directory=True,
+            )
+        notify_media_events(lib.id)
+        return "done"
+
+    @staticmethod
     async def _move_item(entry: MediaBatchEntry, lib: MediaLib, root: Path) -> str:
         """Move one reviewed folder or episode if it is still as it was shown.
 
@@ -1466,6 +1703,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         Returns:
             `done`, or the reason the item was not moved.
         """
+        if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+            return await MediaBatchService._reading_relocate(entry, lib, root)
         async with library_lock(lib.dir):
             current = await MediaLib.get_or_none(id=lib.id)
             if current is None or (

@@ -555,7 +555,7 @@ class MediaBatch(BaseModel):
     library_id: PositiveInt = Field(description="Library ID, not an item ID.")
     operation: Literal["delete", "organize", "rename", "move"] | None = Field(
         default=None,
-        description="Omit to list matches. organize applies the naming template.",
+        description="Omit to list. organize applies the naming template.",
     )
     item_ids: list[PositiveInt] = Field(
         default_factory=list, max_length=200, description="Instead of file filters."
@@ -580,19 +580,19 @@ class MediaBatch(BaseModel):
         default=None,
         min_length=1,
         max_length=256,
-        description="rename: regex replaced in each file name without extension.",
+        description="rename: regex replaced in each name; extension kept.",
     )
     replacement: str = Field(
         default="",
         max_length=256,
-        description="May use {{ title }}, {{ year }}, {{ season }}, {{ episode }}.",
+        description="May use {{title}}/{{year}}/{{season}}/{{episode}}.",
     )
 
     destination: str | None = Field(
         default=None,
         min_length=1,
         max_length=1024,
-        description="move: library-relative folder; existing show merges.",
+        description="move: library-relative folder; existing show/collection merges.",
     )
     by_season: bool = Field(
         default=False, description="move: use Season NN subfolders."
