@@ -424,6 +424,7 @@ class AssistantSessionService:
                 "review_media_rescrape",
                 "review_library_config",
                 "review_media_batch",
+                "apply_media_change",
                 "get_download_plan_options",
                 "search_indexer",
                 "validate_download_plan",
@@ -445,16 +446,25 @@ class AssistantSessionService:
             "validate_download_task",
         }
         return {
-            call.name
+            # a batch that was just applied may be reverted in this turn
+            "review_media_batch" if call.name == "apply_media_change" else call.name
             for call in calls
             if not (download_created and call.name in download_setup)
             if (call.result or {}).get("ok")
             # candidates or current settings let the user choose in this turn
-            if (data := (call.result or {}).get("data") or {}).get("valid")
+            if (
+                (data := (call.result or {}).get("data") or {}).get("valid")
+                and call.name != "apply_media_change"
+            )
             or (call.name == "review_media_rescrape" and data.get("candidates"))
             or (call.name == "review_library_config" and "bindings" in data)
             # a listing lets the user choose what to do with the matches
             or (call.name == "review_media_batch" and "matched" in data)
+            or (
+                call.name == "apply_media_change"
+                and data.get("action") == "batch"
+                and data.get("applied")
+            )
             or (call.name == "get_download_plan_options" and data.get("published"))
             or (call.name == "search_indexer" and data.get("status") == "ok")
             or (

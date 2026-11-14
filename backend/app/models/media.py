@@ -553,7 +553,7 @@ class MediaBatch(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     action: Literal["batch"] = "batch"
     library_id: PositiveInt = Field(description="Library ID, not an item ID.")
-    operation: Literal["delete", "organize", "rename", "move"] | None = Field(
+    operation: Literal["delete", "organize", "rename", "move", "revert"] | None = Field(
         default=None,
         description="Omit to list. organize applies the naming template.",
     )
@@ -596,6 +596,13 @@ class MediaBatch(BaseModel):
     )
     by_season: bool = Field(
         default=False, description="move: use Season NN subfolders."
+    )
+    empty_dirs: bool = Field(
+        default=False,
+        description="delete: remove empty folders and childless works instead.",
+    )
+    batch_id: PositiveInt | None = Field(
+        default=None, description="revert: finished rename or move batch to undo."
     )
 
     @field_validator("extensions")
@@ -662,8 +669,21 @@ class MediaBatch(BaseModel):
         )
         if self.item_ids and filtered:
             raise ValueError("Use item_ids or file filters, not both.")
+        if (self.operation == "revert") != (self.batch_id is not None):
+            raise ValueError("batch_id is required for revert and only used there.")
+        if self.operation == "revert" and (self.item_ids or filtered):
+            raise ValueError("revert takes batch_id only.")
+        if self.empty_dirs and (
+            self.operation != "delete"
+            or self.item_ids
+            or self.extensions
+            or self.name is not None
+            or self.min_size is not None
+            or self.max_size is not None
+        ):
+            raise ValueError("empty_dirs is a delete option with directory only.")
         if self.operation in ("delete", "rename", "move") and not (
-            self.item_ids or filtered
+            self.item_ids or filtered or self.empty_dirs
         ):
             raise ValueError("This operation needs item_ids or a file filter.")
         if (self.operation == "move") != (self.destination is not None):

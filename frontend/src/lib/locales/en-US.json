@@ -739,14 +739,16 @@
         "unknown_season": "Season unknown",
         "unsupported_move": "Move the whole folder instead",
         "unindexable_destination": "Destination would not be indexed",
-        "layout_change": "Cannot switch between a standalone comic and a chapter"
+        "layout_change": "Cannot switch between a standalone comic and a chapter",
+        "not_empty": "Folder is no longer empty"
       },
       "operation": {
         "delete": "Delete",
         "rename": "Rename",
         "organize": "Organize by template",
         "move": "Move"
-      }
+      },
+      "reverts": "Undoes batch #{0}"
     }
   },
   "metadata": {

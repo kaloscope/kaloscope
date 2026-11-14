@@ -739,14 +739,16 @@
         "unknown_season": "季数未知",
         "unsupported_move": "请改为移动整个文件夹",
         "unindexable_destination": "目标位置不会被入库",
-        "layout_change": "无法在独立漫画与章节之间转换"
+        "layout_change": "无法在独立漫画与章节之间转换",
+        "not_empty": "文件夹已不为空"
       },
       "operation": {
         "delete": "删除",
         "rename": "重命名",
         "organize": "按模板整理",
         "move": "移动"
-      }
+      },
+      "reverts": "撤销批量操作 #{0}"
     }
   },
   "metadata": {

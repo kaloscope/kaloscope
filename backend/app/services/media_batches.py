@@ -1,6 +1,7 @@
 """Review and apply batches of library files and items for the assistant and MCP."""
 
 import asyncio
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -27,6 +28,7 @@ from app.core.media.batch import (
     PlanEntry,
     build_index,
     delete_files,
+    empty_directories,
     item_entries,
     item_matches,
     plan_deletion,
@@ -34,6 +36,7 @@ from app.core.media.batch import (
     prune_directories,
     relative,
     relocate_reading,
+    remove_directories,
     rename_files,
     restore_reading,
     scan_files,
@@ -217,7 +220,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         entries: list[PlanEntry] = []
         unchanged = 0
         cut = False
-        if change.operation == "organize":
+        effective = change.operation
+        if change.operation == "revert":
+            entries, issues, effective = await cls._revert_plan(index, items, change)
+        elif change.empty_dirs:
+            entries, issues = await cls._empty_plan(index, items, change, lib)
+        elif change.operation == "organize":
             entries, issues, unchanged, cut = await cls._organize_plan(
                 index, items, change, lib
             )
@@ -337,16 +345,31 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 }
             )
         deleting = change.operation == "delete"
+        reverting = change.operation == "revert"
         trash = KaloscopeConfig.get().filesystem_trash_mode
         reasons = _tally(entry.reason for entry in blocked)
         owners = _tally(entry.owner for entry in planned)
         notes = []
-        if deleting:
+        if reverting:
+            notes.append(
+                f"Undoes batch {change.batch_id}: each listed file or folder gets "
+                "its former name or place back. Units that batch skipped, and "
+                "anything changed since, are left out."
+            )
+        elif change.empty_dirs:
+            notes.append(
+                "Only folders without any file are removed. A work with nothing "
+                "left in it is removed from the library with its own metadata "
+                "and artwork."
+            )
+        elif deleting:
             notes.append(
                 "Files go to the system trash."
                 if trash
                 else "Files are deleted permanently; this cannot be undone."
             )
+        elif reverting:
+            pass
         elif change.operation == "rename" and reading:
             notes.append(
                 "A book or archive takes its same-name OPF along; folders are "
@@ -457,6 +480,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 MediaChangeService.request_key(user.id, request_id),
                 lib,
                 change,
+                effective,
                 revision,
                 result,
                 user,
@@ -858,6 +882,163 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         return entries, [], unchanged
 
     @classmethod
+    async def _empty_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]]]:
+        """Plan removing empty folders and works that have nothing left in them.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Deletion with `empty_dirs` and an optional directory.
+            lib: Library being cleaned.
+
+        Returns:
+            One `dir` unit per topmost folder without any file below it, one
+            `item` unit per directory item or collection without children and
+            without content of its own, and located issues.
+        """
+        try:
+            folders, truncated = await asyncio.to_thread(
+                empty_directories, index, change.directory
+            )
+        except (OSError, ValueError):
+            return [], [
+                {
+                    "path": "directory",
+                    "message": "This directory is not readable inside the library.",
+                }
+            ]
+        if truncated:
+            return [], [
+                {
+                    "path": "directory",
+                    "message": "The library is too large to check in one pass; "
+                    "choose a narrower directory.",
+                }
+            ]
+        entries = [
+            PlanEntry("dir", FileOwner.LOOSE, relative(index.root, path), 0, None)
+            for path in folders
+        ]
+        scope = index.root / change.directory if change.directory else index.root
+        parents = {item.parent_id for item in items if item.parent_id is not None}
+        childless = []
+        for item in items:
+            path = Path(item.path)
+            if (
+                item.path in index.directories
+                and item.id not in parents
+                and (path == scope or path.is_relative_to(scope))
+            ):
+                # a folder that still holds content of its own is not a leftover
+                scan = await asyncio.to_thread(
+                    scan_files, index, directory=relative(index.root, path)
+                )
+                if not any(
+                    match.owner in (FileOwner.UNINDEXED, FileOwner.INDEXED)
+                    for match in scan.matches
+                ):
+                    childless.append(item)
+        busy_items, _ = await cls._busy(lib)
+        entries.extend(
+            await asyncio.to_thread(
+                item_entries, index, childless, {}, busy_items=busy_items
+            )
+        )
+        return entries, []
+
+    @classmethod
+    async def _revert_plan(
+        cls, index: LibraryIndex, items: list[MediaItem], change: MediaBatch
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], str | None]:
+        """Plan undoing a finished rename or move batch from its recorded entries.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Revert naming the batch to undo.
+
+        Returns:
+            One unit per entry that batch applied, in reverse order with source
+            and destination swapped; blocked matches where the file or item is
+            no longer where that batch left it or the former path is taken;
+            located issues; and the operation the units are applied with.
+        """
+        receipt = await MediaChangeReceipt.get_or_none(
+            id=change.batch_id, action=MediaAction.BATCH, lib_id=change.library_id
+        )
+        plan = (receipt.plan if receipt else None) or {}
+        message = None
+        if receipt is None:
+            message = "No batch of this library has this ID."
+        elif not receipt.claimed or receipt.result is None:
+            message = "Only a finished batch can be reverted."
+        elif plan.get("operation") not in ("rename", "move"):
+            message = "Only rename and move batches can be reverted."
+        if message or receipt is None:
+            return [], [{"path": "batch_id", "message": message or ""}], None
+        done = await MediaBatchEntry.filter(
+            receipt_id=receipt.id, status="done", dst__not_isnull=True
+        ).order_by("-seq")
+        rows = {item.id: item for item in items}
+        root = index.root
+        reading = index.lib_type in (LibType.NOVEL, LibType.COMIC)
+        entries: list[PlanEntry] = []
+        restored: list[Path] = []
+        for record in done:
+            source, target = root / (record.dst or ""), root / record.src
+            entry = PlanEntry(
+                record.kind,
+                FileOwner(record.owner),
+                record.dst or "",
+                record.size,
+                None,
+                record.item_id,
+                files=record.files,
+                dst=record.src,
+            )
+            # a folder renamed back earlier in this plan carries its content along
+            carried = any(source.is_relative_to(path) for path in restored)
+            item = rows.get(record.item_id or 0)
+            reason = None
+            try:
+                directory = await asyncio.to_thread(source.is_dir)
+                if record.kind == "item" and item is None:
+                    reason = "missing"
+                elif carried:
+                    entry.identity = [record.item_id] if reading else None
+                elif not await asyncio.to_thread(os.path.lexists, source):
+                    reason = "missing"
+                elif await asyncio.to_thread(os.path.lexists, target):
+                    reason = "destination_exists"
+                elif record.kind == "item" and item is not None:
+                    if str(source) not in (item.path, item.dir):
+                        reason = "item_changed"
+                    elif directory and reading:
+                        entry.identity = [item.id]
+                    elif directory:
+                        entry.identity = sorted(
+                            row.id for row in items if row.parent_id == item.id
+                        )
+                    else:
+                        entry.identity = await asyncio.to_thread(_fingerprint, source)
+                else:
+                    entry.identity = await asyncio.to_thread(_fingerprint, source)
+                if reason is None and directory:
+                    restored.append(target)
+            except OSError:
+                reason = "missing"
+            if reason:
+                entry.status, entry.reason = "blocked", reason
+            entries.append(entry)
+        return entries, [], plan.get("operation")
+
+    @classmethod
     async def _reading_move_plan(
         cls,
         index: LibraryIndex,
@@ -1107,6 +1288,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         key: str,
         lib: MediaLib,
         change: MediaBatch,
+        operation: str | None,
         revision: str,
         result: dict[str, Any],
         user: UserInfo,
@@ -1118,6 +1300,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             key: Account-scoped request identity.
             lib: Library the plan belongs to.
             change: Reviewed selection and operation.
+            operation: Operation the units are applied with; a revert runs as
+                the rename or move it undoes.
             revision: Reviewed revision.
             result: Review shown to the user.
             user: Reviewing administrator.
@@ -1142,7 +1326,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             action=MediaAction.BATCH,
             lib_id=lib.id,
             plan={
-                "operation": change.operation,
+                "operation": operation,
+                "reverts": change.batch_id,
                 "change": change.model_dump(mode="json"),
                 "revision": revision,
                 "library": cls._library_facts(lib),
@@ -1417,7 +1602,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             await MediaBatchEntry.filter(id__in=ids).update(status="started")
             operation = (receipt.plan or {}).get("operation")
             try:
-                if chunk[0].kind == "group":
+                if chunk[0].kind == "dir":
+                    async with library_lock(lib.dir):
+                        outcomes = await write_in_thread(
+                            remove_directories, root, [(chunk[0].id, chunk[0].src)]
+                        )
+                elif chunk[0].kind == "group":
                     outcomes = {chunk[0].id: await cls._organize_work(chunk[0], lib)}
                 elif chunk[0].kind == "item":
                     outcomes = {
@@ -1955,6 +2145,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "library_id": receipt.lib_id,
                     "library_name": plan.get("library_name"),
                     "operation": plan.get("operation"),
+                    "reverts": plan.get("reverts"),
                     "deletion": plan.get("deletion"),
                     "planned": plan.get("planned"),
                     "blocked": plan.get("blocked"),

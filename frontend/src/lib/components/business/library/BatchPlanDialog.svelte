@@ -121,6 +121,9 @@
       {#if batch.operation}
         <span class="text-base-content/60">{$_(`media.batch.operation.${batch.operation}`)}</span>
       {/if}
+      {#if batch.reverts}
+        <span class="text-base-content/60">{$_('media.batch.reverts', batch.reverts)}</span>
+      {/if}
       {#if batch.deletion}
         <span class={batch.deletion === 'permanent' ? 'text-warning' : 'text-base-content/60'}>
           {$_(`media.batch.deletion.${batch.deletion}`)}

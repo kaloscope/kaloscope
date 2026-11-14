@@ -915,3 +915,89 @@ def restore_reading(renames: list[tuple[Path, Path]]):
         except OSError:
             # the watcher reconciles whatever could not be put back
             continue
+
+
+def empty_directories(
+    index: LibraryIndex, directory: str | None = None, *, limit: int = SCAN_LIMIT
+) -> tuple[list[Path], bool]:
+    """Find directories that hold no file anywhere below them.
+
+    Run in a worker thread. Only the topmost empty directory of each empty tree
+    is reported. The library root, symlinks and directories an item is
+    registered on are never reported.
+
+    Args:
+        index: Library lookups built from its items.
+        directory: Library-relative directory to search below; `None` is the root.
+        limit: Entries to visit before stopping.
+
+    Returns:
+        Empty directories in path order, and whether the walk stopped early.
+
+    Raises:
+        ValueError: If the directory leaves the library or is not a directory.
+        OSError: If the directory cannot be read.
+    """
+    root = index.root
+    target = root / directory if directory else root
+    _safe_path(root, target)
+    if not target.is_dir():
+        raise ValueError("directory does not exist in this library")
+    registered = set(index.directories) | set(index.page_dirs) | set(index.containers)
+    empty: set[Path] = set()
+    visited = 0
+    for current, names, files in os.walk(target, topdown=False, followlinks=False):
+        visited += len(names) + len(files)
+        if visited > limit:
+            return [], True
+        path = Path(current)
+        if (
+            not files
+            and str(path) not in registered
+            and not path.is_symlink()
+            and all(
+                path / name in empty and not (path / name).is_symlink()
+                for name in names
+            )
+        ):
+            empty.add(path)
+    empty.discard(root)
+    return sorted(path for path in empty if path.parent not in empty), False
+
+
+def remove_directories(root: Path, units: list[tuple[int, str]]) -> dict[int, str]:
+    """Remove reviewed directories that are still empty, under the library lock.
+
+    Run with `write_in_thread`.
+
+    Args:
+        root: Absolute library root.
+        units: Entry ID and library-relative path of each directory.
+
+    Returns:
+        Each entry's outcome: `done`, or the reason it was skipped or failed.
+    """
+    outcomes = {}
+    for entry_id, source in units:
+        path = root / source
+        try:
+            _safe_path(root, path)
+            if path == root or path.is_symlink() or not path.is_dir():
+                outcomes[entry_id] = "missing"
+                continue
+            below = list(os.walk(path, topdown=False, followlinks=False))
+            if any(files for _, _, files in below) or any(
+                (Path(current) / name).is_symlink()
+                for current, names, _ in below
+                for name in names
+            ):
+                outcomes[entry_id] = "not_empty"
+                continue
+            for current, _, _ in below:
+                os.rmdir(current)
+            outcomes[entry_id] = "done"
+        except ValueError:
+            outcomes[entry_id] = "unsafe_path"
+        except OSError:
+            outcomes[entry_id] = "io_error"
+    return outcomes

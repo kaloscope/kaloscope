@@ -1,6 +1,7 @@
 """Unit tests for reviewed batches of library files and items."""
 
 import asyncio
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from app.services import media_batches as service
 from app.services.mcp import MCPAccessTokenService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
+from app.utils.json import dumps
 from tests.test_download_plan_changes import latest_request
 from tests.test_library_config import TV_TEMPLATE
 from tests.test_mcp import application, call
@@ -1166,5 +1168,245 @@ def test_reading_work_move(tmp_path):
             assert orphan["blocked"]["reasons"] == {"unindexable_destination": 1}
             assert taken["blocked"]["reasons"] == {"layout_change": 1}
             assert deep["issues"][0]["path"] == "destination"
+
+    asyncio.run(run())
+
+
+def reverting(lib: MediaLib, batch_id: int) -> MediaBatch:
+    return MediaBatch(library_id=lib.id, operation="revert", batch_id=batch_id)
+
+
+def test_empty_folders(tmp_path):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            root = Path(env.lib.dir)
+            for name in ("Gone/Deep/Deeper", "Kept"):
+                (root / name).mkdir(parents=True)
+            write(root, "Kept/note.txt")
+            merge = moving(env.lib, "Manga", item_ids=[env.chapters[2].id])
+            await confirm(await MediaBatchService.review(merge, ADMIN), merge)
+            shutil.rmtree(root / "[Scan] Manga 2/Vol 1")
+            await MediaItem.filter(id=env.chapters[1].id).delete()
+            change = MediaBatch(
+                library_id=env.lib.id, operation="delete", empty_dirs=True
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+
+            assert sorted(row["src"] for row in review["sample"]) == [
+                "Gone",
+                "[Scan] Manga 2",
+            ]
+            assert result["outcome"] == "completed"
+            assert not (root / "Gone").exists()
+            # the collection that lost its chapters leaves the library with its folder
+            assert not (root / "[Scan] Manga 2").exists()
+            assert not await MediaItem.exists(id=env.second.id)
+            assert (root / "Kept/note.txt").is_file()
+            assert await MediaItem.exists(id=env.first.id)
+
+    asyncio.run(run())
+
+
+def test_revert_videos(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            folder = Path(env.show.dir)
+            write(folder, "S01E01.zh.ass")
+            before = sorted(path.name for path in folder.iterdir())
+            rename = renaming(env.shows, "^S01", "Old Show S01", item_ids=[env.show.id])
+            done = await confirm(
+                await MediaBatchService.review(rename, env.owner), rename, env.owner
+            )
+            change = reverting(env.shows, done["batch_id"])
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            first = await MediaItem.get(id=env.episodes[0].id)
+            details = await MediaBatchService.details(review["batch_id"])
+            again = await MediaBatchService.review(change, env.owner)
+
+            assert review["operation"] == "revert"
+            assert review["planned"]["units"] == 2
+            assert review["sample"][0]["dst"].startswith("Old Show/S01E0")
+            assert result["outcome"] == "completed"
+            assert sorted(path.name for path in folder.iterdir()) == before
+            assert first.path == str(folder / "S01E01.mkv")
+            assert first.nfo_path == str(folder / "S01E01.nfo")
+            assert (details["operation"], details["reverts"]) == (
+                "rename",
+                done["batch_id"],
+            )
+            # nothing is left where that batch put it, so a second revert has no work
+            assert not again["valid"]
+            assert again["blocked"]["reasons"] == {"missing": 2}
+
+    asyncio.run(run())
+
+
+def test_revert_merge(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            parent, episodes = await second_folder(env)
+            await MediaItem.filter(id=episodes[0].id).delete()
+            (Path(parent.path) / "S01E02.mkv").unlink()
+            (Path(parent.path) / "poster.jpg").unlink()
+            root = Path(env.shows.dir)
+            merge = moving(env.shows, "Old Show", item_ids=[parent.id], by_season=True)
+            done = await confirm(
+                await MediaBatchService.review(merge, env.owner), merge, env.owner
+            )
+            change = reverting(env.shows, done["batch_id"])
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            back = await MediaItem.get(id=episodes[1].id)
+            folder = await MediaItem.get(path=str(root / "Old Show Part 2"))
+
+            assert not await MediaItem.exists(id=parent.id)
+            assert result["outcome"] == "completed"
+            assert (root / "Old Show Part 2/S01E03.mkv").is_file()
+            assert (root / "Old Show Part 2/S01E03.zh.ass").is_file()
+            assert (root / "Old Show Part 2/S02E01.mkv").is_file()
+            # the merge removed the folder's directory item; it is registered again
+            assert back.parent_id == folder.id
+            assert not (root / "Old Show/Season 01").exists()
+
+    asyncio.run(run())
+
+
+def test_revert_comics(tmp_path):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            root = Path(env.lib.dir)
+            rename = renaming(
+                env.lib, r"^\[Scan\] ", item_ids=[env.second.id, env.chapters[2].id]
+            )
+            done = await confirm(await MediaBatchService.review(rename, ADMIN), rename)
+            change = reverting(env.lib, done["batch_id"])
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+            chapter = await MediaItem.get(id=env.chapters[2].id)
+
+            # the collection goes back first, carrying the chapter that follows it
+            assert [row["src"] for row in review["sample"]] == [
+                "Manga 2",
+                "[Scan] Manga 2/Vol 2",
+            ]
+            assert result["outcome"] == "completed"
+            assert (root / "[Scan] Manga 2/[Scan] Vol 2/000.png").is_file()
+            assert chapter.path == str(root / "[Scan] Manga 2/[Scan] Vol 2")
+
+    asyncio.run(run())
+
+
+def test_revert_refusals(tmp_path):
+    async def run():
+        async with database():
+            lib, _, _ = await show(tmp_path)
+            delete = deletion(lib, extensions=["url"])
+            reviewed = await MediaBatchService.review(delete, ADMIN)
+            pending = await MediaBatchService.review(
+                reverting(lib, reviewed["batch_id"]), ADMIN
+            )
+            await confirm(reviewed, delete)
+
+            deleted = await MediaBatchService.review(
+                reverting(lib, reviewed["batch_id"]), ADMIN
+            )
+            unknown = await MediaBatchService.review(reverting(lib, 9999), ADMIN)
+
+            assert [r["issues"][0]["path"] for r in (pending, deleted, unknown)] == [
+                "batch_id"
+            ] * 3
+            assert "finished" in pending["issues"][0]["message"]
+            assert "rename and move" in deleted["issues"][0]["message"]
+
+    asyncio.run(run())
+
+
+def test_undo_conversation(monkeypatch, tmp_path):
+    streams, offered = [], []
+
+    def offer(body, *calls):
+        offered.append(body)
+        return list(calls)
+
+    def confirm_latest(body):
+        return offer(
+            body,
+            (
+                "apply_media_change",
+                {"request_id": latest_request(body), "confirmed": True},
+            ),
+        )
+
+    def batch_id(body):
+        import re
+
+        return int(
+            re.findall(r'batch_id\\?": ?(\d+)', dumps(body["messages"]).decode())[-1]
+        )
+
+    steps = [
+        lambda body: offer(body, ("list_media_items", {"library_id": 61})),
+        lambda body: offer(body, ("review_media_batch", {"library_id": 61})),
+        lambda body: offer(
+            body,
+            (
+                "review_media_batch",
+                {
+                    "library_id": 61,
+                    "operation": "rename",
+                    "item_ids": [600],
+                    "pattern": "^S01",
+                    "replacement": "X",
+                },
+            ),
+        ),
+        lambda body: offer(body),
+        confirm_latest,
+        lambda body: offer(body),
+        lambda body: offer(
+            body,
+            (
+                "review_media_batch",
+                {"library_id": 61, "operation": "revert", "batch_id": batch_id(body)},
+            ),
+        ),
+        lambda body: offer(body),
+        confirm_latest,
+        lambda body: offer(body),
+    ]
+    configure(monkeypatch, scripted(steps, streams))
+
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            folder = Path(env.show.dir)
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), env.owner
+            )
+            for key, prompt in enumerate(("Rename", "Yes", "Undo that", "Yes")):
+                await converse(conversation["id"], env.owner, prompt, key=f"k{key}")
+
+            def pattern(body):
+                tool = next(
+                    tool["function"]
+                    for tool in body["tools"]
+                    if tool["function"]["name"] == "review_media_batch"
+                )
+                return tool["parameters"]["properties"]["pattern"]
+
+            # every field is named from the start; limits arrive with the batch focus
+            assert "maxLength" not in pattern(offered[1])
+            assert pattern(offered[2])["maxLength"] == 256
+            # a turn after an applied batch starts in the focus, ready to undo it
+            assert names(offered[6]) == tools.BATCH_FOCUS
+            assert (folder / "S01E01.mkv").is_file()
+            assert not (folder / "XE01.mkv").exists()
 
     asyncio.run(run())

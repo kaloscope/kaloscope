@@ -482,6 +482,30 @@ class ConfigReview(LibraryConfig):
     )
 
 
+class BatchBrief(ToolArguments):
+    """Name every batch argument without the guidance the batch focus adds."""
+
+    library_id: ResourceID
+    operation: Literal["delete", "organize", "rename", "move", "revert"] | None = Field(
+        default=None, description="Omit to list."
+    )
+    item_ids: list[ResourceID] = Field(default_factory=list)
+    directory: str | None = None
+    extensions: list[str] = Field(default_factory=list)
+    name: str | None = Field(default=None, description="Glob.")
+    owners: list[Annotated[FileOwner, plain_enum(FileOwner)]] = Field(
+        default_factory=lambda: [FileOwner.LOOSE]
+    )
+    min_size: int | None = None
+    max_size: int | None = None
+    pattern: str | None = Field(default=None, description="rename: regex.")
+    replacement: str = ""
+    destination: str | None = Field(default=None, description="move: folder.")
+    by_season: bool = False
+    empty_dirs: bool = False
+    batch_id: ResourceID | None = Field(default=None, description="revert.")
+
+
 class BatchReview(MediaBatch):
     """List library files, or review changing them as one batch."""
 
@@ -554,6 +578,9 @@ class AssistantTool:
     description: str
     arguments: type[BaseModel]
     admin: bool = False
+    # a smaller schema and description offered until the tool's focus is entered
+    brief: type[BaseModel] | None = None
+    brief_description: str | None = None
 
 
 TOOLS = (
@@ -710,13 +737,13 @@ TOOLS = (
     ),
     AssistantTool(
         "list_media_libraries",
-        "List accessible libraries: type, scan state, ingest bindings. No scan.",
+        "List accessible libraries: type, scan state, ingest bindings.",
         MediaLibraryList,
     ),
     AssistantTool(
         "list_media_items",
         "Page visible media in library order; keyword filters titles (omit for all). "
-        "No path=top-level works. Unlocks file delete/rename/move.",
+        "No path=top-level works. Unlocks file delete/rename/move/undo.",
         MediaItemList,
     ),
     AssistantTool(
@@ -821,14 +848,15 @@ TOOLS = (
     ),
     AssistantTool(
         "review_media_batch",
-        "Find files in one library by extension, name, size or items; without "
-        "operation it only counts and samples them. With operation it reviews "
-        "a delete/rename/organize/move batch (move also renames a whole work "
-        "folder) that apply_media_change performs after confirmation. owners "
-        "defaults to loose files; name other classes. Summarize planned, "
-        "blocked, samples and notes in the user's language, not JSON. End the "
-        "turn for confirmation.",
+        "List files in one library by extension, name, size or items (no "
+        "operation), review a delete/rename/organize/move batch (move also "
+        "renames a whole work folder; empty_dirs clears empty folders), or "
+        "revert a finished rename/move batch. apply_media_change performs it "
+        "after confirmation. owners defaults to loose files; name other "
+        "classes. Summarize planned, blocked, samples and notes in the user's "
+        "language, not JSON. End the turn for confirmation.",
         BatchReview,
+        brief=BatchBrief,
         admin=True,
     ),
     AssistantTool(
@@ -1061,7 +1089,10 @@ def tool_schemas(
             }
         ):
             continue
-        parameters = compact_schema(tool.arguments.model_json_schema())
+        short = tool.brief is not None and not batch
+        parameters = compact_schema(
+            (tool.brief if short else tool.arguments).model_json_schema()
+        )
         parameters.pop("description", None)
         encoded = dumps(parameters)
         definitions = {
@@ -1076,7 +1107,8 @@ def tool_schemas(
                 "type": "function",
                 "function": {
                     "name": tool.name,
-                    "description": tool.description,
+                    "description": (tool.brief_description if short else None)
+                    or tool.description,
                     "parameters": parameters,
                 },
             }

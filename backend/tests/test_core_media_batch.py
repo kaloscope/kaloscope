@@ -354,6 +354,12 @@ def test_prune_directories(tmp_path):
         {"operation": "move", "destination": "Show"},
         {"operation": "delete", "name": "*", "destination": "Show"},
         {"name": "*", "by_season": True},
+        {"operation": "revert"},
+        {"operation": "revert", "batch_id": 1, "name": "*"},
+        {"operation": "delete", "name": "*", "batch_id": 1},
+        {"operation": "delete", "empty_dirs": True, "name": "*"},
+        {"operation": "rename", "pattern": "x", "empty_dirs": True},
+        {"empty_dirs": True},
     ],
 )
 def test_invalid_selector(fields):
@@ -408,3 +414,32 @@ def test_organize_selector():
 
     assert (whole.item_ids, whole.directory) == ([], None)
     assert scoped.directory == "Shows"
+
+
+def test_empty_directories(tmp_path):
+    write(tmp_path, "Full/a.txt", "Half/Sub/b.txt")
+    for name in ("Empty/Deep/Deeper", "Half/Hollow", "Work"):
+        (tmp_path / name).mkdir(parents=True)
+    (tmp_path / "Linked").symlink_to(tmp_path / "Empty", target_is_directory=True)
+    index = batch.build_index(
+        library(tmp_path, LibType.COMIC),
+        [item(1, tmp_path / "Work", directory=tmp_path / "Work")],
+    )
+
+    found, truncated = batch.empty_directories(index)
+    scoped, _ = batch.empty_directories(index, "Half")
+    write(tmp_path, "Empty/Deep/late.txt")
+    outcomes = batch.remove_directories(
+        tmp_path, [(1, "Empty"), (2, "Half/Hollow"), (3, "Missing"), (4, "../out")]
+    )
+
+    # a registered work and a link are never reported, only the topmost empty folder
+    assert [path.relative_to(tmp_path).as_posix() for path in found] == [
+        "Empty",
+        "Half/Hollow",
+    ]
+    assert not truncated
+    assert [path.name for path in scoped] == ["Hollow"]
+    assert batch.empty_directories(index, limit=2) == ([], True)
+    assert outcomes == {1: "not_empty", 2: "done", 3: "missing", 4: "unsafe_path"}
+    assert (tmp_path / "Empty/Deep/late.txt").is_file()

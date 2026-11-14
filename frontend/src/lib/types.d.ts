@@ -264,6 +264,7 @@ export type MediaBatch = {
   library_id: number;
   library_name: string | null;
   operation: 'delete' | 'organize' | 'rename' | 'move' | null;
+  reverts: number | null;
   deletion: 'trash' | 'permanent' | null;
   planned: { units: number; files: number; bytes: number; by_owner: Record<string, number> };
   blocked: { units: number; reasons: Record<string, number> };
@@ -278,7 +279,7 @@ export type MediaBatch = {
 /** One unit of a library batch, or a match it left alone. */
 export type MediaBatchEntry = {
   seq: number;
-  kind: 'file' | 'item' | 'group';
+  kind: 'file' | 'item' | 'group' | 'dir';
   owner: 'loose' | 'companion' | 'unindexed' | 'page' | 'indexed';
   item_id: number | null;
   src: string;
