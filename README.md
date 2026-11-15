@@ -30,7 +30,7 @@
 |
 [TG 群组](https://t.me/kaloscope_official)
 
-<img align="center" src="screenshots/dashboard.png" />
+<img align="center" src="screenshots/dashboard.webp" alt="星期六的每日放送首页，无历史记录" width="1668" height="1014" />
 
 </div>
 
@@ -51,11 +51,17 @@ v1.0.0 将 AI 带入工作流编排与日常媒体管理：用自然语言描述
 
 下载、计划与媒体变更会先展示预览，确认后再执行；可用操作受当前账号权限限制。
 
+<img src="screenshots/ai-assistant.png" alt="用中文向 AI 助手提出修改要求，在工作流画布上检查结果" width="1382" height="849" />
+
 ### :robot: AI 工作流节点
 
 - 将模型调用接入工作流，利用上下文变量完成文本处理、信息提取等任务
 - 支持文本与结构化 JSON 输出，并通过 JSON Schema 校验结构化结果
 - 统一配置云端与本地模型，支持 OpenAI 兼容接口，可连接 DeepSeek、Gemini、Ollama、LM Studio 等服务
+
+| AI 节点                                                                                                 | 模型提供商                                                                                                     |
+| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| <img src="screenshots/ai-node.png" alt="AI 节点中的模型、提示词和输出设置" width="1382" height="849" /> | <img src="screenshots/ai-providers.png" alt="DeepSeek 模型提供商配置，密钥不显示" width="1382" height="849" /> |
 
 ### :link: MCP 外部接入
 
@@ -136,6 +142,8 @@ docker run -d \
 助手需要支持工具调用的模型。本地模型服务需使用容器可访问的地址；未配置 AI 时，其余媒体管理功能仍可正常使用。
 
 ## MCP 接入
+
+<img src="screenshots/mcp-access.png" alt="访问令牌页面中的 MCP 地址和认证方式" width="1382" height="849" />
 
 在「个人设置 → 访问令牌」创建令牌，将以下信息填入支持 Streamable HTTP 与 Bearer 认证的 MCP 客户端：
 

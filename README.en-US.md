@@ -30,7 +30,7 @@
 |
 [Telegram Group](https://t.me/kaloscope_official)
 
-<img align="center" src="screenshots/dashboard.png" />
+<img align="center" src="screenshots/dashboard.webp" alt="Saturday's daily broadcast dashboard with no history entries" width="1668" height="1014" />
 
 </div>
 
@@ -51,11 +51,17 @@ v1.0.0 brings AI into workflow creation and everyday media management. Describe 
 
 Download, schedule, plan, and media changes are previewed for confirmation before they run. Available actions follow your account permissions.
 
+<img src="screenshots/ai-assistant.png" alt="Request changes from the AI assistant and review the result on the workflow canvas" width="1382" height="849" />
+
 ### :robot: AI Workflow Nodes
 
 - Add model calls to workflows, using context variables for text processing, information extraction, and other tasks
 - Return text or structured JSON, with JSON Schema validation for structured results
 - Configure cloud and local models in one place through OpenAI-compatible APIs, including DeepSeek, Gemini, Ollama, and LM Studio
+
+| AI Node                                                                                                                | Model Provider                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| <img src="screenshots/ai-node.png" alt="Model, prompt, and output settings in an AI node" width="1382" height="849" /> | <img src="screenshots/ai-providers.png" alt="DeepSeek provider configuration with the API key hidden" width="1382" height="849" /> |
 
 ### :link: External AI Clients
 
@@ -136,6 +142,8 @@ This example enables the built-in aria2 service. For an external downloader, rem
 The assistant requires a model that supports tool calling. Local model services must be reachable from the container. Other media management features work without AI configuration.
 
 ## MCP Access
+
+<img src="screenshots/mcp-access.png" alt="MCP address and authentication settings on the access tokens page" width="1382" height="849" />
 
 Create a token under **Personal → Access Tokens**, then enter these settings in an MCP client that supports Streamable HTTP and Bearer authentication:
 
