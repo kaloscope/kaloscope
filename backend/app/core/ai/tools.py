@@ -487,7 +487,7 @@ class BatchBrief(ToolArguments):
 
     library_id: ResourceID
     operation: Literal["delete", "organize", "rename", "move", "revert"] | None = Field(
-        default=None, description="Omit to list."
+        default=None, description="Omit to list; organize = naming template."
     )
     item_ids: list[ResourceID] = Field(default_factory=list)
     directory: str | None = None

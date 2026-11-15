@@ -11,7 +11,7 @@
   const PAGE_SIZE = 50;
   const STATUSES = ['planned', 'blocked', 'done', 'skipped', 'failed', 'uncertain'] as const;
 
-  const { onfinish }: { onfinish?: () => void } = $props();
+  const { onfinish, onstate }: { onfinish?: () => void; onstate?: (batch: MediaBatch) => void } = $props();
 
   let batch: MediaBatch | null = $state(null);
   let entries: MediaBatchEntry[] = $state([]);
@@ -63,6 +63,7 @@
       }
       const wasRunning = batch?.state === 'running';
       batch = details.data;
+      onstate?.(batch);
       entries = list.data.items;
       total = list.data.total ?? 0;
       failed = false;
@@ -250,7 +251,12 @@
   {/if}
   <div class="modal-action">
     {#if batch?.confirmable && !failed}
-      <button type="button" class="btn btn-primary" disabled={$loading !== null} onclick={apply}>
+      <button
+        type="button"
+        class="btn {batch.deletion === 'permanent' ? 'btn-error' : 'btn-primary'}"
+        disabled={$loading !== null}
+        onclick={apply}
+      >
         {#if $loading !== null}<span class="loading loading-xs loading-spinner"></span>{/if}
         {$_(`media.batch.confirm.${batch.deletion ?? 'apply'}`, $number(batch.planned.units))}
       </button>

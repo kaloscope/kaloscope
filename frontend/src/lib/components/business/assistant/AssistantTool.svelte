@@ -1,12 +1,15 @@
 <script lang="ts">
+  import { api } from '$lib/api';
   import type { AssistantTool } from '$lib/assistant/session';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type {
+    MediaBatch,
     MediaBatchOutcome,
     MediaChangeOutcome,
     PlanChangeOutcome,
     ScheduleChangeOutcome,
+    Resp,
     TaskActionOutcome
   } from '$lib/types';
   import BatchPlanDialog from '../library/BatchPlanDialog.svelte';
@@ -50,6 +53,25 @@
   // the stored plan a review or an outcome refers to
   const batchId = $derived(batch?.batch_id ?? null);
   let planDialog: BatchPlanDialog | undefined = $state();
+  // a reviewed plan may be confirmed, stopped or finished in its dialog
+  let livePlan = $state<MediaBatch | null>(null);
+  const reviewedBatch = $derived(tool.name === 'review_media_batch' && batch?.valid ? batchId : null);
+  $effect(() => {
+    const id = reviewedBatch;
+    if (id === null) return;
+    api
+      .get(`media/batch/${id}`, { retry: 0 })
+      .json<Resp<MediaBatch>>()
+      .then(({ data }) => {
+        if (reviewedBatch === id) livePlan = data;
+      })
+      .catch(() => {
+        // an expired plan keeps the review's own status
+      });
+  });
+  const livePlanStatus = $derived(
+    livePlan && livePlan.state !== 'reviewed' ? (livePlan.state === 'running' ? 'running' : livePlan.outcome) : null
+  );
   // applied outcomes name themselves; other replies say why nothing changed
   const changeStatus = $derived.by(() => {
     if (!changeKind || !tool.name.startsWith('apply_') || !tool.result?.ok || !tool.result.data) return null;
@@ -176,14 +198,27 @@
 {#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.confirmation_required}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{$_('assistant.plan.confirmation_required')}</p>
 {/if}
-{#if changeKind && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
+{#if livePlanStatus && livePlan}
+  <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
+    {$_(`assistant.media_batch.${livePlanStatus}`, [
+      livePlan.counts.done,
+      livePlan.counts.skipped + livePlan.counts.failures + livePlan.counts.uncertain,
+      livePlan.counts.remaining
+    ])}
+  </p>
+{:else if changeKind && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{$_(`assistant.${changeKind}.reviewed`)}</p>
 {/if}
 {#if batchId !== null}
   <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={() => planDialog?.showModal(batchId)}>
     {$_('assistant.media_batch.view_plan')}
   </button>
-  <BatchPlanDialog bind:this={planDialog} />
+  <BatchPlanDialog
+    bind:this={planDialog}
+    onstate={(plan) => {
+      if (reviewedBatch === plan.id) livePlan = plan;
+    }}
+  />
 {/if}
 {#if changeStatus && batch}
   <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">

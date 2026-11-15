@@ -28,6 +28,7 @@ from app.models.media import (
     MediaFormat,
     MediaItem,
     MediaLib,
+    NFOType,
 )
 from app.models.user import UserInfo, UserRole
 from app.services import media_batches as service
@@ -37,9 +38,16 @@ from app.services.media_changes import MediaChangeService
 from app.utils.json import dumps
 from tests.test_core_media_reading_organizer import _work as reading_work
 from tests.test_download_plan_changes import latest_request
-from tests.test_library_config import TV_TEMPLATE
+from tests.test_library_config import MOVIE_TEMPLATE, TV_TEMPLATE
 from tests.test_mcp import application, call
-from tests.test_media_changes import MODEL, Sessions, media, monitor_for, store
+from tests.test_media_changes import (
+    MODEL,
+    Sessions,
+    media,
+    monitor_for,
+    store,
+    write_nfo,
+)
 from tests.test_services_assistant import configure
 from tests.test_services_media_reading import _client, _user
 from tests.test_workflow_runs import converse, names, scripted
@@ -905,6 +913,57 @@ def test_organize(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+def test_organize_video_nfo(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            root = Path(env.movies.dir)
+            folder = root / "alien_dl"
+            folder.mkdir()
+            (folder / "alien.mkv").write_bytes(b"alien")
+            await write_nfo(
+                NFOType.MOVIE,
+                folder / "alien.nfo",
+                {"title": "Alien", "year": 1979, "site": "tmdb", "id": "348"},
+            )
+            parent = await MediaItem.create(
+                lib=env.movies, path=str(folder), dir=str(folder), name="alien_dl"
+            )
+            await MediaItem.create(
+                lib=env.movies,
+                parent=parent,
+                path=str(folder / "alien.mkv"),
+                dir=str(folder),
+                name="alien",
+                nfo_path=str(folder / "alien.nfo"),
+                title="Alien",
+                year=1979,
+            )
+            await MediaLib.filter(id=env.movies.id).update(
+                rename_template=MOVIE_TEMPLATE
+            )
+            change = MediaBatch(
+                library_id=env.movies.id, operation="organize", item_ids=[parent.id]
+            )
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            moved = await MediaItem.get(id=parent.id)
+
+            # a folder without its own NFO is named from its video's NFO
+            assert review["planned"]["units"] == 1
+            assert result["outcome"] == "completed"
+            assert (root / "Alien (1979)/Alien (1979).mkv").is_file()
+            assert (root / "Alien (1979)/Alien (1979).nfo").is_file()
+            assert not folder.exists()
+            assert (moved.path, moved.title, moved.year) == (
+                str(root / "Alien (1979)"),
+                "Alien",
+                1979,
+            )
+
+    asyncio.run(run())
+
+
 def test_organize_changed(monkeypatch, tmp_path):
     async def run():
         async with media(monkeypatch, tmp_path) as env:
@@ -941,6 +1000,8 @@ def test_organize_reading(tmp_path, format):
 
             assert review["planned"]["units"] == 1
             assert review["sample"][0]["src"].startswith("original")
+            # the plan shows where the work itself goes
+            assert review["sample"][0]["dst"].startswith("New Work")
             assert result["outcome"] == "completed"
             assert moved.dir == str(root / "New Work")
             assert not (root / "original").exists()

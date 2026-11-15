@@ -1544,13 +1544,13 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         work.id,
                         files=max(1, preview["moved_files"]),
                     )
-                    if pairs:
-                        target = Path(pairs[0][1])
-                        entry.dst = (
-                            target.parent.as_posix()
-                            if work.path == work.dir
-                            else target.as_posix()
-                        )
+                    own = next((new for old, new in pairs if old == entry.src), None)
+                    if own is not None:
+                        # the work's own path, as a reading folder or a video has
+                        entry.dst = Path(own).as_posix()
+                    elif pairs:
+                        # a video folder is where its first video goes
+                        entry.dst = Path(pairs[0][1]).parent.as_posix()
                     if preview["status"] != "moves":
                         entry.status = "blocked"
                         entry.reason = f"organize_{preview['status']}"

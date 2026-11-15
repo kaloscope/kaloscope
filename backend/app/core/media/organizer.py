@@ -906,11 +906,21 @@ async def _plan(
         raise ValueError("TV episodes require a parent directory")
     if not is_tv and len(group) != 1:
         raise ValueError("multi-file movies require an explicit part naming rule")
+    own_nfo = Path(group[0].nfo_path or Path(group[0].path).with_suffix(".nfo"))
     parent_nfo = (
         Path(parent.nfo_path or str(source_dir / f"{source_dir.name}.nfo"))
         if parent
-        else Path(group[0].nfo_path or Path(group[0].path).with_suffix(".nfo"))
+        else own_nfo
     )
+    if (
+        parent
+        and not is_tv
+        and not parent.nfo_path
+        and not parent_nfo.exists()
+        and own_nfo.is_file()
+    ):
+        # a movie folder may keep its metadata in `<video>.nfo` only
+        parent_nfo = own_nfo
     _safe_path(root, parent_nfo)
     parent_meta = await asyncio.to_thread(
         _metadata, parent_nfo, lib.lib_type, "tvshow" if is_tv else "movie"
