@@ -1,15 +1,17 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Modal } from '$lib/components';
+  import { Modal, alert } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { MediaBatch, MediaBatchEntry, Page, Resp } from '$lib/types';
+  import type { MediaBatch, MediaBatchEntry, MediaBatchOutcome, Page, Resp } from '$lib/types';
   import { formatBytes } from '$lib/utils/number';
   import { onDestroy } from 'svelte';
 
   const PAGE_SIZE = 50;
   const STATUSES = ['planned', 'blocked', 'done', 'skipped', 'failed', 'uncertain'] as const;
+
+  const { onfinish }: { onfinish?: () => void } = $props();
 
   let batch: MediaBatch | null = $state(null);
   let entries: MediaBatchEntry[] = $state([]);
@@ -59,12 +61,15 @@
       if (current !== id) {
         return;
       }
+      const wasRunning = batch?.state === 'running';
       batch = details.data;
       entries = list.data.items;
       total = list.data.total ?? 0;
       failed = false;
       if (batch.state === 'running') {
         timer = setTimeout(load, 2000);
+      } else if (wasRunning) {
+        onfinish?.();
       }
     } catch {
       failed = true;
@@ -89,6 +94,25 @@
     api
       .post(`media/batch/${id}/cancel`)
       .then(() => load())
+      .finally(() => loading.end());
+  }
+
+  /**
+   * Apply the reviewed plan on the user's confirmation and follow its progress.
+   */
+  function apply() {
+    loading.start();
+    api
+      .post(`media/batch/${id}/apply`)
+      .json<Resp<MediaBatchOutcome & { stale?: boolean; pending?: boolean }>>()
+      .then(({ data }) => {
+        if (data.stale || data.pending) {
+          alert({ level: 'warning', message: data.stale ? 'media_batch_stale' : 'media_batch_pending' });
+        } else if (data.outcome !== 'running') {
+          onfinish?.();
+        }
+        return load();
+      })
       .finally(() => loading.end());
   }
 
@@ -225,6 +249,12 @@
     {/if}
   {/if}
   <div class="modal-action">
+    {#if batch?.confirmable && !failed}
+      <button type="button" class="btn btn-primary" disabled={$loading !== null} onclick={apply}>
+        {#if $loading !== null}<span class="loading loading-xs loading-spinner"></span>{/if}
+        {$_(`media.batch.confirm.${batch.deletion ?? 'apply'}`, $number(batch.planned.units))}
+      </button>
+    {/if}
     <button type="button" class="btn" onclick={() => modal.close()}>{$_('action.close', '')}</button>
   </div>
 </Modal>

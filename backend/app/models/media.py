@@ -585,7 +585,8 @@ class MediaBatch(BaseModel):
     replacement: str = Field(
         default="",
         max_length=256,
-        description="May use {{title}}/{{year}}/{{season}}/{{episode}}.",
+        description="May use {{title}}/{{year}}/{{season}}/{{episode}}/"
+        "{{episode_title}}.",
     )
 
     destination: str | None = Field(
@@ -600,6 +601,10 @@ class MediaBatch(BaseModel):
     empty_dirs: bool = Field(
         default=False,
         description="delete: remove empty folders and childless works instead.",
+    )
+    leftovers: bool = Field(
+        default=False,
+        description="empty_dirs: also folders holding only loose files.",
     )
     batch_id: PositiveInt | None = Field(
         default=None, description="revert: finished rename or move batch to undo."
@@ -682,6 +687,8 @@ class MediaBatch(BaseModel):
             or self.max_size is not None
         ):
             raise ValueError("empty_dirs is a delete option with directory only.")
+        if self.leftovers and not self.empty_dirs:
+            raise ValueError("leftovers is only used with empty_dirs.")
         if self.operation in ("delete", "rename", "move") and not (
             self.item_ids or filtered or self.empty_dirs
         ):

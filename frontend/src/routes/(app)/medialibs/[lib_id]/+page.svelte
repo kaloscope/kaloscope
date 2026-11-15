@@ -4,7 +4,9 @@
   import { api } from '$lib/api';
   import { registerAssistantContext } from '$lib/assistant/context';
   import {
+    alert,
     Backdrop,
+    BatchPlanDialog,
     Container,
     DataView,
     Image,
@@ -16,9 +18,10 @@
   } from '$lib/components';
   import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
-  import { _ } from '$lib/i18n';
+  import { _, number } from '$lib/i18n';
+  import { icons } from '$lib/icons';
   import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
-  import type { MediaItem, Page, Resp } from '$lib/types';
+  import type { MediaBatchOutcome, MediaItem, Page, Resp } from '$lib/types';
   import { compactRecord } from '$lib/utils/object';
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -55,6 +58,12 @@
   // the loading states
   const outerLoading = createLoading();
   const innerLoading = createLoading();
+  const reviewLoading = createLoading();
+
+  // items picked for one reviewed batch, on the shown page only
+  let selecting = $state(false);
+  let selected: number[] = $state([]);
+  let planDialog: BatchPlanDialog | undefined = $state();
 
   // the abort controller
   let abortController: AbortController | null = null;
@@ -95,6 +104,50 @@
   );
 
   /**
+   * Open an item, or pick it while items are being selected.
+   *
+   * @param item - Item that was clicked.
+   */
+  function open(item: MediaItem) {
+    if (!selecting) {
+      goto(`${page.url.pathname}/${item.id}`);
+    } else if (selected.includes(item.id)) {
+      selected = selected.filter((id) => id !== item.id);
+    } else {
+      selected = [...selected, item.id];
+    }
+  }
+
+  /**
+   * Start or leave selection without keeping earlier picks.
+   */
+  function toggleSelecting() {
+    selecting = !selecting;
+    selected = [];
+  }
+
+  /**
+   * Review deleting the selected items with their files and show the plan for confirmation.
+   */
+  function reviewDeletion() {
+    if (!lib || selected.length === 0) {
+      return;
+    }
+    reviewLoading.start();
+    api
+      .post('media/batch/review', { json: { library_id: lib.id, operation: 'delete', item_ids: selected } })
+      .json<Resp<MediaBatchOutcome>>()
+      .then(({ data }) => {
+        if (data.batch_id) {
+          planDialog?.showModal(data.batch_id);
+        } else {
+          alert({ level: 'warning', message: 'media_batch_empty' });
+        }
+      })
+      .finally(() => reviewLoading.end());
+  }
+
+  /**
    * Search for media items.
    *
    * @param toTop - Whether to scroll to the top of the page after the search.
@@ -120,6 +173,7 @@
       .then(({ data }) => {
         items = data.items;
         pagination.total = data.total;
+        selected = [];
       })
       .catch((error) => {
         if (error.name === 'AbortError') {
@@ -192,6 +246,27 @@
         }}
         maxWidth="36rem"
       />
+      {#if $user?.role === 'admin'}
+        <div class="flex items-center gap-2">
+          <button type="button" class="btn btn-sm" class:btn-active={selecting} onclick={toggleSelecting}>
+            <iconify-icon icon={icons.listCheck} width="1rem" aria-hidden="true"></iconify-icon>
+            {$_(selecting ? 'message.cancel' : 'media.batch.select')}
+          </button>
+          {#if selecting}
+            <span class="text-sm text-base-content/60" role="status">
+              {$_('media.batch.selected', $number(selected.length))}
+            </span>
+            <button
+              type="button"
+              class="btn btn-outline btn-error btn-sm"
+              disabled={selected.length === 0 || $reviewLoading !== null}
+              onclick={reviewDeletion}
+            >
+              {$_('media.batch.delete_selected')}
+            </button>
+          {/if}
+        </div>
+      {/if}
     {/snippet}
 
     <!-- grid view -->
@@ -204,12 +279,22 @@
         tabindex="0"
         role="button"
         class="group @container relative cursor-pointer"
+        aria-pressed={selecting ? selected.includes(item.id) : undefined}
         onmouseenter={() => (backdrop = item.backdrop ?? item.poster ?? backdrop)}
-        onclick={() => goto(`${page.url.pathname}/${item.id}`)}
+        onclick={() => open(item)}
       >
         <Rating score={item.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.875rem,8cqw,1rem)]" />
+        {#if selecting}
+          <input
+            type="checkbox"
+            class="checkbox absolute top-1 right-1 z-1 checkbox-sm checkbox-primary not-checked:bg-base-100"
+            checked={selected.includes(item.id)}
+            tabindex="-1"
+            aria-hidden="true"
+          />
+        {/if}
         <div
-          class:hidden={$user?.role !== 'admin'}
+          class:hidden={$user?.role !== 'admin' || selecting}
           class="absolute right-0 bottom-0 z-1 p-1 opacity-0 group-hover:opacity-100 {transClass}"
         >
           <MediaActions
@@ -237,7 +322,7 @@
           role="button"
           class="line-clamp-1 text-[clamp(0.875rem,8cqw,1rem)] font-semibold {pointerClass}"
           title={item.title ?? item.name}
-          onclick={() => goto(`${page.url.pathname}/${item.id}`)}
+          onclick={() => open(item)}
         >
           {item.title ?? item.name}
         </div>
@@ -252,3 +337,11 @@
 </Container>
 
 <Backdrop proxy="store" src={backdrop} />
+
+<BatchPlanDialog
+  bind:this={planDialog}
+  onfinish={() => {
+    selecting = false;
+    search();
+  }}
+/>

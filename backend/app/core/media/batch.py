@@ -2,12 +2,11 @@
 
 import mimetypes
 import os
-import re
 import stat
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time_ns
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -31,6 +30,7 @@ from app.utils.extractor import (
     extract_title,
     extract_year,
 )
+from app.utils.regex import substitute
 
 # a review answers within the tool timeout, so a walk stops at either bound
 SCAN_LIMIT = 200_000
@@ -299,6 +299,125 @@ def _reading_owners(
     return result
 
 
+@dataclass
+class _Listing:
+    """Remember one directory's entries as they were when it was read."""
+
+    mtime: int
+    read_at: int
+    # file name -> device, inode, size and modification time
+    files: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
+    directories: list[Path] = field(default_factory=list)
+    # normalized targets of this directory's symlinks
+    links: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _Walk:
+    """Hold the directories one walk visited, in visiting order."""
+
+    directories: dict[Path, _Listing] = field(default_factory=dict)
+    files: int = 0
+    truncated: bool = False
+    at: float = field(default_factory=monotonic)
+
+
+# library root -> its last complete walk, kept per worker process
+_WALKS: dict[str, _Walk] = {}
+WALK_ROOTS = 4
+WALK_FILES = 100_000
+WALK_SECONDS = 600
+# coarse filesystems stamp changes up to two seconds apart
+_RACY_NS = 2_000_000_000
+
+
+def forget_walk(root: Path | str):
+    """Drop a library's remembered walk after its files were changed.
+
+    Args:
+        root: Library root directory.
+    """
+    _WALKS.pop(str(root), None)
+
+
+def _walk(start: Path, known: _Walk | None, limit: int, deadline: float) -> _Walk:
+    """List every directory below a start, reading only those that changed.
+
+    A directory's modification time changes whenever an entry is added, removed
+    or renamed, so an unchanged one is taken from the earlier walk. A file that
+    was rewritten in place keeps its remembered size until the walk expires; a
+    plan built on it is refused for that file when applied, because every unit
+    is compared with the file on disk first.
+
+    Args:
+        start: Directory to walk; symlinked directories are not followed.
+        known: Earlier complete walk of the same library, if remembered.
+        limit: Entries to visit before stopping with `truncated`.
+        deadline: Monotonic time to stop at with `truncated`.
+
+    Returns:
+        The visited directories with their files, subdirectories and symlinks.
+    """
+    if known is not None and monotonic() - known.at > WALK_SECONDS:
+        known = None
+    walk = _Walk()
+    visited = 0
+    pending = [start]
+    while pending:
+        current = pending.pop()
+        try:
+            mtime = os.stat(current, follow_symlinks=False).st_mtime_ns
+        except FileNotFoundError:
+            continue
+        listing = known.directories.get(current) if known else None
+        # a change in the same clock tick as the last read would go unnoticed
+        if (
+            listing is not None
+            and listing.mtime == mtime
+            and listing.read_at - mtime > _RACY_NS
+        ):
+            visited += 1
+        else:
+            listing = _Listing(mtime, time_ns())
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        visited += 1
+                        if visited > limit or monotonic() > deadline:
+                            walk.truncated = True
+                            break
+                        if entry.name.startswith(".organizing-"):
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISLNK(info.st_mode):
+                            link = Path(entry.path)
+                            listing.links.add(
+                                _reference_key(link.parent / os.readlink(link))
+                            )
+                            if link.is_dir():
+                                continue
+                        elif stat.S_ISDIR(info.st_mode):
+                            listing.directories.append(Path(entry.path))
+                            continue
+                        elif not stat.S_ISREG(info.st_mode):
+                            continue
+                        listing.files[entry.name] = (
+                            info.st_dev,
+                            info.st_ino,
+                            info.st_size,
+                            info.st_mtime_ns,
+                        )
+            except FileNotFoundError:
+                continue
+        if walk.truncated or visited > limit or monotonic() > deadline:
+            walk.truncated = True
+            break
+        walk.directories[current] = listing
+        walk.files += len(listing.files)
+        pending.extend(listing.directories)
+    return walk
+
+
 def scan_files(
     index: LibraryIndex,
     *,
@@ -316,6 +435,8 @@ def scan_files(
     Run this synchronous filesystem operation in a worker thread. Directory
     symlinks are recorded but never followed, and files the application is
     writing (`.organizing-*`) are never matched.
+    A complete walk of the library is remembered for a few minutes, so a review
+    that follows a listing reads only the directories that changed in between.
 
     Args:
         index: Library lookups built from its items.
@@ -346,64 +467,37 @@ def scan_files(
     pattern = name.casefold() if name else None
     suffixes = set(extensions or ())
     scan = FileScan()
-    deadline = monotonic() + seconds
-    visited = 0
-    pending = [root if whole else target]
-    while pending:
-        current = pending.pop()
-        names: list[str] = []
-        states: dict[str, os.stat_result] = {}
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    visited += 1
-                    if visited > limit or monotonic() > deadline:
-                        scan.truncated = True
-                        break
-                    if entry.name.startswith(".organizing-"):
-                        continue
-                    info = entry.stat(follow_symlinks=False)
-                    if stat.S_ISLNK(info.st_mode):
-                        link = Path(entry.path)
-                        scan.links.add(_reference_key(link.parent / os.readlink(link)))
-                        if link.is_dir():
-                            continue
-                    elif stat.S_ISDIR(info.st_mode):
-                        pending.append(Path(entry.path))
-                        continue
-                    elif not stat.S_ISREG(info.st_mode):
-                        continue
-                    names.append(entry.name)
-                    states[entry.name] = info
-        except FileNotFoundError:
+    start = root if whole else target
+    walk = _walk(start, _WALKS.get(str(root)), limit, monotonic() + seconds)
+    scan.truncated = walk.truncated
+    if start == root and not walk.truncated and walk.files <= WALK_FILES:
+        _WALKS.pop(str(root), None)
+        while len(_WALKS) >= WALK_ROOTS:
+            del _WALKS[next(iter(_WALKS))]
+        _WALKS[str(root)] = walk
+    for current, listing in walk.directories.items():
+        scan.links.update(listing.links)
+        if not listing.files or not (
+            current == target or current.is_relative_to(target)
+        ):
             continue
-        if scan.truncated:
-            break
-        if not names or not (current == target or current.is_relative_to(target)):
-            continue
-        owners = classify(index, current, names)
+        owners = classify(index, current, list(listing.files))
         if (page_item := index.page_dirs.get(str(current))) is not None:
             scan.pages[page_item] = sum(
                 1 for owner, _ in owners.values() if owner == FileOwner.PAGE
             )
-        for entry_name in names:
-            info = states[entry_name]
+        for entry_name, identity in listing.files.items():
+            size = identity[2]
             if (
                 (suffixes and Path(entry_name).suffix.casefold() not in suffixes)
                 or (pattern and not fnmatchcase(entry_name.casefold(), pattern))
-                or (min_size is not None and info.st_size < min_size)
-                or (max_size is not None and info.st_size > max_size)
+                or (min_size is not None and size < min_size)
+                or (max_size is not None and size > max_size)
             ):
                 continue
             owner, item_id = owners[entry_name]
             scan.matches.append(
-                FileMatch(
-                    current / entry_name,
-                    info.st_size,
-                    owner,
-                    item_id,
-                    [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns],
-                )
+                FileMatch(current / entry_name, size, owner, item_id, list(identity))
             )
     scan.matches.sort(key=lambda match: str(match.path))
     return scan
@@ -660,52 +754,88 @@ def item_matches(index: LibraryIndex, items: list[MediaItem]) -> FileScan:
     return scan
 
 
-def rename_target(
-    pattern: str, replacement: str, name: str, *, directory: bool = False
-) -> str | None:
-    """Apply a rename rule to one file name, keeping its extension.
+def rename_targets(
+    pattern: str,
+    replacement: str,
+    names: list[tuple[str, bool, dict[str, Any] | None]],
+) -> list[str | None]:
+    """Apply a rename rule to many names, keeping each file's extension.
 
     Args:
-        pattern: Regular expression replaced in the name without its extension.
-        replacement: Replacement, optionally a template using the `title`, `year`,
-            `season` and `episode` read from the old name.
-        name: Current file or directory name.
-        directory: Whether the name is a directory's, which has no extension
-            even when it contains dots.
+        pattern: Regular expression replaced in each name without its extension.
+        replacement: Replacement, optionally a template using `title`, `year`,
+            `season`, `episode` and `episode_title`.
+        names: Current name, whether it is a directory's (which has no extension
+            even when it contains dots), and saved metadata that takes
+            precedence over what the name itself says.
 
     Returns:
-        The new file name, or `None` when the result is empty, hidden, reserved,
-        too long or contains characters a file name cannot hold.
+        For each name the new name, or `None` when the result is empty, hidden,
+        reserved, too long or contains characters a file name cannot hold.
 
     Raises:
-        re.error: If the pattern or the rendered replacement is invalid.
+        re.error: If the pattern or a rendered replacement is invalid.
         jinja2.TemplateError: If the replacement template cannot be rendered.
+        TimeoutError: If the pattern takes too long to apply.
     """
-    old, suffix = (name, "") if directory else (Path(name).stem, Path(name).suffix)
-    if is_template(replacement):
-        # the same fields a download transfer rule reads from a file name
-        replacement = render(
-            replacement,
-            context={
+    templated = is_template(replacement)
+    parts = []
+    pairs = []
+    for name, directory, saved in names:
+        old, suffix = (name, "") if directory else (Path(name).stem, Path(name).suffix)
+        rendered = replacement
+        if templated:
+            # a transfer rule reads these from the name; saved metadata is surer
+            context = {
                 "title": extract_title(old),
                 "year": extract_year(old),
                 "season": extract_season(old),
                 "episode": extract_episode(old),
-            },
-            sandboxed=True,
+                "episode_title": "",
+            }
+            context.update(saved or {})
+            rendered = render(replacement, context=context, sandboxed=True)
+        parts.append(suffix)
+        pairs.append((rendered, old))
+    targets: list[str | None] = []
+    for stem, suffix in zip(substitute(pattern, pairs), parts, strict=True):
+        stem = stem.strip()
+        target = stem + suffix
+        targets.append(
+            None
+            if (
+                not stem
+                or stem.startswith(".")
+                or "/" in stem
+                or _UNSAFE.search(stem)
+                or _RESERVED.match(stem)
+                or len(target.encode()) > 255
+            )
+            else target
         )
-    stem = re.sub(pattern, replacement, old).strip()
-    target = stem + suffix
-    if (
-        not stem
-        or stem.startswith(".")
-        or "/" in stem
-        or _UNSAFE.search(stem)
-        or _RESERVED.match(stem)
-        or len(target.encode()) > 255
-    ):
-        return None
-    return target
+    return targets
+
+
+def rename_target(
+    pattern: str, replacement: str, name: str, *, directory: bool = False
+) -> str | None:
+    """Apply a rename rule to one name; see `rename_targets`.
+
+    Args:
+        pattern: Regular expression replaced in the name without its extension.
+        replacement: Replacement text or template.
+        name: Current file or directory name.
+        directory: Whether the name is a directory's.
+
+    Returns:
+        The new name, or `None` when the result is not a usable name.
+
+    Raises:
+        re.error: If the pattern or the rendered replacement is invalid.
+        jinja2.TemplateError: If the replacement template cannot be rendered.
+        TimeoutError: If the pattern takes too long to apply.
+    """
+    return rename_targets(pattern, replacement, [(name, directory, None)])[0]
 
 
 def plan_renames(
@@ -718,6 +848,7 @@ def plan_renames(
     templated: bool,
     busy_items: set[int],
     busy_paths: set[str],
+    metadata: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[list[PlanEntry], int]:
     """Turn matched files into rename units and blocked matches.
 
@@ -730,6 +861,8 @@ def plan_renames(
         templated: Whether the library names indexed items from a template.
         busy_items: Items with a queued or running ingest workflow.
         busy_paths: Files of downloads that are still downloading or transferring.
+        metadata: Saved title, year, season and episode of items by ID, offered
+            to the replacement template ahead of what a name says.
 
     Returns:
         Entries in path order and the number of matches the rule leaves
@@ -742,11 +875,30 @@ def plan_renames(
     Raises:
         re.error: If the pattern or the rendered replacement is invalid.
         jinja2.TemplateError: If the replacement template cannot be rendered.
+        TimeoutError: If the pattern takes too long to apply.
     """
     allowed = set(owners)
     entries: list[PlanEntry] = []
     unchanged = 0
     targets: dict[str, list[PlanEntry]] = {}
+    renamed = iter(
+        rename_targets(
+            pattern,
+            replacement,
+            [
+                (
+                    match.path.name,
+                    match.owner == FileOwner.INDEXED
+                    and str(match.path) not in index.bodies,
+                    (metadata or {}).get(match.item_id or 0),
+                )
+                for match in scan.matches
+                if match.owner in allowed
+                and match.owner not in (FileOwner.COMPANION, FileOwner.PAGE)
+                and not (match.owner == FileOwner.INDEXED and templated)
+            ],
+        )
+    )
     for match in scan.matches:
         entry = PlanEntry(
             "item" if match.owner == FileOwner.INDEXED else "file",
@@ -766,13 +918,7 @@ def plan_renames(
         elif match.owner == FileOwner.INDEXED and templated:
             reason = "template_managed"
         else:
-            target = rename_target(
-                pattern,
-                replacement,
-                match.path.name,
-                directory=match.owner == FileOwner.INDEXED
-                and str(match.path) not in index.bodies,
-            )
+            target = next(renamed)
             if target == match.path.name:
                 unchanged += 1
                 continue
@@ -963,6 +1109,56 @@ def empty_directories(
             empty.add(path)
     empty.discard(root)
     return sorted(path for path in empty if path.parent not in empty), False
+
+
+def leftover_directories(
+    index: LibraryIndex, scan: FileScan, directory: str | None, busy_paths: set[str]
+) -> list[tuple[Path, int, int]]:
+    """Find folders whose every file is a loose leftover.
+
+    A folder qualifies when nothing below it is indexed, unindexed content, a
+    companion of an item, a comic page, a symlink target or a file a download
+    still uses, and no item is registered on it or below it.
+
+    Args:
+        index: Library lookups built from its items.
+        scan: Unfiltered scan of the directory, made with the whole library's
+            symlinks.
+        directory: Library-relative directory that was scanned; `None` is the root.
+        busy_paths: Files of downloads that are still downloading or transferring.
+
+    Returns:
+        The topmost qualifying folders in path order, each with the number of
+        files below it and their bytes. The library root never qualifies.
+    """
+    root = index.root
+    target = root / directory if directory else root
+    blocked: set[Path] = set()
+    totals: dict[Path, list[int]] = {}
+    for match in scan.matches:
+        kept = (
+            match.owner != FileOwner.LOOSE
+            or str(match.path) in busy_paths
+            or is_linked(match.path, scan.links)
+        )
+        for parent in match.path.parents:
+            if parent == root:
+                break
+            if kept:
+                blocked.add(parent)
+            else:
+                total = totals.setdefault(parent, [0, 0])
+                total[0] += 1
+                total[1] += match.size
+    for registered in (*index.directories, *index.page_dirs, *index.containers):
+        path = Path(registered)
+        blocked.update((path, *path.parents))
+    found = {
+        path
+        for path in totals
+        if path not in blocked and (path == target or path.is_relative_to(target))
+    }
+    return [(path, *totals[path]) for path in sorted(found) if path.parent not in found]
 
 
 def remove_directories(root: Path, units: list[tuple[int, str]]) -> dict[int, str]:

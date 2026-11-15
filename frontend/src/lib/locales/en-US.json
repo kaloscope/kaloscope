@@ -666,6 +666,14 @@
       "empty": "No entries",
       "stop": "Stop",
       "stopping": "Stopping…",
+      "confirm": {
+        "apply": "Apply {0} Changes",
+        "trash": "Move {0} to Trash",
+        "permanent": "Permanently Delete {0}"
+      },
+      "select": "Select",
+      "selected": "{0} selected",
+      "delete_selected": "Delete with Files",
       "deletion": {
         "trash": "Moves to the system trash",
         "permanent": "Deletes permanently"
@@ -1045,6 +1053,9 @@
     "http_request_failed": "HTTP request failed!",
     "danmaku_server_required": "Configure the library's danmaku server first.",
     "danmaku_match_failed": "Danmaku matching failed. Retry or select another result.",
+    "media_batch_stale": "The plan expired or the library changed. Review it again.",
+    "media_batch_pending": "Another batch is running on this library. Try again when it has finished.",
+    "media_batch_empty": "Nothing can be deleted: every selected item is left alone.",
     "resource_load_failed": "Unable to load this content. Try another resource or try again later.",
     "magnet_link_copied": "Magnet link copied!",
     "select_export_items": "Please select at least one item to export.",

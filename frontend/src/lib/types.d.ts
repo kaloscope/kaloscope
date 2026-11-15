@@ -270,6 +270,7 @@ export type MediaBatch = {
   blocked: { units: number; reasons: Record<string, number> };
   more: boolean;
   state: 'reviewed' | 'running' | 'finished';
+  confirmable?: boolean;
   stop_requested: boolean;
   counts: { done: number; skipped: number; failures: number; uncertain: number; remaining: number };
   outcome: MediaBatchOutcome['outcome'] | null;

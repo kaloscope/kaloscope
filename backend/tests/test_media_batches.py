@@ -34,6 +34,7 @@ from app.services.mcp import MCPAccessTokenService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.utils.json import dumps
+from tests.test_core_media_reading_organizer import _work as reading_work
 from tests.test_download_plan_changes import latest_request
 from tests.test_library_config import TV_TEMPLATE
 from tests.test_mcp import application, call
@@ -486,6 +487,10 @@ def test_comic_pages(tmp_path):
                 "001.jpg",
                 "cover.jpg",
             ]
+            # the comic is queued for indexing without waiting for the watcher
+            assert await MediaEvent.filter(lib_id=lib.id).values_list(
+                "event_type", "src_path"
+            ) == [("modified", str(root / "Pages"))]
             assert last["blocked"]["reasons"] == {"empties_item": 1}
 
     asyncio.run(run())
@@ -597,6 +602,20 @@ def test_mcp(monkeypatch, tmp_path):
                 token="admin",
             )
 
+            refused = await call(
+                app, "cancel_media_batch", {"batch_id": data["batch_id"]}, token="admin"
+            )
+            stopped = await call(
+                app,
+                "cancel_media_batch",
+                {"batch_id": data["batch_id"]},
+                token=write_token,
+            )
+
+            assert refused["isError"]
+            # a finished batch has nothing left to stop
+            assert stopped["structuredContent"]["state"] == "finished"
+            assert stopped["structuredContent"]["stop_requested"] is False
             assert denied["isError"]
             assert listed["structuredContent"]["matched"]["files"] == 2
             assert "request_id" not in listed["structuredContent"]
@@ -639,6 +658,48 @@ def test_routes(tmp_path):
             # a plan that is not running has nothing to stop
             assert cancelled.json()["data"]["stop_requested"] is False
             assert missing.status_code == 404
+            assert denied.status_code == 403
+
+    asyncio.run(run())
+
+
+def test_dialog_confirmation(tmp_path):
+    async def run():
+        async with database():
+            lib, _, _ = await show(tmp_path)
+            root = Path(lib.dir)
+            body = {"library_id": lib.id, "operation": "delete", "extensions": ["url"]}
+            other = cast(
+                UserInfo, SimpleNamespace(id=7, role=UserRole.ADMIN, perms=None)
+            )
+            stranger = await MediaBatchService.review(
+                deletion(lib, extensions=["txt"]), other
+            )
+
+            async with _client(_user()) as client:
+                listed = await client.post(
+                    "/_api/media/batch/review",
+                    json={"library_id": lib.id, "extensions": ["url"]},
+                )
+                reviewed = await client.post("/_api/media/batch/review", json=body)
+                batch_id = reviewed.json()["data"]["batch_id"]
+                applied = await client.post(f"/_api/media/batch/{batch_id}/apply")
+                again = await client.post(f"/_api/media/batch/{batch_id}/apply")
+                foreign = await client.post(
+                    f"/_api/media/batch/{stranger['batch_id']}/apply"
+                )
+            async with _client(_user([])) as client:
+                denied = await client.post("/_api/media/batch/review", json=body)
+
+            assert listed.json()["data"]["matched"]["files"] == 3
+            assert reviewed.json()["data"]["planned"]["units"] == 3
+            assert applied.json()["data"]["outcome"] == "completed"
+            # a second click reads the outcome instead of running the plan again
+            assert again.json()["data"]["replayed"] is True
+            assert not (root / "stray.url").exists()
+            # only the account that reviewed a plan may confirm it
+            assert foreign.status_code == 403
+            assert (root / "Show/Sample/readme.txt").is_file()
             assert denied.status_code == 403
 
     asyncio.run(run())
@@ -689,6 +750,28 @@ def test_rename_videos(monkeypatch, tmp_path):
             assert first.nfo_path == str(folder / "Old Show S01E01.nfo")
             assert first.parent_id == env.show.id
             assert (await confirm(review, change, env.owner))["replayed"] is True
+
+    asyncio.run(run())
+
+
+def test_rename_metadata(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            await MediaItem.filter(id=env.show.id).update(title="Real Show")
+            await MediaItem.filter(id=env.episodes[0].id).update(
+                title="Pilot", season=1, episode=1
+            )
+            change = renaming(
+                env.shows,
+                "^.*$",
+                "{{ title }} {{ season }}x{{ '%02d' % episode }} {{ episode_title }}",
+                item_ids=[env.episodes[0].id],
+            )
+
+            review = await MediaBatchService.review(change, env.owner)
+
+            # the show's saved title wins over the one parsed from the file name
+            assert review["sample"][0]["dst"] == "Old Show/Real Show 1x01 Pilot.mkv"
 
     asyncio.run(run())
 
@@ -798,6 +881,35 @@ def test_organize_changed(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.CBZ, MediaFormat.DIR])
+def test_organize_reading(tmp_path, format):
+    async def run():
+        async with database():
+            lib, item = await reading_work(tmp_path, format)
+            root = Path(lib.dir)
+            change = MediaBatch(library_id=lib.id, operation="organize")
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+            moved = await MediaItem.get(id=item.id)
+            again = await MediaBatchService.review(change, ADMIN)
+
+            assert review["planned"]["units"] == 1
+            assert review["sample"][0]["src"].startswith("original")
+            assert result["outcome"] == "completed"
+            assert moved.dir == str(root / "New Work")
+            assert not (root / "original").exists()
+            assert Path(moved.path).exists()
+            # the work is queued for indexing under its new place
+            assert await MediaEvent.filter(
+                event_type="modified", src_path=str(root / "New Work")
+            ).exists()
+            assert not again["valid"]
+            assert again["unchanged"] == 1
+
+    asyncio.run(run())
+
+
 async def second_folder(env, **fields) -> tuple[MediaItem, list[MediaItem]]:
     """Add another folder of the same show with a new, a duplicate and a later episode.
 
@@ -860,6 +972,12 @@ def test_merge_episodes(monkeypatch, tmp_path):
 
             assert review["planned"]["units"] == 2
             assert review["blocked"]["reasons"] == {"duplicate_episode": 1}
+            # both copies are named so the user can drop one before moving again
+            assert [
+                (row["episode"], row["incoming"]["item_id"], row["existing"]["path"])
+                for row in review["duplicates"]
+            ] == [(2, episodes[0].id, "Old Show/S01E02.mkv")]
+            assert "leftovers" not in review
             assert result["outcome"] == "completed"
             assert (root / "Old Show/S01E03.mkv").is_file()
             assert (root / "Old Show/S01E03.zh.ass").is_file()
@@ -871,6 +989,55 @@ def test_merge_episodes(monkeypatch, tmp_path):
             assert (root / "Old Show Part 2/poster.jpg").is_file()
             assert await MediaItem.exists(id=parent.id)
             assert (root / "Old Show/S01E02.mkv").read_bytes() == b"episode"
+
+    asyncio.run(run())
+
+
+def test_leftovers(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            parent, episodes = await second_folder(env)
+            root = Path(env.shows.dir)
+            Path(episodes[0].path).unlink()
+            await MediaItem.filter(id=episodes[0].id).delete()
+            write(root, "Junk/a.url", "Junk/Deep/b.txt", "Mixed/c.url", "Mixed/d.mkv")
+            merge = moving(env.shows, "Old Show", item_ids=[parent.id])
+            clean = MediaBatch(
+                library_id=env.shows.id,
+                operation="delete",
+                empty_dirs=True,
+                leftovers=True,
+            )
+
+            merging = await MediaBatchService.review(merge, env.owner)
+            await confirm(merging, merge, env.owner)
+            review = await MediaBatchService.review(clean, env.owner)
+            write(root, "Junk/late.url")
+            result = await confirm(review, clean, env.owner)
+            entries = await MediaBatchService.entries(
+                review["batch_id"], Pageable(page_num=1, page_size=10), None
+            )
+
+            assert merging["leftovers"] == {
+                "folders": 1,
+                "files": 1,
+                "bytes": 10,
+                "sample": [{"directory": "Old Show Part 2", "files": 1, "bytes": 10}],
+            }
+            assert sorted(row["src"] for row in review["sample"]) == [
+                "Junk",
+                "Old Show Part 2",
+            ]
+            assert review["planned"]["files"] == 3
+            assert result["outcome"] == "partial"
+            assert not (root / "Old Show Part 2").exists()
+            # a folder that gained a file after the review is kept whole
+            assert (root / "Junk/a.url").is_file()
+            assert {row["src"]: row["reason"] for row in entries["items"]} == {
+                "Junk": "content_changed",
+                "Old Show Part 2": None,
+            }
+            assert (root / "Mixed/c.url").is_file()
 
     asyncio.run(run())
 
@@ -1144,7 +1311,7 @@ def test_reading_work_move(tmp_path):
             renamed = await confirm(await MediaBatchService.review(body, ADMIN), body)
             current = await MediaItem.get(id=book.id)
             orphan = await MediaBatchService.review(
-                moving(env.lib, "Nowhere", item_ids=[env.chapters[0].id]), ADMIN
+                moving(env.lib, "One Shot", item_ids=[env.chapters[0].id]), ADMIN
             )
             taken = await MediaBatchService.review(
                 moving(env.lib, "Manga", item_ids=[env.second.id]), ADMIN
@@ -1164,10 +1331,104 @@ def test_reading_work_move(tmp_path):
                 str(root / "New Title"),
                 "Novel",
             )
-            # chapters need an existing collection; a collection cannot join another
+            # chapters cannot join a standalone comic, nor a collection another
             assert orphan["blocked"]["reasons"] == {"unindexable_destination": 1}
             assert taken["blocked"]["reasons"] == {"layout_change": 1}
             assert deep["issues"][0]["path"] == "destination"
+
+    asyncio.run(run())
+
+
+def test_comic_split(tmp_path):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            root = Path(env.lib.dir)
+            change = moving(
+                env.lib, "Side Story", item_ids=[c.id for c in env.chapters[1:]]
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+            created = await MediaItem.get(
+                lib_id=env.lib.id, path=str(root / "Side Story")
+            )
+            moved = await MediaItem.filter(parent_id=created.id).order_by("path")
+            undo = reverting(env.lib, result["batch_id"])
+            undone = await confirm(await MediaBatchService.review(undo, ADMIN), undo)
+            back = await MediaItem.get(id=env.chapters[1].id)
+
+            assert review["planned"]["units"] == 2
+            assert result["outcome"] == "completed"
+            # the new folder is registered as a collection before chapters join it
+            assert (created.format, created.parent_id) == (None, None)
+            assert [Path(row.path).name for row in moved] == ["Vol 1", "[Scan] Vol 2"]
+            assert undone["outcome"] == "completed"
+            assert back.parent_id == env.second.id
+            assert (root / "[Scan] Manga 2/Vol 1/000.png").is_file()
+
+    asyncio.run(run())
+
+
+def test_move_movie(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            root = Path(env.movies.dir)
+            write(root, "Loose.2020.mkv", "Loose.2020.zh.ass")
+            (root / "Loose.2020.nfo").write_text(
+                "<movie><title>Loose</title></movie>", encoding="utf-8"
+            )
+            loose = await MediaItem.create(
+                lib=env.movies,
+                dir=str(root),
+                path=str(root / "Loose.2020.mkv"),
+                name="Loose.2020",
+                nfo_path=str(root / "Loose.2020.nfo"),
+                title="Loose",
+                year=2020,
+                unique_id="77",
+                nfo_source="tmdb",
+            )
+            change = moving(env.movies, "Loose (2020)", item_ids=[loose.id])
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            video = await MediaItem.get(id=loose.id)
+            folder = await MediaItem.get(id=video.parent_id)
+            crowd = await MediaBatchService.review(
+                moving(env.movies, "Loose (2020)", item_ids=[501]), env.owner
+            )
+            undo = reverting(env.movies, result["batch_id"])
+            undone = await confirm(
+                await MediaBatchService.review(undo, env.owner), undo, env.owner
+            )
+            restored = await MediaItem.get(id=loose.id)
+
+            assert review["sample"][0]["dst"] == "Loose (2020)/Loose.2020.mkv"
+            assert result["outcome"] == "completed"
+            assert video.path == str(root / "Loose (2020)/Loose.2020.mkv")
+            assert video.nfo_path == str(root / "Loose (2020)/Loose.2020.nfo")
+            # the folder takes over what the library knows about the movie
+            assert (folder.path, folder.title, folder.year, folder.unique_id) == (
+                str(root / "Loose (2020)"),
+                "Loose",
+                2020,
+                "77",
+            )
+            assert folder.nfo_path == video.nfo_path
+            assert crowd["blocked"]["reasons"] == {"identity_mismatch": 1}
+            assert undone["outcome"] == "completed"
+            assert (restored.path, restored.parent_id) == (
+                str(root / "Loose.2020.mkv"),
+                None,
+            )
+            assert sorted(p.name for p in root.iterdir() if p.is_file()) == [
+                "Loose.2020.mkv",
+                "Loose.2020.nfo",
+                "Loose.2020.zh.ass",
+            ]
+            assert not (root / "Loose (2020)").exists()
+            assert not await MediaItem.exists(id=folder.id)
 
     asyncio.run(run())
 

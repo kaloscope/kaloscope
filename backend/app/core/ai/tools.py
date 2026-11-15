@@ -503,6 +503,7 @@ class BatchBrief(ToolArguments):
     destination: str | None = Field(default=None, description="move: folder.")
     by_season: bool = False
     empty_dirs: bool = False
+    leftovers: bool = False
     batch_id: ResourceID | None = Field(default=None, description="revert.")
 
 
@@ -851,7 +852,9 @@ TOOLS = (
         "List files in one library by extension, name, size or items (no "
         "operation), review a delete/rename/organize/move batch (move also "
         "renames a whole work folder; empty_dirs clears empty folders), or "
-        "revert a finished rename/move batch. apply_media_change performs it "
+        "revert a finished rename/move batch. Needs only library_id: call it "
+        "right after list_media_libraries, without reading items first. "
+        "apply_media_change performs it "
         "after confirmation. owners defaults to loose files; name other "
         "classes. Summarize planned, blocked, samples and notes in the user's "
         "language, not JSON. End the turn for confirmation.",

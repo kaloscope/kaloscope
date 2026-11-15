@@ -342,6 +342,8 @@ MEDIA_CHANGE_FACTS = (
     "deletion",
     "by_owner",
     "by_extension",
+    "duplicates",
+    "leftovers",
     "truncated",
     "done",
     "skipped",

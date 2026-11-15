@@ -34,6 +34,7 @@ from app.models.base import IDs, Pageable, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
     MediaAssetQuery,
+    MediaBatch,
     MediaContentQuery,
     MediaDel,
     MediaItem,
@@ -199,19 +200,57 @@ class BatchEntryQuery(Pageable):
     status: str | None = None
 
 
-@media.get("/batch/<id:int>")
+@media.post("/batch/review")
 @authorize(role=UserRole.ADMIN)
-async def get_batch(_, id: int) -> HTTPResponse:
-    """Read a reviewed batch's plan, progress and outcome.
+@validate(json=MediaBatch)
+async def review_batch(request: Request, body: MediaBatch) -> HTTPResponse:
+    """List matching library files, or freeze a batch plan for confirmation.
 
     Args:
-        _: Unused request.
+        request: Current request with the authenticated administrator.
+        body: Library, selector and optional operation.
+
+    Returns:
+        Response containing the listing or the reviewed plan; nothing changes.
+    """
+    return json(await MediaBatchService.review(body, request.ctx.user))
+
+
+@media.post("/batch/<id:int>/apply")
+@authorize(role=UserRole.ADMIN)
+async def apply_batch(request: Request, id: int) -> HTTPResponse:
+    """Apply a reviewed plan on its reviewer's confirmation.
+
+    Args:
+        request: Current request with the authenticated administrator.
         id: Batch ID.
 
     Returns:
-        Response containing the batch details.
+        Response containing the outcome, or `running` while the batch continues.
     """
-    return json(await MediaBatchService.details(id))
+    return json(await MediaBatchService.confirm(id, request.ctx.user))
+
+
+@media.get("/batch/<id:int>")
+@authorize(role=UserRole.ADMIN)
+async def get_batch(request: Request, id: int) -> HTTPResponse:
+    """Read a reviewed batch's plan, progress and outcome.
+
+    Args:
+        request: Current request with the authenticated administrator.
+        id: Batch ID.
+
+    Returns:
+        Response containing the batch details and whether this account may
+        confirm the plan.
+    """
+    details = await MediaBatchService.details(id)
+    details["confirmable"] = (
+        details.pop("user_id") == request.ctx.user.id
+        and details["state"] == "reviewed"
+        and details["planned"]["units"] > 0
+    )
+    return json(details)
 
 
 @media.get("/batch/<id:int>/entries")

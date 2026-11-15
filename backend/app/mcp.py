@@ -196,6 +196,7 @@ _WRITE_TOOLS = frozenset(
         "apply_download_plan_change",
         "apply_download_task_action",
         "apply_media_change",
+        "cancel_media_batch",
     }
 )
 DRAFT_WRITE = ToolAnnotations(
@@ -380,13 +381,16 @@ def create_server() -> MCPServer:
             "In novel and comic libraries rename applies to a book or archive "
             "file, a chapter folder or a comic folder; move renames a work folder "
             "or puts comic chapters into another existing collection. "
+            "A loose movie file moves into a folder of its own, and comic "
+            "chapters may start a new collection. "
             "delete with empty_dirs removes folders without any file and works "
-            "with nothing left in them. revert with batch_id undoes a finished "
+            "with nothing left in them; leftovers also removes folders holding "
+            "only loose files. revert with batch_id undoes a finished "
             "rename or move batch. "
             "Show planned and blocked counts, sample paths, the deletion mode and "
             "notes, page the plan with get_media_batch, and apply only after "
             "approval. A running batch is not done; repeat the apply call to read "
-            "its outcome. "
+            "its outcome, or stop it with cancel_media_batch. "
             "Task pause/resume/retry/delete also follows them for one listed task; "
             "delete files only on explicit request. A queued action is not done; "
             "list the task later instead of waiting. "
@@ -1928,6 +1932,47 @@ def create_server() -> MCPServer:
         return MediaChangeApplyResult.model_validate(
             await _read(MediaChangeService.apply_change(application, _user(ctx)))
         )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        )
+    )
+    async def cancel_media_batch(
+        ctx: Context,
+        batch_id: Annotated[
+            _ResourceID, Field(description="Running batch from review_media_batch.")
+        ],
+    ) -> MediaBatchResult:
+        """Ask a running batch to stop before its next unit.
+
+        Units already applied stay applied; the rest are left untouched and the
+        batch ends as `cancelled`. A batch that is not running is unchanged.
+
+        Args:
+            ctx: Administrator context with a read-write token.
+            batch_id: Batch returned by a review.
+
+        Returns:
+            The plan header, its `state` and unit `counts` after the request,
+            with the first page of entries that were not applied.
+        """
+
+        async def stop() -> dict:
+            user = _user(ctx)
+            _require_admin(user)
+            details = await MediaBatchService.details(batch_id)
+            await MediaLibService.get_accessible(details["library_id"], user)
+            details = await MediaBatchService.cancel(batch_id)
+            page = await MediaBatchService.entries(
+                batch_id, Pageable(page_num=1, page_size=50), "planned"
+            )
+            return {**details, **page}
+
+        return MediaBatchResult.model_validate(await _read(stop()))
 
     @server.tool(annotations=READ_ONLY)
     async def list_workflow_jobs(

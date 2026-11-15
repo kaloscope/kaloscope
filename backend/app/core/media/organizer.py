@@ -2039,6 +2039,75 @@ async def move_episode(
     return await _journal(lib, item, payload)
 
 
+async def move_movie(lib: MediaLib, item: MediaItem, directory: Path) -> dict[str, str]:
+    """Move one indexed movie file and its companions into a movie folder.
+
+    An indexed destination folder is reused. A new folder is registered with the
+    movie's saved metadata and NFO, as a scan would register a movie that was
+    found inside a folder. The library root is accepted so a move can be undone;
+    a folder item left without a video is removed.
+
+    Args:
+        lib: Movie library whose lock is held by the caller.
+        item: Indexed movie file to move.
+        directory: Absolute folder directly below the library root, or the root.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        OrganizePendingError: If the persisted plan cannot finish.
+        ValueError: If the move is unsafe, conflicts with an existing file or
+            the destination is deeper than one folder.
+    """
+    root = Path(lib.dir).absolute()
+    depth = len(directory.relative_to(root).parts)
+    if depth > 1:
+        raise ValueError("a movie is indexed at most one folder below the root")
+    target = (
+        await MediaItem.filter(lib_id=lib.id, path=str(directory)).first()
+        if depth
+        else None
+    )
+    # plan before registering a new folder so a refused move leaves no record
+    payload = await plan_relocation(
+        lib,
+        item,
+        directory / Path(item.path).name,
+        parent_id=(target.id if target else 0) if depth else None,
+    )
+    if depth and target is None:
+        moved = next(update for update in payload["updates"] if update["id"] == item.id)
+        target, _ = await MediaItem.get_or_create(
+            lib_id=lib.id,
+            path=str(directory),
+            defaults={
+                "dir": str(directory),
+                "name": directory.name,
+                "visible": item.visible,
+                "nfo_path": moved.get("nfo_path", item.nfo_path),
+                "nfo_mtime": item.nfo_mtime,
+                "poster": moved.get("poster", item.poster),
+                "backdrop": moved.get("backdrop", item.backdrop),
+                **{
+                    name: getattr(item, name)
+                    for name in (
+                        "title",
+                        "year",
+                        "aired",
+                        "unique_id",
+                        "nfo_source",
+                        "rating",
+                    )
+                },
+            },
+        )
+        moved["parent_id"] = target.id
+    return await _journal(lib, item, payload)
+
+
 async def plan_directory_move(
     lib: MediaLib, parent: MediaItem, directory: Path
 ) -> dict:

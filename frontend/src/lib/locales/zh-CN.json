@@ -666,6 +666,14 @@
       "empty": "暂无条目",
       "stop": "停止",
       "stopping": "停止中",
+      "confirm": {
+        "apply": "执行 {0} 项更改",
+        "trash": "将 {0} 项移入回收站",
+        "permanent": "永久删除 {0} 项"
+      },
+      "select": "选择",
+      "selected": "已选择 {0} 项",
+      "delete_selected": "连同文件删除",
       "deletion": {
         "trash": "移入系统回收站",
         "permanent": "永久删除"
@@ -1045,6 +1053,9 @@
     "http_request_failed": "发送 HTTP 请求失败",
     "danmaku_server_required": "请先配置媒体库的弹幕服务器",
     "danmaku_match_failed": "弹幕匹配失败，请重试或选择其他结果",
+    "media_batch_stale": "计划已过期或媒体库已变更，请重新预览",
+    "media_batch_pending": "此媒体库正在执行其他批量操作，请在其完成后重试",
+    "media_batch_empty": "没有可删除的内容，所选项目均不处理",
     "resource_load_failed": "内容加载失败，请尝试其他资源或稍后重试",
     "magnet_link_copied": "磁力链接已复制",
     "select_export_items": "请先选择要导出的数据",

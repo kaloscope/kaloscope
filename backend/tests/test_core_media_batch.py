@@ -1,6 +1,9 @@
 """Unit tests for library file classification and batch planning."""
 
 import os
+import re
+import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -18,6 +21,7 @@ from app.models.media import (
     MediaItem,
     MediaLib,
 )
+from app.utils.regex import substitute
 
 
 def library(root: Path, lib_type: LibType) -> MediaLib:
@@ -208,6 +212,40 @@ def test_scan_bounds(tmp_path):
     assert not batch.scan_files(index).truncated
     with pytest.raises(ValueError):
         batch.scan_files(index, directory="missing")
+
+
+def test_remembered_walk(tmp_path, monkeypatch):
+    write(tmp_path, "A/one.txt", "B/two.txt")
+    index = batch.build_index(library(tmp_path, LibType.MOVIE), [])
+    old = time.time() - 60
+    for directory in (tmp_path, tmp_path / "A", tmp_path / "B"):
+        os.utime(directory, (old, old))
+    read: list[str] = []
+    scandir = os.scandir
+
+    def counting(path):
+        read.append(Path(path).name)
+        return scandir(path)
+
+    monkeypatch.setattr(batch.os, "scandir", counting)
+
+    first = batch.scan_files(index)
+    read.clear()
+    again = batch.scan_files(index, directory="A")
+    unchanged = list(read)
+    write(tmp_path, "B/three.txt")
+    added = batch.scan_files(index)
+    changed = list(read)
+    batch.forget_walk(tmp_path)
+    read.clear()
+    batch.scan_files(index)
+
+    assert len(first.matches) == 2
+    assert [match.path.name for match in again.matches] == ["one.txt"]
+    assert unchanged == []
+    assert len(added.matches) == 3
+    assert changed == ["B"]
+    assert len(read) == 3
 
 
 def test_links(tmp_path):
@@ -406,6 +444,30 @@ def test_selector_normalization():
 )
 def test_rename_target(pattern, replacement, name, expected):
     assert batch.rename_target(pattern, replacement, name) == expected
+
+
+def test_rename_metadata():
+    rule = (
+        "{{ title }} S{{ '%02d' % season }}E{{ '%02d' % episode }} {{ episode_title }}"
+    )
+    saved = {"title": "Real Show", "season": 2, "episode_title": "Pilot"}
+
+    targets = batch.rename_targets(
+        "^.*$",
+        rule,
+        [("x.S01E03.mkv", False, saved), ("Other.S01E04.mkv", False, None)],
+    )
+
+    assert targets == ["Real Show S02E03 Pilot.mkv", "Other S01E04.mkv"]
+
+
+def test_rename_timeout(monkeypatch):
+    monkeypatch.setattr(batch, "substitute", partial(substitute, timeout=0.5))
+
+    with pytest.raises(TimeoutError):
+        batch.rename_target("(a+)+$", "", "a" * 40 + "b.mkv")
+    with pytest.raises(re.error):
+        batch.rename_target("(", "", "a.mkv")
 
 
 def test_organize_selector():
