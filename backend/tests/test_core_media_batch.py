@@ -248,6 +248,58 @@ def test_remembered_walk(tmp_path, monkeypatch):
     assert len(read) == 3
 
 
+def test_remembered_classes(tmp_path, monkeypatch):
+    write(tmp_path, "Movie/Movie.mkv", "Movie/Movie.nfo", "Other/notes.txt")
+    old = time.time() - 60
+    for directory in (tmp_path, tmp_path / "Movie", tmp_path / "Other"):
+        os.utime(directory, (old, old))
+    lib = library(tmp_path, LibType.MOVIE)
+    calls: list[str] = []
+    classify = batch._video_owners
+
+    def counting(index, directory, names):
+        calls.append(directory.name)
+        return classify(index, directory, names)
+
+    monkeypatch.setattr(batch, "_video_owners", counting)
+    unindexed = batch.build_index(lib, [])
+    indexed = batch.build_index(
+        lib,
+        [
+            item(1, tmp_path / "Movie", directory=tmp_path / "Movie"),
+            item(2, tmp_path / "Movie/Movie.mkv"),
+        ],
+    )
+
+    before = owners(unindexed, extensions=[".mkv", ".nfo"], whole=True)
+    first = list(calls)
+    again = owners(unindexed, extensions=[".mkv", ".nfo"], whole=True)
+    repeated = calls[len(first) :]
+    after = owners(indexed, extensions=[".mkv", ".nfo"], whole=True)
+
+    # a folder without a matching file is never classified
+    assert first == ["Movie"]
+    assert again == before and repeated == []
+    assert before == {
+        "Movie/Movie.mkv": FileOwner.UNINDEXED,
+        "Movie/Movie.nfo": FileOwner.LOOSE,
+    }
+    # the same remembered listing is classified again once its items change
+    assert after == {
+        "Movie/Movie.mkv": FileOwner.INDEXED,
+        "Movie/Movie.nfo": FileOwner.COMPANION,
+    }
+    assert calls[-1] == "Movie"
+
+
+def test_name_parts():
+    names = ["a.mkv", "a.MKV", ".S01E01.json", ".hidden", "a.", "x.tar.gz", "noext"]
+
+    assert [batch._name_parts(name) for name in names] == [
+        (Path(name).stem, Path(name).suffix.casefold()) for name in names
+    ]
+
+
 def test_links(tmp_path):
     write(tmp_path, "A/keep.txt", "A/free.txt", "Real/inner.txt")
     (tmp_path / "alias.txt").symlink_to(tmp_path / "A/keep.txt")

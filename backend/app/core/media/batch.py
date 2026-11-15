@@ -6,6 +6,7 @@ import re
 import stat
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from functools import lru_cache
 from pathlib import Path
 from time import monotonic, time_ns
 from typing import Any
@@ -82,6 +83,20 @@ class LibraryIndex:
     owned: dict[str, int] = field(default_factory=dict)
     # directory holding a file body -> (item ID, body stem)
     containers: dict[str, tuple[int, str]] = field(default_factory=dict)
+    # directory -> every fact above that its classification reads, so a
+    # remembered classification is reused only while they are unchanged
+    folders: dict[str, tuple[Any, ...]] = field(default_factory=dict)
+
+    def folder_key(self, directory: str) -> tuple[Any, ...]:
+        """Identify what classifying one directory depends on.
+
+        Args:
+            directory: Absolute directory path.
+
+        Returns:
+            The library type and the directory's own index facts.
+        """
+        return (self.lib_type, self.folders.get(directory, ()))
 
 
 @dataclass(frozen=True)
@@ -156,7 +171,37 @@ def build_index(lib: MediaLib, items: list[MediaItem]) -> LibraryIndex:
         for value in (item.poster, item.backdrop):
             if value and not urlsplit(value).scheme and not value.startswith("//"):
                 index.owned[os.path.normpath(base / value)] = item.id
+    facts: dict[str, list[tuple[Any, ...]]] = {}
+    for kind, lookup in (("body", index.bodies), ("owned", index.owned)):
+        for path, item_id in lookup.items():
+            parent, name = os.path.split(path)
+            facts.setdefault(parent, []).append((kind, name, item_id))
+    for kind, lookup in (
+        ("directory", index.directories),
+        ("pages", index.page_dirs),
+        ("container", index.containers),
+    ):
+        for path, value in lookup.items():
+            facts.setdefault(path, []).append((kind, value))
+    index.folders.update((path, tuple(sorted(rows))) for path, rows in facts.items())
     return index
+
+
+def _name_parts(name: str) -> tuple[str, str]:
+    """Split a file name as `Path.stem` and a case-folded `Path.suffix` would.
+
+    Args:
+        name: File name without a directory.
+
+    Returns:
+        The stem and the lower-case suffix, which is empty for a name without
+        one or a name that only starts with a dot.
+    """
+    stem, suffix = os.path.splitext(name)
+    if suffix == ".":
+        # `Path` treats a trailing dot as part of the stem
+        return name, ""
+    return stem, suffix.casefold()
 
 
 def _is_video(name: str) -> bool:
@@ -169,9 +214,24 @@ def _is_video(name: str) -> bool:
         Whether its guessed MIME type is a video type or its extension is a
         video container the library does not index, which must not look loose.
     """
-    return (mimetypes.guess_file_type(name)[0] or "").startswith("video/") or Path(
-        name
-    ).suffix.casefold() in _VIDEO_EXTENSIONS
+    return _video_suffix(_name_parts(name)[1])
+
+
+@lru_cache(maxsize=1024)
+def _video_suffix(suffix: str) -> bool:
+    """Check whether a lower-case file suffix names a video type.
+
+    Args:
+        suffix: Suffix with its dot, possibly empty.
+
+    Returns:
+        Whether its guessed MIME type is a video type or it is a video container
+        the library does not index.
+    """
+    return bool(suffix) and (
+        (mimetypes.guess_file_type(f"file{suffix}")[0] or "").startswith("video/")
+        or suffix in _VIDEO_EXTENSIONS
+    )
 
 
 def _video_owners(
@@ -190,27 +250,28 @@ def _video_owners(
         danmaku caches and artwork beside indexed videos or in item directories.
     """
     base = str(directory)
+    folder = os.path.basename(base)
     videos = {name for name in names if _is_video(name)}
     indexed = {
-        Path(name).stem: index.bodies[f"{base}/{name}"]
+        _name_parts(name)[0]: index.bodies[f"{base}/{name}"]
         for name in videos
         if f"{base}/{name}" in index.bodies
     }
-    stems = sorted((Path(name).stem for name in videos), key=len, reverse=True)
+    stems = sorted((_name_parts(name)[0] for name in videos), key=len, reverse=True)
     holder = index.directories.get(base)
     if holder is None and indexed:
         holder = next(iter(indexed.values()))
     result: dict[str, tuple[FileOwner, int | None]] = {}
     for name in names:
         path = f"{base}/{name}"
-        stem, suffix = Path(name).stem, Path(name).suffix.casefold()
+        stem, suffix = _name_parts(name)
         if path in index.bodies:
             result[name] = (FileOwner.INDEXED, index.bodies[path])
         elif name in videos:
             result[name] = (FileOwner.UNINDEXED, None)
         elif path in index.owned:
             result[name] = (FileOwner.COMPANION, index.owned[path])
-        elif suffix == ".nfo" and (stem in indexed or stem == directory.name):
+        elif suffix == ".nfo" and (stem in indexed or stem == folder):
             owner = indexed.get(stem, index.directories.get(base))
             result[name] = (
                 (FileOwner.COMPANION, owner)
@@ -272,7 +333,8 @@ def _reading_owners(
     result: dict[str, tuple[FileOwner, int | None]] = {}
     for name in names:
         path = f"{base}/{name}"
-        stem, suffix = Path(name).stem.casefold(), Path(name).suffix.casefold()
+        stem, suffix = _name_parts(name)
+        stem = stem.casefold()
         image = suffix in IMAGE_EXTENSIONS
         if path in index.bodies:
             result[name] = (FileOwner.INDEXED, index.bodies[path])
@@ -313,6 +375,9 @@ class _Listing:
     directories: list[Path] = field(default_factory=list)
     # normalized targets of this directory's symlinks
     links: set[str] = field(default_factory=set)
+    # the files' classes, and the index facts they were computed from
+    owners: dict[str, tuple[FileOwner, int | None]] | None = None
+    owners_key: tuple[Any, ...] | None = None
 
 
 @dataclass
@@ -440,6 +505,9 @@ def scan_files(
     writing (`.organizing-*`) are never matched.
     A complete walk of the library is remembered for a few minutes, so a review
     that follows a listing reads only the directories that changed in between.
+    Each remembered directory also keeps its files' classes until its listing
+    or the index facts about it change, and a directory without a file that
+    passes the filters is not classified at all.
 
     Args:
         index: Library lookups built from its items.
@@ -484,20 +552,32 @@ def scan_files(
             current == target or current.is_relative_to(target)
         ):
             continue
-        owners = classify(index, current, list(listing.files))
-        if (page_item := index.page_dirs.get(str(current))) is not None:
+        wanted = [
+            (entry_name, identity)
+            for entry_name, identity in listing.files.items()
+            if not (
+                (suffixes and _name_parts(entry_name)[1] not in suffixes)
+                or (pattern and not fnmatchcase(entry_name.casefold(), pattern))
+                or (min_size is not None and identity[2] < min_size)
+                or (max_size is not None and identity[2] > max_size)
+            )
+        ]
+        if not wanted:
+            # page totals are only read for comics with matched pages
+            continue
+        base = str(current)
+        key = index.folder_key(base)
+        owners = listing.owners
+        if owners is None or listing.owners_key != key:
+            owners = classify(index, current, list(listing.files))
+            # remembered listings are shared with later scans of this library
+            listing.owners, listing.owners_key = owners, key
+        if (page_item := index.page_dirs.get(base)) is not None:
             scan.pages[page_item] = sum(
                 1 for owner, _ in owners.values() if owner == FileOwner.PAGE
             )
-        for entry_name, identity in listing.files.items():
+        for entry_name, identity in wanted:
             size = identity[2]
-            if (
-                (suffixes and Path(entry_name).suffix.casefold() not in suffixes)
-                or (pattern and not fnmatchcase(entry_name.casefold(), pattern))
-                or (min_size is not None and size < min_size)
-                or (max_size is not None and size > max_size)
-            ):
-                continue
             owner, item_id = owners[entry_name]
             scan.matches.append(
                 FileMatch(current / entry_name, size, owner, item_id, list(identity))
