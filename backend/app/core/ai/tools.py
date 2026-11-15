@@ -499,7 +499,9 @@ class BatchBrief(ToolArguments):
     min_size: int | None = None
     max_size: int | None = None
     pattern: str | None = Field(default=None, description="rename: regex.")
-    replacement: str = ""
+    replacement: str = Field(
+        default="", description="\\1 or {{title}} S{{season:02}}E{{episode:02}}."
+    )
     destination: str | None = Field(default=None, description="move: folder.")
     by_season: bool = False
     empty_dirs: bool = False
@@ -744,7 +746,7 @@ TOOLS = (
     AssistantTool(
         "list_media_items",
         "Page visible media in library order; keyword filters titles (omit for all). "
-        "No path=top-level works. Unlocks file delete/rename/move/undo.",
+        "No path=top-level works. Unlocks file delete/rename/move/merge/undo.",
         MediaItemList,
     ),
     AssistantTool(
@@ -849,15 +851,17 @@ TOOLS = (
     ),
     AssistantTool(
         "review_media_batch",
-        "List files in one library by extension, name, size or items (no "
-        "operation), review a delete/rename/organize/move batch (move also "
-        "renames a whole work folder; empty_dirs clears empty folders), or "
-        "revert a finished rename/move batch. Needs only library_id: call it "
-        "right after list_media_libraries, without reading items first. "
-        "apply_media_change performs it "
-        "after confirmation. owners defaults to loose files; name other "
-        "classes. Summarize planned, blocked, samples and notes in the user's "
-        "language, not JSON. End the turn for confirmation.",
+        "Rename, move/merge, delete, organize or undo files in one library as "
+        "one batch; without operation, list files by extension, name, size or "
+        "items. move merges into an existing show/collection, holding "
+        "duplicates back, or renames a work folder; empty_dirs clears empty "
+        "folders; revert undoes a finished rename/move batch. Needs only "
+        "library_id and a directory or item_ids: review the operation directly, "
+        "without reading items or listing first. apply_media_change performs "
+        "it after confirmation. owners "
+        "defaults to loose files; name other classes. Summarize planned, "
+        "blocked, duplicates, leftovers and notes in the user's language, not "
+        "JSON. End the turn for confirmation.",
         BatchReview,
         brief=BatchBrief,
         admin=True,

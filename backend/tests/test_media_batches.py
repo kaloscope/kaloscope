@@ -14,6 +14,7 @@ from tortoise import Tortoise
 from app.core.ai import tools
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import ForbiddenException, NotFoundException
+from app.models.ai import AIProviderPreset
 from app.models.assistant import ConversationCreate
 from app.models.base import Pageable
 from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
@@ -548,6 +549,50 @@ def test_conversation(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+def test_hosted_turn_start(monkeypatch, tmp_path):
+    streams, offered = [], []
+
+    def offer(body, *calls):
+        offered.append(names(body))
+        return list(calls)
+
+    steps = [
+        lambda body: offer(
+            body,
+            (
+                "review_media_batch",
+                {"library_id": 60, "operation": "delete", "extensions": ["url"]},
+            ),
+        ),
+        lambda body: offer(body),
+    ]
+    configure(
+        monkeypatch,
+        scripted(steps, streams),
+        preset=AIProviderPreset.DEEPSEEK,
+        cloud_budget=True,
+    )
+
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            write(Path(env.movies.dir), "a.url")
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), env.owner
+            )
+
+            _, reviewed = await converse(
+                conversation["id"], env.owner, "Delete the url files.", key="a"
+            )
+
+            # a hosted budget offers the batch review before any media is read,
+            # without the other reviews or the apply tool
+            assert "review_media_batch" in offered[0]
+            assert not {"review_library_scan", "apply_media_change"} & offered[0]
+            assert reviewed[0]["data"]["planned"]["units"] == 1
+
+    asyncio.run(run())
+
+
 def test_mcp(monkeypatch, tmp_path):
     async def run():
         async with application() as app:
@@ -1022,13 +1067,24 @@ def test_leftovers(monkeypatch, tmp_path):
                 "folders": 1,
                 "files": 1,
                 "bytes": 10,
-                "sample": [{"directory": "Old Show Part 2", "files": 1, "bytes": 10}],
+                "sample": [
+                    {
+                        "directory": "Old Show Part 2",
+                        "files": 1,
+                        "bytes": 10,
+                        "names": ["poster.jpg"],
+                    }
+                ],
             }
             assert sorted(row["src"] for row in review["sample"]) == [
                 "Junk",
                 "Old Show Part 2",
             ]
             assert review["planned"]["files"] == 3
+            assert [row["names"] for row in review["leftovers"]["sample"]] == [
+                ["Deep/b.txt", "a.url"],
+                ["poster.jpg"],
+            ]
             assert result["outcome"] == "partial"
             assert not (root / "Old Show Part 2").exists()
             # a folder that gained a file after the review is kept whole

@@ -19,7 +19,12 @@ from openai import (
     omit,
 )
 
-from app.core.ai.history import budgets, context_size, prepare_context
+from app.core.ai.history import (
+    CLOUD_INPUT_TOKENS,
+    budgets,
+    context_size,
+    prepare_context,
+)
 from app.core.ai.tools import (
     CREATE_TOOL,
     MEDIA_CHANGE_TOOLS,
@@ -389,6 +394,18 @@ class AssistantService:
             and (current_context or {}).get("page_type") != "workflow_designer"
         )
         plan_tools = plan_authoring
+        input_budget, output_budget = budgets(
+            turn.model["model_id"], preset=provider.preset
+        )
+        if (
+            media_change is False
+            and not plan_authoring
+            and input_budget >= CLOUD_INPUT_TOKENS
+        ):
+            # the model decides at turn start whether library files can change,
+            # and a batch review only lists or plans; the floor budget keeps
+            # it until media is read, for room
+            media_change = {"review_media_batch"}
         schemas = tool_schemas(
             user,
             plan_authoring=plan_authoring,
@@ -415,9 +432,6 @@ class AssistantService:
         canvas_snapshot_id = canvas["snapshot_id"] if canvas else None
         tool_count = 0
         finish_requested = False
-        input_budget, output_budget = budgets(
-            turn.model["model_id"], preset=provider.preset
-        )
         text_length = 0
         continuation = []
         yield AssistantEvent(event="compacting", data={"active": True})

@@ -461,6 +461,26 @@ def test_rename_metadata():
     assert targets == ["Real Show S02E03 Pilot.mkv", "Other S01E04.mkv"]
 
 
+@pytest.mark.parametrize(
+    ("pattern", "replacement"),
+    [
+        ("^.*$", "{{ title }} - S{{season:02}}E{{ episode:02d }}"),
+        (".*", "{{ title }} - S{{ '%02d' % season }}E{{ '%02d' % episode }}"),
+        (r"^.*?S(\d{2})E(\d{2}).*$", "{{ title }} - S$1E${2}"),
+        (r"^.*?S(\d{2})E(\d{2}).*$", r"{{ title }} - S\1E\g<2>"),
+    ],
+)
+def test_rename_forms(pattern, replacement):
+    saved = {"title": "$5 a Day"}
+
+    targets = batch.rename_targets(
+        pattern, replacement, [("[Grp] Show.S01E02.1080p.mkv", False, saved)]
+    )
+
+    # a whole-name match is replaced once, and a title is never read as a group
+    assert targets == ["$5 a Day - S01E02.mkv"]
+
+
 def test_rename_timeout(monkeypatch):
     monkeypatch.setattr(batch, "substitute", partial(substitute, timeout=0.5))
 

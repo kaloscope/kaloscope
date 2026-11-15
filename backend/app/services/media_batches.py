@@ -89,6 +89,7 @@ PLAN_KEEP = 10
 # loose files are removed in short lock holds so the watcher and scans interleave
 FILE_CHUNK = 50
 DUPLICATE_ROWS = 10
+LEFTOVER_NAMES = 5
 # organization previews stop here so a review answers within the tool timeout
 PLAN_SECONDS = 10
 BATCH_UNCERTAIN = (
@@ -265,7 +266,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         if change.operation == "revert":
             entries, issues, effective = await cls._revert_plan(index, items, change)
         elif change.empty_dirs:
-            entries, issues = await cls._empty_plan(index, items, change, lib)
+            entries, issues = await cls._empty_plan(index, items, change, lib, extras)
         elif change.operation == "organize":
             entries, issues, unchanged, cut = await cls._organize_plan(
                 index, items, change, lib
@@ -1059,23 +1060,53 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
 
         Returns:
             The number of folders and files and their bytes, with the first
-            folders by path, or `None` when nothing stays behind.
+            folders by path and their first file names, or `None` when
+            nothing stays behind.
         """
-        rows = []
+        found = []
         for folder in folders:
-            count = size = 0
+            stays: list[tuple[Path, int]] = []
             for current, _, names in os.walk(folder, followlinks=False):
                 for name in names:
                     path = Path(current) / name
                     if str(path) in moved:
                         continue
-                    count += 1
+                    size = 0
                     with suppress(OSError):
-                        size += path.lstat().st_size
-            if count:
-                rows.append(
-                    {"directory": relative(root, folder), "files": count, "bytes": size}
-                )
+                        size = path.lstat().st_size
+                    stays.append((path, size))
+            if stays:
+                found.append((folder, stays))
+        return MediaBatchService._leftover_report(root, found)
+
+    @staticmethod
+    def _leftover_report(
+        root: Path, folders: list[tuple[Path, list[tuple[Path, int]]]]
+    ) -> dict[str, Any] | None:
+        """Summarize the files left in folders so they can be named to the user.
+
+        Args:
+            root: Absolute library root.
+            folders: Each folder with the absolute path and size of every file
+                staying in it.
+
+        Returns:
+            The number of folders and files and their bytes, with the first
+            folders by path and the first file names in each, or `None` when no
+            folder holds a file.
+        """
+        rows = [
+            {
+                "directory": relative(root, folder),
+                "files": len(files),
+                "bytes": sum(size for _, size in files),
+                "names": sorted(str(path.relative_to(folder)) for path, _ in files)[
+                    :LEFTOVER_NAMES
+                ],
+            }
+            for folder, files in sorted(folders)
+            if files
+        ]
         if not rows:
             return None
         return {
@@ -1092,6 +1123,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         items: list[MediaItem],
         change: MediaBatch,
         lib: MediaLib,
+        extras: dict[str, Any],
     ) -> tuple[list[PlanEntry], list[dict[str, str]]]:
         """Plan removing empty folders and works that have nothing left in them.
 
@@ -1100,6 +1132,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             items: Every item of the library.
             change: Deletion with `empty_dirs` and an optional directory.
             lib: Library being cleaned.
+            extras: Review additions, which receive `leftovers` naming the
+                files of each leftover folder.
 
         Returns:
             One `dir` unit per topmost folder without any file below it, one
@@ -1144,6 +1178,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         "choose a narrower directory.",
                     }
                 ]
+            folders = leftover_directories(index, scan, change.directory, busy_paths)
             entries.extend(
                 PlanEntry(
                     "dir",
@@ -1153,9 +1188,21 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     [count, size],
                     files=count,
                 )
-                for path, count, size in leftover_directories(
-                    index, scan, change.directory, busy_paths
-                )
+                for path, count, size in folders
+            )
+            extras["leftovers"] = cls._leftover_report(
+                index.root,
+                [
+                    (
+                        path,
+                        [
+                            (match.path, match.size)
+                            for match in scan.matches
+                            if match.path.is_relative_to(path)
+                        ],
+                    )
+                    for path, _, _ in folders
+                ],
             )
         scope = index.root / change.directory if change.directory else index.root
         parents = {item.parent_id for item in items if item.parent_id is not None}

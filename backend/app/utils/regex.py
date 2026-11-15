@@ -6,14 +6,26 @@ import sys
 
 from app.utils.json import dumps, loads
 
+# `re.sub` also replaces the empty match left at the end of a whole-name match,
+# which turns `.*` -> `x` into `xx`; an empty match right after a match is skipped
 _CHILD = """
 import json, re, sys
 request = json.load(sys.stdin)
+def sub(pattern, repl, text):
+    out, position, last = [], 0, -1
+    for match in pattern.finditer(text):
+        if match.start() == match.end() == last:
+            continue
+        out.append(text[position:match.start()])
+        out.append(match.expand(repl))
+        position = last = match.end()
+    out.append(text[position:])
+    return "".join(out)
 try:
     pattern = re.compile(request["pattern"])
-    result = [pattern.sub(repl, text) for repl, text in request["pairs"]]
+    result = [sub(pattern, repl, text) for repl, text in request["pairs"]]
     json.dump({"result": result}, sys.stdout)
-except re.error as error:
+except (re.error, IndexError) as error:
     json.dump({"error": str(error)}, sys.stdout)
 """
 
@@ -25,7 +37,8 @@ def substitute(
 
     The standard engine has no time limit, and a pattern with catastrophic
     backtracking would occupy a worker thread until the process ends. A child
-    process can be killed instead.
+    process can be killed instead. Unlike `re.sub`, an empty match directly
+    after another match is not replaced, so `.*` replaces a name once.
 
     Args:
         pattern: Regular expression supplied by a user or a model.

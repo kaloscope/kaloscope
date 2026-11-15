@@ -2,6 +2,7 @@
 
 import mimetypes
 import os
+import re
 import stat
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -32,6 +33,8 @@ from app.utils.extractor import (
 )
 from app.utils.regex import substitute
 
+_PADDED = re.compile(r"\{\{\s*(\w+)\s*:\s*0?(\d)d?\s*\}\}")
+_DOLLAR = re.compile(r"\$(?:(\d+)|\{(\d+)\})")
 # a review answers within the tool timeout, so a walk stops at either bound
 SCAN_LIMIT = 200_000
 SCAN_SECONDS = 10
@@ -764,7 +767,9 @@ def rename_targets(
     Args:
         pattern: Regular expression replaced in each name without its extension.
         replacement: Replacement, optionally a template using `title`, `year`,
-            `season`, `episode` and `episode_title`.
+            `season`, `episode` and `episode_title`; `{{season:02}}` pads a
+            number with zeros. Groups may be written `\\1`, `\\g<1>`, `$1` or
+            `${1}`.
         names: Current name, whether it is a directory's (which has no extension
             even when it contains dots), and saved metadata that takes
             precedence over what the name itself says.
@@ -778,6 +783,16 @@ def rename_targets(
         jinja2.TemplateError: If the replacement template cannot be rendered.
         TimeoutError: If the pattern takes too long to apply.
     """
+    # `{{season:02}}` is how most people ask for padding; Jinja has no format spec
+    replacement = _PADDED.sub(
+        lambda match: (
+            f"{{{{ '%0{match[2]}d' % {match[1]} if {match[1]} is not none else '' }}}}"
+        ),
+        replacement,
+    )
+    # most regex tools write group references as `$1` or `${1}`; converting the
+    # rule, not rendered values, leaves a title such as `$5 a Day` alone
+    replacement = _DOLLAR.sub(lambda match: f"\\g<{match[1] or match[2]}>", replacement)
     templated = is_template(replacement)
     parts = []
     pairs = []

@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PositiveInt,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -585,7 +586,7 @@ class MediaBatch(BaseModel):
     replacement: str = Field(
         default="",
         max_length=256,
-        description="May use {{title}}/{{year}}/{{season}}/{{episode}}/"
+        description="\\1 groups; {{title}}/{{year}}/{{season:02}}/{{episode:02}}/"
         "{{episode_title}}.",
     )
 
@@ -634,11 +635,12 @@ class MediaBatch(BaseModel):
 
     @field_validator("directory", "destination")
     @classmethod
-    def relative_directory(cls, value: str | None) -> str | None:
-        """Keep the search directory inside the library.
+    def relative_directory(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """Keep the search directory or destination inside the library.
 
         Args:
             value: Requested directory.
+            info: Validation context naming the field being checked.
 
         Returns:
             A normalized relative POSIX path, or `None` for the library root.
@@ -650,7 +652,10 @@ class MediaBatch(BaseModel):
             return None
         path = PurePosixPath(value.strip().replace("\\", "/"))
         if path.is_absolute() or ".." in path.parts:
-            raise ValueError("directory is relative to the library root.")
+            raise ValueError(
+                f"{info.field_name} is relative to the library root, such as "
+                "'Show A', not an absolute path."
+            )
         return None if str(path) in ("", ".") else str(path)
 
     @model_validator(mode="after")
