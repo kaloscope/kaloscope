@@ -37,6 +37,12 @@ from app.utils.json import dumps
 
 # retain ownership while a reasoning model has no public text to checkpoint
 LEASE_SECONDS = TURN_TIMEOUT + 60
+_MEDIA_REVIEW_BY_ACTION = {
+    "scan": "review_library_scan",
+    "rescrape": "review_media_rescrape",
+    "configure": "review_library_config",
+    "batch": "review_media_batch",
+}
 
 
 def resource_order(resource_id: int | str) -> tuple[bool, int | str]:
@@ -403,7 +409,8 @@ class AssistantSessionService:
         Returns:
             Review tools and download setup tools whose results may be confirmed
             or continued in this turn. Completed creation ends download setup;
-            uncertain submissions retain its recovery tools.
+            uncertain submissions retain its recovery tools. Successful media
+            applications retain the review tool for their own action.
         """
         previous = (
             await AssistantTurn.filter(
@@ -446,8 +453,10 @@ class AssistantSessionService:
             "validate_download_task",
         }
         return {
-            # a batch that was just applied may be reverted in this turn
-            "review_media_batch" if call.name == "apply_media_change" else call.name
+            # a completed action keeps its own management tools available
+            _MEDIA_REVIEW_BY_ACTION[data["action"]]
+            if call.name == "apply_media_change"
+            else call.name
             for call in calls
             if not (download_created and call.name in download_setup)
             if (call.result or {}).get("ok")
@@ -462,7 +471,7 @@ class AssistantSessionService:
             or (call.name == "review_media_batch" and "matched" in data)
             or (
                 call.name == "apply_media_change"
-                and data.get("action") == "batch"
+                and data.get("action") in _MEDIA_REVIEW_BY_ACTION
                 and data.get("applied")
             )
             or (call.name == "get_download_plan_options" and data.get("published"))

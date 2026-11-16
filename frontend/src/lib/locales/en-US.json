@@ -656,10 +656,12 @@
       "live_tip": "Live"
     },
     "batch": {
-      "title": "Batch Plan",
+      "title": "Batch Operations",
       "unavailable": "This plan is no longer available.",
       "planned": "{0} planned · {1}",
       "blocked": "{0} left alone",
+      "following": "{0} handled with their owning item",
+      "filter_blocked": "With item or left alone",
       "progress": "{0} done · {1} skipped or failed · {2} remaining",
       "more": "More files match than one batch holds. Review the same selection again afterwards for the rest.",
       "all": "All entries",
@@ -671,9 +673,9 @@
         "trash": "Move {0} to Trash",
         "permanent": "Permanently Delete {0}"
       },
-      "select": "Select",
+      "select": "Batch Management",
       "selected": "{0} selected",
-      "delete_selected": "Delete with Files",
+      "delete_selected": "Delete",
       "deletion": {
         "trash": "Moves to the system trash",
         "permanent": "Deletes permanently"
@@ -730,7 +732,7 @@
         "media_source_unavailable": "Source unavailable",
         "interrupted": "Interrupted",
         "error": "Unexpected error",
-        "follows_item": "Follows its video",
+        "follows_item": "Handled with its owning item",
         "page_order": "Page order depends on names",
         "unsupported_library": "Not supported in this library",
         "template_managed": "Named by the template",

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
+  import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
   import { registerAssistantContext } from '$lib/assistant/context';
   import {
@@ -247,7 +248,7 @@
     data={items}
     loading={$innerLoading}
     hideOnScroll={standaloneMode.current}
-    filtersClass="sm:justify-center"
+    filtersClass="flex-wrap items-center sm:flex-nowrap sm:justify-center"
     gridClass="grid-cols-2 grid-cols-compact"
     itemClass="mb-4 z-1"
   >
@@ -262,23 +263,34 @@
         maxWidth="36rem"
       />
       {#if $user?.role === 'admin'}
-        <div class="flex items-center gap-2">
-          <button type="button" class="btn btn-sm" class:btn-active={selecting} onclick={toggleSelecting}>
-            <iconify-icon icon={icons.listCheck} width="1rem" aria-hidden="true"></iconify-icon>
-            {$_(selecting ? 'message.cancel' : 'media.batch.select')}
+        <div class="contents sm:flex sm:shrink-0 sm:items-center sm:gap-2">
+          <button
+            type="button"
+            class="btn btn-square shrink-0 btn-sm"
+            class:btn-active={selecting}
+            aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
+            aria-pressed={selecting}
+            use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select') }}
+            onclick={toggleSelecting}
+          >
+            <iconify-icon icon={selecting ? icons.dismiss : icons.listCheck} width="1rem" aria-hidden="true"
+            ></iconify-icon>
           </button>
           {#if selecting}
-            <span class="text-sm text-base-content/60" role="status">
-              {$_('media.batch.selected', $number(selected.length))}
-            </span>
-            <button
-              type="button"
-              class="btn btn-outline btn-error btn-sm"
-              disabled={selected.length === 0 || $reviewLoading !== null}
-              onclick={reviewDeletion}
-            >
-              {$_('media.batch.delete_selected')}
-            </button>
+            <div class="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-start">
+              <span class="text-sm whitespace-nowrap text-base-content/60" role="status">
+                {$_('media.batch.selected', $number(selected.length))}
+              </span>
+              <button
+                type="button"
+                class="btn shrink-0 btn-outline btn-error btn-sm"
+                disabled={selected.length === 0 || $reviewLoading !== null}
+                onclick={reviewDeletion}
+              >
+                <iconify-icon icon={icons.delete} width="1rem" aria-hidden="true"></iconify-icon>
+                {$_('media.batch.delete_selected')}
+              </button>
+            </div>
           {/if}
         </div>
       {/if}

@@ -28,6 +28,8 @@
   let modal: Modal;
   const loading = createLoading();
   const pages = $derived(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+  const following = $derived.by(() => batch?.blocked.reasons.follows_item ?? 0);
+  const blocked = $derived.by(() => Math.max(0, (batch?.blocked.units ?? 0) - following));
 
   /**
    * Open the dialog for one reviewed batch.
@@ -160,19 +162,14 @@
       <span class="text-base-content/60">
         {$_('media.batch.planned', [$number(batch.planned.units), formatBytes(batch.planned.bytes)])}
       </span>
-      {#if batch.blocked.units}
-        <span class="text-base-content/60">{$_('media.batch.blocked', $number(batch.blocked.units))}</span>
+      {#if following}
+        <span class="text-base-content/60">{$_('media.batch.following', $number(following))}</span>
       {/if}
-      {#if batch.operation}
-        <span class="text-base-content/60">{$_(`media.batch.operation.${batch.operation}`)}</span>
+      {#if blocked}
+        <span class="text-base-content/60">{$_('media.batch.blocked', $number(blocked))}</span>
       {/if}
       {#if batch.reverts}
         <span class="text-base-content/60">{$_('media.batch.reverts', batch.reverts)}</span>
-      {/if}
-      {#if batch.deletion}
-        <span class={batch.deletion === 'permanent' ? 'text-warning' : 'text-base-content/60'}>
-          {$_(`media.batch.deletion.${batch.deletion}`)}
-        </span>
       {/if}
     </div>
     {#if batch.state !== 'reviewed'}
@@ -214,7 +211,9 @@
       >
         <option value="">{$_('media.batch.all')}</option>
         {#each STATUSES as value (value)}
-          <option {value}>{$_(`media.batch.status.${value}`)}</option>
+          <option {value}
+            >{$_(value === 'blocked' ? 'media.batch.filter_blocked' : `media.batch.status.${value}`)}</option
+          >
         {/each}
       </select>
       <span class="text-xs text-base-content/60">{$_('data.paginator.total', $number(total))}</span>
@@ -242,11 +241,15 @@
               <td class="text-right text-xs whitespace-nowrap">{formatBytes(entry.size)}</td>
               <td class="text-xs whitespace-nowrap">{$_(`media.batch.owner.${entry.owner}`)}</td>
               <td class="text-xs">
-                <span class="whitespace-nowrap">{$_(`media.batch.status.${entry.status}`)}</span>
-                {#if entry.reason}
-                  <span class="block text-base-content/60">
-                    {$_(`media.batch.reason.${entry.reason}`, { default: entry.reason })}
-                  </span>
+                {#if entry.reason === 'follows_item'}
+                  <span>{$_('media.batch.reason.follows_item')}</span>
+                {:else}
+                  <span class="whitespace-nowrap">{$_(`media.batch.status.${entry.status}`)}</span>
+                  {#if entry.reason}
+                    <span class="block text-base-content/60">
+                      {$_(`media.batch.reason.${entry.reason}`, { default: entry.reason })}
+                    </span>
+                  {/if}
                 {/if}
               </td>
             </tr>

@@ -77,7 +77,12 @@ from app.models.media import (
 )
 from app.models.user import UserInfo
 from app.services.base import BaseService
-from app.services.media import MediaItemService, MediaLibService, _media_activity
+from app.services.media import (
+    MediaItemService,
+    MediaLibService,
+    _media_activity,
+    _parent_deletion_snapshot,
+)
 from app.utils.asyncio import write_in_thread
 from app.utils.json import dumps, loads
 
@@ -373,6 +378,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     continue
                 seen.add(entry.item_id or 0)
             unique.append(entry)
+        cleanup_notes: list[str] = []
+        if change.operation == "delete" and not change.empty_dirs:
+            unique, blocked, cleanup_notes = await cls._parent_cleanup(
+                lib, items, unique, blocked
+            )
         more = cut or len(unique) > BATCH_LIMIT
         planned = unique[:BATCH_LIMIT]
         if reading and change.operation == "rename":
@@ -509,6 +519,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 f"{reasons['owner_excluded']} matches belong to other file classes "
                 "and are not included; name them in owners to include them."
             )
+        notes.extend(cleanup_notes)
         if len(unique) > BATCH_LIMIT:
             notes.append(
                 f"Only the first {BATCH_LIMIT} of {len(unique)} units are in this "
@@ -541,7 +552,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "unchanged": unchanged,
             "deletion": ("trash" if trash else "permanent") if deleting else None,
             "can_revert": effective in ("rename", "move"),
-            "sample": cls._sample([*blocked, *planned]),
+            "sample": cls._sample(
+                [*planned, *blocked] if cleanup_notes else [*blocked, *planned]
+            ),
             "omitted": max(0, len(blocked) + len(planned) - SAMPLE_ROWS),
             "notes": notes,
             "revision": revision,
@@ -561,6 +574,135 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             )
             result.update(request_id=str(request_id), batch_id=receipt.id)
         return loads(dumps(result))
+
+    @classmethod
+    async def _parent_cleanup(
+        cls,
+        lib: MediaLib,
+        items: list[MediaItem],
+        planned: list[PlanEntry],
+        blocked: list[PlanEntry],
+    ) -> tuple[list[PlanEntry], list[PlanEntry], list[str]]:
+        """Include newly empty parents and their exclusive files in a deletion.
+
+        Args:
+            lib: Library whose files were reviewed.
+            items: Current library members used to resolve parent ownership.
+            planned: Selected deletion units before applying the batch limit.
+            blocked: Matches excluded from independent execution.
+
+        Returns:
+            Planned and blocked units, plus notes naming included parents and
+            files. A parent replaces its selected children as one guarded unit;
+            unindexed content, busy work or uncertain ownership retain it.
+        """
+        selected = {entry.item_id for entry in planned if entry.kind == "item"}
+        children: dict[int, list[MediaItem]] = {}
+        rows = {item.id: item for item in items}
+        for item in items:
+            if item.parent_id is not None:
+                children.setdefault(item.parent_id, []).append(item)
+            if item.id in selected and item.path == item.dir and item.format is None:
+                children.setdefault(item.id, [])
+        candidates = [
+            rows[parent_id]
+            for parent_id, members in children.items()
+            if parent_id in selected or all(member.id in selected for member in members)
+        ]
+        if not candidates:
+            return planned, blocked, []
+        busy, paths = await cls._busy(lib)
+        notes = []
+        root = Path(lib.dir)
+        owned_paths = build_index(lib, items).owned
+        for parent in sorted(candidates, key=lambda item: item.path):
+            members = children[parent.id]
+            ids = {parent.id, *(item.id for item in members)}
+            for item in [parent, *members]:
+                item.lib = lib
+                if item.parent_id is not None:
+                    item.parent = rows[item.parent_id]
+            snapshot = (
+                None
+                if ids & busy
+                else await asyncio.to_thread(
+                    _parent_deletion_snapshot,
+                    parent,
+                    members,
+                    [item for item in items if item.id not in ids],
+                )
+            )
+            if snapshot is None or any(
+                str(root / path) in paths for path, _ in snapshot["owned"]
+            ):
+                if parent.id in selected:
+                    planned = [entry for entry in planned if entry.item_id != parent.id]
+                    entries = await asyncio.to_thread(
+                        item_entries,
+                        build_index(lib, items),
+                        members,
+                        {},
+                        busy_items=busy,
+                    )
+                    planned.extend(
+                        entry for entry in entries if entry.status == "planned"
+                    )
+                    blocked.extend(
+                        entry for entry in entries if entry.status == "blocked"
+                    )
+                notes.append(
+                    f"Parent {relative(root, Path(parent.path))} stays: unindexed "
+                    "or protected content remains, or cleanup ownership cannot "
+                    "be confirmed. Only its reviewed children are removed."
+                )
+                continue
+            planned = [entry for entry in planned if entry.item_id not in ids]
+            owned = {path: identity for path, identity in snapshot["owned"]}
+            display = sorted(
+                owned,
+                key=lambda path: (owned_paths.get(str(root / path)) != parent.id, path),
+            )
+            blocked = [
+                entry
+                for entry in blocked
+                if entry.item_id not in ids or entry.src not in owned
+            ]
+            planned.append(
+                PlanEntry(
+                    "item",
+                    FileOwner.INDEXED,
+                    relative(root, Path(parent.path)),
+                    sum(identity[2] for identity in owned.values()),
+                    [snapshot],
+                    parent.id,
+                    files=len(owned),
+                )
+            )
+            bodies = {item.path: item.id for item in members}
+            blocked.extend(
+                PlanEntry(
+                    "file",
+                    FileOwner.INDEXED
+                    if str(root / path) in bodies
+                    else FileOwner.COMPANION,
+                    path,
+                    identity[2],
+                    identity,
+                    bodies.get(str(root / path), parent.id),
+                    status="blocked",
+                    reason="follows_item",
+                )
+                for path, identity in ((path, owned[path]) for path in display)
+            )
+            sample = ", ".join(display[:SAMPLE_ROWS])
+            notes.append(
+                f"Deleting all {len(members)} children also removes empty parent "
+                f"{relative(root, Path(parent.path))} and its exclusive metadata "
+                f"and artwork: {len(owned)} files in total ({sample}). Other "
+                "loose files stay. The entire work is skipped if its files or "
+                "ownership change after this preview."
+            )
+        return planned, blocked, notes
 
     @staticmethod
     def _sample(entries: list[PlanEntry]) -> list[dict[str, Any]]:

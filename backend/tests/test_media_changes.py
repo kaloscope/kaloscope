@@ -1404,6 +1404,144 @@ def test_superseded(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("scope", ["same_turn", "next_turn", "other_library"])
+def test_listing_after_review(monkeypatch, tmp_path, scope):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), env.owner
+            )
+            turn = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="scan",
+                status="complete",
+                prompt="Preview scanning this library.",
+            )
+            scan = await scan_review(env.owner, 60)
+            await AssistantToolCall.create(
+                turn=turn,
+                call_id="scan",
+                name="review_library_scan",
+                arguments=dumps({"library_id": 60}).decode(),
+                status="complete",
+                result={"ok": True, "data": scan},
+            )
+            if scope == "next_turn":
+                turn = await AssistantTurn.create(
+                    conversation_id=conversation["id"],
+                    request_id="list",
+                    status="complete",
+                    prompt="List files instead.",
+                )
+            library_id = 61 if scope == "other_library" else 60
+            await AssistantToolCall.create(
+                turn=turn,
+                call_id="listing",
+                name="review_media_batch",
+                arguments=dumps({"library_id": library_id}).decode(),
+                status="complete",
+                result={
+                    "ok": True,
+                    "data": {"library_id": library_id, "matched": {"files": 1}},
+                },
+            )
+
+            confirmed = await tools.apply_media_change(
+                tools.MediaConfirm(request_id=scan["request_id"], confirmed=True),
+                conversation["id"],
+                env.owner,
+            )
+
+            if scope == "same_turn":
+                assert confirmed["outcome"] == "scanned"
+            else:
+                assert confirmed["confirmation_required"] and not confirmed["applied"]
+
+    asyncio.run(run())
+
+
+def test_scan_after_listing(monkeypatch, tmp_path):
+    streams = []
+
+    def scan(body):
+        assert "review_library_scan" in names(body)
+        return [("review_library_scan", {"library_id": 60})]
+
+    configure(
+        monkeypatch,
+        scripted(
+            [
+                lambda _: [("list_media_libraries", {})],
+                lambda _: [("review_media_batch", {"library_id": 60})],
+                scan,
+                lambda _: [],
+            ],
+            streams,
+        ),
+    )
+
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), env.owner
+            )
+
+            done, results = await converse(
+                conversation["id"],
+                env.owner,
+                "List files, then preview a scan.",
+                key="listing-scan",
+            )
+
+            assert done.event == "done"
+            assert results[-1]["data"]["valid"]
+            assert results[-1]["data"]["action"] == "scan"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        ("scan", "review_library_scan"),
+        ("rescrape", "review_media_rescrape"),
+        ("configure", "review_library_config"),
+        ("batch", "review_media_batch"),
+    ],
+)
+def test_applied_continuation(monkeypatch, tmp_path, action, expected):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), env.owner
+            )
+            previous = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="applied",
+                status="complete",
+                prompt="Confirm the media change.",
+            )
+            await AssistantToolCall.create(
+                turn=previous,
+                call_id="applied",
+                name="apply_media_change",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": {"action": action, "applied": True}},
+            )
+            current = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="continue",
+                prompt="Continue managing this library.",
+            )
+
+            offered = await Sessions.reviewed(current)
+
+            assert offered == {expected}
+
+    asyncio.run(run())
+
+
 def test_mcp(monkeypatch, tmp_path):
     async def run():
         async with application() as app:

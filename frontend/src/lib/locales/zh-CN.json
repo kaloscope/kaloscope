@@ -656,10 +656,12 @@
       "live_tip": "直播"
     },
     "batch": {
-      "title": "批量计划",
+      "title": "批量操作",
       "unavailable": "此计划已不可用",
       "planned": "计划处理 {0} 项，共 {1}",
       "blocked": "{0} 项不处理",
+      "following": "{0} 项随所属条目处理",
+      "filter_blocked": "跟随处理或不处理",
       "progress": "已完成 {0} 项，跳过或失败 {1} 项，剩余 {2} 项",
       "more": "匹配的文件超出单次批量上限，执行后请对相同条件再次预览以处理其余部分",
       "all": "全部条目",
@@ -671,9 +673,9 @@
         "trash": "将 {0} 项移入回收站",
         "permanent": "永久删除 {0} 项"
       },
-      "select": "选择",
+      "select": "批量管理",
       "selected": "已选择 {0} 项",
-      "delete_selected": "连同文件删除",
+      "delete_selected": "删除",
       "deletion": {
         "trash": "移入系统回收站",
         "permanent": "永久删除"
@@ -730,7 +732,7 @@
         "media_source_unavailable": "来源不可用",
         "interrupted": "已中断",
         "error": "意外错误",
-        "follows_item": "随所属视频改名",
+        "follows_item": "随所属条目一起处理",
         "page_order": "页序依赖文件名",
         "unsupported_library": "此媒体库暂不支持",
         "template_managed": "由命名模板管理",

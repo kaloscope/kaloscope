@@ -654,9 +654,10 @@ def plan_deletion(
 
     Returns:
         Entries in path order. An indexed body becomes one `item` unit, every
-        other allowed match one `file` unit. Excluded classes, linked files,
-        busy items and downloads, unwritable directories and selections that
-        would empty a directory comic are blocked with a reason.
+        other allowed match one `file` unit. Companions of planned bodies follow
+        their item instead of being deleted twice. Excluded classes, linked
+        files, busy items and downloads, unwritable directories and selections
+        that would empty a directory comic are blocked with a reason.
     """
     allowed = set(owners)
     selected_pages: dict[int, int] = {}
@@ -699,6 +700,18 @@ def plan_deletion(
         if reason:
             entry.status, entry.reason = "blocked", reason
         entries.append(entry)
+    selected = {
+        entry.item_id
+        for entry in entries
+        if entry.kind == "item" and entry.status == "planned"
+    }
+    for entry in entries:
+        if (
+            entry.status == "planned"
+            and entry.owner == FileOwner.COMPANION
+            and entry.item_id in selected
+        ):
+            entry.status, entry.reason = "blocked", "follows_item"
     return entries
 
 

@@ -585,19 +585,80 @@ async def _remove_media_records(items: list[MediaItem]):
     await MediaItem.filter(id__in=ids).delete()
 
 
+def _parent_deletion_snapshot(
+    parent: MediaItem, children: list[MediaItem], others: list[MediaItem]
+) -> dict[str, Any] | None:
+    """Snapshot a parent and its exclusive files for a reviewed deletion.
+
+    Args:
+        parent: Directory item with its library and parent loaded.
+        children: Every selected child with its relations loaded.
+        others: Surviving items used to protect shared files and nested works.
+
+    Returns:
+        Child IDs, all current files and the exclusive deletion manifest, or
+        `None` if unindexed media, links, surviving items or uncertain ownership
+        prevent automatic parent cleanup.
+    """
+    from app.core.media.batch import build_index, relative, scan_files
+
+    root, directory = Path(parent.lib.dir), Path(parent.path)
+    selected = [parent, *children]
+    ids = {item.id for item in selected}
+    if (
+        parent.path != parent.dir
+        or directory == root
+        or not directory.is_relative_to(root)
+        or any(not Path(child.path).is_relative_to(directory) for child in children)
+        or any(Path(other.path).is_relative_to(directory) for other in others)
+    ):
+        return None
+    try:
+        index = build_index(parent.lib, [*selected, *others])
+        scan = scan_files(index, directory=relative(root, directory), fresh=True)
+        if (
+            scan.truncated
+            or scan.links
+            or any(
+                match.owner == "unindexed"
+                or (match.owner in ("indexed", "page") and match.item_id not in ids)
+                for match in scan.matches
+            )
+        ):
+            return None
+        _, bodies, companions = _media_files(selected, others)
+    except (OSError, ValueError, ContentError):
+        return None
+    return {
+        "children": sorted(child.id for child in children),
+        "tree": sorted(
+            [relative(root, match.path), match.identity] for match in scan.matches
+        ),
+        "owned": sorted(
+            [relative(root, path), list(state)]
+            for path, state in (bodies | companions).items()
+        ),
+    }
+
+
 def _matches_expected(
-    item: MediaItem | None, child_ids: list[int], expected: tuple[str, list[int]]
+    item: MediaItem | None,
+    children: list[MediaItem],
+    expected: tuple[str, list[Any]],
+    others: list[MediaItem],
 ) -> bool:
     """Check that an item is still what a review showed.
 
     Args:
         item: Current row of the item being deleted, if it still exists.
-        child_ids: IDs of its current children.
+        children: Current child items with their library and parent loaded.
         expected: Reviewed absolute path and identity.
+        others: Surviving items used to check a parent cleanup manifest.
 
     Returns:
         Whether the path is unchanged and a body file keeps its reviewed
         fingerprint, or a directory item keeps exactly its reviewed children.
+        Automatic parent cleanup also requires unchanged files and ownership.
     """
     path, identity = expected
     if item is None or item.path != path:
@@ -605,7 +666,9 @@ def _matches_expected(
     source = Path(path)
     try:
         if source.is_dir() and not source.is_symlink():
-            return sorted(child_ids) == identity
+            if identity and isinstance(identity[0], dict):
+                return _parent_deletion_snapshot(item, children, others) == identity[0]
+            return sorted(child.id for child in children) == identity
         info = source.lstat()
     except OSError:
         return False
@@ -4198,13 +4261,15 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         id: int,
         local: bool = False,
         *,
-        expected: tuple[str, list[int]] | None = None,
+        expected: tuple[str, list[Any]] | None = None,
     ):
         """Delete or hide a media item under its library lock.
 
         Recover organization before resolving current paths. Local deletion
         removes owned files individually. Retain the original child scope across
-        parent changes and summarize surviving comic collections.
+        parent changes and summarize surviving comic collections. Reviewed
+        deletions retain parents outside the stored plan. Automatically included
+        parents require an unchanged file and ownership snapshot before cleanup.
 
         Args:
             id: Media item ID.
@@ -4213,6 +4278,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 file's fingerprint, or a directory item's sorted child IDs. `None`
                 deletes whatever the item currently is. Reviewed deletions also
                 recheck ingestion and downloads before removing owned files.
+                Automatic parent cleanup carries its full file manifest instead
+                of only child IDs and is refused if any file or ownership changes.
 
         Raises:
             DoesNotExist: If the item is missing before a local deletion.
@@ -4237,18 +4304,31 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 id__in=[id, *child_ids], lib_id=item.lib_id
             ).select_related("lib", "parent")
             parent_ids = {row.parent_id for row in items if row.parent_id is not None}
-            if expected is not None and not await to_thread(
-                _matches_expected,
-                next((row for row in items if row.id == id), None),
-                await MediaItem.filter(parent_id=id).values_list("id", flat=True),
-                expected,
-            ):
-                raise ContentError("content_changed")
+            if expected is not None:
+                children = await MediaItem.filter(parent_id=id).select_related(
+                    "lib", "parent"
+                )
+                guarded = bool(expected[1] and isinstance(expected[1][0], dict))
+                others = (
+                    await MediaItem.filter(lib_id=lib.id)
+                    .exclude(id__in=[id, *(child.id for child in children)])
+                    .select_related("lib", "parent")
+                    if guarded
+                    else []
+                )
+                if not await to_thread(
+                    _matches_expected,
+                    next((row for row in items if row.id == id), None),
+                    children,
+                    expected,
+                    others,
+                ):
+                    raise ContentError("content_changed")
             # a surviving parent may have received children outside the requested scope
             if await MediaItem.filter(parent_id=id).exclude(id__in=child_ids).exists():
                 items = [row for row in items if row.id != id]
             if local:
-                if not reading:
+                if not reading and expected is None:
                     ids = {row.id for row in items}
                     for parent in await MediaItem.filter(
                         id__in=parent_ids - ids, lib_id=item.lib_id

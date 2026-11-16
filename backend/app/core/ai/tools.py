@@ -136,14 +136,14 @@ MEDIA_REVIEWS = {
 }
 MEDIA_REVIEW_TOOLS = frozenset(MEDIA_REVIEWS)
 MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
-# a batch conversation needs room for its plan, so it keeps only these tools
-BATCH_FOCUS = frozenset(
+# a file conversation keeps library management available without unrelated domains
+BATCH_FOCUS = MEDIA_CHANGE_TOOLS | frozenset(
     {
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
-        "review_media_batch",
-        "apply_media_change",
+        "list_workflows",
+        "get_workflow",
         "read_conversation_history",
         "navigate",
     }
@@ -1004,8 +1004,9 @@ def tool_schemas(
             a review in the previous turn.
         media_change: Offer media changes: `True` for all after reading media this
             turn, or the named tools continuing a review from the previous turn.
-        batch: Focus on a batch after its first listing or review, or when the
-            previous turn ended with one. Other tools return in a later turn.
+        batch: Focus on files and library management after a listing or review,
+            or when the previous turn ended with one. Other domains return in a
+            later turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -2117,8 +2118,10 @@ async def apply_media_change(
 
     Only the newest media review of the conversation may be applied, and it must
     be valid and from a completed earlier turn; any newer media review, even a
-    failed one, a candidate list or a settings read, replaces it. A claimed
-    request replays first, so retries never apply it again.
+    failed one, a candidate list or a settings read, replaces it. A successful
+    file listing for the same library in that review's turn only adds facts;
+    listings from later turns or other libraries still replace the review.
+    A claimed request replays first, so retries never apply it again.
 
     Args:
         args: Reviewed request ID and the user's confirmation.
@@ -2143,7 +2146,22 @@ async def apply_media_change(
         if data.get("request_id") != str(args.request_id):
             continue
         reviewed = await AssistantTurn.get(id=record.turn_id)
-        ready = index == 0 and reviewed.status == "complete"
+        superseded = False
+        for later in reviews[:index]:
+            later_result = later.result or {}
+            later_data = later_result.get("data") or {}
+            if not (
+                later.turn_id == record.turn_id
+                and later.name == "review_media_batch"
+                and later_result.get("ok")
+                and "matched" in later_data
+                and "operation" not in later_data
+                and isinstance(data.get("library_id"), int)
+                and later_data.get("library_id") == data["library_id"]
+            ):
+                superseded = True
+                break
+        ready = not superseded and reviewed.status == "complete"
         change = MEDIA_REVIEWS[record.name].model_validate_json(record.arguments)
         result = await MediaChangeService.apply_change(
             MediaChangeApply(

@@ -233,6 +233,39 @@ def test_delete_loose(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
+def test_delete_last_child(tmp_path, lib_type):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            lib.lib_type = lib_type
+            await lib.save(update_fields=["lib_type"])
+            root = Path(lib.dir)
+            write(root, "Show/poster.jpg")
+            Path(episodes[1].path).unlink()
+            await episodes[1].delete()
+            change = deletion(lib, item_ids=[episodes[0].id])
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change, ADMIN)
+
+            assert result["done"] == 1
+            assert not Path(episodes[0].path).exists()
+            assert not Path(episodes[0].path).with_suffix(".nfo").exists()
+            assert not await MediaItem.exists(id=parent.id)
+            assert not Path(parent.nfo_path).exists()
+            assert not (root / "Show/poster.jpg").exists()
+            assert (root / "Show/info.url").read_bytes() == b"x" * 10
+            assert review["planned"]["files"] == 4
+            assert {row["src"] for row in review["sample"]} >= {
+                "Show",
+                "Show/Show.nfo",
+                "Show/poster.jpg",
+            }
+
+    asyncio.run(run())
+
+
 def test_delete_items(tmp_path):
     async def run():
         async with database():
@@ -256,6 +289,32 @@ def test_delete_items(tmp_path):
     asyncio.run(run())
 
 
+def test_delete_with_companions(tmp_path):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            change = deletion(
+                lib,
+                directory="Show",
+                name="Show S01E01.*",
+                owners=["indexed", "companion"],
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+
+            assert review["planned"]["units"] == 1
+            assert review["blocked"]["reasons"] == {"follows_item": 1}
+            assert result["outcome"] == "completed"
+            assert result["done"] == 1 and result["skipped"] == 0
+            assert not Path(episodes[0].path).exists()
+            assert not Path(episodes[0].path).with_suffix(".nfo").exists()
+            assert Path(episodes[1].path).exists()
+            assert Path(parent.nfo_path).exists()
+
+    asyncio.run(run())
+
+
 def test_indexed_by_filter(tmp_path):
     async def run():
         async with database():
@@ -270,11 +329,83 @@ def test_indexed_by_filter(tmp_path):
             review = await MediaBatchService.review(change, ADMIN)
             result = await confirm(review, change)
 
+            assert review["planned"]["units"] == 1
+            assert result["outcome"] == "completed"
+            assert not await MediaItem.exists(id=parent.id)
+            assert not Path(parent.nfo_path).exists()
+            assert not list(Path(lib.dir).rglob("*.mkv"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "name", ["extra.mkv", "extra.TS", "extra.m2ts", "extra.iso", "Extras/extra.mp4"]
+)
+@pytest.mark.parametrize("selection", ["children", "parent"])
+def test_parent_unindexed(tmp_path, name, selection):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            root = Path(lib.dir)
+            write(root, f"Show/{name}", "Show/poster.jpg")
+            change = deletion(
+                lib,
+                item_ids=[parent.id]
+                if selection == "parent"
+                else [item.id for item in episodes],
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+            result = await confirm(review, change)
+
             assert review["planned"]["units"] == 2
             assert result["outcome"] == "completed"
-            # the show goes with its last episode, as a manual deletion does
-            assert not await MediaItem.exists(id=parent.id)
-            assert not list(Path(lib.dir).rglob("*.mkv"))
+            assert await MediaItem.exists(id=parent.id)
+            assert (root / "Show" / name).read_bytes() == b"x" * 10
+            assert Path(parent.nfo_path).read_bytes() == b"x" * 10
+            assert (root / "Show/poster.jpg").read_bytes() == b"x" * 10
+            assert not any(Path(item.path).exists() for item in episodes)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("edit", ["unindexed", "body", "metadata", "child"])
+@pytest.mark.parametrize("selection", ["children", "parent"])
+def test_parent_changed(tmp_path, edit, selection):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            root = Path(lib.dir)
+            change = deletion(
+                lib,
+                item_ids=[parent.id]
+                if selection == "parent"
+                else [item.id for item in episodes],
+            )
+            review = await MediaBatchService.review(change, ADMIN)
+            if edit == "unindexed":
+                write(root, "Show/late.mkv")
+            elif edit == "body":
+                Path(episodes[0].path).write_bytes(b"changed body")
+            elif edit == "metadata":
+                Path(parent.nfo_path).write_bytes(b"changed metadata")
+            else:
+                write(root, "Show/late.mkv")
+                await MediaItem.create(
+                    lib=lib,
+                    parent=parent,
+                    path=str(root / "Show/late.mkv"),
+                    dir=parent.dir,
+                    name="late",
+                )
+
+            result = await confirm(review, change)
+
+            assert result["done"] == 0
+            assert result["reasons"] == {"content_changed": 1}
+            assert await MediaItem.exists(id=parent.id)
+            assert Path(parent.nfo_path).exists()
+            assert all(Path(item.path).exists() for item in episodes)
 
     asyncio.run(run())
 
