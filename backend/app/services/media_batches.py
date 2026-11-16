@@ -222,8 +222,10 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         Returns:
             Without an operation: match counts by class and extension and a
             bounded sample. With one: planned and blocked units, the deletion
-            mode, notes, located issues, the `revision` and, when valid, a
-            `request_id` and `batch_id` for this exact plan.
+            mode, notes, located issues, whether undo is supported (`can_revert`),
+            the `revision` and, when valid, a `request_id` and `batch_id` for this
+            exact plan. Undo requires a finished rename or move batch and
+            unchanged files; organize and delete do not support undo.
 
         Raises:
             ForbiddenException: If the account cannot manage library files.
@@ -468,7 +470,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         else:
             notes.append(
                 "Works are renamed and moved as the naming template and their "
-                "saved metadata say; no metadata is fetched."
+                "saved metadata say; no metadata is fetched. This organize batch "
+                "cannot be undone; revert supports only finished rename/move batches."
             )
         if unchanged:
             notes.append(
@@ -537,6 +540,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "more": more,
             "unchanged": unchanged,
             "deletion": ("trash" if trash else "permanent") if deleting else None,
+            "can_revert": effective in ("rename", "move"),
             "sample": cls._sample([*blocked, *planned]),
             "omitted": max(0, len(blocked) + len(planned) - SAMPLE_ROWS),
             "notes": notes,
@@ -1730,7 +1734,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
 
         Returns:
             Shared identity, unit counts, reasons of units that were not applied
-            and a few of their paths.
+            and a few of their paths. `can_revert` reports whether the operation
+            supports undo after finishing, subject to unchanged file identities.
         """
         plan = receipt.plan or {}
         unfinished = await MediaBatchEntry.filter(
@@ -1742,6 +1747,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "library_id": receipt.lib_id,
             "library_name": plan.get("library_name"),
             "batch_id": receipt.id,
+            "can_revert": plan.get("operation") in ("rename", "move"),
             **await cls.counts(receipt.id),
             "reasons": dict(_tally(entry.reason for entry in unfinished)),
             "sample": [
@@ -2519,7 +2525,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
 
         Returns:
             The recorded outcome with current counts, a `running` report, or
-            an `interrupted` outcome after a server stop.
+            an `interrupted` outcome after a server stop. Derive `can_revert`
+            from the stored operation, including for legacy outcomes.
         """
         from app.services.media_changes import MediaChangeService
 
@@ -2544,6 +2551,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             dumps(
                 {
                     **(receipt.result or {}),
+                    "can_revert": (receipt.plan or {}).get("operation")
+                    in ("rename", "move"),
                     "replayed": True,
                     "current": await cls.counts(receipt.id),
                 }
@@ -2591,7 +2600,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
 
         Returns:
             The reviewed plan header, unit counts, whether it is `reviewed`,
-            `running` or `finished`, and its recorded outcome.
+            `running` or `finished`, its recorded outcome, and whether its
+            operation supports undo (`can_revert`).
 
         Raises:
             NotFoundException: If no batch has this identity.
@@ -2608,6 +2618,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "library_name": plan.get("library_name"),
                     "operation": plan.get("operation"),
                     "reverts": plan.get("reverts"),
+                    "can_revert": plan.get("operation") in ("rename", "move"),
                     "deletion": plan.get("deletion"),
                     "planned": plan.get("planned"),
                     "blocked": plan.get("blocked"),

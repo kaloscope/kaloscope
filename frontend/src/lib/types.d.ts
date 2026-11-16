@@ -265,6 +265,8 @@ export type MediaBatch = {
   library_name: string | null;
   operation: 'delete' | 'organize' | 'rename' | 'move' | null;
   reverts: number | null;
+  /** Whether this operation supports undo after finishing. */
+  can_revert: boolean;
   deletion: 'trash' | 'permanent' | null;
   planned: { units: number; files: number; bytes: number; by_owner: Record<string, number> };
   blocked: { units: number; reasons: Record<string, number> };
@@ -298,6 +300,7 @@ export type MediaBatchOutcome = {
   outcome?: 'completed' | 'partial' | 'cancelled' | 'interrupted' | 'running' | 'absent';
   library_id?: number;
   batch_id?: number;
+  can_revert?: boolean;
   done?: number;
   skipped?: number;
   failures?: number;

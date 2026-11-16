@@ -740,13 +740,13 @@ TOOLS = (
     ),
     AssistantTool(
         "list_media_libraries",
-        "List accessible libraries: type, scan state, ingest bindings.",
+        "List library roots, not folders: type, scan state, ingest bindings.",
         MediaLibraryList,
     ),
     AssistantTool(
         "list_media_items",
-        "Page visible media in library order; keyword filters titles (omit for all). "
-        "No path=top-level works. Unlocks file delete/rename/move/merge/undo.",
+        "Page indexed items, not folders; unlisted folders may exist. Check folder "
+        "paths with review_media_batch. keyword=titles; no path=top-level works.",
         MediaItemList,
     ),
     AssistantTool(
@@ -851,26 +851,26 @@ TOOLS = (
     ),
     AssistantTool(
         "review_media_batch",
-        "Rename, move/merge, delete, organize or undo files in one library as "
-        "one batch; without operation, list files by extension, name, size or "
-        "items. move merges into an existing show/collection, holding "
-        "duplicates back, or renames a work folder; empty_dirs clears empty "
-        "folders; revert undoes a finished rename/move batch. Needs only "
-        "library_id and a directory or item_ids: review the operation directly, "
-        "without reading items or listing first. apply_media_change performs "
-        "it after confirmation. owners "
-        "defaults to loose files; name other classes. Summarize planned, "
-        "blocked, duplicates, leftovers and notes in the user's language, not "
-        "JSON. End the turn for confirmation.",
+        "List files (omit operation) or review changes "
+        "in one library. On media_library pages library_id=page_context.resource_id. "
+        "directory/destination are its relative folders, not library names; "
+        "no cross-library moves. Review paths directly; an unindexed folder can exist. "
+        "move merges shows/collections, skips duplicates, "
+        "or renames a work folder. organize uses saved naming and cannot undo; "
+        "revert only finished rename/move batches. Report can_revert. "
+        "empty_dirs clears empty folders. owners defaults loose; name other classes. "
+        "Explain planned, blocked, duplicates, leftovers and notes in the user's "
+        "language. End for confirmation; apply_media_change executes.",
         BatchReview,
         brief=BatchBrief,
         admin=True,
     ),
     AssistantTool(
         "apply_media_change",
-        "Apply a prior turn's valid scan/rescrape/config/batch review after the user "
-        "confirms it; returns quickly (submitted/running is not done). Repeat the "
-        "same request_id after errors; never re-review to retry.",
+        "Apply a prior turn's valid scan/rescrape/config/batch review after user "
+        "confirmation. Returns quickly: submitted/running is not done. Retry the "
+        "same request_id after errors; never re-review. Report can_revert for batches; "
+        "false means no undo, never offer it.",
         MediaConfirm,
         admin=True,
     ),

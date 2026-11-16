@@ -1719,6 +1719,55 @@ def test_revert_refusals(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("operation", ["rename", "move", "organize", "delete"])
+def test_revert_capability(monkeypatch, tmp_path, operation):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            if operation == "rename":
+                change = renaming(env.shows, "^S01", "New S01", item_ids=[env.show.id])
+            elif operation == "move":
+                change = moving(env.shows, "Target", item_ids=[env.show.id])
+            elif operation == "organize":
+                await MediaLib.filter(id=env.shows.id).update(
+                    rename_template=TV_TEMPLATE
+                )
+                change = MediaBatch(library_id=env.shows.id, operation="organize")
+            else:
+                change = deletion(env.shows, item_ids=[env.episodes[0].id])
+            expected = operation in ("rename", "move")
+
+            review = await MediaBatchService.review(change, env.owner)
+            result = await confirm(review, change, env.owner)
+            details = await MediaBatchService.details(review["batch_id"])
+            receipt = await MediaChangeReceipt.get(id=review["batch_id"])
+            legacy = {
+                key: value for key, value in result.items() if key != "can_revert"
+            }
+            await MediaChangeReceipt.filter(id=receipt.id).update(result=legacy)
+            replay = await confirm(review, change, env.owner)
+
+            assert review["valid"] and result["outcome"] == "completed"
+            assert all(
+                value["can_revert"] is expected
+                for value in (review, result, details, replay)
+            )
+            for name, value in (
+                ("review_media_batch", review),
+                ("apply_media_change", result),
+            ):
+                fact = tools.tool_facts({"name": name, "ok": True, "data": value})
+                assert fact["data"]["can_revert"] is expected
+            if operation == "organize":
+                assert any("cannot be undone" in note for note in review["notes"])
+                undo = await MediaBatchService.review(
+                    reverting(env.shows, result["batch_id"]), env.owner
+                )
+                assert not undo["valid"]
+                assert "rename and move" in undo["issues"][0]["message"]
+
+    asyncio.run(run())
+
+
 def test_undo_conversation(monkeypatch, tmp_path):
     streams, offered = [], []
 

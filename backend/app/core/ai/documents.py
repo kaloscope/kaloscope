@@ -335,6 +335,7 @@ MEDIA_CHANGE_FACTS = (
     "operation",
     "lib_type",
     "batch_id",
+    "can_revert",
     "matched",
     "planned",
     "blocked",
