@@ -160,6 +160,32 @@ def _fingerprint(path: Path) -> list[int]:
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
 
 
+def _case_alias(source: Path, destination: Path) -> bool:
+    """Check whether two spellings resolve to one case-insensitive directory entry.
+
+    Args:
+        source: Existing source path.
+        destination: Different spelling of the same name in the same directory.
+
+    Returns:
+        Whether both paths identify one entry. Distinct hard links and missing
+        or unreadable paths are not aliases.
+    """
+    if (
+        source.parent != destination.parent
+        or source.name == destination.name
+        or source.name.casefold() != destination.name.casefold()
+    ):
+        return False
+    try:
+        if not os.path.samefile(source, destination):
+            return False
+        names = {path.name for path in source.parent.iterdir()}
+        return source.name not in names or destination.name not in names
+    except OSError:
+        return False
+
+
 def _companions(path: Path) -> list[Path]:
     """Find the NFO and subtitle files associated with a video basename.
 
@@ -236,14 +262,21 @@ def _validate_link_references(root: Path, moves: dict[str, str]):
     source_directories = {
         str(parent) for source in sources for parent in Path(source).parents
     }
+    moving_directories = {
+        _reference_key(Path(source))
+        for source, destination in moves.items()
+        if source != destination and Path(source).is_dir()
+    }
     links = _LINKS.get()
     if links is None:
         links = _library_links(root)
     for path, target, directory in links:
         if path in moves:
             continue
-        if target in sources or (
-            directory is not None and directory in source_directories
+        if (
+            target in sources
+            or any(target.startswith(source + os.sep) for source in moving_directories)
+            or (directory is not None and directory in source_directories)
         ):
             raise ValueError(
                 f"moving a file would break a symlink outside the group: {path}"
@@ -1351,6 +1384,8 @@ def _move_files(root: Path, payload: dict):
 
     Preserve recorded permissions when publishing copied NFO files. Accept legacy
     journals without a recorded `mode`, retaining their private temporary-file mode.
+    A move's optional `temporary` path stages case-only renames and lets recovery
+    continue after either rename without replacing another directory entry.
 
     Args:
         root: Absolute media library root.
@@ -1366,6 +1401,22 @@ def _move_files(root: Path, payload: dict):
         source, destination = Path(move["src"]), Path(move["dst"])
         _safe_path(root, source)
         _safe_path(root, destination)
+        if temporary := move.get("temporary"):
+            staging = Path(temporary)
+            _safe_path(root, staging)
+            if os.path.lexists(staging):
+                source = staging
+            elif os.path.lexists(source):
+                if _fingerprint(source) != move["identity"]:
+                    raise OrganizePendingError(
+                        f"source changed during organization: {source}"
+                    )
+                if os.path.lexists(destination) and not _case_alias(
+                    source, destination
+                ):
+                    raise FileExistsError(str(destination))
+                rename_exclusive(source, staging)
+                source = staging
         if source.exists() or source.is_symlink():
             if _fingerprint(source) != move["identity"]:
                 raise OrganizePendingError(
@@ -1606,7 +1657,8 @@ async def _finish_reading(
                 if (item.dir if reading["directory"] else item.path) != str(source):
                     raise ContentError("content_changed")
                 if (
-                    item.parent_id is not None
+                    reading["directory"]
+                    and item.parent_id is not None
                     and target.parent != root
                     and not await MediaItem.filter(
                         lib_id=lib.id, path=str(target.parent)
@@ -2213,7 +2265,9 @@ async def plan_directory_move(
     """Plan moving a whole work directory to a new, unused directory.
 
     Every file below the directory moves with it, the directory item keeps its
-    identity, and every item below it is rebased.
+    identity, and every item below it is rebased, including absolute local image
+    references. A tree without files is moved as a directory so empty containers
+    and their subdirectories are retained.
 
     Args:
         lib: Video library whose lock the caller holds when applying.
@@ -2251,6 +2305,9 @@ async def plan_directory_move(
         for name in files:
             path = base / name
             moves[str(path)] = str(directory / path.relative_to(source))
+    empty = not moves
+    if empty:
+        moves[str(source)] = str(directory)
     # the work's own NFO is named after its directory
     own = source / f"{source.name}.nfo"
     if str(own) in moves:
@@ -2287,12 +2344,12 @@ async def plan_directory_move(
         }
         if row.id == parent.id:
             data["name"] = directory.name
-        for name in ("nfo_path", "danmaku_path"):
+        for name in ("nfo_path", "danmaku_path", "poster", "backdrop"):
             value = getattr(row, name)
             if value and rebase(value) != value:
                 data[name] = rebase(value)
         updates.append(data)
-    nfo_edits = await asyncio.to_thread(_nfo_edits, moves)
+    nfo_edits = [] if empty else await asyncio.to_thread(_nfo_edits, moves)
     await _validate_downloads(
         lib, set(moves) | set(moves.values()) | {edit["path"] for edit in nfo_edits}
     )

@@ -20,6 +20,7 @@ from app.core.exceptions import ForbiddenException, NotFoundException
 from app.core.media import organizer
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
+from app.core.media.handlers.reading import ReadingSource
 from app.core.media.organizer import recover_organizing
 from app.models.ai import AIProviderPreset
 from app.models.assistant import ConversationCreate
@@ -45,6 +46,7 @@ from app.services.media import MediaItemService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.utils.json import dumps
+from tests.test_core_media_reading_organizer import _source as reading_source
 from tests.test_core_media_reading_organizer import _work as reading_work
 from tests.test_download_plan_changes import latest_request
 from tests.test_library_config import MOVIE_TEMPLATE, TV_TEMPLATE
@@ -2144,5 +2146,398 @@ def test_item_download_guard(tmp_path, folder):
             assert result["reasons"] == {"download_active": 1}
             assert source.exists()
             assert await MediaItem.filter(lib_id=lib.id).count() == 3
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["loose", "video", "novel"])
+@pytest.mark.parametrize("mutation", ["replace", "rewrite"])
+def test_revert_identity(tmp_path, kind, mutation):
+    async def run():
+        async with database():
+            root = tmp_path / "library"
+            name = (
+                "Book/old.txt"
+                if kind == "novel"
+                else "old.mkv"
+                if kind == "video"
+                else "old.url"
+            )
+            write(root, name)
+            source = root / name
+            lib = await MediaLib.create(
+                name="Identity",
+                lib_type=LibType.NOVEL if kind == "novel" else LibType.TV_SHOW,
+                dir=str(root),
+                priority=1,
+            )
+            fields = {"extensions": ["url"]}
+            if kind != "loose":
+                item = await MediaItem.create(
+                    lib=lib,
+                    path=str(source),
+                    dir=str(source.parent),
+                    name="old",
+                    format=MediaFormat.TXT if kind == "novel" else None,
+                )
+                fields = {"item_ids": [item.id]}
+            change = renaming(lib, "^old$", "new", **fields)
+            result = await confirm(
+                await MediaBatchService.review(change, ADMIN), change
+            )
+            assert result["done"] == 1
+            target = source.with_stem("new")
+            if mutation == "replace":
+                target.unlink()
+            target.write_bytes(b"replacement")
+
+            review = await MediaBatchService.review(
+                reverting(lib, result["batch_id"]), ADMIN
+            )
+
+            assert review["planned"]["units"] == 0
+            assert review["blocked"]["reasons"] == {"content_changed": 1}
+            assert target.read_bytes() == b"replacement"
+            assert not source.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.CBZ, MediaFormat.ZIP])
+def test_archive_chapter_rename(tmp_path, format):
+    async def run():
+        async with database():
+            root = tmp_path / "library"
+            directory = root / "Series/Chapter"
+            reading_source(directory, format, "Chapter")
+            lib = await MediaLib.create(
+                name="Archives", lib_type=LibType.COMIC, dir=str(root), priority=1
+            )
+            parent = await MediaItemService.create_reading(
+                lib.id, ReadingSource(directory.parent, None)
+            )
+            source = directory / f"old.{format.value.upper()}"
+            item = await MediaItemService.create_reading(
+                lib.id, ReadingSource(source, format, directory.parent)
+            )
+            change = renaming(lib, "^old$", "new", item_ids=[item.id])
+
+            result = await confirm(
+                await MediaBatchService.review(change, ADMIN), change
+            )
+            await item.refresh_from_db()
+
+            assert result["done"] == 1
+            assert item.path == str(source.with_stem("new"))
+            assert item.parent_id == parent.id
+            assert await MediaItem.filter(lib_id=lib.id).count() == 2
+            undo = reverting(lib, result["batch_id"])
+            reverted = await confirm(await MediaBatchService.review(undo, ADMIN), undo)
+            await item.refresh_from_db()
+            assert reverted["done"] == 1 and item.path == str(source)
+            assert source.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reference", ["absolute", "relative", "remote"])
+def test_folder_artwork(tmp_path, reference):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            root = Path(lib.dir)
+            write(root, "Show/poster.jpg", "Show/fanart.jpg", "Show/episode-thumb.jpg")
+            values = {
+                "absolute": (
+                    str(root / "Show/poster.jpg"),
+                    str(root / "Show/fanart.jpg"),
+                ),
+                "relative": ("poster.jpg", "fanart.jpg"),
+                "remote": (
+                    "https://example.test/poster.jpg",
+                    "https://example.test/fanart.jpg",
+                ),
+            }[reference]
+            await MediaItem.filter(id=parent.id).update(
+                poster=values[0], backdrop=values[1]
+            )
+            await MediaItem.filter(id=episodes[0].id).update(
+                poster=str(root / "Show/episode-thumb.jpg")
+            )
+            change = moving(lib, "Renamed", item_ids=[parent.id])
+
+            result = await confirm(
+                await MediaBatchService.review(change, ADMIN), change
+            )
+            await parent.refresh_from_db()
+            await episodes[0].refresh_from_db()
+
+            assert result["done"] == 1
+            expected = (
+                (str(root / "Renamed/poster.jpg"), str(root / "Renamed/fanart.jpg"))
+                if reference == "absolute"
+                else values
+            )
+            assert (parent.poster, parent.backdrop) == expected
+            assert episodes[0].poster == str(root / "Renamed/episode-thumb.jpg")
+            assert Path(episodes[0].poster).exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_empty_work_move(tmp_path, nested):
+    async def run():
+        async with database():
+            root = tmp_path / "library"
+            source = root / "Empty"
+            (source / "A/B" if nested else source).mkdir(parents=True)
+            lib = await MediaLib.create(
+                name="Empty", lib_type=LibType.TV_SHOW, dir=str(root), priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(source), dir=str(source), name="Empty"
+            )
+            change = moving(lib, "Target", item_ids=[item.id])
+
+            result = await confirm(
+                await MediaBatchService.review(change, ADMIN), change
+            )
+            await item.refresh_from_db()
+
+            assert result["done"] == 1
+            assert Path(item.path).is_dir() and not source.exists()
+            if nested:
+                assert (Path(item.path) / "A/B").is_dir()
+            undo = reverting(lib, result["batch_id"])
+            reverted = await confirm(await MediaBatchService.review(undo, ADMIN), undo)
+            assert reverted["done"] == 1 and source.is_dir()
+            assert not (root / "Target").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
+def test_reading_case_rename(tmp_path, format):
+    async def run():
+        async with database():
+            lib, item = await reading_work(tmp_path, format)
+            lib.rename_template = None
+            await lib.save(update_fields=["rename_template"])
+            source = Path(item.path)
+            if format == MediaFormat.TXT:
+                source.with_suffix(".opf").write_bytes(
+                    (source.parent / "metadata.opf").read_bytes()
+                )
+            name = source.stem if format == MediaFormat.TXT else source.name
+            change = renaming(lib, f"^{name}$", name.upper(), item_ids=[item.id])
+
+            review = await MediaBatchService.review(change, ADMIN)
+            assert review["valid"], review
+            result = await confirm(review, change)
+            await item.refresh_from_db()
+
+            assert result["done"] == 1
+            target = (
+                source.with_stem(name.upper())
+                if format == MediaFormat.TXT
+                else source.with_name(name.upper())
+            )
+            assert item.path == str(target) and target.exists()
+            assert target.name in {path.name for path in target.parent.iterdir()}
+            if format == MediaFormat.TXT:
+                assert target.with_suffix(".opf").name in {
+                    path.name for path in target.parent.iterdir()
+                }
+            undo = reverting(lib, result["batch_id"])
+            reverted = await confirm(await MediaBatchService.review(undo, ADMIN), undo)
+            await item.refresh_from_db()
+            assert reverted["done"] == 1 and item.path == str(source)
+            assert source.name in {path.name for path in source.parent.iterdir()}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["tv", "novel", "comic"])
+@pytest.mark.parametrize("allowed", [False, True])
+def test_move_owners(tmp_path, kind, allowed):
+    async def run():
+        async with database():
+            if kind == "tv":
+                lib, _, _ = await show(tmp_path)
+                extension = "mkv"
+                count = 2
+            else:
+                format = MediaFormat.TXT if kind == "novel" else MediaFormat.CBZ
+                lib, _ = await reading_work(tmp_path, format)
+                lib.rename_template = None
+                await lib.save(update_fields=["rename_template"])
+                extension, count = format.value, 1
+            change = moving(
+                lib,
+                "Target",
+                extensions=[extension],
+                owners=["indexed"] if allowed else ["loose"],
+            )
+
+            review = await MediaBatchService.review(change, ADMIN)
+
+            assert review["planned"]["units"] == (count if allowed else 0)
+            if allowed:
+                result = await confirm(review, change)
+                assert result["done"] == count
+            else:
+                assert review["blocked"]["reasons"] == {"owner_excluded": count}
+                assert not (Path(lib.dir) / "Target").exists()
+
+    asyncio.run(run())
+
+
+def test_archive_parent_revert(tmp_path):
+    async def run():
+        async with database():
+            root = tmp_path / "library"
+            directory = root / "Series/Chapter"
+            reading_source(directory, MediaFormat.CBZ, "Chapter")
+            lib = await MediaLib.create(
+                name="Archives", lib_type=LibType.COMIC, dir=str(root), priority=1
+            )
+            parent = await MediaItemService.create_reading(
+                lib.id, ReadingSource(directory.parent, None)
+            )
+            source = directory / "old.CBZ"
+            item = await MediaItemService.create_reading(
+                lib.id, ReadingSource(source, MediaFormat.CBZ, directory.parent)
+            )
+            change = renaming(
+                lib, "^(Series|old)$", r"new-\1", item_ids=[parent.id, item.id]
+            )
+
+            result = await confirm(
+                await MediaBatchService.review(change, ADMIN), change
+            )
+            assert result["done"] == 2
+            assert (root / "new-Series/Chapter/new-old.CBZ").exists()
+            undo = reverting(lib, result["batch_id"])
+            reverted = await confirm(await MediaBatchService.review(undo, ADMIN), undo)
+            await item.refresh_from_db()
+
+            assert reverted["done"] == 2
+            assert item.path == str(source) and source.exists()
+            assert item.parent_id == parent.id
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("checkpoint", [1, 2, 4])
+def test_case_recovery(tmp_path, monkeypatch, checkpoint):
+    async def run():
+        async with database():
+            lib, item = await reading_work(tmp_path, MediaFormat.TXT)
+            lib.rename_template = None
+            await lib.save(update_fields=["rename_template"])
+            source = Path(item.path)
+            source.with_suffix(".opf").write_bytes(
+                (source.parent / "metadata.opf").read_bytes()
+            )
+            before = source.read_bytes()
+            change = renaming(lib, "^old$", "OLD", item_ids=[item.id])
+            review = await MediaBatchService.review(change, ADMIN)
+            entry = await MediaBatchEntry.get(receipt_id=review["batch_id"])
+            original = organizer.rename_exclusive
+            writes = 0
+
+            def interrupt(old, new):
+                nonlocal writes
+                original(old, new)
+                writes += 1
+                if writes == checkpoint:
+                    raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                patch.setattr(organizer, "rename_exclusive", interrupt)
+                with pytest.raises(asyncio.CancelledError):
+                    await MediaBatchService._rename_item(entry, lib, Path(lib.dir))
+
+            assert await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+            await item.refresh_from_db()
+            target = source.with_stem("OLD")
+            names = {path.name for path in target.parent.iterdir()}
+
+            assert item.path == str(target) and target.read_bytes() == before
+            assert "OLD.TXT" in names and "OLD.opf" in names
+            assert not any(name.startswith(".organizing-") for name in names)
+            assert not await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+
+    asyncio.run(run())
+
+
+def test_case_recovery_conflict(tmp_path, monkeypatch):
+    async def run():
+        async with database():
+            lib, item = await reading_work(tmp_path, MediaFormat.TXT)
+            lib.rename_template = None
+            await lib.save(update_fields=["rename_template"])
+            source = Path(item.path)
+            before = source.read_bytes()
+            change = renaming(lib, "^old$", "OLD", item_ids=[item.id])
+            review = await MediaBatchService.review(change, ADMIN)
+            entry = await MediaBatchEntry.get(receipt_id=review["batch_id"])
+            original = organizer.rename_exclusive
+
+            def interrupt(old, new):
+                original(old, new)
+                source.write_bytes(b"unrelated replacement")
+                raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                patch.setattr(organizer, "rename_exclusive", interrupt)
+                with pytest.raises(asyncio.CancelledError):
+                    await MediaBatchService._rename_item(entry, lib, Path(lib.dir))
+            with pytest.raises(organizer.OrganizePendingError):
+                async with library_lock(lib.dir):
+                    await recover_organizing(lib)
+            assert source.read_bytes() == b"unrelated replacement"
+            assert await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+            source.unlink()
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+            await item.refresh_from_db()
+
+            assert item.path == str(source.with_stem("OLD"))
+            assert Path(item.path).read_bytes() == before
+
+    asyncio.run(run())
+
+
+def test_empty_work_link(tmp_path):
+    async def run():
+        async with database():
+            root = tmp_path / "library"
+            source = root / "Empty"
+            (source / "Child").mkdir(parents=True)
+            (root / "Alias").symlink_to(source / "Child", target_is_directory=True)
+            lib = await MediaLib.create(
+                name="Empty", lib_type=LibType.TV_SHOW, dir=str(root), priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(source), dir=str(source), name="Empty"
+            )
+            change = moving(lib, "Target", item_ids=[item.id])
+
+            review = await MediaBatchService.review(change, ADMIN)
+
+            assert not review["valid"]
+            assert review["blocked"]["reasons"] == {"organize_blocked": 1}
+            assert (root / "Alias").is_dir()
+            assert source.exists() and not (root / "Target").exists()
 
     asyncio.run(run())

@@ -11,6 +11,7 @@ from pathlib import Path
 from time import monotonic, time_ns
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from app.core.media.handlers.reading import (
     COVER_NAMES,
@@ -20,6 +21,7 @@ from app.core.media.handlers.reading import (
 from app.core.media.naming import _RESERVED, _UNSAFE
 from app.core.media.organizer import (
     _SUBTITLES,
+    _case_alias,
     _fingerprint,
     _reference_key,
     _safe_path,
@@ -1106,13 +1108,14 @@ def plan_reading_relocation(
 ) -> dict[str, Any]:
     """Freeze a reading file or container move before changing the filesystem.
 
-    A body file takes its same-stem OPF along. Persist the returned payload as
-    an organization journal before applying it under the library lock.
+    A body file takes its same-stem OPF along. Case-only renames include a unique
+    temporary path for exclusive renaming and recovery on every filesystem.
+    Persist the returned payload before applying it under the library lock.
 
     Args:
         root: Absolute library root.
         source: Body file, work directory or chapter directory to rename.
-        target: New path, which must not exist.
+        target: Unused new path or a case-only alias of the source.
         create_parent: Whether moving a chapter may create its destination parent.
 
     Returns:
@@ -1138,13 +1141,16 @@ def plan_reading_relocation(
         for sibling in source.parent.iterdir():
             if sibling.name.casefold() == wanted and sibling.is_file():
                 renames.append((sibling, target.with_suffix(sibling.suffix)))
-    if any(os.path.lexists(new) for _, new in renames):
+    if any(os.path.lexists(new) and not _case_alias(old, new) for old, new in renames):
         raise FileExistsError(str(target))
+    moves = []
+    for old, new in renames:
+        move = {"src": str(old), "dst": str(new), "identity": _fingerprint(old)}
+        if old != new and str(old).casefold() == str(new).casefold():
+            move["temporary"] = str(old.with_name(f".organizing-{uuid4().hex}"))
+        moves.append(move)
     return {
-        "moves": [
-            {"src": str(old), "dst": str(new), "identity": _fingerprint(old)}
-            for old, new in renames
-        ],
+        "moves": moves,
         "mapping": {str(old): str(new) for old, new in renames},
         "creates": [],
         "symlinks": [],
@@ -1169,13 +1175,29 @@ def restore_reading(root: Path, moves: list[dict[str, Any]]) -> bool:
         try:
             _safe_path(root, old)
             _safe_path(root, new)
+            temporary = Path(move["temporary"]) if move.get("temporary") else None
+            if temporary is not None:
+                _safe_path(root, temporary)
+            current = (
+                temporary
+                if temporary is not None and os.path.lexists(temporary)
+                else new
+            )
             if os.path.lexists(old):
-                if _fingerprint(old) == move["identity"] and not os.path.lexists(new):
+                if current == new and temporary is not None and _case_alias(old, new):
+                    if _fingerprint(new) != move["identity"]:
+                        return False
+                    rename_exclusive(new, temporary)
+                    current = temporary
+                elif _fingerprint(old) == move["identity"] and not os.path.lexists(
+                    current
+                ):
                     continue
+                else:
+                    return False
+            if _fingerprint(current) != move["identity"]:
                 return False
-            if _fingerprint(new) != move["identity"]:
-                return False
-            rename_exclusive(new, old)
+            rename_exclusive(current, old)
         except (OSError, ValueError):
             return False
     return True

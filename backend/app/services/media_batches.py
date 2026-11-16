@@ -49,6 +49,7 @@ from app.core.media.coordination import library_lock, notify_media_events
 from app.core.media.organizer import (
     OrganizeDeferredError,
     OrganizePendingError,
+    _case_alias,
     _fingerprint,
     move_directory,
     move_episode,
@@ -813,7 +814,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     }
                 )
             for match in scan.matches:
-                if match.owner == FileOwner.INDEXED and match.item_id in rows:
+                if (
+                    match.owner == FileOwner.INDEXED
+                    and match.owner in change.owners
+                    and match.item_id in rows
+                ):
                     selected.append(rows[match.item_id])
                 else:
                     entries.append(
@@ -827,6 +832,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             status="blocked",
                             reason="follows_item"
                             if match.owner == FileOwner.COMPANION
+                            and match.owner in change.owners
                             else "owner_excluded",
                         )
                     )
@@ -1238,8 +1244,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         Returns:
             One unit per entry that batch applied, in reverse order with source
             and destination swapped; blocked matches where the file or item is
-            no longer where that batch left it or the former path is taken;
-            located issues; and the operation the units are applied with.
+            no longer where that batch left it, its body changed or the former
+            path is taken; located issues; and the operation the units use.
         """
         receipt = await MediaChangeReceipt.get_or_none(
             id=change.batch_id, action=MediaAction.BATCH, lib_id=change.library_id
@@ -1261,7 +1267,26 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         root = index.root
         reading = index.lib_type in (LibType.NOVEL, LibType.COMIC)
         entries: list[PlanEntry] = []
-        restored: list[Path] = []
+        restored: list[tuple[Path, Path]] = []
+
+        def observed(path: Path) -> Path:
+            """Resolve a planned restored path to its current location.
+
+            Args:
+                path: Path after earlier directory units in this undo plan.
+
+            Returns:
+                The existing path before those directories have been restored.
+            """
+            return next(
+                (
+                    current / path.relative_to(former)
+                    for former, current in reversed(restored)
+                    if path.is_relative_to(former)
+                ),
+                path,
+            )
+
         for record in done:
             source, target = root / (record.dst or ""), root / record.src
             entry = PlanEntry(
@@ -1274,22 +1299,26 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 files=record.files,
                 dst=record.src,
             )
-            # a folder renamed back earlier in this plan carries its content along
-            carried = any(source.is_relative_to(path) for path in restored)
+            # earlier directory units will carry this source to its planned path
+            current_source, current_target = observed(source), observed(target)
             item = rows.get(record.item_id or 0)
             reason = None
             try:
-                directory = await asyncio.to_thread(source.is_dir)
-                if record.kind == "item" and item is None:
+                directory = await asyncio.to_thread(current_source.is_dir)
+                if (
+                    record.kind == "item"
+                    and item is None
+                    or not await asyncio.to_thread(os.path.lexists, current_source)
+                ):
                     reason = "missing"
-                elif carried:
-                    entry.identity = [record.item_id] if reading else None
-                elif not await asyncio.to_thread(os.path.lexists, source):
-                    reason = "missing"
-                elif await asyncio.to_thread(os.path.lexists, target):
+                elif await asyncio.to_thread(
+                    os.path.lexists, current_target
+                ) and not await asyncio.to_thread(
+                    _case_alias, current_source, current_target
+                ):
                     reason = "destination_exists"
                 elif record.kind == "item" and item is not None:
-                    if str(source) not in (item.path, item.dir):
+                    if str(current_source) not in (item.path, item.dir):
                         reason = "item_changed"
                     elif directory and reading:
                         entry.identity = [item.id]
@@ -1297,12 +1326,22 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         entry.identity = sorted(
                             row.id for row in items if row.parent_id == item.id
                         )
+                        if entry.identity != record.identity:
+                            reason = "content_changed"
                     else:
-                        entry.identity = await asyncio.to_thread(_fingerprint, source)
+                        entry.identity = await asyncio.to_thread(
+                            _fingerprint, current_source
+                        )
+                        if entry.identity != record.identity:
+                            reason = "content_changed"
                 else:
-                    entry.identity = await asyncio.to_thread(_fingerprint, source)
+                    entry.identity = await asyncio.to_thread(
+                        _fingerprint, current_source
+                    )
+                    if entry.identity != record.identity:
+                        reason = "content_changed"
                 if reason is None and directory:
-                    restored.append(target)
+                    restored.append((target, current_source))
             except OSError:
                 reason = "missing"
             if reason:
@@ -1348,6 +1387,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             )
         rows = {item.id: item for item in items}
         selected: list[MediaItem] = []
+        entries: list[PlanEntry] = []
         if change.item_ids:
             missing = [item_id for item_id in change.item_ids if item_id not in rows]
             if missing:
@@ -1380,11 +1420,26 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         "choose a narrower directory.",
                     }
                 )
-            selected = [
-                rows[match.item_id]
-                for match in scan.matches
-                if match.owner == FileOwner.INDEXED and match.item_id in rows
-            ]
+            for match in scan.matches:
+                if (
+                    match.owner == FileOwner.INDEXED
+                    and match.owner in change.owners
+                    and match.item_id in rows
+                ):
+                    selected.append(rows[match.item_id])
+                else:
+                    entries.append(
+                        PlanEntry(
+                            "file",
+                            match.owner,
+                            relative(index.root, match.path),
+                            match.size,
+                            match.identity,
+                            match.item_id,
+                            status="blocked",
+                            reason="owner_excluded",
+                        )
+                    )
         if issues:
             return [], issues, 0
 
@@ -1404,7 +1459,6 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         )
         # a work folder renamed onto the destination makes it unavailable to others
         taken = occupied
-        entries: list[PlanEntry] = []
         unchanged = 0
         claimed: set[str] = set()
         seen: set[Path] = set()
