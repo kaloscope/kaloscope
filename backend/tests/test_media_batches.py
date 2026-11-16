@@ -6,17 +6,25 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sanic import Sanic
 from tortoise import Tortoise
+from tortoise.exceptions import OperationalError
 
 from app.core.ai import tools
 from app.core.config import KaloscopeConfig
+from app.core.dl.driver import DownloadState
 from app.core.exceptions import ForbiddenException, NotFoundException
+from app.core.media import organizer
+from app.core.media.common import ContentError
+from app.core.media.coordination import library_lock
+from app.core.media.organizer import recover_organizing
 from app.models.ai import AIProviderPreset
 from app.models.assistant import ConversationCreate
 from app.models.base import Pageable
+from app.models.download import Downloader, DownloadTask
 from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
 from app.models.media import (
     LibType,
@@ -30,9 +38,10 @@ from app.models.media import (
     MediaLib,
     NFOType,
 )
-from app.models.user import UserInfo, UserRole
+from app.models.user import User, UserHistory, UserInfo, UserRole
 from app.services import media_batches as service
 from app.services.mcp import MCPAccessTokenService
+from app.services.media import MediaItemService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.utils.json import dumps
@@ -50,6 +59,7 @@ from tests.test_media_changes import (
 )
 from tests.test_services_assistant import configure
 from tests.test_services_media_reading import _client, _user
+from tests.test_services_user_history import _entry
 from tests.test_workflow_runs import converse, names, scripted
 
 ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN, perms=None))
@@ -1786,5 +1796,353 @@ def test_undo_conversation(monkeypatch, tmp_path):
             assert names(offered[6]) == tools.BATCH_FOCUS
             assert (folder / "S01E01.mkv").is_file()
             assert not (folder / "XE01.mkv").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutation", ["rename", "replace", "rewrite"])
+def test_leftover_changes(tmp_path, mutation):
+    async def run():
+        async with database():
+            lib, _, _ = await show(tmp_path)
+            root = Path(lib.dir)
+            write(root, "Junk/old.url")
+            source = root / "Junk/old.url"
+            change = deletion(lib, empty_dirs=True, leftovers=True, directory="Junk")
+            review = await MediaBatchService.review(change, ADMIN)
+
+            if mutation == "rename":
+                source.rename(source.with_name("new.url"))
+            else:
+                if mutation == "replace":
+                    source.unlink()
+                source.write_bytes(b"y" * 10)
+            result = await confirm(review, change)
+
+            assert result["reasons"] == {"content_changed": 1}
+            assert len(list((root / "Junk").iterdir())) == 1
+
+    asyncio.run(run())
+
+
+def test_legacy_leftover(tmp_path):
+    async def run():
+        async with database():
+            lib, _, _ = await show(tmp_path)
+            root = Path(lib.dir)
+            write(root, "Junk/old.url")
+            change = deletion(lib, empty_dirs=True, leftovers=True, directory="Junk")
+            review = await MediaBatchService.review(change, ADMIN)
+            await MediaBatchEntry.filter(receipt_id=review["batch_id"]).update(
+                identity=[1, 10]
+            )
+
+            result = await confirm(review, change)
+
+            assert result["reasons"] == {"content_changed": 1}
+            assert (root / "Junk/old.url").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("guard", "reason"),
+    [
+        ("companion", "item_changed"),
+        ("download", "download_active"),
+        ("link", "linked"),
+    ],
+)
+def test_delete_guards(tmp_path, guard, reason):
+    async def run():
+        async with database():
+            lib, _, _ = await show(tmp_path)
+            root = Path(lib.dir)
+            write(root, "Staged/episode.zh.srt")
+            source = root / "Staged/episode.zh.srt"
+            change = deletion(lib, name="episode.zh.srt")
+            review = await MediaBatchService.review(change, ADMIN)
+            assert review["planned"]["units"] == 1
+
+            if guard == "companion":
+                write(root, "Staged/episode.mkv")
+                await MediaItem.create(
+                    lib=lib,
+                    dir=str(source.parent),
+                    path=str(source.with_name("episode.mkv")),
+                    name="episode",
+                )
+            elif guard == "download":
+                downloader = await Downloader.create(
+                    name="Active", priority=1, config="{}"
+                )
+                await DownloadTask.create(
+                    downloader=downloader,
+                    dir=str(source.parent),
+                    name="Active",
+                    files=[source.name],
+                    state=DownloadState.DOWNLOADING,
+                )
+            else:
+                (root / "alias.srt").symlink_to(source)
+            result = await confirm(review, change)
+
+            assert result["reasons"] == {reason: 1}
+            assert source.exists()
+
+    asyncio.run(run())
+
+
+def test_last_page_guard(tmp_path):
+    async def run():
+        async with database():
+            root = tmp_path / "comics"
+            write(root, "Book/001.png", "Book/002.png")
+            lib = await MediaLib.create(
+                name="Comics", lib_type=LibType.COMIC, dir=str(root), priority=1
+            )
+            await MediaItem.create(
+                lib=lib,
+                path=str(root / "Book"),
+                dir=str(root / "Book"),
+                name="Book",
+                format=MediaFormat.DIR,
+            )
+            change = deletion(lib, name="001.png", owners=["page"])
+            review = await MediaBatchService.review(change, ADMIN)
+            (root / "Book/002.png").unlink()
+
+            result = await confirm(review, change)
+
+            assert result["reasons"] == {"empties_item": 1}
+            assert (root / "Book/001.png").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("trash", [False, True])
+def test_deletion_mode_changed(tmp_path, monkeypatch, trash):
+    async def run():
+        async with database():
+            lib, _, _ = await show(tmp_path)
+            config = SimpleNamespace(filesystem_trash_mode=trash)
+            monkeypatch.setattr(KaloscopeConfig, "get", lambda: config)
+            change = deletion(lib, name="stray.url")
+            review = await MediaBatchService.review(change, ADMIN)
+            config.filesystem_trash_mode = not trash
+
+            result = await confirm(review, change)
+
+            assert result["stale"] is True
+            assert not result["applied"]
+            assert (Path(lib.dir) / "stray.url").exists()
+            assert not (await MediaChangeReceipt.get(id=review["batch_id"])).claimed
+
+    asyncio.run(run())
+
+
+def test_reading_recovery(tmp_path, monkeypatch):
+    async def run():
+        async with database():
+            root = tmp_path / "books"
+            write(root, "Book/old.txt", "Book/old.opf")
+            lib = await MediaLib.create(
+                name="Books", lib_type=LibType.NOVEL, dir=str(root), priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib,
+                path=str(root / "Book/old.txt"),
+                dir=str(root / "Book"),
+                name="old",
+                format=MediaFormat.TXT,
+            )
+            change = renaming(lib, "^old$", "new", item_ids=[item.id])
+            review = await MediaBatchService.review(change, ADMIN)
+            original = MediaItemService.move_reading_file
+            monkeypatch.setattr(
+                MediaItemService,
+                "move_reading_file",
+                AsyncMock(side_effect=OperationalError("database unavailable")),
+            )
+
+            result = await confirm(review, change)
+
+            assert result["reasons"] == {"organize_pending": 1}
+            assert await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+            monkeypatch.setattr(MediaItemService, "move_reading_file", original)
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+            await item.refresh_from_db()
+
+            assert item.path == str(root / "Book/new.txt")
+            assert Path(item.path).exists()
+            assert (root / "Book/new.opf").exists()
+            assert not await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+            assert await MediaItem.filter(lib_id=lib.id).count() == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["before_files", "after_files", "index"])
+def test_reading_interruption(tmp_path, monkeypatch, stage):
+    async def run():
+        async with database():
+            lib, item = await reading_work(tmp_path, MediaFormat.TXT)
+            lib.rename_template = None
+            await lib.save(update_fields=["rename_template"])
+            source = Path(item.path)
+            snapshot = item.original
+            owner = await User.create(
+                username="Reader", password="unused", role="admin"
+            )
+            history = await UserHistory.create(user=owner, **await _entry(item))
+            locator = history.locator
+            change = renaming(lib, "^old$", "new", item_ids=[item.id])
+            review = await MediaBatchService.review(change, ADMIN)
+            entry = await MediaBatchEntry.get(receipt_id=review["batch_id"])
+            original = organizer._move_files
+
+            def interrupt(root, payload):
+                if stage == "after_files":
+                    original(root, payload)
+                raise asyncio.CancelledError
+
+            with monkeypatch.context() as patch:
+                if stage == "index":
+                    patch.setattr(
+                        MediaItemService,
+                        "move_reading_file",
+                        AsyncMock(side_effect=asyncio.CancelledError),
+                    )
+                else:
+                    patch.setattr(organizer, "_move_files", interrupt)
+                with pytest.raises(asyncio.CancelledError):
+                    await MediaBatchService._rename_item(entry, lib, Path(lib.dir))
+
+            assert await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+            async with library_lock(lib.dir):
+                await recover_organizing(lib)
+                assert await recover_organizing(lib) == {}
+            await item.refresh_from_db()
+            await history.refresh_from_db()
+
+            assert item.path == str(source.with_stem("new"))
+            assert Path(item.path).exists() and not source.exists()
+            assert item.original == snapshot
+            assert history.rel_id == item.id and history.locator == locator
+            assert not await MediaEvent.filter(
+                lib_id=lib.id, event_type="organize"
+            ).exists()
+
+    asyncio.run(run())
+
+
+def test_reading_collection_recovery(tmp_path, monkeypatch):
+    async def run():
+        async with database():
+            env = await comics(tmp_path)
+            item = env.chapters[2]
+            root = Path(env.lib.dir)
+            change = moving(env.lib, "New Collection", item_ids=[item.id])
+            review = await MediaBatchService.review(change, ADMIN)
+            original = MediaItemService.move_reading_directory
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    MediaItemService,
+                    "move_reading_directory",
+                    AsyncMock(side_effect=OperationalError("database unavailable")),
+                )
+                result = await confirm(review, change)
+
+            assert result["reasons"] == {"organize_pending": 1}
+            assert not await MediaItem.filter(
+                path=str(root / "New Collection")
+            ).exists()
+            async with library_lock(env.lib.dir):
+                await recover_organizing(env.lib)
+            await item.refresh_from_db()
+            parent = await MediaItem.get(id=item.parent_id)
+
+            assert parent.path == str(root / "New Collection")
+            assert item.path == str(root / "New Collection/[Scan] Vol 2")
+            assert (Path(item.path) / "000.png").exists()
+            assert not await MediaEvent.filter(
+                lib_id=env.lib.id, event_type="organize"
+            ).exists()
+            assert MediaItemService.move_reading_directory == original
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_reading_rollback(tmp_path, monkeypatch, occupied):
+    async def run():
+        async with database():
+            lib, item = await reading_work(tmp_path, MediaFormat.TXT)
+            lib.rename_template = None
+            await lib.save(update_fields=["rename_template"])
+            source = Path(item.path)
+            before = source.read_bytes()
+            change = renaming(lib, "^old$", "new", item_ids=[item.id])
+            review = await MediaBatchService.review(change, ADMIN)
+
+            async def refuse(*args, **kwargs):
+                if occupied:
+                    source.write_bytes(b"replacement")
+                raise ContentError("unsupported_layout")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(MediaItemService, "move_reading_file", refuse)
+                result = await confirm(review, change)
+            await item.refresh_from_db()
+
+            assert result["reasons"] == {
+                "organize_pending" if occupied else "organize_blocked": 1
+            }
+            assert item.path == str(source)
+            assert source.read_bytes() == (b"replacement" if occupied else before)
+            assert (
+                await MediaEvent.filter(lib_id=lib.id, event_type="organize").exists()
+                is occupied
+            )
+            if occupied:
+                assert source.with_stem("new").read_bytes() == before
+                source.unlink()
+                async with library_lock(lib.dir):
+                    await recover_organizing(lib)
+                await item.refresh_from_db()
+                assert item.path == str(source.with_stem("new"))
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("folder", [False, True])
+def test_item_download_guard(tmp_path, folder):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            change = deletion(lib, item_ids=[parent.id if folder else episodes[0].id])
+            review = await MediaBatchService.review(change, ADMIN)
+            downloader = await Downloader.create(name="Active", priority=1, config="{}")
+            source = Path(episodes[0].path)
+            await DownloadTask.create(
+                downloader=downloader,
+                dir=str(source.parent),
+                name="Active",
+                files=[source.name],
+                state=DownloadState.DOWNLOADING,
+            )
+
+            result = await confirm(review, change)
+
+            assert result["reasons"] == {"download_active": 1}
+            assert source.exists()
+            assert await MediaItem.filter(lib_id=lib.id).count() == 3
 
     asyncio.run(run())

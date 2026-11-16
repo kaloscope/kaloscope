@@ -495,6 +495,7 @@ def scan_files(
     min_size: int | None = None,
     max_size: int | None = None,
     whole: bool = False,
+    fresh: bool = False,
     limit: int = SCAN_LIMIT,
     seconds: float = SCAN_SECONDS,
 ) -> FileScan:
@@ -518,6 +519,7 @@ def scan_files(
         max_size: Largest matching size in bytes, if any.
         whole: Walk the whole library so symlinks outside the directory are
             known. Matches still come from the directory only.
+        fresh: Read current file attributes instead of reusing a remembered walk.
         limit: Entries to visit before stopping with `truncated`.
         seconds: Wall-clock time to spend before stopping with `truncated`.
 
@@ -539,7 +541,9 @@ def scan_files(
     suffixes = set(extensions or ())
     scan = FileScan()
     start = root if whole else target
-    walk = _walk(start, _WALKS.get(str(root)), limit, monotonic() + seconds)
+    walk = _walk(
+        start, None if fresh else _WALKS.get(str(root)), limit, monotonic() + seconds
+    )
     scan.truncated = walk.truncated
     if start == root and not walk.truncated and walk.files <= WALK_FILES:
         _WALKS.pop(str(root), None)
@@ -1097,33 +1101,36 @@ def rename_files(
     return outcomes
 
 
-def relocate_reading(root: Path, source: Path, target: Path) -> list[tuple[Path, Path]]:
-    """Rename a reading body file or container on disk, under the library lock.
+def plan_reading_relocation(
+    root: Path, source: Path, target: Path, *, create_parent: bool = False
+) -> dict[str, Any]:
+    """Freeze a reading file or container move before changing the filesystem.
 
-    Run with `write_in_thread`. A body file takes its same-stem OPF along. The
-    index is updated afterwards by the service that carries an observed move.
+    A body file takes its same-stem OPF along. Persist the returned payload as
+    an organization journal before applying it under the library lock.
 
     Args:
         root: Absolute library root.
         source: Body file, work directory or chapter directory to rename.
-        target: New path, which must not exist and whose parent must exist.
+        target: New path, which must not exist.
+        create_parent: Whether moving a chapter may create its destination parent.
 
     Returns:
-        The renames performed, so the caller can undo them if the index refuses.
+        File identities, path mappings and the existing executor's empty lists.
 
     Raises:
         FileExistsError: If the target is taken.
-        FileNotFoundError: If the source or the target's parent is missing.
+        FileNotFoundError: If the source or a required target parent is missing.
         ValueError: If a path is unsafe or the source is a symlink.
-        OSError: If a rename fails; renames already done are undone first.
+        OSError: If file attributes cannot be read.
     """
-    from app.utils.disk import rename_exclusive
-
     _safe_path(root, source)
     _safe_path(root, target)
     if source.is_symlink():
         raise ValueError("renaming a linked source is not supported")
-    if not os.path.lexists(source) or not target.parent.is_dir():
+    if not os.path.lexists(source) or (
+        not create_parent and not target.parent.is_dir()
+    ):
         raise FileNotFoundError(str(source))
     renames = [(source, target)]
     if source.is_file():
@@ -1133,29 +1140,45 @@ def relocate_reading(root: Path, source: Path, target: Path) -> list[tuple[Path,
                 renames.append((sibling, target.with_suffix(sibling.suffix)))
     if any(os.path.lexists(new) for _, new in renames):
         raise FileExistsError(str(target))
-    done: list[tuple[Path, Path]] = []
-    try:
-        for old, new in renames:
-            rename_exclusive(old, new)
-            done.append((old, new))
-    except OSError:
-        restore_reading(done)
-        raise
-    return done
+    return {
+        "moves": [
+            {"src": str(old), "dst": str(new), "identity": _fingerprint(old)}
+            for old, new in renames
+        ],
+        "mapping": {str(old): str(new) for old, new in renames},
+        "creates": [],
+        "symlinks": [],
+    }
 
 
-def restore_reading(renames: list[tuple[Path, Path]]):
-    """Undo renames made by `relocate_reading`, newest first.
+def restore_reading(root: Path, moves: list[dict[str, Any]]) -> bool:
+    """Undo journaled reading moves without replacing unrelated files.
 
     Args:
-        renames: Renames that were performed.
+        root: Absolute library root.
+        moves: Source, destination and original fingerprint of each move.
+
+    Returns:
+        Whether every source was restored or was already unchanged. A missing,
+        replaced or occupied path leaves the journal available for recovery.
     """
-    for old, new in reversed(renames):
+    from app.utils.disk import rename_exclusive
+
+    for move in reversed(moves):
+        old, new = Path(move["src"]), Path(move["dst"])
         try:
-            os.rename(new, old)
-        except OSError:
-            # the watcher reconciles whatever could not be put back
-            continue
+            _safe_path(root, old)
+            _safe_path(root, new)
+            if os.path.lexists(old):
+                if _fingerprint(old) == move["identity"] and not os.path.lexists(new):
+                    continue
+                return False
+            if _fingerprint(new) != move["identity"]:
+                return False
+            rename_exclusive(new, old)
+        except (OSError, ValueError):
+            return False
+    return True
 
 
 def empty_directories(

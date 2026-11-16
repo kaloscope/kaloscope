@@ -1469,6 +1469,8 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     legacy plans. Retain filesystem events for reused sources or destinations
     changed by external writers before the database commit.
     Preserve existing original snapshots and capture file information for new parents.
+    Reading relocations reuse the observed-move helpers under the same lock;
+    their index updates, reconciliation events and journal removal commit together.
 
     Args:
         lib: Media library whose lock is held by the caller.
@@ -1485,6 +1487,8 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
         if payload is None:
             raise ValueError("organization event has no payload")
         await write_in_thread(_move_files, Path(lib.dir).absolute(), payload)
+        if "reading" in payload:
+            return await _finish_reading(lib, event, payload)
         async with in_transaction("default"):
             parent = payload["parent"]
             parent_id = None
@@ -1559,6 +1563,91 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
             f"organization {event.id} needs recovery "
             f"before library {lib.id} can continue"
         ) from error
+
+
+async def _finish_reading(
+    lib: MediaLib, event: MediaEvent, payload: dict
+) -> dict[str, str]:
+    """Commit a reading relocation or safely undo an invalid destination.
+
+    The caller holds the library lock and has applied the journal's moves.
+    Database errors and cancellation retain the journal for the next recovery.
+
+    Args:
+        lib: Reading library being recovered.
+        event: Persisted organization event.
+        payload: File identities and the reading source and destination.
+
+    Returns:
+        Applied path mappings, or an empty mapping after a refused move was undone.
+
+    Raises:
+        Exception: If indexing or rollback cannot finish; the journal stays pending.
+    """
+    from tortoise.exceptions import DoesNotExist
+
+    from app.core.media.batch import restore_reading
+    from app.core.media.common import ContentError
+    from app.core.media.handlers.reading import ReadingSource
+    from app.services.media import MediaItemService
+
+    root = Path(lib.dir).absolute()
+    reading = payload["reading"]
+    source, target = Path(reading["source"]), Path(reading["destination"])
+    expected = (
+        target / Path(reading["item_path"]).relative_to(source)
+        if reading["directory"]
+        else target
+    )
+    try:
+        async with in_transaction():
+            item = await MediaItem.get(id=reading["item_id"], lib_id=lib.id)
+            if item.path != str(expected):
+                if (item.dir if reading["directory"] else item.path) != str(source):
+                    raise ContentError("content_changed")
+                if (
+                    item.parent_id is not None
+                    and target.parent != root
+                    and not await MediaItem.filter(
+                        lib_id=lib.id, path=str(target.parent)
+                    ).exists()
+                ):
+                    await MediaItemService.create_reading(
+                        lib.id, ReadingSource(target.parent, None), _locked=True
+                    )
+                await (
+                    MediaItemService.move_reading_directory(
+                        lib.id, source, target, _locked=True
+                    )
+                    if reading["directory"]
+                    else MediaItemService.move_reading_file(
+                        lib.id, source, target, _locked=True
+                    )
+                )
+                await item.refresh_from_db()
+                if item.path != str(expected):
+                    raise ContentError("content_changed")
+            for work in {
+                root / source.relative_to(root).parts[0],
+                root / target.relative_to(root).parts[0],
+            }:
+                await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="modified",
+                    src_path=str(work),
+                    is_directory=True,
+                )
+            await event.delete()
+    except (ContentError, ValueError, DoesNotExist):
+        if not await write_in_thread(restore_reading, root, payload["moves"]):
+            raise
+        if reading["created_parent"]:
+            with suppress(OSError):
+                await write_in_thread(target.parent.rmdir)
+        await event.delete()
+        return {}
+    notify_media_events(lib.id)
+    return payload["mapping"]
 
 
 def _remove_empty_directories(path: Path):

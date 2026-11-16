@@ -35,19 +35,17 @@ from app.core.media.batch import (
     item_matches,
     leftover_directories,
     plan_deletion,
+    plan_reading_relocation,
     plan_renames,
     prune_directories,
     relative,
-    relocate_reading,
     remove_directories,
     rename_files,
-    restore_reading,
     scan_files,
     shown,
 )
 from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock, notify_media_events
-from app.core.media.handlers.reading import ReadingSource
 from app.core.media.organizer import (
     OrganizeDeferredError,
     OrganizePendingError,
@@ -64,7 +62,6 @@ from app.core.media.organizer import (
     shared_validation,
 )
 from app.models.base import Pageable
-from app.models.download import DownloadTask
 from app.models.media import (
     FileOwner,
     LibType,
@@ -79,7 +76,7 @@ from app.models.media import (
 )
 from app.models.user import UserInfo
 from app.services.base import BaseService
-from app.services.media import MediaItemService, MediaLibService, _running_ingests
+from app.services.media import MediaItemService, MediaLibService, _media_activity
 from app.utils.asyncio import write_in_thread
 from app.utils.json import dumps, loads
 
@@ -208,15 +205,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             Item IDs with a queued or running ingest workflow, and files of
             downloads that are still downloading into or transferring to it.
         """
-        _, items = await _running_ingests()
-        paths: set[str] = set()
-        root = Path(lib.dir)
-        for task in await DownloadTask.all():
-            if task.transfer_lib_id == lib.id and task.transfer_pending:
-                paths.update((task.transfer_targets or {}).values())
-            if task.completed_at is None and Path(task.dir).is_relative_to(root):
-                paths.update(str(Path(task.dir) / name) for name in task.files or [])
-        return items, paths
+        return await _media_activity(lib)
 
     @classmethod
     async def review(cls, change: MediaBatch, user: UserInfo) -> dict[str, Any]:
@@ -524,6 +513,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         revision = _digest(
             [
                 cls._library_facts(lib),
+                ("trash" if trash else "permanent") if deleting else None,
                 change.model_dump(mode="json"),
                 [
                     [entry.kind, entry.src, entry.dst, entry.identity]
@@ -1140,7 +1130,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             `item` unit per directory item or collection without children and
             without content of its own, and located issues. With `leftovers`,
             also one `dir` unit per folder holding only loose files, carrying
-            the number of files and their bytes as its identity.
+            every file's relative path and fingerprint as its identity.
         """
         try:
             folders, truncated = await asyncio.to_thread(
@@ -1185,7 +1175,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     FileOwner.LOOSE,
                     relative(index.root, path),
                     size,
-                    [count, size],
+                    [
+                        [relative(index.root, match.path), match.identity]
+                        for match in scan.matches
+                        if match.path.is_relative_to(path)
+                    ],
                     files=count,
                 )
                 for path, count, size in folders
@@ -1778,6 +1772,15 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             receipt is None
             or plan.get("revision") != body.revision
             or plan.get("library") != cls._library_facts(lib)
+            or (
+                change.operation == "delete"
+                and plan.get("deletion")
+                != (
+                    "trash"
+                    if KaloscopeConfig.get().filesystem_trash_mode
+                    else "permanent"
+                )
+            )
         ):
             return {
                 "applied": False,
@@ -1971,7 +1974,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         """Delete a folder that still holds only the loose files that were shown.
 
         Args:
-            entry: Directory entry whose identity is its file count and bytes.
+            entry: Directory entry with the reviewed file paths and fingerprints.
             lib: Library as reviewed.
 
         Returns:
@@ -1989,7 +1992,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             _, busy_paths = await cls._busy(current)
             try:
                 scan = await asyncio.to_thread(
-                    scan_files, index, directory=entry.src, whole=True
+                    scan_files, index, directory=entry.src, whole=True, fresh=True
                 )
             except (OSError, ValueError):
                 return "missing"
@@ -1997,7 +2000,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             # anything new, changed or claimed since the review keeps the folder
             if (
                 scan.truncated
-                or [list(row[1:]) for row in found] != [entry.identity]
+                or len(found) != 1
+                or [
+                    [relative(index.root, match.path), match.identity]
+                    for match in scan.matches
+                ]
+                != entry.identity
                 or found[0][0] != index.root / entry.src
             ):
                 return "content_changed"
@@ -2019,9 +2027,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 )
             )[entry.id]
 
-    @staticmethod
+    @classmethod
     async def _delete_files(
-        chunk: list[MediaBatchEntry], lib: MediaLib, root: Path
+        cls, chunk: list[MediaBatchEntry], lib: MediaLib, root: Path
     ) -> dict[int, str]:
         """Delete a chunk of reviewed files under the library lock.
 
@@ -2041,22 +2049,44 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             ):
                 return {entry.id: "library_changed" for entry in chunk}
             await recover_organizing(current)
-            # a file that became an item's body since the review is left alone
-            indexed = set(
-                await MediaItem.filter(
-                    lib_id=lib.id,
-                    path__in=[
-                        str(root / entry.src)
-                        for entry in chunk
-                        if entry.owner != FileOwner.INDEXED
-                    ],
-                ).values_list("path", flat=True)
+            index, _ = await cls._index(current)
+            busy_items, busy_paths = await cls._busy(current)
+            scope = relative(
+                root, os.path.commonpath([(root / entry.src).parent for entry in chunk])
             )
-            outcomes = {
-                entry.id: "item_changed"
-                for entry in chunk
-                if str(root / entry.src) in indexed
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files, index, directory=scope, whole=True, fresh=True
+                )
+            except (OSError, ValueError):
+                return {entry.id: "content_changed" for entry in chunk}
+            if scan.truncated:
+                return {entry.id: "content_changed" for entry in chunk}
+            selected = {entry.src for entry in chunk}
+            scan.matches = [
+                match
+                for match in scan.matches
+                if relative(root, match.path) in selected
+            ]
+            guards = {
+                entry.src: entry
+                for entry in plan_deletion(
+                    index,
+                    scan,
+                    [FileOwner(entry.owner) for entry in chunk],
+                    busy_items=busy_items,
+                    busy_paths=busy_paths,
+                )
             }
+            outcomes = {}
+            for entry in chunk:
+                guard = guards.get(entry.src)
+                if guard is None:
+                    outcomes[entry.id] = "missing"
+                elif (guard.owner, guard.item_id) != (entry.owner, entry.item_id):
+                    outcomes[entry.id] = "item_changed"
+                elif guard.reason:
+                    outcomes[entry.id] = guard.reason
             outcomes.update(
                 await write_in_thread(
                     delete_files,
@@ -2168,10 +2198,10 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
     ) -> str:
         """Rename or move one novel or comic source and carry its item along.
 
-        The file or folder is renamed under the library lock, then the index is
-        updated by the same service that follows a rename seen on disk, so the
-        item keeps its ID, history and caches. If the index refuses, the rename
-        is undone. Affected works are queued for the library's own reconcile.
+        Persist the file moves before changing disk, then recover them under
+        the library lock with the existing observed-move helpers. Index changes,
+        reconcile events and journal removal commit together. A refused layout
+        is safely undone; database errors or interruption keep a recovery journal.
 
         Args:
             entry: Item entry marked as started.
@@ -2205,76 +2235,51 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     entry.identity or []
                 ):
                     return "content_changed"
-                # chapters may start a collection that does not exist yet
                 started = (
                     item.parent_id is not None
                     and target.parent != root
                     and not await asyncio.to_thread(os.path.lexists, target.parent)
                 )
-                if started:
-                    await write_in_thread(target.parent.mkdir)
-                try:
-                    renames = await write_in_thread(
-                        relocate_reading, root, source, target
-                    )
-                except BaseException:
-                    if started:
-                        with suppress(OSError):
-                            await write_in_thread(target.parent.rmdir)
-                    raise
+                payload = await asyncio.to_thread(
+                    plan_reading_relocation,
+                    root,
+                    source,
+                    target,
+                    create_parent=started,
+                )
+                payload["reading"] = {
+                    "item_id": item.id,
+                    "item_path": item.path,
+                    "source": str(source),
+                    "destination": str(target),
+                    "directory": directory,
+                    "created_parent": started,
+                }
+                await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="organize",
+                    src_path=str(source),
+                    dest_path=str(target),
+                    is_directory=directory,
+                    payload=payload,
+                )
+                notify_media_events(lib.id)
+                mapping = await recover_organizing(current)
+                return (
+                    "done"
+                    if mapping.get(str(source)) == str(target)
+                    else "organize_blocked"
+                )
             except FileNotFoundError:
                 return "missing"
             except FileExistsError:
                 return "destination_exists"
             except ValueError:
                 return "unsafe_path"
+            except OrganizePendingError:
+                return "organize_pending"
             except OSError:
                 return "io_error"
-        created = None
-        try:
-            if (
-                item.parent_id is not None
-                and target.parent != root
-                and not await MediaItem.filter(
-                    lib_id=lib.id, path=str(target.parent)
-                ).exists()
-            ):
-                created = await MediaItemService.create_reading(
-                    lib.id, ReadingSource(target.parent, None)
-                )
-            moved = await (
-                MediaItemService.move_reading_directory(lib.id, source, target)
-                if directory
-                else MediaItemService.move_reading_file(lib.id, source, target)
-            )
-        except (ContentError, ValueError, DoesNotExist):
-            async with library_lock(lib.dir):
-                await write_in_thread(restore_reading, renames)
-                if created is not None:
-                    await MediaItem.filter(id=created.id).delete()
-                if started:
-                    with suppress(OSError):
-                        await write_in_thread(target.parent.rmdir)
-            return "organize_blocked"
-        if not moved:
-            # the watcher may have carried the item first; anything else is unknown
-            refreshed = await MediaItem.get_or_none(id=entry.item_id)
-            if refreshed is None or not Path(refreshed.path).is_relative_to(
-                target if directory else target.parent
-            ):
-                return "error"
-        for work in {
-            root / Path(entry.src).parts[0],
-            root / Path(entry.dst or entry.src).parts[0],
-        }:
-            await MediaEvent.create(
-                lib_id=lib.id,
-                event_type="modified",
-                src_path=str(work),
-                is_directory=True,
-            )
-        notify_media_events(lib.id)
-        return "done"
 
     @staticmethod
     async def _move_item(entry: MediaBatchEntry, lib: MediaLib, root: Path) -> str:
@@ -2429,9 +2434,6 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         """
         if entry.item_id is None:
             return "missing"
-        _, busy = await _running_ingests()
-        if entry.item_id in busy:
-            return "ingesting"
         try:
             await MediaItemService.delete(
                 entry.item_id,
