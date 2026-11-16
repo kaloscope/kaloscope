@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from itertools import product
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
@@ -11,7 +12,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from tortoise import Tortoise
 
-from app.core.ai import tools
+from app.core.ai import history, tools
 from app.core.ai.documents import graph_outline
 from app.core.exceptions import ErrorCode
 from app.models.assistant import (
@@ -30,6 +31,7 @@ from app.models.flow import (
     GraphState,
 )
 from app.models.user import Permissions, User, UserInfo, UserRole
+from app.services.assistant import SYSTEM_PROMPT
 
 ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN))
 CREATE = {"name": "Nightly scan", "category": "schedule", "description": "Scan daily"}
@@ -173,6 +175,62 @@ def test_compact_schemas():
     assert operations["set_field"]["properties"]["field_id"]["pattern"] == "^[^$].*$"
     assert "data.$schema" in operations["add_node"]["properties"]["node"]["description"]
     assert schemas["list_media_items"]["properties"]["page_size"]["maximum"] == 50
+
+
+def fixed_size(**flags) -> int:
+    """Measure the system prompt and one tool catalog as the budget counts them.
+
+    Args:
+        **flags: Gating flags selecting the catalog state.
+
+    Returns:
+        Bytes every request in that state spends before any conversation content.
+    """
+    return history.context_size(
+        [{"role": "system", "content": SYSTEM_PROMPT}],
+        tools.tool_schemas(ADMIN, **flags),
+    )
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {},
+        {"media_change": True},
+        {"task_action": True},
+        {"schedule": True},
+        {"plan_change": True},
+        {"plan_authoring": True},
+        {"plan_authoring": True, "plan_only": True},
+        {"plan_authoring": True, "plan_only": True, "plan_change": True},
+        {"authoring": True},
+        {"authoring": True, "trial": True},
+    ],
+)
+def test_floor_catalog(flags):
+    # a larger budget buys working memory, never more fixed text: no mode or
+    # single unlock may outgrow the largest one measured at the 32,000 floor
+    assert fixed_size(**flags) <= 24796
+
+
+def test_cloud_catalog():
+    names = ("trial", "schedule", "plan_change", "task_action", "media_change")
+    modes = (
+        {},
+        {"plan_authoring": True},
+        {"plan_authoring": True, "plan_only": True},
+        {"authoring": True},
+    )
+
+    largest = max(
+        fixed_size(**mode, **dict(zip(names, values, strict=True)))
+        for mode in modes
+        for values in product((False, True), repeat=len(names))
+    )
+
+    # every combination still leaves the hosted budget its turn-start reserve
+    allowance = history.CLOUD_INPUT_TOKENS - history.DEFAULT_OUTPUT_TOKENS
+    assert largest <= allowance - 4096
 
 
 @pytest.mark.parametrize(

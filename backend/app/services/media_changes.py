@@ -45,6 +45,7 @@ from app.models.media import (
     LibraryScan,
     LibType,
     MediaAction,
+    MediaBatch,
     MediaChangeApply,
     MediaChangeReceipt,
     MediaEvent,
@@ -193,7 +194,9 @@ def candidate_key(candidate: dict[str, Any]) -> str:
     return hashlib.sha256(dumps(identity, option=orjson.OPT_SORT_KEYS)).hexdigest()[:12]
 
 
-def _change_facts(change: LibraryScan | MediaRescrape | LibraryConfig) -> dict:
+def _change_facts(
+    change: LibraryScan | MediaRescrape | LibraryConfig | MediaBatch,
+) -> dict:
     """Read the fields that identify a reviewed change.
 
     Args:
@@ -225,7 +228,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
     def change_request(
         cls,
         user_id: int,
-        change: LibraryScan | MediaRescrape | LibraryConfig,
+        change: LibraryScan | MediaRescrape | LibraryConfig | MediaBatch,
         revision: str,
         nonce: bytes | None = None,
     ) -> UUID:
@@ -244,6 +247,19 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         digest = _digest(_change_facts(change))
         tag = hashlib.sha256(nonce + f"{user_id}:{digest}:{revision}".encode())
         return UUID(bytes=nonce + tag.digest()[:8])
+
+    @staticmethod
+    def request_key(user_id: int, request_id: UUID) -> str:
+        """Name the receipt of one account's request.
+
+        Args:
+            user_id: Account that reviewed the request.
+            request_id: Reviewed request ID.
+
+        Returns:
+            Account-scoped receipt key.
+        """
+        return hashlib.sha256(f"{user_id}:{request_id}".encode()).hexdigest()
 
     @classmethod
     async def _review_scan(
@@ -1323,7 +1339,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "message": "This request_id was reviewed for another change or "
                 "revision; review it again.",
             }
-        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        key = cls.request_key(user.id, body.request_id)
         lock = _LOCKS.setdefault(key, asyncio.Lock())
         if lock.locked():
             return await cls._pending(key, user)
@@ -1335,6 +1351,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         if task in done:
             return task.result()
         receipt = await MediaChangeReceipt.get_or_none(key=key)
+        if isinstance(body.change, MediaBatch):
+            from app.services.media_batches import MediaBatchService
+
+            return await MediaBatchService.running(
+                receipt if receipt is not None and receipt.claimed else None
+            )
         target = {}
         if isinstance(body.change, LibraryScan | LibraryConfig):
             target = {
@@ -1368,7 +1390,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             The recorded outcome once available, otherwise `pending`.
         """
         receipt = await MediaChangeReceipt.get_or_none(key=key)
-        if receipt is not None and receipt.result is not None:
+        if receipt is not None and (
+            receipt.result is not None
+            # a running batch reports its progress instead of an opaque wait
+            or (receipt.action == MediaAction.BATCH and receipt.claimed)
+        ):
             return await cls._replay(receipt, user)
         return {
             "applied": False,
@@ -1397,7 +1423,14 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 with submission_lock(f"media-change:{key}"):
                     receipt = await MediaChangeReceipt.get_or_none(key=key)
                     if receipt is not None and receipt.claimed:
-                        return await cls._replay(receipt, user)
+                        # holding both locks proves no other call is applying it
+                        return await cls._replay(receipt, user, settle=True)
+                    if isinstance(body.change, MediaBatch):
+                        from app.services.media_batches import MediaBatchService
+
+                        return await MediaBatchService.apply(
+                            body, body.change, key, user, receipt
+                        )
                     if isinstance(body.change, LibraryScan):
                         return await cls._apply_scan(body, body.change, key, user)
                     if isinstance(body.change, LibraryConfig):
@@ -1414,13 +1447,15 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
 
     @classmethod
     async def _replay(
-        cls, receipt: MediaChangeReceipt, user: UserInfo
+        cls, receipt: MediaChangeReceipt, user: UserInfo, *, settle: bool = False
     ) -> dict[str, Any]:
         """Read a recorded outcome under current permissions without applying.
 
         Args:
             receipt: Claimed request.
             user: Current account.
+            settle: Whether the caller holds the request's locks, so a batch
+                without an outcome was interrupted rather than still running.
 
         Returns:
             The recorded outcome, or `uncertain` for a claim without one, with
@@ -1431,6 +1466,10 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             ForbiddenException: If the account can no longer read the library.
         """
         _require_admin(user)
+        if receipt.action == MediaAction.BATCH:
+            from app.services.media_batches import MediaBatchService
+
+            return await MediaBatchService.replay(receipt, user, settle=settle)
         with suppress(NotFoundException):
             await MediaLibService.get_accessible(receipt.lib_id, user)
         current = None

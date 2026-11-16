@@ -1,0 +1,2888 @@
+"""Review and apply batches of library files and items for the assistant and MCP."""
+
+import asyncio
+import os
+import re
+from collections import Counter
+from collections.abc import Iterable
+from contextlib import suppress
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+from filelock import Timeout as LockTimeout
+from jinja2 import TemplateError
+from sanic.log import logger
+from tortoise import timezone
+from tortoise.exceptions import DoesNotExist
+from tortoise.functions import Count
+
+from app.core.config import KaloscopeConfig
+from app.core.dl.syncer import submission_lock
+from app.core.exceptions import ForbiddenException, NotFoundException
+from app.core.media.batch import (
+    BATCH_LIMIT,
+    SAMPLE_ROWS,
+    FileScan,
+    LibraryIndex,
+    PlanEntry,
+    build_index,
+    delete_files,
+    empty_directories,
+    forget_walk,
+    item_entries,
+    item_matches,
+    leftover_directories,
+    plan_deletion,
+    plan_reading_relocation,
+    plan_renames,
+    prune_directories,
+    relative,
+    remove_directories,
+    rename_files,
+    scan_files,
+    shown,
+)
+from app.core.media.common import ContentError
+from app.core.media.coordination import library_lock, notify_media_events
+from app.core.media.organizer import (
+    OrganizeDeferredError,
+    OrganizePendingError,
+    _case_alias,
+    _fingerprint,
+    move_directory,
+    move_episode,
+    move_movie,
+    organize_items,
+    plan_directory_move,
+    plan_relocation,
+    preview_organization,
+    recover_organizing,
+    rename_item,
+    shared_validation,
+)
+from app.models.base import Pageable
+from app.models.media import (
+    FileOwner,
+    LibType,
+    MediaAction,
+    MediaBatch,
+    MediaBatchEntry,
+    MediaChangeApply,
+    MediaChangeReceipt,
+    MediaEvent,
+    MediaItem,
+    MediaLib,
+)
+from app.models.user import UserInfo
+from app.services.base import BaseService
+from app.services.media import (
+    MediaItemService,
+    MediaLibService,
+    _media_activity,
+    _parent_deletion_snapshot,
+)
+from app.utils.asyncio import write_in_thread
+from app.utils.json import dumps, loads
+
+# an unconfirmed plan is worthless once the library has moved on
+PLAN_TTL = timedelta(hours=24)
+PLAN_KEEP = 10
+# loose files are removed in short lock holds so the watcher and scans interleave
+FILE_CHUNK = 50
+DUPLICATE_ROWS = 10
+LEFTOVER_NAMES = 5
+# organization previews stop here so a review answers within the tool timeout
+PLAN_SECONDS = 10
+BATCH_UNCERTAIN = (
+    "The server stopped while this batch was running. Counts show what is known; "
+    "review again to continue with what remains."
+)
+
+
+def _merge_reason(source: MediaItem | None, target: MediaItem | None) -> str | None:
+    """Decide whether episodes of one directory item may join another.
+
+    Args:
+        source: Directory item the episodes leave, if indexed.
+        target: Directory item of the destination show or season, if indexed.
+
+    Returns:
+        `None` when the destination is new, the same item, shares the source's
+        external identity, or the source was never scraped. Otherwise the
+        reason: differing visibility, or a scraped source whose identity the
+        destination does not share.
+    """
+    if source is None or target is None or source.id == target.id:
+        return None
+    if source.visible != target.visible:
+        return "visibility_differs"
+    if source.unique_id and (source.nfo_source, source.unique_id) != (
+        target.nfo_source,
+        target.unique_id,
+    ):
+        return "identity_mismatch"
+    return None
+
+
+def _tally(values: Iterable[Any]) -> Counter[str]:
+    """Count values under plain text keys, which stored JSON requires.
+
+    Args:
+        values: Enumeration members, reason codes or `None`.
+
+    Returns:
+        Counts keyed by each value's text; `None` counts as `unknown`.
+    """
+    return Counter("unknown" if value is None else str(value) for value in values)
+
+
+class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
+    """Freeze a selection into a plan, then apply exactly that plan once."""
+
+    @staticmethod
+    def _library_facts(lib: MediaLib) -> list[Any]:
+        """Read the library settings a plan depends on.
+
+        Args:
+            lib: Library a plan was built for.
+
+        Returns:
+            Facts whose change makes every stored path meaningless.
+        """
+        return [lib.id, lib.dir, lib.lib_type, lib.rename_template]
+
+    @staticmethod
+    async def _index(lib: MediaLib) -> tuple[LibraryIndex, list[MediaItem]]:
+        """Snapshot a library's items for classification.
+
+        Args:
+            lib: Library to read.
+
+        Returns:
+            Path lookups and the items they were built from.
+        """
+        items = await MediaItem.filter(lib_id=lib.id)
+        return build_index(lib, items), items
+
+    @staticmethod
+    def _metadata(items: list[MediaItem]) -> dict[int, dict[str, Any]]:
+        """Collect the saved facts a rename template may use.
+
+        Args:
+            items: Every item of the library.
+
+        Returns:
+            By item ID the `title`, `year`, `season`, `episode` and
+            `episode_title` the library has saved; an episode's `title` is its
+            show's, and its own title counts as `episode_title` only when it
+            differs. Unknown facts are omitted.
+        """
+        by_id = {item.id: item for item in items}
+        saved: dict[int, dict[str, Any]] = {}
+        for item in items:
+            parent = by_id.get(item.parent_id or 0)
+            numbered = parent is not None and item.episode is not None
+            show = parent.title if parent and numbered else None
+            facts = {
+                "title": show or item.title,
+                "year": item.year or (parent.year if parent else None),
+                "season": item.season
+                if item.season is not None
+                else (parent.season if parent else None),
+                "episode": item.episode,
+                # an unscraped episode carries its show's title instead of its own
+                "episode_title": item.title if show and item.title != show else None,
+            }
+            saved[item.id] = {
+                key: value for key, value in facts.items() if value is not None
+            }
+        return saved
+
+    @staticmethod
+    async def _busy(lib: MediaLib) -> tuple[set[int], set[str]]:
+        """Find items and files that other work is still using.
+
+        Args:
+            lib: Library being planned.
+
+        Returns:
+            Item IDs with a queued or running ingest workflow, and files of
+            downloads that are still downloading into or transferring to it.
+        """
+        return await _media_activity(lib)
+
+    @classmethod
+    async def review(cls, change: MediaBatch, user: UserInfo) -> dict[str, Any]:
+        """List matching files, or freeze a deletion plan for confirmation.
+
+        Nothing is deleted. A review with an operation stores its plan so the
+        confirmed batch is exactly what was shown, however the library changes.
+
+        Args:
+            change: Library, selector and optional operation.
+            user: Current administrator.
+
+        Returns:
+            Without an operation: match counts by class and extension and a
+            bounded sample. With one: planned and blocked units, the deletion
+            mode, notes, located issues, whether undo is supported (`can_revert`),
+            the `revision` and, when valid, a `request_id` and `batch_id` for this
+            exact plan. Undo requires a finished rename or move batch and
+            unchanged files; organize and delete do not support undo.
+
+        Raises:
+            ForbiddenException: If the account cannot manage library files.
+            NotFoundException: If the library does not exist.
+        """
+        from app.services.media_changes import (
+            MediaChangeService,
+            _digest,
+            _require_admin,
+        )
+
+        _require_admin(user)
+        lib = await MediaLibService.get_accessible(change.library_id, user)
+        index, items = await cls._index(lib)
+        base: dict[str, Any] = {
+            "library_id": lib.id,
+            "library_name": lib.name,
+            "lib_type": lib.lib_type,
+        }
+        reading = lib.lib_type in (LibType.NOVEL, LibType.COMIC)
+        if change.operation is not None:
+            base = {"action": MediaAction.BATCH, "operation": change.operation, **base}
+        issues: list[dict[str, str]] = []
+        scan = FileScan()
+        entries: list[PlanEntry] = []
+        unchanged = 0
+        cut = False
+        extras: dict[str, Any] = {}
+        effective = change.operation
+        if change.operation == "revert":
+            entries, issues, effective = await cls._revert_plan(index, items, change)
+        elif change.empty_dirs:
+            entries, issues = await cls._empty_plan(index, items, change, lib, extras)
+        elif change.operation == "organize":
+            entries, issues, unchanged, cut = await cls._organize_plan(
+                index, items, change, lib
+            )
+        elif change.operation == "move":
+            entries, issues, unchanged, extras = await cls._move_plan(
+                index, items, change, lib
+            )
+        elif change.item_ids and change.operation != "rename":
+            entries, issues = await cls._selected(index, items, change, lib)
+        else:
+            if change.item_ids:
+                chosen = set(change.item_ids)
+                scan = await asyncio.to_thread(
+                    item_matches,
+                    index,
+                    [
+                        item
+                        for item in items
+                        if item.id in chosen
+                        # a show brings its episodes; a collection is renamed alone
+                        or (item.parent_id in chosen and not reading)
+                    ],
+                )
+                if not scan.matches:
+                    issues.append(
+                        {
+                            "path": "item_ids",
+                            "message": "No item of this library is selected.",
+                        }
+                    )
+            else:
+                try:
+                    scan = await asyncio.to_thread(
+                        scan_files,
+                        index,
+                        directory=change.directory,
+                        extensions=change.extensions,
+                        name=change.name,
+                        min_size=change.min_size,
+                        max_size=change.max_size,
+                        whole=change.operation is not None,
+                    )
+                except (OSError, ValueError):
+                    issues.append(
+                        {
+                            "path": "directory",
+                            "message": "This directory is not readable inside the "
+                            "library.",
+                        }
+                    )
+                if change.operation is None:
+                    return cls._listing(base, index, scan, issues)
+                if scan.truncated:
+                    issues.append(
+                        {
+                            "path": "directory",
+                            "message": "The library is too large to plan in one "
+                            "pass; choose a narrower directory.",
+                        }
+                    )
+            busy_items, busy_paths = await cls._busy(lib)
+            if change.operation == "rename":
+                try:
+                    entries, unchanged = await asyncio.to_thread(
+                        plan_renames,
+                        index,
+                        scan,
+                        [FileOwner.INDEXED] if change.item_ids else change.owners,
+                        change.pattern or "",
+                        change.replacement,
+                        templated=bool(lib.rename_template),
+                        busy_items=busy_items,
+                        busy_paths=busy_paths,
+                        metadata=cls._metadata(items),
+                    )
+                except TimeoutError:
+                    issues.append(
+                        {
+                            "path": "pattern",
+                            "message": "The pattern takes too long on these names; "
+                            "use a simpler one.",
+                        }
+                    )
+                except (re.error, TemplateError, ValueError, TypeError):
+                    issues.append(
+                        {
+                            "path": "pattern",
+                            "message": "The pattern or replacement is not a valid "
+                            "rule for these names.",
+                        }
+                    )
+            else:
+                entries = plan_deletion(
+                    index,
+                    scan,
+                    change.owners,
+                    busy_items=busy_items,
+                    busy_paths=busy_paths,
+                )
+        if change.operation is None:
+            return cls._selection(base, entries, issues)
+
+        planned = [entry for entry in entries if entry.status == "planned"]
+        blocked = [entry for entry in entries if entry.status == "blocked"]
+        # one item may be matched through several of its files
+        seen: set[int] = set()
+        unique = []
+        for entry in planned:
+            if entry.kind == "item":
+                if entry.item_id in seen:
+                    continue
+                seen.add(entry.item_id or 0)
+            unique.append(entry)
+        cleanup_notes: list[str] = []
+        if change.operation == "delete" and not change.empty_dirs:
+            unique, blocked, cleanup_notes = await cls._parent_cleanup(
+                lib, items, unique, blocked
+            )
+        more = cut or len(unique) > BATCH_LIMIT
+        planned = unique[:BATCH_LIMIT]
+        if reading and change.operation == "rename":
+            # a chapter is renamed before the collection that holds it
+            planned.sort(key=lambda entry: -len(Path(entry.src).parts))
+        if not planned and not issues:
+            issues.append(
+                {
+                    "path": "owners" if blocked else "library_id",
+                    "message": "Nothing would change: every match is blocked."
+                    if blocked
+                    else "Every selected name already matches."
+                    if unchanged
+                    else "Nothing matches this selection.",
+                }
+            )
+        deleting = change.operation == "delete"
+        reverting = change.operation == "revert"
+        trash = KaloscopeConfig.get().filesystem_trash_mode
+        reasons = _tally(entry.reason for entry in blocked)
+        owners = _tally(entry.owner for entry in planned)
+        notes = []
+        if reverting:
+            notes.append(
+                f"Undoes batch {change.batch_id}: each listed file or folder gets "
+                "its former name or place back. Units that batch skipped, and "
+                "anything changed since, are left out."
+            )
+        elif change.empty_dirs:
+            notes.append(
+                "Only folders without any file are removed. A work with nothing "
+                "left in it is removed from the library with its own metadata "
+                "and artwork."
+            )
+            if change.leftovers:
+                notes.append(
+                    "Folders holding only loose files are removed with those "
+                    "files, which "
+                    + (
+                        "go to the system trash."
+                        if trash
+                        else "are deleted permanently; this cannot be undone."
+                    )
+                )
+        elif deleting:
+            notes.append(
+                "Files go to the system trash."
+                if trash
+                else "Files are deleted permanently; this cannot be undone."
+            )
+        elif reverting:
+            pass
+        elif change.operation == "rename" and reading:
+            notes.append(
+                "A book or archive takes its same-name OPF along; folders are "
+                "renamed in place. Renamed works are indexed again afterwards."
+            )
+        elif change.operation == "rename":
+            notes.append(
+                "Each video's NFO, subtitles, artwork and danmaku cache take its "
+                "new name; nothing is moved to another folder."
+            )
+        elif change.operation == "move" and reading:
+            notes.append(
+                "A work folder is renamed as a whole; chapters join the "
+                "destination collection, which is created when it does not exist, "
+                "and are indexed again. A collection left "
+                "empty stays in place, and reading history stays with the work it "
+                "was recorded under."
+            )
+        elif change.operation == "move":
+            notes.append(
+                "Videos move with their NFO, subtitles, artwork and danmaku cache. "
+                "A folder they leave keeps its own NFO and artwork and is removed "
+                "only when empty; no scan or rescrape starts."
+            )
+            if lib.lib_type == LibType.MOVIE:
+                notes.append(
+                    "A loose movie file starts the destination folder and gives "
+                    "it its saved metadata; a folder holds one movie."
+                )
+            if reasons["duplicate_episode"]:
+                notes.append(
+                    f"{reasons['duplicate_episode']} episodes already exist in "
+                    "the destination and stay where they are; duplicates lists "
+                    "both copies. To replace one, delete the unwanted copy by "
+                    "item_ids first, then review this move again."
+                )
+            if leftovers := extras.get("leftovers"):
+                notes.append(
+                    f"Folders every video leaves: {leftovers['folders']}, still "
+                    f"holding {leftovers['files']} other files. After applying, a "
+                    "delete with empty_dirs and leftovers removes them."
+                )
+        else:
+            notes.append(
+                "Works are renamed and moved as the naming template and their "
+                "saved metadata say; no metadata is fetched. This organize batch "
+                "cannot be undone; revert supports only finished rename/move batches."
+            )
+        if unchanged:
+            notes.append(
+                f"{unchanged} already have the resulting name and are left out."
+            )
+        if cut:
+            notes.append(
+                "Planning stopped at its time limit; review again after applying "
+                "for the remaining works."
+            )
+        if deleting and owners[FileOwner.INDEXED]:
+            notes.append(
+                f"{owners[FileOwner.INDEXED]} indexed items are removed from the "
+                "library with their watch or reading history and their own "
+                "metadata, subtitles and artwork."
+            )
+        if deleting and owners[FileOwner.COMPANION]:
+            notes.append(
+                f"{owners[FileOwner.COMPANION]} files are metadata, subtitles or "
+                "artwork of items that stay; those items lose them, and a later "
+                "scan may fetch metadata again."
+            )
+        if deleting and owners[FileOwner.PAGE]:
+            notes.append(
+                f"{owners[FileOwner.PAGE]} files are comic pages; their comics are "
+                "indexed again afterwards."
+            )
+        if deleting and owners[FileOwner.UNINDEXED]:
+            notes.append(
+                f"{owners[FileOwner.UNINDEXED]} files are content the library "
+                "has not indexed."
+            )
+        if reasons["owner_excluded"]:
+            notes.append(
+                f"{reasons['owner_excluded']} matches belong to other file classes "
+                "and are not included; name them in owners to include them."
+            )
+        notes.extend(cleanup_notes)
+        if len(unique) > BATCH_LIMIT:
+            notes.append(
+                f"Only the first {BATCH_LIMIT} of {len(unique)} units are in this "
+                "batch; review the same selection again afterwards for the rest."
+            )
+        revision = _digest(
+            [
+                cls._library_facts(lib),
+                ("trash" if trash else "permanent") if deleting else None,
+                change.model_dump(mode="json"),
+                [
+                    [entry.kind, entry.src, entry.dst, entry.identity]
+                    for entry in planned
+                ],
+            ]
+        )
+        result: dict[str, Any] = {
+            "valid": not issues,
+            "issues": issues,
+            **base,
+            "matched": {"units": len(unique) + len(blocked)},
+            "planned": {
+                "units": len(planned),
+                "files": sum(entry.files for entry in planned),
+                "bytes": sum(entry.size or 0 for entry in planned),
+                "by_owner": dict(owners),
+            },
+            "blocked": {"units": len(blocked), "reasons": dict(reasons)},
+            "more": more,
+            "unchanged": unchanged,
+            "deletion": ("trash" if trash else "permanent") if deleting else None,
+            "can_revert": effective in ("rename", "move"),
+            "sample": cls._sample(
+                [*planned, *blocked] if cleanup_notes else [*blocked, *planned]
+            ),
+            "omitted": max(0, len(blocked) + len(planned) - SAMPLE_ROWS),
+            "notes": notes,
+            "revision": revision,
+        }
+        result.update({key: value for key, value in extras.items() if value})
+        if not issues:
+            request_id = MediaChangeService.change_request(user.id, change, revision)
+            receipt = await cls._store(
+                request_id,
+                lib,
+                change,
+                effective,
+                revision,
+                result,
+                user,
+                [*planned, *blocked[:BATCH_LIMIT]],
+            )
+            result.update(request_id=str(request_id), batch_id=receipt.id)
+        return loads(dumps(result))
+
+    @classmethod
+    async def _parent_cleanup(
+        cls,
+        lib: MediaLib,
+        items: list[MediaItem],
+        planned: list[PlanEntry],
+        blocked: list[PlanEntry],
+    ) -> tuple[list[PlanEntry], list[PlanEntry], list[str]]:
+        """Include newly empty parents and their exclusive files in a deletion.
+
+        Args:
+            lib: Library whose files were reviewed.
+            items: Current library members used to resolve parent ownership.
+            planned: Selected deletion units before applying the batch limit.
+            blocked: Matches excluded from independent execution.
+
+        Returns:
+            Planned and blocked units, plus notes naming included parents and
+            files. A parent replaces its selected children as one guarded unit;
+            unindexed content, busy work or uncertain ownership retain it.
+        """
+        selected = {entry.item_id for entry in planned if entry.kind == "item"}
+        children: dict[int, list[MediaItem]] = {}
+        rows = {item.id: item for item in items}
+        for item in items:
+            if item.parent_id is not None:
+                children.setdefault(item.parent_id, []).append(item)
+            if item.id in selected and item.path == item.dir and item.format is None:
+                children.setdefault(item.id, [])
+        candidates = [
+            rows[parent_id]
+            for parent_id, members in children.items()
+            if parent_id in selected or all(member.id in selected for member in members)
+        ]
+        if not candidates:
+            return planned, blocked, []
+        busy, paths = await cls._busy(lib)
+        notes = []
+        root = Path(lib.dir)
+        owned_paths = build_index(lib, items).owned
+        for parent in sorted(candidates, key=lambda item: item.path):
+            members = children[parent.id]
+            ids = {parent.id, *(item.id for item in members)}
+            for item in [parent, *members]:
+                item.lib = lib
+                if item.parent_id is not None:
+                    item.parent = rows[item.parent_id]
+            snapshot = (
+                None
+                if ids & busy
+                else await asyncio.to_thread(
+                    _parent_deletion_snapshot,
+                    parent,
+                    members,
+                    [item for item in items if item.id not in ids],
+                )
+            )
+            if snapshot is None or any(
+                str(root / path) in paths for path, _ in snapshot["owned"]
+            ):
+                if parent.id in selected:
+                    planned = [entry for entry in planned if entry.item_id != parent.id]
+                    entries = await asyncio.to_thread(
+                        item_entries,
+                        build_index(lib, items),
+                        members,
+                        {},
+                        busy_items=busy,
+                    )
+                    planned.extend(
+                        entry for entry in entries if entry.status == "planned"
+                    )
+                    blocked.extend(
+                        entry for entry in entries if entry.status == "blocked"
+                    )
+                notes.append(
+                    f"Parent {relative(root, Path(parent.path))} stays: unindexed "
+                    "or protected content remains, or cleanup ownership cannot "
+                    "be confirmed. Only its reviewed children are removed."
+                )
+                continue
+            planned = [entry for entry in planned if entry.item_id not in ids]
+            owned = {path: identity for path, identity in snapshot["owned"]}
+            display = sorted(
+                owned,
+                key=lambda path: (owned_paths.get(str(root / path)) != parent.id, path),
+            )
+            blocked = [
+                entry
+                for entry in blocked
+                if entry.item_id not in ids or entry.src not in owned
+            ]
+            planned.append(
+                PlanEntry(
+                    "item",
+                    FileOwner.INDEXED,
+                    relative(root, Path(parent.path)),
+                    sum(identity[2] for identity in owned.values()),
+                    [snapshot],
+                    parent.id,
+                    files=len(owned),
+                )
+            )
+            bodies = {item.path: item.id for item in members}
+            blocked.extend(
+                PlanEntry(
+                    "file",
+                    FileOwner.INDEXED
+                    if str(root / path) in bodies
+                    else FileOwner.COMPANION,
+                    path,
+                    identity[2],
+                    identity,
+                    bodies.get(str(root / path), parent.id),
+                    status="blocked",
+                    reason="follows_item",
+                )
+                for path, identity in ((path, owned[path]) for path in display)
+            )
+            sample = ", ".join(display[:SAMPLE_ROWS])
+            notes.append(
+                f"Deleting all {len(members)} children also removes empty parent "
+                f"{relative(root, Path(parent.path))} and its exclusive metadata "
+                f"and artwork: {len(owned)} files in total ({sample}). Other "
+                "loose files stay. The entire work is skipped if its files or "
+                "ownership change after this preview."
+            )
+        return planned, blocked, notes
+
+    @staticmethod
+    def _sample(entries: list[PlanEntry]) -> list[dict[str, Any]]:
+        """Show the first entries of a plan in a bounded form.
+
+        Args:
+            entries: Entries in display order.
+
+        Returns:
+            At most `SAMPLE_ROWS` rows with shortened paths.
+        """
+        rows = []
+        for entry in entries[:SAMPLE_ROWS]:
+            row: dict[str, Any] = {
+                "src": shown(entry.src),
+                "size": entry.size,
+                "owner": entry.owner,
+            }
+            if entry.dst is not None:
+                row["dst"] = shown(entry.dst)
+            if entry.item_id is not None:
+                row["item_id"] = entry.item_id
+            if entry.reason:
+                row["blocked"] = entry.reason
+            rows.append(row)
+        return rows
+
+    @classmethod
+    def _listing(
+        cls,
+        base: dict[str, Any],
+        index: LibraryIndex,
+        scan: FileScan,
+        issues: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Summarize matched files without planning anything.
+
+        Args:
+            base: Library facts shared by every result.
+            index: Library lookups used for the walk.
+            scan: Walk result.
+            issues: Problems reading the selection.
+
+        Returns:
+            Counts by class and by the ten commonest extensions, and a sample.
+        """
+        extensions = Counter(
+            match.path.suffix.casefold() or "(none)" for match in scan.matches
+        )
+        common = dict(extensions.most_common(10))
+        if len(extensions) > 10:
+            common["(other)"] = len(scan.matches) - sum(common.values())
+        sample = []
+        for match in scan.matches[:SAMPLE_ROWS]:
+            row: dict[str, Any] = {
+                "path": shown(relative(index.root, match.path)),
+                "size": match.size,
+                "owner": match.owner,
+            }
+            if match.item_id is not None:
+                row["item_id"] = match.item_id
+            sample.append(row)
+        return loads(
+            dumps(
+                {
+                    **base,
+                    "issues": issues,
+                    "matched": {
+                        "files": len(scan.matches),
+                        "bytes": sum(match.size for match in scan.matches),
+                    },
+                    "by_owner": dict(_tally(match.owner for match in scan.matches)),
+                    "by_extension": common,
+                    "sample": sample,
+                    "omitted": max(0, len(scan.matches) - SAMPLE_ROWS),
+                    "truncated": scan.truncated,
+                }
+            )
+        )
+
+    @classmethod
+    def _selection(
+        cls,
+        base: dict[str, Any],
+        entries: list[PlanEntry],
+        issues: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Summarize explicitly selected items without planning anything.
+
+        Args:
+            base: Library facts shared by every result.
+            entries: Units the selected items would form.
+            issues: Problems resolving the selection.
+
+        Returns:
+            The item count and a sample.
+        """
+        return loads(
+            dumps(
+                {
+                    **base,
+                    "issues": issues,
+                    "matched": {
+                        "items": len(entries),
+                        "files": sum(entry.files for entry in entries),
+                        "bytes": sum(entry.size or 0 for entry in entries),
+                    },
+                    "sample": cls._sample(entries),
+                    "omitted": max(0, len(entries) - SAMPLE_ROWS),
+                    "truncated": False,
+                }
+            )
+        )
+
+    @classmethod
+    async def _selected(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]]]:
+        """Resolve explicitly selected items into units.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Selection naming item IDs.
+            lib: Library the items must belong to.
+
+        Returns:
+            Units for the selected items, and an issue naming IDs that are not
+            items of this library. A child whose parent is also selected is
+            covered by the parent.
+        """
+        rows = {item.id: item for item in items}
+        missing = [item_id for item_id in change.item_ids if item_id not in rows]
+        issues = (
+            [
+                {
+                    "path": "item_ids",
+                    "message": "Not items of this library: "
+                    + ", ".join(map(str, missing[:10])),
+                }
+            ]
+            if missing
+            else []
+        )
+        chosen = set(change.item_ids) - set(missing)
+        children: dict[int, list[MediaItem]] = {}
+        for item in items:
+            if item.parent_id is not None:
+                children.setdefault(item.parent_id, []).append(item)
+        top = [
+            rows[item_id] for item_id in chosen if rows[item_id].parent_id not in chosen
+        ]
+        busy_items, _ = await cls._busy(lib)
+        entries = await asyncio.to_thread(
+            item_entries, index, top, children, busy_items=busy_items
+        )
+        return entries, issues
+
+    @classmethod
+    async def _move_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], int, dict[str, Any]]:
+        """Plan moving selected videos or work folders to one destination folder.
+
+        A whole directory item moving to a folder that does not exist is a folder
+        rename. Otherwise TV episodes move one by one into the destination show
+        or season, which merges two folders of one series.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Selection, destination and season layout.
+            lib: Movie or TV library without a naming template.
+
+        Returns:
+            One `item` unit per folder or episode that would move; blocked
+            matches with reasons for unknown seasons, differing identities or
+            visibility, duplicate episodes, taken names, busy items and moves
+            the organizer refuses; located issues; the number already in
+            place; and `duplicates` (the episode already in the destination
+            beside each one it blocks) and `leftovers` (files staying in
+            folders every video leaves), both bounded.
+        """
+        issues: list[dict[str, str]] = []
+        if lib.lib_type in (LibType.NOVEL, LibType.COMIC) and not lib.rename_template:
+            return (*await cls._reading_move_plan(index, items, change, lib), {})
+        if lib.rename_template:
+            issues.append(
+                {
+                    "path": "library_id",
+                    "message": "This library is organized by its naming template; "
+                    "correct the metadata and use organize instead.",
+                }
+            )
+        tv = lib.lib_type == LibType.TV_SHOW
+        destination = index.root / (change.destination or "")
+        depth = len(Path(change.destination or "").parts)
+        if not tv and (depth != 1 or change.by_season):
+            issues.append(
+                {
+                    "path": "by_season" if depth == 1 else "destination",
+                    "message": "A movie library takes one folder directly below "
+                    "its root, without by_season.",
+                }
+            )
+        if tv and depth != 1 and (change.by_season or depth != 2):
+            issues.append(
+                {
+                    "path": "destination",
+                    "message": "Use a series folder, or series/season without "
+                    "by_season; other folders are not indexed.",
+                }
+            )
+        rows = {item.id: item for item in items}
+        selected: list[MediaItem] = []
+        entries: list[PlanEntry] = []
+        if change.item_ids:
+            missing = [item_id for item_id in change.item_ids if item_id not in rows]
+            if missing:
+                issues.append(
+                    {
+                        "path": "item_ids",
+                        "message": "Not items of this library: "
+                        + ", ".join(map(str, missing[:10])),
+                    }
+                )
+            selected = [rows[i] for i in change.item_ids if i in rows]
+        elif not issues:
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files,
+                    index,
+                    directory=change.directory,
+                    extensions=change.extensions,
+                    name=change.name,
+                    min_size=change.min_size,
+                    max_size=change.max_size,
+                )
+            except (OSError, ValueError):
+                scan = FileScan(truncated=True)
+            if scan.truncated:
+                issues.append(
+                    {
+                        "path": "directory",
+                        "message": "This selection could not be read completely; "
+                        "choose a narrower directory.",
+                    }
+                )
+            for match in scan.matches:
+                if (
+                    match.owner == FileOwner.INDEXED
+                    and match.owner in change.owners
+                    and match.item_id in rows
+                ):
+                    selected.append(rows[match.item_id])
+                else:
+                    entries.append(
+                        PlanEntry(
+                            "file",
+                            match.owner,
+                            relative(index.root, match.path),
+                            match.size,
+                            match.identity,
+                            match.item_id,
+                            status="blocked",
+                            reason="follows_item"
+                            if match.owner == FileOwner.COMPANION
+                            and match.owner in change.owners
+                            else "owner_excluded",
+                        )
+                    )
+        if issues:
+            return [], issues, 0, {}
+
+        children: dict[int, list[MediaItem]] = {}
+        by_path = {item.path: item for item in items}
+        for item in items:
+            if item.parent_id is not None:
+                children.setdefault(item.parent_id, []).append(item)
+        busy_items, _ = await cls._busy(lib)
+        unchanged = 0
+        videos: dict[int, MediaItem] = {}
+        folders: list[MediaItem] = []
+        occupied = destination.exists() or str(destination) in by_path
+        for item in sorted(selected, key=lambda row: row.path):
+            if item.path != item.dir:
+                videos[item.id] = item
+            elif tv and (change.by_season or occupied):
+                videos.update((row.id, row) for row in children.get(item.id, []))
+            else:
+                folders.append(item)
+        taken: dict[str, dict[tuple[int, int], MediaItem]] = {}
+        started: int | None = None
+        duplicates: list[dict[str, Any]] = []
+        leaving: dict[int, set[int]] = {}
+        moved_files: set[str] = set()
+        async with shared_validation(lib):
+            for item in folders:
+                if Path(item.path) == destination:
+                    unchanged += 1
+                    continue
+                rows_below = children.get(item.id, [])
+                sizes = [row.size for row in rows_below if row.size is not None]
+                entry = PlanEntry(
+                    "item",
+                    FileOwner.INDEXED,
+                    relative(index.root, item.path),
+                    sum(sizes) if sizes else item.size,
+                    sorted(row.id for row in rows_below),
+                    item.id,
+                    files=len(rows_below) or 1,
+                    dst=change.destination,
+                )
+                reason = None
+                if occupied:
+                    reason = "destination_exists"
+                elif {item.id, *(row.id for row in rows_below)} & busy_items:
+                    reason = "ingesting"
+                else:
+                    try:
+                        await plan_directory_move(lib, item, destination)
+                    except OrganizeDeferredError:
+                        reason = "organize_deferred"
+                    except (ValueError, OSError):
+                        reason = (
+                            "unindexable_destination"
+                            if len(Path(entry.src).parts) != depth
+                            else "organize_blocked"
+                        )
+                if reason:
+                    entry.status, entry.reason = "blocked", reason
+                else:
+                    # a second folder cannot take the same new name
+                    occupied = True
+                entries.append(entry)
+            for item in sorted(videos.values(), key=lambda row: row.path):
+                path = Path(item.path)
+                folder = destination
+                reason = None
+                if not tv and item.parent_id is not None and not occupied:
+                    # only a loose movie starts a folder; a filed one is moved
+                    # by moving its folder
+                    reason = "unsupported_move"
+                elif change.by_season:
+                    if item.season is None:
+                        reason = "unknown_season"
+                    else:
+                        folder = destination / f"Season {item.season:02d}"
+                if reason is None and Path(item.dir) == folder:
+                    unchanged += 1
+                    continue
+                try:
+                    identity = await asyncio.to_thread(_fingerprint, path)
+                except OSError:
+                    identity, reason = None, reason or "missing"
+                entry = PlanEntry(
+                    "item",
+                    FileOwner.INDEXED,
+                    relative(index.root, path),
+                    item.size,
+                    identity,
+                    item.id,
+                    dst=relative(index.root, folder / path.name),
+                )
+                if reason is None and not tv:
+                    target = by_path.get(str(folder))
+                    if target is None and occupied:
+                        reason = "unindexable_destination"
+                    elif target is None and started not in (None, item.id):
+                        # one folder is one movie, so only the first may start it
+                        reason = "destination_exists"
+                    elif reason := _merge_reason(
+                        rows.get(item.parent_id or 0) or item, target
+                    ):
+                        pass
+                    elif item.id in busy_items:
+                        reason = "ingesting"
+                    else:
+                        try:
+                            await plan_relocation(
+                                lib, item, folder / path.name, parent_id=0
+                            )
+                            started = started or item.id
+                        except OrganizeDeferredError:
+                            reason = "organize_deferred"
+                        except (ValueError, OSError):
+                            reason = (
+                                "destination_exists"
+                                if (folder / path.name).exists()
+                                else "organize_blocked"
+                            )
+                elif reason is None:
+                    target = by_path.get(str(folder))
+                    # a new season folder joins the series it is created under
+                    series = target or by_path.get(
+                        str(index.root / Path(change.destination or "").parts[0])
+                    )
+                    numbers = (
+                        (item.season, item.episode)
+                        if item.season is not None and item.episode is not None
+                        else None
+                    )
+                    if str(folder) not in taken:
+                        taken[str(folder)] = {
+                            (row.season, row.episode): row
+                            for row in children.get(target.id if target else 0, [])
+                            if row.season is not None and row.episode is not None
+                        }
+                    reason = _merge_reason(rows.get(item.parent_id or 0), series)
+                    if reason is None and numbers in taken[str(folder)]:
+                        reason = "duplicate_episode"
+                        existing = taken[str(folder)][numbers]
+                        if len(duplicates) < DUPLICATE_ROWS:
+                            duplicates.append(
+                                {
+                                    "season": item.season,
+                                    "episode": item.episode,
+                                    "incoming": cls._file_facts(index, item),
+                                    "existing": cls._file_facts(index, existing),
+                                }
+                            )
+                    elif reason is None and item.id in busy_items:
+                        reason = "ingesting"
+                    elif reason is None:
+                        try:
+                            payload = await plan_relocation(
+                                lib, item, folder / path.name, parent_id=0
+                            )
+                            moved_files.update(move["src"] for move in payload["moves"])
+                            leaving.setdefault(item.parent_id or 0, set()).add(item.id)
+                        except OrganizeDeferredError:
+                            reason = "organize_deferred"
+                        except (ValueError, OSError):
+                            reason = (
+                                "destination_exists"
+                                if (folder / path.name).exists()
+                                else "organize_blocked"
+                            )
+                    if reason is None and numbers is not None:
+                        taken[str(folder)][numbers] = item
+                if reason:
+                    entry.status, entry.reason = "blocked", reason
+                entries.append(entry)
+        vacated = [
+            Path(rows[parent_id].path)
+            for parent_id, ids in sorted(leaving.items())
+            if parent_id in rows
+            and ids >= {row.id for row in children.get(parent_id, [])}
+        ]
+        leftovers = await asyncio.to_thread(
+            cls._leftovers, index.root, vacated, moved_files
+        )
+        return (
+            entries,
+            [],
+            unchanged,
+            {"duplicates": duplicates, "leftovers": leftovers},
+        )
+
+    @staticmethod
+    def _file_facts(index: LibraryIndex, item: MediaItem) -> dict[str, Any]:
+        """Describe one indexed video so two copies can be told apart.
+
+        Args:
+            index: Library lookups.
+            item: Indexed video.
+
+        Returns:
+            Its item ID, shortened library-relative path and size in bytes.
+        """
+        return {
+            "item_id": item.id,
+            "path": shown(relative(index.root, item.path)),
+            "size": item.size,
+        }
+
+    @staticmethod
+    def _leftovers(
+        root: Path, folders: list[Path], moved: set[str]
+    ) -> dict[str, Any] | None:
+        """Count the files that stay behind in folders every video leaves.
+
+        Run in a worker thread.
+
+        Args:
+            root: Absolute library root.
+            folders: Folders whose indexed videos all move away.
+            moved: Absolute paths of the files that move.
+
+        Returns:
+            The number of folders and files and their bytes, with the first
+            folders by path and their first file names, or `None` when
+            nothing stays behind.
+        """
+        found = []
+        for folder in folders:
+            stays: list[tuple[Path, int]] = []
+            for current, _, names in os.walk(folder, followlinks=False):
+                for name in names:
+                    path = Path(current) / name
+                    if str(path) in moved:
+                        continue
+                    size = 0
+                    with suppress(OSError):
+                        size = path.lstat().st_size
+                    stays.append((path, size))
+            if stays:
+                found.append((folder, stays))
+        return MediaBatchService._leftover_report(root, found)
+
+    @staticmethod
+    def _leftover_report(
+        root: Path, folders: list[tuple[Path, list[tuple[Path, int]]]]
+    ) -> dict[str, Any] | None:
+        """Summarize the files left in folders so they can be named to the user.
+
+        Args:
+            root: Absolute library root.
+            folders: Each folder with the absolute path and size of every file
+                staying in it.
+
+        Returns:
+            The number of folders and files and their bytes, with the first
+            folders by path and the first file names in each, or `None` when no
+            folder holds a file.
+        """
+        rows = [
+            {
+                "directory": relative(root, folder),
+                "files": len(files),
+                "bytes": sum(size for _, size in files),
+                "names": sorted(str(path.relative_to(folder)) for path, _ in files)[
+                    :LEFTOVER_NAMES
+                ],
+            }
+            for folder, files in sorted(folders)
+            if files
+        ]
+        if not rows:
+            return None
+        return {
+            "folders": len(rows),
+            "files": sum(row["files"] for row in rows),
+            "bytes": sum(row["bytes"] for row in rows),
+            "sample": rows[:DUPLICATE_ROWS],
+        }
+
+    @classmethod
+    async def _empty_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+        extras: dict[str, Any],
+    ) -> tuple[list[PlanEntry], list[dict[str, str]]]:
+        """Plan removing empty folders and works that have nothing left in them.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Deletion with `empty_dirs` and an optional directory.
+            lib: Library being cleaned.
+            extras: Review additions, which receive `leftovers` naming the
+                files of each leftover folder.
+
+        Returns:
+            One `dir` unit per topmost folder without any file below it, one
+            `item` unit per directory item or collection without children and
+            without content of its own, and located issues. With `leftovers`,
+            also one `dir` unit per folder holding only loose files, carrying
+            every file's relative path and fingerprint as its identity.
+        """
+        try:
+            folders, truncated = await asyncio.to_thread(
+                empty_directories, index, change.directory
+            )
+        except (OSError, ValueError):
+            return [], [
+                {
+                    "path": "directory",
+                    "message": "This directory is not readable inside the library.",
+                }
+            ]
+        if truncated:
+            return [], [
+                {
+                    "path": "directory",
+                    "message": "The library is too large to check in one pass; "
+                    "choose a narrower directory.",
+                }
+            ]
+        entries = [
+            PlanEntry("dir", FileOwner.LOOSE, relative(index.root, path), 0, None)
+            for path in folders
+        ]
+        busy_items, busy_paths = await cls._busy(lib)
+        if change.leftovers:
+            scan = await asyncio.to_thread(
+                scan_files, index, directory=change.directory, whole=True
+            )
+            if scan.truncated:
+                return [], [
+                    {
+                        "path": "directory",
+                        "message": "The library is too large to check in one pass; "
+                        "choose a narrower directory.",
+                    }
+                ]
+            folders = leftover_directories(index, scan, change.directory, busy_paths)
+            entries.extend(
+                PlanEntry(
+                    "dir",
+                    FileOwner.LOOSE,
+                    relative(index.root, path),
+                    size,
+                    [
+                        [relative(index.root, match.path), match.identity]
+                        for match in scan.matches
+                        if match.path.is_relative_to(path)
+                    ],
+                    files=count,
+                )
+                for path, count, size in folders
+            )
+            extras["leftovers"] = cls._leftover_report(
+                index.root,
+                [
+                    (
+                        path,
+                        [
+                            (match.path, match.size)
+                            for match in scan.matches
+                            if match.path.is_relative_to(path)
+                        ],
+                    )
+                    for path, _, _ in folders
+                ],
+            )
+        scope = index.root / change.directory if change.directory else index.root
+        parents = {item.parent_id for item in items if item.parent_id is not None}
+        childless = []
+        for item in items:
+            path = Path(item.path)
+            if (
+                item.path in index.directories
+                and item.id not in parents
+                and (path == scope or path.is_relative_to(scope))
+            ):
+                # a folder that still holds content of its own is not a leftover
+                scan = await asyncio.to_thread(
+                    scan_files, index, directory=relative(index.root, path)
+                )
+                if not any(
+                    match.owner in (FileOwner.UNINDEXED, FileOwner.INDEXED)
+                    for match in scan.matches
+                ):
+                    childless.append(item)
+        entries.extend(
+            await asyncio.to_thread(
+                item_entries, index, childless, {}, busy_items=busy_items
+            )
+        )
+        return entries, []
+
+    @classmethod
+    async def _revert_plan(
+        cls, index: LibraryIndex, items: list[MediaItem], change: MediaBatch
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], str | None]:
+        """Plan undoing a finished rename or move batch from its recorded entries.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Revert naming the batch to undo.
+
+        Returns:
+            One unit per entry that batch applied, in reverse order with source
+            and destination swapped; blocked matches where the file or item is
+            no longer where that batch left it, its body changed or the former
+            path is taken; located issues; and the operation the units use.
+        """
+        receipt = await MediaChangeReceipt.get_or_none(
+            id=change.batch_id, action=MediaAction.BATCH, lib_id=change.library_id
+        )
+        plan = (receipt.plan if receipt else None) or {}
+        message = None
+        if receipt is None:
+            message = "No batch of this library has this ID."
+        elif not receipt.claimed or receipt.result is None:
+            message = "Only a finished batch can be reverted."
+        elif plan.get("operation") not in ("rename", "move"):
+            message = "Only rename and move batches can be reverted."
+        if message or receipt is None:
+            return [], [{"path": "batch_id", "message": message or ""}], None
+        done = await MediaBatchEntry.filter(
+            receipt_id=receipt.id, status="done", dst__not_isnull=True
+        ).order_by("-seq")
+        rows = {item.id: item for item in items}
+        root = index.root
+        reading = index.lib_type in (LibType.NOVEL, LibType.COMIC)
+        entries: list[PlanEntry] = []
+        restored: list[tuple[Path, Path]] = []
+
+        def observed(path: Path) -> Path:
+            """Resolve a planned restored path to its current location.
+
+            Args:
+                path: Path after earlier directory units in this undo plan.
+
+            Returns:
+                The existing path before those directories have been restored.
+            """
+            return next(
+                (
+                    current / path.relative_to(former)
+                    for former, current in reversed(restored)
+                    if path.is_relative_to(former)
+                ),
+                path,
+            )
+
+        for record in done:
+            source, target = root / (record.dst or ""), root / record.src
+            entry = PlanEntry(
+                record.kind,
+                FileOwner(record.owner),
+                record.dst or "",
+                record.size,
+                None,
+                record.item_id,
+                files=record.files,
+                dst=record.src,
+            )
+            # earlier directory units will carry this source to its planned path
+            current_source, current_target = observed(source), observed(target)
+            item = rows.get(record.item_id or 0)
+            reason = None
+            try:
+                directory = await asyncio.to_thread(current_source.is_dir)
+                if (
+                    record.kind == "item"
+                    and item is None
+                    or not await asyncio.to_thread(os.path.lexists, current_source)
+                ):
+                    reason = "missing"
+                elif await asyncio.to_thread(
+                    os.path.lexists, current_target
+                ) and not await asyncio.to_thread(
+                    _case_alias, current_source, current_target
+                ):
+                    reason = "destination_exists"
+                elif record.kind == "item" and item is not None:
+                    if str(current_source) not in (item.path, item.dir):
+                        reason = "item_changed"
+                    elif directory and reading:
+                        entry.identity = [item.id]
+                    elif directory:
+                        entry.identity = sorted(
+                            row.id for row in items if row.parent_id == item.id
+                        )
+                        if entry.identity != record.identity:
+                            reason = "content_changed"
+                    else:
+                        entry.identity = await asyncio.to_thread(
+                            _fingerprint, current_source
+                        )
+                        if entry.identity != record.identity:
+                            reason = "content_changed"
+                else:
+                    entry.identity = await asyncio.to_thread(
+                        _fingerprint, current_source
+                    )
+                    if entry.identity != record.identity:
+                        reason = "content_changed"
+                if reason is None and directory:
+                    restored.append((target, current_source))
+            except OSError:
+                reason = "missing"
+            if reason:
+                entry.status, entry.reason = "blocked", reason
+            entries.append(entry)
+        return entries, [], plan.get("operation")
+
+    @classmethod
+    async def _reading_move_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], int]:
+        """Plan moving novel or comic works and comic chapters to one folder.
+
+        A work moves as its whole folder to a name that is not taken, which is a
+        folder rename. A comic chapter moves into another existing collection,
+        which merges two folders of one series.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Selection and destination.
+            lib: Novel or comic library without a naming template.
+
+        Returns:
+            One `item` unit per work folder or chapter that would move, chapters
+            starting a new collection when the destination does not exist; blocked
+            matches for taken names, a destination that is not a collection, and
+            a work that would have to become a chapter; located issues; and the
+            number already in place.
+        """
+        issues: list[dict[str, str]] = []
+        relative_destination = Path(change.destination or "")
+        if len(relative_destination.parts) != 1:
+            issues.append(
+                {
+                    "path": "destination",
+                    "message": "Use a work folder directly below the library root.",
+                }
+            )
+        rows = {item.id: item for item in items}
+        selected: list[MediaItem] = []
+        entries: list[PlanEntry] = []
+        if change.item_ids:
+            missing = [item_id for item_id in change.item_ids if item_id not in rows]
+            if missing:
+                issues.append(
+                    {
+                        "path": "item_ids",
+                        "message": "Not items of this library: "
+                        + ", ".join(map(str, missing[:10])),
+                    }
+                )
+            selected = [rows[i] for i in change.item_ids if i in rows]
+        elif not issues:
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files,
+                    index,
+                    directory=change.directory,
+                    extensions=change.extensions,
+                    name=change.name,
+                    min_size=change.min_size,
+                    max_size=change.max_size,
+                )
+            except (OSError, ValueError):
+                scan = FileScan(truncated=True)
+            if scan.truncated:
+                issues.append(
+                    {
+                        "path": "directory",
+                        "message": "This selection could not be read completely; "
+                        "choose a narrower directory.",
+                    }
+                )
+            for match in scan.matches:
+                if (
+                    match.owner == FileOwner.INDEXED
+                    and match.owner in change.owners
+                    and match.item_id in rows
+                ):
+                    selected.append(rows[match.item_id])
+                else:
+                    entries.append(
+                        PlanEntry(
+                            "file",
+                            match.owner,
+                            relative(index.root, match.path),
+                            match.size,
+                            match.identity,
+                            match.item_id,
+                            status="blocked",
+                            reason="owner_excluded",
+                        )
+                    )
+        if issues:
+            return [], issues, 0
+
+        root = index.root
+        destination = root / relative_destination
+        collection = next(
+            (item for item in items if item.path == str(destination)), None
+        )
+        merging = (
+            collection is not None
+            and collection.format is None
+            and collection.parent_id is None
+        )
+        busy_items, _ = await cls._busy(lib)
+        occupied = await asyncio.to_thread(destination.exists) or any(
+            Path(item.dir) == destination for item in items
+        )
+        # a work folder renamed onto the destination makes it unavailable to others
+        taken = occupied
+        unchanged = 0
+        claimed: set[str] = set()
+        seen: set[Path] = set()
+        for item in sorted(selected, key=lambda row: row.path):
+            container = Path(item.dir)
+            if container in seen:
+                continue
+            seen.add(container)
+            chapter = item.parent_id is not None
+            target = destination / container.name if chapter else destination
+            if (container.parent if chapter else container) == destination:
+                unchanged += 1
+                continue
+            entry = PlanEntry(
+                "item",
+                FileOwner.INDEXED,
+                relative(root, container),
+                item.size,
+                [item.id],
+                item.id,
+                dst=relative(root, target),
+            )
+            reason = None
+            if chapter and not merging and (collection is not None or taken):
+                # an unindexed folder or another kind of work cannot take chapters
+                reason = "unindexable_destination"
+            elif not chapter and merging:
+                reason = "layout_change"
+            elif (
+                (not chapter and taken)
+                or await asyncio.to_thread(target.exists)
+                or str(target).casefold() in claimed
+            ):
+                reason = "destination_exists"
+            elif item.id in busy_items:
+                reason = "ingesting"
+            elif await asyncio.to_thread(container.is_symlink):
+                reason = "linked"
+            if reason:
+                entry.status, entry.reason = "blocked", reason
+            else:
+                claimed.add(str(target).casefold())
+                taken = taken or not chapter
+            entries.append(entry)
+        return entries, [], unchanged
+
+    @classmethod
+    async def _organize_plan(
+        cls,
+        index: LibraryIndex,
+        items: list[MediaItem],
+        change: MediaBatch,
+        lib: MediaLib,
+    ) -> tuple[list[PlanEntry], list[dict[str, str]], int, bool]:
+        """Preview organizing the selected works under the saved naming template.
+
+        Args:
+            index: Library lookups.
+            items: Every item of the library.
+            change: Selection naming works by ID or directory, or the whole library.
+            lib: Library whose template is applied.
+
+        Returns:
+            One `group` unit per work that would move, with its expected paths
+            as identity; works the organizer would defer, skip or refuse as
+            blocked matches; located issues; the number of works already in
+            place; and whether planning stopped at its time limit.
+        """
+        issues: list[dict[str, str]] = []
+        if not lib.rename_template:
+            return (
+                [],
+                [
+                    {
+                        "path": "library_id",
+                        "message": "This library has no naming template; set one in "
+                        "its settings first.",
+                    }
+                ],
+                0,
+                False,
+            )
+        works = [item for item in items if item.parent_id is None]
+        if change.item_ids:
+            chosen = set(change.item_ids)
+            known = {item.id for item in works}
+            if chosen - known:
+                issues.append(
+                    {
+                        "path": "item_ids",
+                        "message": "Select top-level works of this library: "
+                        + ", ".join(map(str, sorted(chosen - known)[:10])),
+                    }
+                )
+            works = [item for item in works if item.id in chosen]
+        elif change.directory:
+            scope = index.root / change.directory
+            works = [
+                item
+                for item in works
+                if Path(item.path) == scope or Path(item.path).is_relative_to(scope)
+            ]
+        entries: list[PlanEntry] = []
+        unchanged = 0
+        cut = False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PLAN_SECONDS
+        try:
+            async with shared_validation(lib):
+                for work in sorted(works, key=lambda item: item.path):
+                    if loop.time() > deadline or len(entries) > 2 * BATCH_LIMIT:
+                        cut = True
+                        break
+                    preview = await preview_organization(lib, lib.rename_template, work)
+                    if preview["status"] == "unchanged":
+                        unchanged += 1
+                        continue
+                    pairs = [
+                        [
+                            relative(index.root, pair["current"]),
+                            relative(index.root, pair["proposed"]),
+                        ]
+                        for pair in preview["paths"]
+                    ]
+                    entry = PlanEntry(
+                        "group",
+                        FileOwner.INDEXED,
+                        relative(index.root, work.path),
+                        work.size,
+                        pairs,
+                        work.id,
+                        files=max(1, preview["moved_files"]),
+                    )
+                    own = next((new for old, new in pairs if old == entry.src), None)
+                    if own is not None:
+                        # the work's own path, as a reading folder or a video has
+                        entry.dst = Path(own).as_posix()
+                    elif pairs:
+                        # a video folder is where its first video goes
+                        entry.dst = Path(pairs[0][1]).parent.as_posix()
+                    if preview["status"] != "moves":
+                        entry.status = "blocked"
+                        entry.reason = f"organize_{preview['status']}"
+                    entries.append(entry)
+        except OSError:
+            issues.append(
+                {
+                    "path": "library_id",
+                    "message": "The library directory could not be read.",
+                }
+            )
+        return entries, issues, unchanged, cut
+
+    @classmethod
+    async def _store(
+        cls,
+        request_id: UUID,
+        lib: MediaLib,
+        change: MediaBatch,
+        operation: str | None,
+        revision: str,
+        result: dict[str, Any],
+        user: UserInfo,
+        entries: list[PlanEntry],
+    ) -> MediaChangeReceipt:
+        """Persist a reviewed plan and drop plans nobody confirmed.
+
+        Args:
+            request_id: Request identity issued for this review.
+            lib: Library the plan belongs to.
+            change: Reviewed selection and operation.
+            operation: Operation the units are applied with; a revert runs as
+                the rename or move it undoes.
+            revision: Reviewed revision.
+            result: Review shown to the user.
+            user: Reviewing administrator.
+            entries: Planned units followed by blocked matches.
+
+        Returns:
+            The unclaimed receipt holding the plan header.
+        """
+        stale = await MediaChangeReceipt.filter(
+            action=MediaAction.BATCH, claimed=False
+        ).order_by("-id")
+        cutoff = timezone.now() - PLAN_TTL
+        expired = [
+            row.id
+            for position, row in enumerate(stale)
+            if position >= PLAN_KEEP - 1 or (row.created_at and row.created_at < cutoff)
+        ]
+        if expired:
+            await MediaChangeReceipt.filter(id__in=expired, claimed=False).delete()
+        from app.services.media_changes import MediaChangeService
+
+        receipt = await MediaChangeReceipt.create(
+            key=MediaChangeService.request_key(user.id, request_id),
+            action=MediaAction.BATCH,
+            lib_id=lib.id,
+            plan={
+                "request": str(request_id),
+                "operation": operation,
+                "reverts": change.batch_id,
+                "change": change.model_dump(mode="json"),
+                "revision": revision,
+                "library": cls._library_facts(lib),
+                "library_name": lib.name,
+                "user_id": user.id,
+                "deletion": result["deletion"],
+                "planned": result["planned"],
+                "blocked": result["blocked"],
+                "more": result["more"],
+                "stop": False,
+            },
+        )
+        await MediaBatchEntry.bulk_create(
+            [
+                MediaBatchEntry(
+                    receipt_id=receipt.id,
+                    seq=seq,
+                    kind=entry.kind,
+                    owner=entry.owner,
+                    item_id=entry.item_id,
+                    src=entry.src,
+                    dst=entry.dst,
+                    files=entry.files,
+                    size=entry.size,
+                    identity=entry.identity,
+                    status=entry.status,
+                    reason=entry.reason,
+                )
+                for seq, entry in enumerate(entries, 1)
+            ],
+            batch_size=500,
+        )
+        return receipt
+
+    @classmethod
+    async def counts(cls, receipt_id: int) -> dict[str, int]:
+        """Count a batch's entries by status.
+
+        Args:
+            receipt_id: Batch identity.
+
+        Returns:
+            `done`, `skipped`, `failures`, `uncertain` and `remaining` unit
+            counts. Entries still marked as started count as remaining.
+        """
+        rows = (
+            await MediaBatchEntry.filter(receipt_id=receipt_id)
+            .annotate(total=Count("id"))
+            .group_by("status")
+            .values("status", "total")
+        )
+        found = {row["status"]: row["total"] for row in rows}
+        return {
+            "done": found.get("done", 0),
+            "skipped": found.get("skipped", 0),
+            "failures": found.get("failed", 0),
+            "uncertain": found.get("uncertain", 0),
+            "remaining": found.get("planned", 0) + found.get("started", 0),
+        }
+
+    @classmethod
+    async def _summary(cls, receipt: MediaChangeReceipt) -> dict[str, Any]:
+        """Describe a batch's progress with grouped reasons and a sample.
+
+        Args:
+            receipt: Batch header.
+
+        Returns:
+            Shared identity, unit counts, reasons of units that were not applied
+            and a few of their paths. `can_revert` reports whether the operation
+            supports undo after finishing, subject to unchanged file identities.
+        """
+        plan = receipt.plan or {}
+        unfinished = await MediaBatchEntry.filter(
+            receipt_id=receipt.id, status__in=("skipped", "failed", "uncertain")
+        ).order_by("seq")
+        return {
+            "action": MediaAction.BATCH,
+            "operation": plan.get("operation"),
+            "library_id": receipt.lib_id,
+            "library_name": plan.get("library_name"),
+            "batch_id": receipt.id,
+            "can_revert": plan.get("operation") in ("rename", "move"),
+            **await cls.counts(receipt.id),
+            "reasons": dict(_tally(entry.reason for entry in unfinished)),
+            "sample": [
+                {
+                    "src": shown(entry.src),
+                    "status": entry.status,
+                    "reason": entry.reason,
+                }
+                for entry in unfinished[:10]
+            ],
+            "path": f"/medialibs/{receipt.lib_id}",
+        }
+
+    @classmethod
+    async def running(cls, receipt: MediaChangeReceipt | None) -> dict[str, Any]:
+        """Report a batch that another call is still applying.
+
+        Args:
+            receipt: Claimed batch, if its claim is already visible.
+
+        Returns:
+            A `running` outcome with the counts so far.
+        """
+        summary = await cls._summary(receipt) if receipt is not None else {}
+        return loads(
+            dumps(
+                {
+                    "applied": None,
+                    "outcome": "running",
+                    "action": MediaAction.BATCH,
+                    **summary,
+                    "message": "Still running in the background; repeat this request "
+                    "later to read its outcome. Do not review it again.",
+                }
+            )
+        )
+
+    @classmethod
+    async def apply(
+        cls,
+        body: MediaChangeApply,
+        change: MediaBatch,
+        key: str,
+        user: UserInfo,
+        receipt: MediaChangeReceipt | None,
+    ) -> dict[str, Any]:
+        """Recheck, claim and run one reviewed batch.
+
+        The caller holds this request's locks and has already replayed a claimed
+        receipt. Only the stored plan runs; the selector is never evaluated again.
+
+        Args:
+            body: Confirmed request.
+            change: Reviewed selection and operation.
+            key: Account-scoped request identity.
+            user: Current administrator.
+            receipt: Unclaimed review holding the plan, if it still exists.
+
+        Returns:
+            A `completed`, `partial` or `cancelled` outcome with unit counts, or
+            a refusal: `stale`, `absent`, `confirmation_required` or `pending`
+            while another batch runs on the library.
+        """
+        from app.services.media_changes import MediaChangeService
+
+        base: dict[str, Any] = {
+            "action": MediaAction.BATCH,
+            "operation": change.operation,
+            "library_id": change.library_id,
+        }
+        lib = await MediaLib.get_or_none(id=change.library_id)
+        if lib is None:
+            return {
+                "applied": False,
+                "outcome": "absent",
+                **base,
+                "message": "The library no longer exists; nothing was changed.",
+            }
+        await MediaLibService.get_accessible(lib.id, user)
+        plan = (receipt.plan if receipt else None) or {}
+        if (
+            receipt is None
+            or plan.get("revision") != body.revision
+            or plan.get("library") != cls._library_facts(lib)
+            or (
+                change.operation == "delete"
+                and plan.get("deletion")
+                != (
+                    "trash"
+                    if KaloscopeConfig.get().filesystem_trash_mode
+                    else "permanent"
+                )
+            )
+        ):
+            return {
+                "applied": False,
+                **base,
+                "stale": True,
+                "message": "The reviewed plan expired or the library changed; "
+                "review it again.",
+            }
+        base.update(library_name=lib.name, batch_id=receipt.id)
+        if not body.confirmed:
+            return {
+                **base,
+                "planned": plan["planned"],
+                "blocked": plan["blocked"],
+                "deletion": plan["deletion"],
+                "request_id": str(body.request_id),
+                "revision": body.revision,
+                "applied": False,
+                "confirmation_required": True,
+            }
+        try:
+            with submission_lock(f"media-batch:{lib.id}"):
+                claimed = await MediaChangeReceipt.filter(
+                    key=key, claimed=False
+                ).update(claimed=True)
+                if not claimed:
+                    return await MediaChangeService._replay(
+                        await MediaChangeReceipt.get(key=key), user
+                    )
+                stopped = await cls._run(receipt, lib)
+        except LockTimeout:
+            return {
+                "applied": False,
+                **base,
+                "pending": True,
+                "message": "Another batch is running on this library; repeat this "
+                "request when it has finished.",
+            }
+        summary = await cls._summary(receipt)
+        done, left = summary["done"], summary["remaining"]
+        problems = summary["skipped"] + summary["failures"] + summary["uncertain"]
+        outcome = (
+            "cancelled" if stopped else "partial" if problems or left else "completed"
+        )
+        return await MediaChangeService._record(
+            key,
+            {
+                "applied": bool(done),
+                "outcome": outcome,
+                **summary,
+                "deletion": plan["deletion"],
+                "message": {
+                    "completed": "Every planned unit was applied.",
+                    "partial": "Some units were skipped or failed; their reasons "
+                    "are listed. Review again to retry what remains.",
+                    "cancelled": "Stopped on request; the remaining units were "
+                    "not touched.",
+                }[outcome],
+            },
+        )
+
+    @classmethod
+    async def _stopped(cls, receipt_id: int) -> bool:
+        """Read a running batch's stop flag.
+
+        Args:
+            receipt_id: Batch identity.
+
+        Returns:
+            Whether a stop was requested.
+        """
+        receipt = await MediaChangeReceipt.get_or_none(id=receipt_id)
+        return receipt is None or bool((receipt.plan or {}).get("stop"))
+
+    @classmethod
+    async def _run(cls, receipt: MediaChangeReceipt, lib: MediaLib) -> bool:
+        """Apply the planned units in order, recording each outcome.
+
+        Args:
+            receipt: Claimed batch.
+            lib: Library as reviewed.
+
+        Returns:
+            Whether the batch stopped early on request.
+        """
+        root = Path(lib.dir).absolute()
+        entries = await MediaBatchEntry.filter(
+            receipt_id=receipt.id, status="planned"
+        ).order_by("seq")
+        emptied: set[Path] = set()
+        changed: set[Path] = set()
+        reading = lib.lib_type in (LibType.NOVEL, LibType.COMIC)
+        position = 0
+        stopped = False
+        while position < len(entries):
+            if await cls._stopped(receipt.id):
+                stopped = True
+                break
+            if entries[position].kind != "file":
+                chunk = [entries[position]]
+            else:
+                chunk = []
+                for entry in entries[position : position + FILE_CHUNK]:
+                    if entry.kind != "file":
+                        break
+                    chunk.append(entry)
+            position += len(chunk)
+            ids = [entry.id for entry in chunk]
+            await MediaBatchEntry.filter(id__in=ids).update(status="started")
+            operation = (receipt.plan or {}).get("operation")
+            try:
+                if chunk[0].kind == "dir" and chunk[0].identity:
+                    outcomes = {chunk[0].id: await cls._remove_leftovers(chunk[0], lib)}
+                elif chunk[0].kind == "dir":
+                    async with library_lock(lib.dir):
+                        outcomes = await write_in_thread(
+                            remove_directories, root, [(chunk[0].id, chunk[0].src)]
+                        )
+                elif chunk[0].kind == "group":
+                    outcomes = {chunk[0].id: await cls._organize_work(chunk[0], lib)}
+                elif chunk[0].kind == "item":
+                    outcomes = {
+                        chunk[0].id: await (
+                            cls._rename_item(chunk[0], lib, root)
+                            if operation == "rename"
+                            else cls._move_item(chunk[0], lib, root)
+                            if operation == "move"
+                            else cls._delete_item(chunk[0], root)
+                        )
+                    }
+                elif operation == "rename":
+                    outcomes = await cls._rename_files(chunk, lib, root)
+                else:
+                    outcomes = await cls._delete_files(chunk, lib, root)
+            except Exception:
+                logger.exception("Failed to apply a media batch chunk")
+                outcomes = dict.fromkeys(ids, "error")
+            for outcome in set(outcomes.values()):
+                matching = [key for key, value in outcomes.items() if value == outcome]
+                await MediaBatchEntry.filter(id__in=matching).update(
+                    status="done"
+                    if outcome == "done"
+                    else "failed"
+                    if outcome
+                    in ("io_error", "error", "organize_pending", "organize_blocked")
+                    else "skipped",
+                    reason=None if outcome == "done" else outcome,
+                )
+            if operation == "delete":
+                emptied.update(
+                    (root / entry.src).parent
+                    for entry in chunk
+                    if entry.kind == "file" and outcomes.get(entry.id) == "done"
+                )
+                # pages, covers and metadata change what their work shows
+                changed.update(
+                    root / Path(entry.src).parts[0]
+                    for entry in chunk
+                    if reading
+                    and entry.kind == "file"
+                    and entry.owner in (FileOwner.PAGE, FileOwner.COMPANION)
+                    and outcomes.get(entry.id) == "done"
+                    and len(Path(entry.src).parts) > 1
+                )
+        forget_walk(root)
+        if changed:
+            # the watcher may miss or delay these, so the reconcile is queued here
+            for work in sorted(changed):
+                await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="modified",
+                    src_path=str(work),
+                    is_directory=True,
+                )
+            notify_media_events(lib.id)
+        if emptied:
+            try:
+                async with library_lock(lib.dir):
+                    kept = set()
+                    for item in await MediaItem.filter(lib_id=lib.id).only(
+                        "dir", "path"
+                    ):
+                        kept.update((item.dir, item.path))
+                    await write_in_thread(prune_directories, root, emptied, kept)
+            except Exception:
+                logger.exception("Failed to prune directories emptied by a batch")
+        return stopped
+
+    @classmethod
+    async def _remove_leftovers(cls, entry: MediaBatchEntry, lib: MediaLib) -> str:
+        """Delete a folder that still holds only the loose files that were shown.
+
+        Args:
+            entry: Directory entry with the reviewed file paths and fingerprints.
+            lib: Library as reviewed.
+
+        Returns:
+            `done`, or the reason the folder was left alone.
+        """
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (current.dir, current.lib_type) != (
+                lib.dir,
+                lib.lib_type,
+            ):
+                return "library_changed"
+            await recover_organizing(current)
+            index, _ = await cls._index(current)
+            _, busy_paths = await cls._busy(current)
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files, index, directory=entry.src, whole=True, fresh=True
+                )
+            except (OSError, ValueError):
+                return "missing"
+            found = leftover_directories(index, scan, entry.src, busy_paths)
+            # anything new, changed or claimed since the review keeps the folder
+            if (
+                scan.truncated
+                or len(found) != 1
+                or [
+                    [relative(index.root, match.path), match.identity]
+                    for match in scan.matches
+                ]
+                != entry.identity
+                or found[0][0] != index.root / entry.src
+            ):
+                return "content_changed"
+            outcomes = await write_in_thread(
+                delete_files,
+                index.root,
+                [
+                    (position, relative(index.root, match.path), match.identity)
+                    for position, match in enumerate(scan.matches)
+                ],
+            )
+            if failed := next(
+                (value for value in outcomes.values() if value != "done"), None
+            ):
+                return failed
+            return (
+                await write_in_thread(
+                    remove_directories, index.root, [(entry.id, entry.src)]
+                )
+            )[entry.id]
+
+    @classmethod
+    async def _delete_files(
+        cls, chunk: list[MediaBatchEntry], lib: MediaLib, root: Path
+    ) -> dict[int, str]:
+        """Delete a chunk of reviewed files under the library lock.
+
+        Args:
+            chunk: File entries marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            Each entry's outcome: `done` or the reason it was not deleted.
+        """
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (current.dir, current.lib_type) != (
+                lib.dir,
+                lib.lib_type,
+            ):
+                return {entry.id: "library_changed" for entry in chunk}
+            await recover_organizing(current)
+            index, _ = await cls._index(current)
+            busy_items, busy_paths = await cls._busy(current)
+            scope = relative(
+                root, os.path.commonpath([(root / entry.src).parent for entry in chunk])
+            )
+            try:
+                scan = await asyncio.to_thread(
+                    scan_files, index, directory=scope, whole=True, fresh=True
+                )
+            except (OSError, ValueError):
+                return {entry.id: "content_changed" for entry in chunk}
+            if scan.truncated:
+                return {entry.id: "content_changed" for entry in chunk}
+            selected = {entry.src for entry in chunk}
+            scan.matches = [
+                match
+                for match in scan.matches
+                if relative(root, match.path) in selected
+            ]
+            guards = {
+                entry.src: entry
+                for entry in plan_deletion(
+                    index,
+                    scan,
+                    [FileOwner(entry.owner) for entry in chunk],
+                    busy_items=busy_items,
+                    busy_paths=busy_paths,
+                )
+            }
+            outcomes = {}
+            for entry in chunk:
+                guard = guards.get(entry.src)
+                if guard is None:
+                    outcomes[entry.id] = "missing"
+                elif (guard.owner, guard.item_id) != (entry.owner, entry.item_id):
+                    outcomes[entry.id] = "item_changed"
+                elif guard.reason:
+                    outcomes[entry.id] = guard.reason
+            outcomes.update(
+                await write_in_thread(
+                    delete_files,
+                    root,
+                    [
+                        (entry.id, entry.src, entry.identity or [])
+                        for entry in chunk
+                        if entry.id not in outcomes
+                    ],
+                )
+            )
+            return outcomes
+
+    @staticmethod
+    async def _rename_files(
+        chunk: list[MediaBatchEntry], lib: MediaLib, root: Path
+    ) -> dict[int, str]:
+        """Rename a chunk of reviewed loose files under the library lock.
+
+        Args:
+            chunk: File entries marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            Each entry's outcome: `done` or the reason it was not renamed.
+        """
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (current.dir, current.lib_type) != (
+                lib.dir,
+                lib.lib_type,
+            ):
+                return {entry.id: "library_changed" for entry in chunk}
+            await recover_organizing(current)
+            # a file that became an item's body since the review is left alone
+            indexed = set(
+                await MediaItem.filter(
+                    lib_id=lib.id, path__in=[str(root / entry.src) for entry in chunk]
+                ).values_list("path", flat=True)
+            )
+            outcomes = {
+                entry.id: "item_changed"
+                for entry in chunk
+                if str(root / entry.src) in indexed
+            }
+            outcomes.update(
+                await write_in_thread(
+                    rename_files,
+                    root,
+                    [
+                        (entry.id, entry.src, entry.dst or "", entry.identity or [])
+                        for entry in chunk
+                        if entry.id not in outcomes
+                    ],
+                )
+            )
+            return outcomes
+
+    @staticmethod
+    async def _rename_item(entry: MediaBatchEntry, lib: MediaLib, root: Path) -> str:
+        """Rename one reviewed video and its companions through the organizer.
+
+        Args:
+            entry: Item entry marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            `done`, or the reason the video was not renamed.
+        """
+        if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+            return await MediaBatchService._reading_relocate(entry, lib, root)
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (
+                current.dir,
+                current.lib_type,
+                current.rename_template,
+            ) != (lib.dir, lib.lib_type, lib.rename_template):
+                return "library_changed"
+            await recover_organizing(current)
+            item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+            if item is None:
+                return "missing"
+            if item.path != str(root / entry.src):
+                return "item_changed"
+            try:
+                if await asyncio.to_thread(_fingerprint, Path(item.path)) != (
+                    entry.identity or []
+                ):
+                    return "content_changed"
+                await rename_item(current, item, Path(entry.dst or "").stem)
+            except FileNotFoundError:
+                return "missing"
+            except OrganizeDeferredError:
+                return "organize_deferred"
+            except OrganizePendingError:
+                return "organize_pending"
+            except ValueError:
+                return "organize_blocked"
+            except OSError:
+                return "io_error"
+        return "done"
+
+    @staticmethod
+    async def _reading_relocate(
+        entry: MediaBatchEntry, lib: MediaLib, root: Path
+    ) -> str:
+        """Rename or move one novel or comic source and carry its item along.
+
+        Persist the file moves before changing disk, then recover them under
+        the library lock with the existing observed-move helpers. Index changes,
+        reconcile events and journal removal commit together. A refused layout
+        is safely undone; database errors or interruption keep a recovery journal.
+
+        Args:
+            entry: Item entry marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            `done`, or the reason the source was not relocated.
+        """
+        source, target = root / entry.src, root / (entry.dst or "")
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (
+                current.dir,
+                current.lib_type,
+                current.rename_template,
+            ) != (lib.dir, lib.lib_type, lib.rename_template):
+                return "library_changed"
+            await recover_organizing(current)
+            item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+            if item is None:
+                return "missing"
+            try:
+                directory = await asyncio.to_thread(source.is_dir)
+                if directory:
+                    if Path(item.dir) != source:
+                        return "item_changed"
+                elif item.path != str(source):
+                    return "item_changed"
+                elif await asyncio.to_thread(_fingerprint, source) != (
+                    entry.identity or []
+                ):
+                    return "content_changed"
+                started = (
+                    item.parent_id is not None
+                    and target.parent != root
+                    and not await asyncio.to_thread(os.path.lexists, target.parent)
+                )
+                payload = await asyncio.to_thread(
+                    plan_reading_relocation,
+                    root,
+                    source,
+                    target,
+                    create_parent=started,
+                )
+                payload["reading"] = {
+                    "item_id": item.id,
+                    "item_path": item.path,
+                    "source": str(source),
+                    "destination": str(target),
+                    "directory": directory,
+                    "created_parent": started,
+                }
+                await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="organize",
+                    src_path=str(source),
+                    dest_path=str(target),
+                    is_directory=directory,
+                    payload=payload,
+                )
+                notify_media_events(lib.id)
+                mapping = await recover_organizing(current)
+                return (
+                    "done"
+                    if mapping.get(str(source)) == str(target)
+                    else "organize_blocked"
+                )
+            except FileNotFoundError:
+                return "missing"
+            except FileExistsError:
+                return "destination_exists"
+            except ValueError:
+                return "unsafe_path"
+            except OrganizePendingError:
+                return "organize_pending"
+            except OSError:
+                return "io_error"
+
+    @staticmethod
+    async def _move_item(entry: MediaBatchEntry, lib: MediaLib, root: Path) -> str:
+        """Move one reviewed folder or episode if it is still as it was shown.
+
+        Args:
+            entry: Item entry marked as started.
+            lib: Library as reviewed.
+            root: Its absolute root.
+
+        Returns:
+            `done`, or the reason the item was not moved.
+        """
+        if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
+            return await MediaBatchService._reading_relocate(entry, lib, root)
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if current is None or (
+                current.dir,
+                current.lib_type,
+                current.rename_template,
+            ) != (lib.dir, lib.lib_type, lib.rename_template):
+                return "library_changed"
+            await recover_organizing(current)
+            item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+            if item is None:
+                return "missing"
+            if item.path != str(root / entry.src):
+                return "item_changed"
+            target = root / (entry.dst or "")
+            try:
+                if item.path == item.dir:
+                    below = await MediaItem.filter(parent_id=item.id).values_list(
+                        "id", flat=True
+                    )
+                    if sorted(below) != (entry.identity or []):
+                        return "content_changed"
+                    await move_directory(current, item, target)
+                    return "done"
+                if await asyncio.to_thread(_fingerprint, Path(item.path)) != (
+                    entry.identity or []
+                ):
+                    return "content_changed"
+                folder = target.parent
+                owner = await MediaItem.filter(lib_id=lib.id, path=str(folder)).first()
+                if lib.lib_type == LibType.MOVIE:
+                    source = await MediaItem.get_or_none(id=item.parent_id)
+                    if reason := _merge_reason(source or item, owner):
+                        return reason
+                    if folder != root and owner is None:
+                        if item.parent_id is not None:
+                            return "unsupported_move"
+                        if await asyncio.to_thread(os.path.lexists, folder):
+                            return "unindexable_destination"
+                    await move_movie(current, item, folder)
+                    return "done"
+                series = (
+                    owner
+                    or await MediaItem.filter(
+                        lib_id=lib.id,
+                        path=str(root / folder.relative_to(root).parts[0]),
+                    ).first()
+                )
+                source = await MediaItem.get_or_none(id=item.parent_id)
+                if reason := _merge_reason(source, series):
+                    return reason
+                if (
+                    owner is not None
+                    and item.season is not None
+                    and item.episode is not None
+                    and await MediaItem.filter(
+                        parent_id=owner.id, season=item.season, episode=item.episode
+                    )
+                    .exclude(id=item.id)
+                    .exists()
+                ):
+                    return "duplicate_episode"
+                await move_episode(current, item, folder)
+            except FileNotFoundError:
+                return "missing"
+            except OrganizeDeferredError:
+                return "organize_deferred"
+            except OrganizePendingError:
+                return "organize_pending"
+            except ValueError:
+                return "organize_blocked"
+            except OSError:
+                return "io_error"
+        return "done"
+
+    @staticmethod
+    async def _organize_work(entry: MediaBatchEntry, lib: MediaLib) -> str:
+        """Organize one reviewed work if it would still move as it was shown.
+
+        Args:
+            entry: Group entry marked as started.
+            lib: Library as reviewed.
+
+        Returns:
+            `done`, or the reason the work was not organized.
+        """
+        root = Path(lib.dir).absolute()
+        async with library_lock(lib.dir):
+            current = await MediaLib.get_or_none(id=lib.id)
+            if (
+                current is None
+                or not current.rename_template
+                or (current.dir, current.lib_type, current.rename_template)
+                != (lib.dir, lib.lib_type, lib.rename_template)
+            ):
+                return "library_changed"
+            try:
+                await recover_organizing(current)
+                item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+                if item is None:
+                    return "missing"
+                preview = await preview_organization(
+                    current, current.rename_template, item
+                )
+                pairs = [
+                    [relative(root, pair["current"]), relative(root, pair["proposed"])]
+                    for pair in preview["paths"]
+                ]
+                if preview["status"] != "moves" or pairs != entry.identity:
+                    return "content_changed"
+                await organize_items(current, [item.id])
+                item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
+                if item is not None:
+                    after = await preview_organization(
+                        current, current.rename_template, item
+                    )
+                    if after["status"] != "unchanged":
+                        return f"organize_{after['status']}"
+            except OrganizeDeferredError:
+                return "organize_deferred"
+            except OrganizePendingError:
+                return "organize_pending"
+            except OSError:
+                return "io_error"
+        return "done"
+
+    @staticmethod
+    async def _delete_item(entry: MediaBatchEntry, root: Path) -> str:
+        """Delete one reviewed item with its files through the library's own rules.
+
+        Args:
+            entry: Item entry marked as started.
+            root: Absolute library root.
+
+        Returns:
+            `done`, or the reason the item was not deleted.
+        """
+        if entry.item_id is None:
+            return "missing"
+        try:
+            await MediaItemService.delete(
+                entry.item_id,
+                local=True,
+                expected=(str(root / entry.src), entry.identity or []),
+            )
+        except DoesNotExist:
+            return "missing"
+        except ContentError as error:
+            return error.code
+        except OrganizePendingError:
+            return "organize_pending"
+        except OSError:
+            return "io_error"
+        return "done"
+
+    @classmethod
+    async def replay(
+        cls, receipt: MediaChangeReceipt, user: UserInfo, *, settle: bool = False
+    ) -> dict[str, Any]:
+        """Read a claimed batch's outcome without applying anything.
+
+        Args:
+            receipt: Claimed batch.
+            user: Current administrator.
+            settle: Whether the caller holds this request's locks, which proves
+                no runner is alive. A batch without a recorded outcome is then
+                recorded as `interrupted`; otherwise it is reported as running.
+
+        Returns:
+            The recorded outcome with current counts, a `running` report, or
+            an `interrupted` outcome after a server stop. Derive `can_revert`
+            from the stored operation, including for legacy outcomes.
+        """
+        from app.services.media_changes import MediaChangeService
+
+        with suppress(NotFoundException):
+            await MediaLibService.get_accessible(receipt.lib_id, user)
+        if receipt.result is None:
+            if not settle:
+                return await cls.running(receipt)
+            await cls._settle(receipt)
+            summary = await cls._summary(receipt)
+            await MediaChangeService._record(
+                receipt.key,
+                {
+                    "applied": True if summary["done"] else None,
+                    "outcome": "interrupted",
+                    **summary,
+                    "message": BATCH_UNCERTAIN,
+                },
+            )
+            receipt = await MediaChangeReceipt.get(id=receipt.id)
+        return loads(
+            dumps(
+                {
+                    **(receipt.result or {}),
+                    "can_revert": (receipt.plan or {}).get("operation")
+                    in ("rename", "move"),
+                    "replayed": True,
+                    "current": await cls.counts(receipt.id),
+                }
+            )
+        )
+
+    @staticmethod
+    async def _settle(receipt: MediaChangeReceipt):
+        """Resolve entries a stopped server left marked as started.
+
+        Args:
+            receipt: Claimed batch with no runner alive.
+        """
+        lib = await MediaLib.get_or_none(id=receipt.lib_id)
+        for entry in await MediaBatchEntry.filter(
+            receipt_id=receipt.id, status="started"
+        ):
+            status = "uncertain"
+            if entry.kind == "item" and entry.dst is None:
+                if not await MediaItem.exists(id=entry.item_id):
+                    status = "done"
+            elif entry.kind == "item" and lib is not None:
+                # a journaled rename is finished by organizer recovery
+                item = await MediaItem.get_or_none(id=entry.item_id)
+                if item is not None and item.path == str(Path(lib.dir) / entry.dst):
+                    status = "done"
+                elif item is not None and item.path == str(Path(lib.dir) / entry.src):
+                    status = "planned"
+            elif entry.kind == "file" and lib is not None:
+                path = Path(lib.dir) / entry.src
+                present = await asyncio.to_thread(
+                    lambda path=path: path.exists() or path.is_symlink()
+                )
+                status = "planned" if present else "done"
+            await MediaBatchEntry.filter(id=entry.id).update(
+                status=status, reason="interrupted" if status == "uncertain" else None
+            )
+
+    @classmethod
+    async def details(cls, id: int) -> dict[str, Any]:
+        """Read one batch's header, progress and outcome for the plan dialog.
+
+        Args:
+            id: Batch identity.
+
+        Returns:
+            The reviewed plan header, unit counts, whether it is `reviewed`,
+            `running` or `finished`, its recorded outcome, and whether its
+            operation supports undo (`can_revert`).
+
+        Raises:
+            NotFoundException: If no batch has this identity.
+        """
+        receipt = await MediaChangeReceipt.get_or_none(id=id, action=MediaAction.BATCH)
+        if receipt is None or receipt.plan is None:
+            raise NotFoundException
+        plan = receipt.plan
+        return loads(
+            dumps(
+                {
+                    "id": receipt.id,
+                    "library_id": receipt.lib_id,
+                    "library_name": plan.get("library_name"),
+                    "operation": plan.get("operation"),
+                    "reverts": plan.get("reverts"),
+                    "can_revert": plan.get("operation") in ("rename", "move"),
+                    "deletion": plan.get("deletion"),
+                    "planned": plan.get("planned"),
+                    "blocked": plan.get("blocked"),
+                    "more": plan.get("more"),
+                    "state": "reviewed"
+                    if not receipt.claimed
+                    else "finished"
+                    if receipt.result is not None
+                    else "running",
+                    "stop_requested": bool(plan.get("stop")),
+                    "user_id": plan.get("user_id"),
+                    "counts": await cls.counts(receipt.id),
+                    "outcome": (receipt.result or {}).get("outcome"),
+                    "created_at": receipt.created_at,
+                }
+            )
+        )
+
+    @classmethod
+    async def confirm(cls, id: int, user: UserInfo) -> dict[str, Any]:
+        """Apply a stored plan on its reviewer's own confirmation.
+
+        This is the confirmation a person gives in the plan dialog. It goes
+        through the same request as a typed confirmation, so repeating it reads
+        the outcome and never runs the plan twice.
+
+        Args:
+            id: Batch identity.
+            user: Current administrator, who must be the plan's reviewer.
+
+        Returns:
+            The outcome `MediaChangeService.apply_change` reports for this plan.
+
+        Raises:
+            NotFoundException: If no batch has this identity.
+            ForbiddenException: If another account reviewed the plan.
+        """
+        from app.services.media_changes import MediaChangeService
+
+        receipt = await MediaChangeReceipt.get_or_none(id=id, action=MediaAction.BATCH)
+        if receipt is None or receipt.plan is None:
+            raise NotFoundException
+        plan = receipt.plan
+        if plan.get("user_id") != user.id:
+            raise ForbiddenException
+        return await MediaChangeService.apply_change(
+            MediaChangeApply(
+                # a plan stored before requests were kept can only be reviewed again
+                request_id=UUID(plan.get("request") or "0" * 32),
+                change=MediaBatch.model_validate(plan["change"]),
+                revision=plan["revision"],
+                confirmed=True,
+            ),
+            user,
+        )
+
+    @classmethod
+    async def entries(
+        cls, id: int, query: Pageable, status: str | None = None
+    ) -> dict[str, Any]:
+        """Page through one batch's entries.
+
+        Args:
+            id: Batch identity.
+            query: Page number and size.
+            status: Only entries with this status, if given.
+
+        Returns:
+            The total and one page in plan order, blocked entries after planned.
+
+        Raises:
+            NotFoundException: If no batch has this identity.
+        """
+        if not await MediaChangeReceipt.exists(id=id, action=MediaAction.BATCH):
+            raise NotFoundException
+        filters: dict[str, Any] = {"receipt_id": id}
+        if status:
+            filters["status"] = status
+        page = await MediaBatchEntry.page(
+            page_num=query.page_num,
+            page_size=query.page_size,
+            ordering="seq",
+            **filters,
+        )
+        return {
+            "total": page.total,
+            "items": [
+                {
+                    "seq": entry.seq,
+                    "kind": entry.kind,
+                    "owner": entry.owner,
+                    "item_id": entry.item_id,
+                    "src": entry.src,
+                    "dst": entry.dst,
+                    "files": entry.files,
+                    "size": entry.size,
+                    "status": entry.status,
+                    "reason": entry.reason,
+                }
+                for entry in page.items
+            ],
+        }
+
+    @classmethod
+    async def cancel(cls, id: int) -> dict[str, Any]:
+        """Ask a running batch to stop before its next unit.
+
+        Args:
+            id: Batch identity.
+
+        Returns:
+            The batch's details after the request. A batch that is not running
+            is unchanged.
+
+        Raises:
+            NotFoundException: If no batch has this identity.
+        """
+        receipt = await MediaChangeReceipt.get_or_none(id=id, action=MediaAction.BATCH)
+        if receipt is None or receipt.plan is None:
+            raise NotFoundException
+        if receipt.claimed and receipt.result is None:
+            await MediaChangeReceipt.filter(id=id).update(
+                plan={**receipt.plan, "stop": True}
+            )
+        return await cls.details(id)

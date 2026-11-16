@@ -314,6 +314,36 @@ class MediaConfigReviewResult(Result):
     notes: list[str] = Field(description="Scope and timing to show before confirming.")
 
 
+class MediaBatchReviewResult(Result):
+    """List matching library files, or describe a reviewed batch; nothing changes."""
+
+    library_id: int = Field(description="Library ID, not an item ID.")
+    library_name: str
+    issues: list[dict[str, str]]
+    matched: dict[str, int] = Field(
+        description="Everything the selection matched, including blocked matches."
+    )
+    sample: list[dict[str, JSONType]] = Field(
+        description="First matches only; `omitted` counts the rest. Page a "
+        "reviewed plan with get_media_batch."
+    )
+
+
+class MediaBatchResult(Result):
+    """Describe a stored batch plan, its progress and a page of its entries."""
+
+    id: int
+    library_id: int
+    state: str = Field(description="`reviewed`, `running` or `finished`.")
+    counts: dict[str, int] = Field(
+        description="Units done, skipped, failed (`failures`), uncertain and remaining."
+    )
+    total: int = Field(ge=0, description="Entries matching the status filter.")
+    items: list[dict[str, JSONType]] = Field(
+        description="Entries in plan order with library-relative paths."
+    )
+
+
 class MediaChangeApplyResult(Result):
     """Describe an applied, running, replayed, refused or uncertain media change."""
 

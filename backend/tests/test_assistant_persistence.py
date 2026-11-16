@@ -73,6 +73,39 @@ def test_generation_budget_overrides(monkeypatch):
     assert history.budgets("thinking-model", authoring=True) == (32000, 65536)
 
 
+@pytest.mark.parametrize("preset", [*AIProviderPreset, None])
+def test_preset_budget(monkeypatch, preset):
+    monkeypatch.setattr(history.Sanic, "get_app", lambda: SimpleNamespace(config={}))
+    local = {AIProviderPreset.OLLAMA, AIProviderPreset.LMSTUDIO, None}
+
+    budget = history.budgets("default", preset=preset)
+
+    assert budget == (32000 if preset in local else 64000, 4096)
+
+
+@pytest.mark.parametrize(
+    ("model", "preset", "expected"),
+    [
+        ("default", AIProviderPreset.DEEPSEEK, 96000),
+        ("default", AIProviderPreset.OLLAMA, 24000),
+        ("default", None, 24000),
+        ("pinned", AIProviderPreset.DEEPSEEK, 48000),
+        ("pinned", AIProviderPreset.OLLAMA, 48000),
+    ],
+)
+def test_input_budget_overrides(monkeypatch, model, preset, expected):
+    config = {
+        "ASSISTANT_INPUT_TOKENS": 24000,
+        "ASSISTANT_CLOUD_INPUT_TOKENS": 96000,
+        "ASSISTANT_MODEL_BUDGETS": {"pinned": {"input_tokens": 48000}},
+    }
+    monkeypatch.setattr(
+        history.Sanic, "get_app", lambda: SimpleNamespace(config=config)
+    )
+
+    assert history.budgets(model, preset=preset)[0] == expected
+
+
 def test_thinking_lease(monkeypatch):
     async def run():
         async with database() as (owner, _):
@@ -2203,7 +2236,7 @@ def test_long_conversation(monkeypatch, preset):
 
 @pytest.mark.parametrize("malformed", [False, True])
 def test_summary_failure_preserves_history(monkeypatch, malformed):
-    monkeypatch.setattr(history, "budgets", lambda _: (12000, 1000))
+    monkeypatch.setattr(history, "budgets", lambda _, **__: (12000, 1000))
     completion = SimpleNamespace(
         usage=None,
         choices=[
@@ -2254,7 +2287,7 @@ def test_summary_failure_preserves_history(monkeypatch, malformed):
 @pytest.mark.parametrize("source_ids", [[1, 2], [2, 999999]])
 @pytest.mark.parametrize("preset", [AIProviderPreset.DEEPSEEK, None])
 def test_rolling_summary_sources(monkeypatch, source_ids, preset):
-    monkeypatch.setattr(history, "budgets", lambda _: (12000, 1000))
+    monkeypatch.setattr(history, "budgets", lambda _, **__: (12000, 1000))
     usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
     create = AsyncMock(
         return_value=SimpleNamespace(
@@ -2328,7 +2361,7 @@ def test_rolling_summary_sources(monkeypatch, source_ids, preset):
     "reference", ["owned", "index", "other", "missing", "unreferenced"]
 )
 def test_summary_history_sources(monkeypatch, reference):
-    monkeypatch.setattr(history, "budgets", lambda _: (12000, 1000))
+    monkeypatch.setattr(history, "budgets", lambda _, **__: (12000, 1000))
 
     async def run():
         async with database() as (owner, _):
@@ -2589,7 +2622,7 @@ def test_context_sheds_samples():
 
 
 def test_summary_fallback_and_cancel(monkeypatch):
-    monkeypatch.setattr(history, "budgets", lambda _: (12000, 1000))
+    monkeypatch.setattr(history, "budgets", lambda _, **__: (12000, 1000))
 
     async def run():
         async with database() as (owner, _):

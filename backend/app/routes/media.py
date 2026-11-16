@@ -30,10 +30,11 @@ from app.core.transcode import (
     read_m3u8,
     stop_tasks,
 )
-from app.models.base import IDs, Range
+from app.models.base import IDs, Pageable, Range
 from app.models.flow import GraphCategory
 from app.models.media import (
     MediaAssetQuery,
+    MediaBatch,
     MediaContentQuery,
     MediaDel,
     MediaItem,
@@ -48,6 +49,7 @@ from app.models.media import (
 from app.models.user import UserRole
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.media_batches import MediaBatchService
 from app.utils.extractor import extract_title
 from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
 
@@ -190,6 +192,97 @@ async def delete_items(_, body: MediaDel) -> HTTPResponse:
                 raise
             logger.error("Failed to delete the media item: %s", id, exc_info=True)
     return empty()
+
+
+class BatchEntryQuery(Pageable):
+    """Page one batch's entries, optionally by status."""
+
+    status: str | None = None
+
+
+@media.post("/batch/review")
+@authorize(role=UserRole.ADMIN)
+@validate(json=MediaBatch)
+async def review_batch(request: Request, body: MediaBatch) -> HTTPResponse:
+    """List matching library files, or freeze a batch plan for confirmation.
+
+    Args:
+        request: Current request with the authenticated administrator.
+        body: Library, selector and optional operation.
+
+    Returns:
+        Response containing the listing or the reviewed plan; nothing changes.
+    """
+    return json(await MediaBatchService.review(body, request.ctx.user))
+
+
+@media.post("/batch/<id:int>/apply")
+@authorize(role=UserRole.ADMIN)
+async def apply_batch(request: Request, id: int) -> HTTPResponse:
+    """Apply a reviewed plan on its reviewer's confirmation.
+
+    Args:
+        request: Current request with the authenticated administrator.
+        id: Batch ID.
+
+    Returns:
+        Response containing the outcome, or `running` while the batch continues.
+    """
+    return json(await MediaBatchService.confirm(id, request.ctx.user))
+
+
+@media.get("/batch/<id:int>")
+@authorize(role=UserRole.ADMIN)
+async def get_batch(request: Request, id: int) -> HTTPResponse:
+    """Read a reviewed batch's plan, progress and outcome.
+
+    Args:
+        request: Current request with the authenticated administrator.
+        id: Batch ID.
+
+    Returns:
+        Response containing the batch details and whether this account may
+        confirm the plan.
+    """
+    details = await MediaBatchService.details(id)
+    details["confirmable"] = (
+        details.pop("user_id") == request.ctx.user.id
+        and details["state"] == "reviewed"
+        and details["planned"]["units"] > 0
+    )
+    return json(details)
+
+
+@media.get("/batch/<id:int>/entries")
+@authorize(role=UserRole.ADMIN)
+@validate(query=BatchEntryQuery)
+async def list_batch_entries(_, query: BatchEntryQuery, id: int) -> HTTPResponse:
+    """List one page of a batch's entries.
+
+    Args:
+        _: Unused request.
+        query: Page and optional status filter.
+        id: Batch ID.
+
+    Returns:
+        Response containing the total and the requested entries.
+    """
+    return json(await MediaBatchService.entries(id, query, query.status))
+
+
+@media.post("/batch/<id:int>/cancel")
+@authorize(role=UserRole.ADMIN)
+async def cancel_batch(_, id: int) -> HTTPResponse:
+    """Ask a running batch to stop before its next unit.
+
+    Args:
+        _: Unused request.
+        id: Batch ID.
+
+    Returns:
+        Response containing the batch details after the request.
+    """
+    return json(await MediaBatchService.cancel(id))
 
 
 @media.get("/<id:int>")

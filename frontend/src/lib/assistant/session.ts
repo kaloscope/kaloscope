@@ -16,6 +16,7 @@ import type {
   AssistantToolResult,
   Resp
 } from '$lib/types';
+import { resetMediaBatchWatchers, watchMediaBatch } from '$lib/utils/media-batches';
 import { derived, get, writable } from 'svelte/store';
 import { v4 as uuidv4 } from 'uuid';
 import { captureAssistantContext } from './context';
@@ -140,6 +141,7 @@ let handoffTimer: ReturnType<typeof setTimeout> | undefined;
  * Clear account data and invalidate all late network callbacks.
  */
 function resetSession(): void {
+  resetMediaBatchWatchers();
   resetAssistantCanvas();
   cancelStopRecovery();
   clearHandoff();
@@ -892,21 +894,25 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'apply_download_task_action' && event.data.ok && event.data.data?.applied !== false) {
             window.dispatchEvent(new Event('download-task-changed'));
           }
-          // show a submitted scan, a saved rescrape or new settings on the open pages
+          // refresh batches after execution and show scans, rescrapes or saved settings
           if (
             tool.name === 'apply_media_change' &&
             event.data.ok &&
             event.data.data &&
             event.data.data.applied !== false
           ) {
-            const { action, item_id, library_id } = event.data.data;
-            window.dispatchEvent(
-              typeof item_id === 'number'
-                ? new CustomEvent('media-item-changed', { detail: { item_id, library_id } })
-                : new CustomEvent(action === 'configure' ? 'media-library-changed' : 'media-library-scan', {
-                    detail: { library_id }
-                  })
-            );
+            const { action, batch_id, item_id, library_id } = event.data.data;
+            if (action === 'batch') {
+              if (typeof batch_id === 'number') watchMediaBatch(batch_id);
+            } else {
+              window.dispatchEvent(
+                typeof item_id === 'number'
+                  ? new CustomEvent('media-item-changed', { detail: { item_id, library_id } })
+                  : new CustomEvent(action === 'configure' ? 'media-library-changed' : 'media-library-scan', {
+                      detail: { library_id }
+                    })
+              );
+            }
           }
           break;
         }

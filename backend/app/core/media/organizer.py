@@ -6,7 +6,9 @@ import re
 import stat
 import tempfile
 import unicodedata
-from contextlib import suppress
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
 from copy import copy
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -54,6 +56,15 @@ _METADATA = {
     "backdrop": "backdrop",
     "rating": "rating",
 }
+
+
+# one library walk and one task query shared by many plans of a batch review
+_LINKS: ContextVar[list[tuple[str, str, str | None]] | None] = ContextVar(
+    "organizer_links", default=None
+)
+_TASKS: ContextVar[list[DownloadTask] | None] = ContextVar(
+    "organizer_tasks", default=None
+)
 
 
 class OrganizePendingError(RuntimeError):
@@ -149,6 +160,32 @@ def _fingerprint(path: Path) -> list[int]:
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
 
 
+def _case_alias(source: Path, destination: Path) -> bool:
+    """Check whether two spellings resolve to one case-insensitive directory entry.
+
+    Args:
+        source: Existing source path.
+        destination: Different spelling of the same name in the same directory.
+
+    Returns:
+        Whether both paths identify one entry. Distinct hard links and missing
+        or unreadable paths are not aliases.
+    """
+    if (
+        source.parent != destination.parent
+        or source.name == destination.name
+        or source.name.casefold() != destination.name.casefold()
+    ):
+        return False
+    try:
+        if not os.path.samefile(source, destination):
+            return False
+        names = {path.name for path in source.parent.iterdir()}
+        return source.name not in names or destination.name not in names
+    except OSError:
+        return False
+
+
 def _companions(path: Path) -> list[Path]:
     """Find the NFO and subtitle files associated with a video basename.
 
@@ -225,22 +262,84 @@ def _validate_link_references(root: Path, moves: dict[str, str]):
     source_directories = {
         str(parent) for source in sources for parent in Path(source).parents
     }
+    moving_directories = {
+        _reference_key(Path(source))
+        for source, destination in moves.items()
+        if source != destination and Path(source).is_dir()
+    }
+    links = _LINKS.get()
+    if links is None:
+        links = _library_links(root)
+    for path, target, directory in links:
+        if path in moves:
+            continue
+        if (
+            target in sources
+            or any(target.startswith(source + os.sep) for source in moving_directories)
+            or (directory is not None and directory in source_directories)
+        ):
+            raise ValueError(
+                f"moving a file would break a symlink outside the group: {path}"
+            )
+
+
+def _library_links(root: Path) -> list[tuple[str, str, str | None]]:
+    """List a library's symlinks with their normalized targets.
+
+    Args:
+        root: Absolute media library root to inspect without following links.
+
+    Returns:
+        Each link's path, its target's reference key and, for a directory link,
+        the resolved target directory's reference key.
+
+    Raises:
+        OSError: If a directory or symlink cannot be inspected.
+    """
+    links = []
     directories = [root]
     while directories:
         for path in directories.pop().iterdir():
             if path.is_symlink():
-                if str(path) in moves:
-                    continue
                 target = path.parent / os.readlink(path)
-                if _reference_key(target) in sources or (
-                    path.is_dir()
-                    and _reference_key(target.resolve()) in source_directories
-                ):
-                    raise ValueError(
-                        f"moving a file would break a symlink outside the group: {path}"
+                links.append(
+                    (
+                        str(path),
+                        _reference_key(target),
+                        _reference_key(target.resolve()) if path.is_dir() else None,
                     )
+                )
             elif path.is_dir():
                 directories.append(path)
+    return links
+
+
+@asynccontextmanager
+async def shared_validation(lib: MediaLib) -> AsyncGenerator[None]:
+    """Share one symlink walk and one download query across many plans.
+
+    Planning validates every group against the library's symlinks and download
+    tasks. A batch review plans many groups at one moment, so it reads both once.
+    Plans made inside describe that moment, as previews already do.
+
+    Args:
+        lib: Library whose plans are being previewed.
+
+    Yields:
+        Control while validators reuse the snapshot.
+
+    Raises:
+        OSError: If the library cannot be walked.
+    """
+    links = _LINKS.set(
+        await asyncio.to_thread(_library_links, Path(lib.dir).absolute())
+    )
+    tasks = _TASKS.set(await DownloadTask.all())
+    try:
+        yield
+    finally:
+        _LINKS.reset(links)
+        _TASKS.reset(tasks)
 
 
 def _relocate_reference(
@@ -490,7 +589,8 @@ async def _validate_downloads(lib: MediaLib, affected_paths: set[str]):
         OrganizeDeferredError: If an affected download is still transferring.
         ValueError: If the plan would modify an original download source.
     """
-    for task in await DownloadTask.all():
+    tasks = _TASKS.get()
+    for task in tasks if tasks is not None else await DownloadTask.all():
         targets = task.transfer_targets or {}
         if (
             task.transfer_lib_id == lib.id
@@ -839,11 +939,21 @@ async def _plan(
         raise ValueError("TV episodes require a parent directory")
     if not is_tv and len(group) != 1:
         raise ValueError("multi-file movies require an explicit part naming rule")
+    own_nfo = Path(group[0].nfo_path or Path(group[0].path).with_suffix(".nfo"))
     parent_nfo = (
         Path(parent.nfo_path or str(source_dir / f"{source_dir.name}.nfo"))
         if parent
-        else Path(group[0].nfo_path or Path(group[0].path).with_suffix(".nfo"))
+        else own_nfo
     )
+    if (
+        parent
+        and not is_tv
+        and not parent.nfo_path
+        and not parent_nfo.exists()
+        and own_nfo.is_file()
+    ):
+        # a movie folder may keep its metadata in `<video>.nfo` only
+        parent_nfo = own_nfo
     _safe_path(root, parent_nfo)
     parent_meta = await asyncio.to_thread(
         _metadata, parent_nfo, lib.lib_type, "tvshow" if is_tv else "movie"
@@ -1274,6 +1384,8 @@ def _move_files(root: Path, payload: dict):
 
     Preserve recorded permissions when publishing copied NFO files. Accept legacy
     journals without a recorded `mode`, retaining their private temporary-file mode.
+    A move's optional `temporary` path stages case-only renames and lets recovery
+    continue after either rename without replacing another directory entry.
 
     Args:
         root: Absolute media library root.
@@ -1289,6 +1401,22 @@ def _move_files(root: Path, payload: dict):
         source, destination = Path(move["src"]), Path(move["dst"])
         _safe_path(root, source)
         _safe_path(root, destination)
+        if temporary := move.get("temporary"):
+            staging = Path(temporary)
+            _safe_path(root, staging)
+            if os.path.lexists(staging):
+                source = staging
+            elif os.path.lexists(source):
+                if _fingerprint(source) != move["identity"]:
+                    raise OrganizePendingError(
+                        f"source changed during organization: {source}"
+                    )
+                if os.path.lexists(destination) and not _case_alias(
+                    source, destination
+                ):
+                    raise FileExistsError(str(destination))
+                rename_exclusive(source, staging)
+                source = staging
         if source.exists() or source.is_symlink():
             if _fingerprint(source) != move["identity"]:
                 raise OrganizePendingError(
@@ -1392,6 +1520,8 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
     legacy plans. Retain filesystem events for reused sources or destinations
     changed by external writers before the database commit.
     Preserve existing original snapshots and capture file information for new parents.
+    Reading relocations reuse the observed-move helpers under the same lock;
+    their index updates, reconciliation events and journal removal commit together.
 
     Args:
         lib: Media library whose lock is held by the caller.
@@ -1408,6 +1538,8 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
         if payload is None:
             raise ValueError("organization event has no payload")
         await write_in_thread(_move_files, Path(lib.dir).absolute(), payload)
+        if "reading" in payload:
+            return await _finish_reading(lib, event, payload)
         async with in_transaction("default"):
             parent = payload["parent"]
             parent_id = None
@@ -1482,6 +1614,92 @@ async def _finish(lib: MediaLib, event: MediaEvent) -> dict[str, str]:
             f"organization {event.id} needs recovery "
             f"before library {lib.id} can continue"
         ) from error
+
+
+async def _finish_reading(
+    lib: MediaLib, event: MediaEvent, payload: dict
+) -> dict[str, str]:
+    """Commit a reading relocation or safely undo an invalid destination.
+
+    The caller holds the library lock and has applied the journal's moves.
+    Database errors and cancellation retain the journal for the next recovery.
+
+    Args:
+        lib: Reading library being recovered.
+        event: Persisted organization event.
+        payload: File identities and the reading source and destination.
+
+    Returns:
+        Applied path mappings, or an empty mapping after a refused move was undone.
+
+    Raises:
+        Exception: If indexing or rollback cannot finish; the journal stays pending.
+    """
+    from tortoise.exceptions import DoesNotExist
+
+    from app.core.media.batch import restore_reading
+    from app.core.media.common import ContentError
+    from app.core.media.handlers.reading import ReadingSource
+    from app.services.media import MediaItemService
+
+    root = Path(lib.dir).absolute()
+    reading = payload["reading"]
+    source, target = Path(reading["source"]), Path(reading["destination"])
+    expected = (
+        target / Path(reading["item_path"]).relative_to(source)
+        if reading["directory"]
+        else target
+    )
+    try:
+        async with in_transaction():
+            item = await MediaItem.get(id=reading["item_id"], lib_id=lib.id)
+            if item.path != str(expected):
+                if (item.dir if reading["directory"] else item.path) != str(source):
+                    raise ContentError("content_changed")
+                if (
+                    reading["directory"]
+                    and item.parent_id is not None
+                    and target.parent != root
+                    and not await MediaItem.filter(
+                        lib_id=lib.id, path=str(target.parent)
+                    ).exists()
+                ):
+                    await MediaItemService.create_reading(
+                        lib.id, ReadingSource(target.parent, None), _locked=True
+                    )
+                await (
+                    MediaItemService.move_reading_directory(
+                        lib.id, source, target, _locked=True
+                    )
+                    if reading["directory"]
+                    else MediaItemService.move_reading_file(
+                        lib.id, source, target, _locked=True
+                    )
+                )
+                await item.refresh_from_db()
+                if item.path != str(expected):
+                    raise ContentError("content_changed")
+            for work in {
+                root / source.relative_to(root).parts[0],
+                root / target.relative_to(root).parts[0],
+            }:
+                await MediaEvent.create(
+                    lib_id=lib.id,
+                    event_type="modified",
+                    src_path=str(work),
+                    is_directory=True,
+                )
+            await event.delete()
+    except (ContentError, ValueError, DoesNotExist):
+        if not await write_in_thread(restore_reading, root, payload["moves"]):
+            raise
+        if reading["created_parent"]:
+            with suppress(OSError):
+                await write_in_thread(target.parent.rmdir)
+        await event.delete()
+        return {}
+    notify_media_events(lib.id)
+    return payload["mapping"]
 
 
 def _remove_empty_directories(path: Path):
@@ -1760,3 +1978,416 @@ async def organize_items(lib: MediaLib, item_ids: list[int]) -> dict[str, str]:
     if deferred is not None:
         raise deferred
     return mapping
+
+
+async def plan_relocation(
+    lib: MediaLib,
+    item: MediaItem,
+    destination: Path,
+    *,
+    parent_id: int | None = None,
+) -> dict:
+    """Plan giving one indexed video a new name or directory inside its library.
+
+    The video keeps its extension. Its same-stem NFO, `stem.*` subtitles,
+    `stem-*` artwork and danmaku cache go with it under the new stem, and local
+    references in the NFO and the index follow them.
+
+    Args:
+        lib: Video library whose lock the caller holds when applying.
+        item: Indexed video file to relocate.
+        destination: Absolute new path of the video, with its extension.
+        parent_id: Directory item owning the destination when the video changes
+            directory; `None` keeps the current parent, as a rename does.
+
+    Returns:
+        A journal compatible with the existing organization executor. A video
+        that leaves its directory names its former parent for removal once that
+        parent has no children left.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        ValueError: If the change is unsafe, conflicts with an existing file,
+            involves a symlink or would modify an original download source.
+    """
+    root = Path(lib.dir).absolute()
+    old = Path(item.path)
+    _safe_path(root, old)
+    if item.path == item.dir or not old.is_file():
+        raise ValueError("only an indexed video file can be relocated")
+    if destination.suffix != old.suffix:
+        raise ValueError("a relocated video keeps its extension")
+    folder, stem = destination.parent, destination.stem
+    moves = {str(old): str(destination)}
+    for companion in _companions(old):
+        moves[str(companion)] = str(folder / (stem + companion.name[len(old.stem) :]))
+    for sibling in old.parent.iterdir():
+        if (
+            sibling.name.startswith(f"{old.stem}-")
+            and sibling.is_file()
+            and (mimetypes.guess_file_type(sibling)[0] or "").startswith("image/")
+        ):
+            moves[str(sibling)] = str(folder / (stem + sibling.name[len(old.stem) :]))
+    cache = old.parent / f".{old.stem}.json"
+    if cache.is_file() or cache.is_symlink():
+        moves[str(cache)] = str(folder / f".{stem}.json")
+    if any(Path(source).is_symlink() for source in moves):
+        raise ValueError("relocating a linked file is not supported")
+    await _validate_moves(root, moves)
+
+    own_nfo = Path(item.nfo_path) if item.nfo_path else old.with_suffix(".nfo")
+    new_nfo = Path(moves.get(str(own_nfo), str(own_nfo)))
+    data: dict[str, Any] = {
+        "id": item.id,
+        "path": str(destination),
+        "dir": str(folder),
+        "name": stem,
+    }
+    moving = folder != old.parent
+    if moving:
+        data["parent_id"] = parent_id
+    for name in ("nfo_path", "danmaku_path"):
+        value = getattr(item, name)
+        if value in moves:
+            data[name] = moves[value]
+    for name in ("poster", "backdrop"):
+        value = getattr(item, name)
+        updated = _relocate_reference(value, own_nfo, new_nfo, moves)
+        if updated != value:
+            data[name] = updated
+    updates = [data]
+    # a movie folder is registered on its video's NFO
+    for other in await MediaItem.filter(lib_id=lib.id, nfo_path__in=list(moves)):
+        if other.id != item.id:
+            updates.append(
+                {"id": other.id, "path": other.path, "nfo_path": moves[other.nfo_path]}
+            )
+    nfo_edits = await asyncio.to_thread(_nfo_edits, moves)
+    await _validate_downloads(
+        lib, set(moves) | set(moves.values()) | {edit["path"] for edit in nfo_edits}
+    )
+    await _validate_updates(lib, updates)
+    return {
+        "moves": [
+            {"src": src, "dst": dst, "identity": _fingerprint(Path(src))}
+            for src, dst in moves.items()
+        ],
+        "updates": updates,
+        "parent": None,
+        "delete_parent": item.parent_id if moving else None,
+        "mapping": dict(moves),
+        "nfo_edits": nfo_edits,
+        "symlinks": [],
+        "creates": [],
+        "cleanup": str(old.parent) if moving and old.parent != root else None,
+    }
+
+
+async def _journal(lib: MediaLib, item: MediaItem, payload: dict) -> dict[str, str]:
+    """Persist a plan and finish it under the library lock held by the caller.
+
+    Args:
+        lib: Video library whose lock is held by the caller.
+        item: Item the plan starts from.
+        payload: Journal built by a planner in this module.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OrganizePendingError: If the persisted plan cannot finish.
+    """
+    event = await MediaEvent.create(
+        lib_id=lib.id,
+        event_type="organize",
+        src_path=item.path,
+        dest_path=None,
+        is_directory=item.path == item.dir,
+        payload=payload,
+    )
+    return await _finish(lib, event)
+
+
+async def rename_item(lib: MediaLib, item: MediaItem, stem: str) -> dict[str, str]:
+    """Rename one indexed video with its companions through a recoverable journal.
+
+    Args:
+        lib: Video library whose lock is held by the caller.
+        item: Indexed video file to rename.
+        stem: New file name without its extension.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        OrganizePendingError: If the persisted plan cannot finish.
+        ValueError: If the rename is unsafe or conflicts with an existing file.
+    """
+    old = Path(item.path)
+    payload = await plan_relocation(lib, item, old.with_name(stem + old.suffix))
+    return await _journal(lib, item, payload)
+
+
+async def move_episode(
+    lib: MediaLib, item: MediaItem, directory: Path
+) -> dict[str, str]:
+    """Move one indexed episode and its companions into another show directory.
+
+    The destination's directory item is reused, or created from the episode's
+    current parent when the directory is new to the index. The former parent is
+    removed once its last episode has left; its own NFO and artwork stay on disk.
+
+    Args:
+        lib: TV library whose lock is held by the caller.
+        item: Indexed episode to move.
+        directory: Absolute series or season directory to move it into.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        OrganizePendingError: If the persisted plan cannot finish.
+        ValueError: If the move is unsafe or conflicts with an existing file.
+    """
+    from app.core.media.handlers.tvshow import episode_location
+
+    root = Path(lib.dir).absolute()
+    location = episode_location(
+        (*directory.relative_to(root).parts, Path(item.path).name)
+    )
+    if location is None:
+        raise ValueError("the destination is not a series or season directory")
+    target = await MediaItem.filter(lib_id=lib.id, path=str(directory)).first()
+    # plan before registering a new directory so a refused move leaves no record
+    payload = await plan_relocation(
+        lib,
+        item,
+        directory / Path(item.path).name,
+        parent_id=target.id if target else 0,
+    )
+    if target is None:
+        source = await MediaItem.filter(id=item.parent_id).first()
+        target, _ = await MediaItem.get_or_create(
+            lib_id=lib.id,
+            path=str(directory),
+            defaults={
+                "dir": str(directory),
+                "name": directory.name,
+                "title": source.title if source else None,
+                "year": source.year if source else None,
+                "season": location[0],
+                "visible": source.visible if source else True,
+            },
+        )
+        for update in payload["updates"]:
+            if update["id"] == item.id:
+                update["parent_id"] = target.id
+    return await _journal(lib, item, payload)
+
+
+async def move_movie(lib: MediaLib, item: MediaItem, directory: Path) -> dict[str, str]:
+    """Move one indexed movie file and its companions into a movie folder.
+
+    An indexed destination folder is reused. A new folder is registered with the
+    movie's saved metadata and NFO, as a scan would register a movie that was
+    found inside a folder. The library root is accepted so a move can be undone;
+    a folder item left without a video is removed.
+
+    Args:
+        lib: Movie library whose lock is held by the caller.
+        item: Indexed movie file to move.
+        directory: Absolute folder directly below the library root, or the root.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        OrganizePendingError: If the persisted plan cannot finish.
+        ValueError: If the move is unsafe, conflicts with an existing file or
+            the destination is deeper than one folder.
+    """
+    root = Path(lib.dir).absolute()
+    depth = len(directory.relative_to(root).parts)
+    if depth > 1:
+        raise ValueError("a movie is indexed at most one folder below the root")
+    target = (
+        await MediaItem.filter(lib_id=lib.id, path=str(directory)).first()
+        if depth
+        else None
+    )
+    # plan before registering a new folder so a refused move leaves no record
+    payload = await plan_relocation(
+        lib,
+        item,
+        directory / Path(item.path).name,
+        parent_id=(target.id if target else 0) if depth else None,
+    )
+    if depth and target is None:
+        moved = next(update for update in payload["updates"] if update["id"] == item.id)
+        target, _ = await MediaItem.get_or_create(
+            lib_id=lib.id,
+            path=str(directory),
+            defaults={
+                "dir": str(directory),
+                "name": directory.name,
+                "visible": item.visible,
+                "nfo_path": moved.get("nfo_path", item.nfo_path),
+                "nfo_mtime": item.nfo_mtime,
+                "poster": moved.get("poster", item.poster),
+                "backdrop": moved.get("backdrop", item.backdrop),
+                **{
+                    name: getattr(item, name)
+                    for name in (
+                        "title",
+                        "year",
+                        "aired",
+                        "unique_id",
+                        "nfo_source",
+                        "rating",
+                    )
+                },
+            },
+        )
+        moved["parent_id"] = target.id
+    return await _journal(lib, item, payload)
+
+
+async def plan_directory_move(
+    lib: MediaLib, parent: MediaItem, directory: Path
+) -> dict:
+    """Plan moving a whole work directory to a new, unused directory.
+
+    Every file below the directory moves with it, the directory item keeps its
+    identity, and every item below it is rebased, including absolute local image
+    references. A tree without files is moved as a directory so empty containers
+    and their subdirectories are retained.
+
+    Args:
+        lib: Video library whose lock the caller holds when applying.
+        parent: Directory item to move.
+        directory: Absolute destination, which must not exist and must sit at
+            the same depth as the source.
+
+    Returns:
+        A journal compatible with the existing organization executor.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        ValueError: If the move is unsafe, the destination exists or is indexed,
+            the depth changes, or the directory holds a symlink.
+    """
+    root = Path(lib.dir).absolute()
+    source = Path(parent.path)
+    _safe_path(root, source)
+    _safe_path(root, directory)
+    if parent.path != parent.dir or not source.is_dir():
+        raise ValueError("only a directory item can be moved as a whole")
+    if directory.exists() or directory.is_symlink():
+        raise ValueError(f"destination already exists: {directory}")
+    if len(directory.relative_to(root).parts) != len(source.relative_to(root).parts):
+        raise ValueError("a moved directory keeps its depth in the library")
+    if directory.is_relative_to(source):
+        raise ValueError("a directory cannot move into itself")
+    moves: dict[str, str] = {}
+    for current, dirs, files in os.walk(source, followlinks=False):
+        base = Path(current)
+        for name in (*dirs, *files):
+            if (base / name).is_symlink():
+                raise ValueError("moving a directory with links is not supported")
+        for name in files:
+            path = base / name
+            moves[str(path)] = str(directory / path.relative_to(source))
+    empty = not moves
+    if empty:
+        moves[str(source)] = str(directory)
+    # the work's own NFO is named after its directory
+    own = source / f"{source.name}.nfo"
+    if str(own) in moves:
+        moves[str(own)] = str(directory / f"{directory.name}.nfo")
+    await _validate_moves(root, moves)
+
+    def rebase(value: str | None) -> str | None:
+        """Rebase a stored path below the source onto the destination.
+
+        Args:
+            value: Stored absolute path, if any.
+
+        Returns:
+            The moved path, or the value unchanged when it is not below the source.
+        """
+        if not value:
+            return value
+        if value in moves:
+            return moves[value]
+        path = Path(value)
+        if path == source or path.is_relative_to(source):
+            return str(directory / path.relative_to(source))
+        return value
+
+    updates = []
+    for row in await MediaItem.filter(lib_id=lib.id):
+        path = Path(row.path)
+        if not (path == source or path.is_relative_to(source)):
+            continue
+        data: dict[str, Any] = {
+            "id": row.id,
+            "path": rebase(row.path),
+            "dir": rebase(row.dir),
+        }
+        if row.id == parent.id:
+            data["name"] = directory.name
+        for name in ("nfo_path", "danmaku_path", "poster", "backdrop"):
+            value = getattr(row, name)
+            if value and rebase(value) != value:
+                data[name] = rebase(value)
+        updates.append(data)
+    nfo_edits = [] if empty else await asyncio.to_thread(_nfo_edits, moves)
+    await _validate_downloads(
+        lib, set(moves) | set(moves.values()) | {edit["path"] for edit in nfo_edits}
+    )
+    await _validate_updates(lib, updates)
+    return {
+        "moves": [
+            {"src": src, "dst": dst, "identity": _fingerprint(Path(src))}
+            for src, dst in moves.items()
+        ],
+        "updates": updates,
+        "parent": None,
+        "delete_parent": None,
+        "mapping": {**moves, str(source): str(directory)},
+        "nfo_edits": nfo_edits,
+        "symlinks": [],
+        "creates": [],
+        "cleanup": str(source),
+    }
+
+
+async def move_directory(
+    lib: MediaLib, parent: MediaItem, directory: Path
+) -> dict[str, str]:
+    """Move a whole work directory through a recoverable journal.
+
+    Args:
+        lib: Video library whose lock is held by the caller.
+        parent: Directory item to move.
+        directory: Absolute destination that does not exist yet.
+
+    Returns:
+        Mapping from original paths to their new paths.
+
+    Raises:
+        OSError: If files cannot be inspected or read.
+        OrganizeDeferredError: If an affected download has unfinished transfers.
+        OrganizePendingError: If the persisted plan cannot finish.
+        ValueError: If the move is unsafe or the destination is taken.
+    """
+    payload = await plan_directory_move(lib, parent, directory)
+    return await _journal(lib, parent, payload)

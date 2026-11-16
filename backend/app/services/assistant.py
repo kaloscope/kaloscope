@@ -19,7 +19,12 @@ from openai import (
     omit,
 )
 
-from app.core.ai.history import budgets, context_size, prepare_context
+from app.core.ai.history import (
+    CLOUD_INPUT_TOKENS,
+    budgets,
+    context_size,
+    prepare_context,
+)
 from app.core.ai.tools import (
     CREATE_TOOL,
     MEDIA_CHANGE_TOOLS,
@@ -371,6 +376,8 @@ class AssistantService:
         media_change = (
             media_reviews | {"apply_media_change"} if media_reviews else False
         )
+        # the previous turn listed or reviewed a batch: keep its focus
+        batch_focus = "review_media_batch" in reviewed
         current_context = turn.context
         plan_authoring = (
             bool(
@@ -387,6 +394,18 @@ class AssistantService:
             and (current_context or {}).get("page_type") != "workflow_designer"
         )
         plan_tools = plan_authoring
+        input_budget, output_budget = budgets(
+            turn.model["model_id"], preset=provider.preset
+        )
+        if (
+            media_change is False
+            and not plan_authoring
+            and input_budget >= CLOUD_INPUT_TOKENS
+        ):
+            # the model decides at turn start whether library files can change,
+            # and a batch review only lists or plans; the floor budget keeps
+            # it until media is read, for room
+            media_change = {"review_media_batch"}
         schemas = tool_schemas(
             user,
             plan_authoring=plan_authoring,
@@ -395,6 +414,7 @@ class AssistantService:
             plan_change=plan_change,
             task_action=task_action,
             media_change=media_change,
+            batch=batch_focus,
         )
         workflow_authoring = False
         self_contained = False
@@ -412,7 +432,6 @@ class AssistantService:
         canvas_snapshot_id = canvas["snapshot_id"] if canvas else None
         tool_count = 0
         finish_requested = False
-        input_budget, output_budget = budgets(turn.model["model_id"])
         text_length = 0
         continuation = []
         yield AssistantEvent(event="compacting", data={"active": True})
@@ -493,11 +512,11 @@ class AssistantService:
                 raise KaloscopeException(ErrorCode.ASSISTANT_CONTEXT_LIMIT)
             if not await AssistantSessionService.allowed(turn.resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
-            generation_output = (
-                budgets(turn.model["model_id"], authoring=True)[1]
-                if canvas is not None or workflow_authoring
-                else output_budget
-            )
+            generation_output = output_budget
+            if canvas is not None or workflow_authoring:
+                _, generation_output = budgets(
+                    turn.model["model_id"], authoring=True, preset=provider.preset
+                )
             reasoning_details = []
             text_prefix = ""
             text_started = False
@@ -840,6 +859,11 @@ class AssistantService:
                         if schema["function"]["name"]
                         not in {"get_download_plan", "list_download_plans"}
                     ]
+                if result["ok"] and call.function.name == "review_media_batch":
+                    batch_focus = True
+                if batch_focus:
+                    # a plan and its samples need the room other tools would take
+                    schemas = tool_schemas(user, batch=True)
                 # a result committed together with its effect is authoritative
                 await AssistantToolCall.filter(
                     turn_id=turn.id, call_id=info["id"], status="running"

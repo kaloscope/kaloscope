@@ -13,6 +13,7 @@ from contextlib import (
     ExitStack,
     asynccontextmanager,
     contextmanager,
+    nullcontext,
     suppress,
 )
 from dataclasses import asdict
@@ -54,6 +55,7 @@ from app.core.media.organizer import (
     recover_organizing,
 )
 from app.core.renderer import SANDBOX_ENV, render
+from app.models.download import DownloadTask
 from app.models.flow import (
     FlowGraph,
     FlowInstance,
@@ -164,6 +166,27 @@ async def _running_ingests() -> tuple[set[int], set[int]]:
             if type(params.get("item_id")) is int and params["item_id"] > 0
         },
     )
+
+
+async def _media_activity(lib: MediaLib) -> tuple[set[int], set[str]]:
+    """Find indexed items and download files that ongoing work still uses.
+
+    Args:
+        lib: Library whose file operations are being guarded.
+
+    Returns:
+        Item IDs with queued or running ingestion and paths still being
+        downloaded into or transferred to this library.
+    """
+    _, items = await _running_ingests()
+    paths: set[str] = set()
+    root = Path(lib.dir)
+    for task in await DownloadTask.all():
+        if task.transfer_lib_id == lib.id and task.transfer_pending:
+            paths.update((task.transfer_targets or {}).values())
+        if task.completed_at is None and Path(task.dir).is_relative_to(root):
+            paths.update(str(Path(task.dir) / name) for name in task.files or [])
+    return items, paths
 
 
 def _reading_role(item: MediaItem) -> Literal["book", "collection", "chapter"]:
@@ -560,6 +583,96 @@ async def _remove_media_records(items: list[MediaItem]):
             history_ids.append(history.id)
     await UserHistory.filter(id__in=history_ids).delete()
     await MediaItem.filter(id__in=ids).delete()
+
+
+def _parent_deletion_snapshot(
+    parent: MediaItem, children: list[MediaItem], others: list[MediaItem]
+) -> dict[str, Any] | None:
+    """Snapshot a parent and its exclusive files for a reviewed deletion.
+
+    Args:
+        parent: Directory item with its library and parent loaded.
+        children: Every selected child with its relations loaded.
+        others: Surviving items used to protect shared files and nested works.
+
+    Returns:
+        Child IDs, all current files and the exclusive deletion manifest, or
+        `None` if unindexed media, links, surviving items or uncertain ownership
+        prevent automatic parent cleanup.
+    """
+    from app.core.media.batch import build_index, relative, scan_files
+
+    root, directory = Path(parent.lib.dir), Path(parent.path)
+    selected = [parent, *children]
+    ids = {item.id for item in selected}
+    if (
+        parent.path != parent.dir
+        or directory == root
+        or not directory.is_relative_to(root)
+        or any(not Path(child.path).is_relative_to(directory) for child in children)
+        or any(Path(other.path).is_relative_to(directory) for other in others)
+    ):
+        return None
+    try:
+        index = build_index(parent.lib, [*selected, *others])
+        scan = scan_files(index, directory=relative(root, directory), fresh=True)
+        if (
+            scan.truncated
+            or scan.links
+            or any(
+                match.owner == "unindexed"
+                or (match.owner in ("indexed", "page") and match.item_id not in ids)
+                for match in scan.matches
+            )
+        ):
+            return None
+        _, bodies, companions = _media_files(selected, others)
+    except (OSError, ValueError, ContentError):
+        return None
+    return {
+        "children": sorted(child.id for child in children),
+        "tree": sorted(
+            [relative(root, match.path), match.identity] for match in scan.matches
+        ),
+        "owned": sorted(
+            [relative(root, path), list(state)]
+            for path, state in (bodies | companions).items()
+        ),
+    }
+
+
+def _matches_expected(
+    item: MediaItem | None,
+    children: list[MediaItem],
+    expected: tuple[str, list[Any]],
+    others: list[MediaItem],
+) -> bool:
+    """Check that an item is still what a review showed.
+
+    Args:
+        item: Current row of the item being deleted, if it still exists.
+        children: Current child items with their library and parent loaded.
+        expected: Reviewed absolute path and identity.
+        others: Surviving items used to check a parent cleanup manifest.
+
+    Returns:
+        Whether the path is unchanged and a body file keeps its reviewed
+        fingerprint, or a directory item keeps exactly its reviewed children.
+        Automatic parent cleanup also requires unchanged files and ownership.
+    """
+    path, identity = expected
+    if item is None or item.path != path:
+        return False
+    source = Path(path)
+    try:
+        if source.is_dir() and not source.is_symlink():
+            if identity and isinstance(identity[0], dict):
+                return _parent_deletion_snapshot(item, children, others) == identity[0]
+            return sorted(child.id for child in children) == identity
+        info = source.lstat()
+    except OSError:
+        return False
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns] == identity
 
 
 def _media_files(items: list[MediaItem], others: list[MediaItem]):
@@ -2210,7 +2323,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         return issues
 
     @classmethod
-    async def create_reading(cls, lib_id: int, source: ReadingSource) -> MediaItem:
+    async def create_reading(
+        cls, lib_id: int, source: ReadingSource, *, _locked: bool = False
+    ) -> MediaItem:
         """Get or register a discovered reading source without parsing its content.
 
         Register comic collections before their chapters. Validate current paths
@@ -2223,6 +2338,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Args:
             lib_id: Reading library containing the discovered source.
             source: Candidate from the reading handler, revalidated before saving.
+            _locked: Whether the caller already holds the library lock and is
+                completing its own organization journal; skip nested recovery.
 
         Returns:
             Existing item or a new pending item with its library and parent loaded.
@@ -2232,13 +2349,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             ContentError: If the type, source, parent or existing ownership is invalid.
         """
         original = await MediaLib.get(id=lib_id)
-        async with library_lock(original.dir):
+        async with nullcontext() if _locked else library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if lib.dir != original.dir:
                 raise ContentError("content_changed")
             if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
                 raise ContentError("unsupported_media_format")
-            await recover_organizing(lib)
+            if not _locked:
+                await recover_organizing(lib)
             parent = None
             if source.parent_path is not None:
                 parent = await MediaItem.get_or_none(
@@ -2518,6 +2636,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         dest_path: Path,
         *,
         previous_paths: tuple[Path, ...] = (),
+        _locked: bool = False,
     ) -> MediaItem | None:
         """Apply an observed body-file move while retaining its registered identity.
 
@@ -2530,9 +2649,10 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             lib_id: Novel or comic library containing the moved file.
             src_path: Absolute previous body path from the move event.
             dest_path: Absolute new body path at the same depth in this library.
-            previous_paths: Other former paths in a continuous move chain, excluding
-                Defaults to an empty tuple.
-                src_path. The default empty tuple handles a single move.
+            previous_paths: Other former paths in a continuous move chain,
+                excluding `src_path`. Defaults to an empty tuple.
+            _locked: Whether the caller already holds the library lock and is
+                completing its own organization journal; skip nested recovery.
 
         Returns:
             Updated item with its original ID, or None if the previous path is
@@ -2570,13 +2690,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             )
         ):
             raise ValueError("move paths must select containers at the same depth")
-        async with library_lock(original.dir):
+        async with nullcontext() if _locked else library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
                 raise ContentError("content_changed")
             if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
                 raise ContentError("unsupported_media_format")
-            await recover_organizing(lib)
+            if not _locked:
+                await recover_organizing(lib)
             item = await MediaItem.get_or_none(
                 lib_id=lib_id, path=str(src_path)
             ).select_related("lib", "parent")
@@ -2639,6 +2760,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         dest_path: Path,
         *,
         previous_paths: tuple[Path, ...] = (),
+        _locked: bool = False,
     ) -> list[MediaItem]:
         """Apply an observed work or chapter directory move within the same library.
 
@@ -2654,8 +2776,9 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             src_path: Absolute previous work or comic chapter directory.
             dest_path: Absolute new directory at the same depth in this library.
             previous_paths: Other former directories in a continuous move chain,
-                Defaults to an empty tuple.
-                excluding src_path. The default empty tuple handles a single move.
+                excluding `src_path`. Defaults to an empty tuple.
+            _locked: Whether the caller already holds the library lock and is
+                completing its own organization journal; skip nested recovery.
 
         Returns:
             Updated items with their original IDs and parents loaded, or an empty
@@ -2697,13 +2820,14 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             raise ValueError(
                 "move paths must select visible work or chapter containers"
             )
-        async with library_lock(original.dir):
+        async with nullcontext() if _locked else library_lock(original.dir):
             lib = await MediaLib.get(id=lib_id)
             if (lib.dir, lib.lib_type) != (original.dir, original.lib_type):
                 raise ContentError("content_changed")
             if lib.lib_type not in (LibType.NOVEL, LibType.COMIC):
                 raise ContentError("unsupported_media_format")
-            await recover_organizing(lib)
+            if not _locked:
+                await recover_organizing(lib)
             candidates = await MediaItem.filter(
                 Q(path=str(src_path))
                 | Q(path__startswith=f"{src_path}/")
@@ -4132,21 +4256,36 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             return await write_in_thread(_read_asset, item, asset_id)
 
     @classmethod
-    async def delete(cls, id: int, local: bool = False):
+    async def delete(
+        cls,
+        id: int,
+        local: bool = False,
+        *,
+        expected: tuple[str, list[Any]] | None = None,
+    ):
         """Delete or hide a media item under its library lock.
 
         Recover organization before resolving current paths. Local deletion
         removes owned files individually. Retain the original child scope across
-        parent changes and summarize surviving comic collections.
+        parent changes and summarize surviving comic collections. Reviewed
+        deletions retain parents outside the stored plan. Automatically included
+        parents require an unchanged file and ownership snapshot before cleanup.
 
         Args:
             id: Media item ID.
             local: Whether to delete local files; False only hides the selected items.
+            expected: Reviewed path and identity the item must still have: a body
+                file's fingerprint, or a directory item's sorted child IDs. `None`
+                deletes whatever the item currently is. Reviewed deletions also
+                recheck ingestion and downloads before removing owned files.
+                Automatic parent cleanup carries its full file manifest instead
+                of only child IDs and is refused if any file or ownership changes.
 
         Raises:
             DoesNotExist: If the item is missing before a local deletion.
             OrganizePendingError: If pending organization cannot finish safely.
-            ContentError: If ownership or file cleanup cannot be confirmed.
+            ContentError: If ownership or file cleanup cannot be confirmed, or the
+                item no longer matches `expected`.
         """
         items = await MediaItem.filter(Q(id=id) | Q(parent_id=id)).select_related("lib")
         item = next((row for row in items if row.id == id), None)
@@ -4165,11 +4304,31 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                 id__in=[id, *child_ids], lib_id=item.lib_id
             ).select_related("lib", "parent")
             parent_ids = {row.parent_id for row in items if row.parent_id is not None}
+            if expected is not None:
+                children = await MediaItem.filter(parent_id=id).select_related(
+                    "lib", "parent"
+                )
+                guarded = bool(expected[1] and isinstance(expected[1][0], dict))
+                others = (
+                    await MediaItem.filter(lib_id=lib.id)
+                    .exclude(id__in=[id, *(child.id for child in children)])
+                    .select_related("lib", "parent")
+                    if guarded
+                    else []
+                )
+                if not await to_thread(
+                    _matches_expected,
+                    next((row for row in items if row.id == id), None),
+                    children,
+                    expected,
+                    others,
+                ):
+                    raise ContentError("content_changed")
             # a surviving parent may have received children outside the requested scope
             if await MediaItem.filter(parent_id=id).exclude(id__in=child_ids).exists():
                 items = [row for row in items if row.id != id]
             if local:
-                if not reading:
+                if not reading and expected is None:
                     ids = {row.id for row in items}
                     for parent in await MediaItem.filter(
                         id__in=parent_ids - ids, lib_id=item.lib_id
@@ -4180,6 +4339,22 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
                             .exists()
                         ):
                             items.append(parent)
+                if expected is not None:
+                    busy, paths = await _media_activity(lib)
+                    ids = {row.id for row in items}
+                    if ids & busy:
+                        raise ContentError("ingesting")
+                    if paths:
+                        others = (
+                            await MediaItem.filter(lib_id=lib.id)
+                            .exclude(id__in=ids)
+                            .only("dir", "path", "nfo_path")
+                        )
+                        _, bodies, companions = await to_thread(
+                            _media_files, items, others
+                        )
+                        if paths & {str(path) for path in (*bodies, *companions)}:
+                            raise ContentError("download_active")
                 await cls._delete_local(items)
             else:
                 await MediaItem.filter(id__in=[row.id for row in items]).update(

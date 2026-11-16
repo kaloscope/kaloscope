@@ -254,7 +254,10 @@ def test_protocol(mode):
                 "review_library_scan",
                 "review_media_rescrape",
                 "review_library_config",
+                "review_media_batch",
+                "get_media_batch",
                 "apply_media_change",
+                "cancel_media_batch",
             }
             for tool in result.tools:
                 assert tool.annotations is not None
@@ -272,6 +275,7 @@ def test_protocol(mode):
                     "apply_download_plan_change",
                     "apply_download_task_action",
                     "apply_media_change",
+                    "cancel_media_batch",
                 }
                 assert tool.annotations.read_only_hint is (not writes)
                 assert tool.annotations.destructive_hint is (
@@ -302,6 +306,7 @@ def test_protocol(mode):
                         "apply_download_plan_change",
                         "apply_download_task_action",
                         "apply_media_change",
+                        "cancel_media_batch",
                     }
                 )
                 if tool.name in {
@@ -370,7 +375,7 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 40
+            assert len(response_json(response)["result"]["tools"]) == 43
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )

@@ -96,9 +96,11 @@ from app.models.flow import (
 )
 from app.models.mcp import NodeTypesResult
 from app.models.media import (
+    FileOwner,
     Language,
     LibraryConfig,
     LibraryScan,
+    MediaBatch,
     MediaChangeApply,
     MediaQuery,
     MediaRescrape,
@@ -108,6 +110,7 @@ from app.models.workflow_authoring import HTTPProbe, TemplateValidation
 from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.services.workflow_authoring import (
     probe_http_request,
@@ -129,9 +132,22 @@ MEDIA_REVIEWS = {
     "review_library_scan": LibraryScan,
     "review_media_rescrape": MediaRescrape,
     "review_library_config": LibraryConfig,
+    "review_media_batch": MediaBatch,
 }
 MEDIA_REVIEW_TOOLS = frozenset(MEDIA_REVIEWS)
 MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
+# a file conversation keeps library management available without unrelated domains
+BATCH_FOCUS = MEDIA_CHANGE_TOOLS | frozenset(
+    {
+        "list_media_libraries",
+        "list_media_items",
+        "get_media_item",
+        "list_workflows",
+        "get_workflow",
+        "read_conversation_history",
+        "navigate",
+    }
+)
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -466,6 +482,44 @@ class ConfigReview(LibraryConfig):
     )
 
 
+class BatchBrief(ToolArguments):
+    """Name every batch argument without the guidance the batch focus adds."""
+
+    library_id: ResourceID
+    operation: Literal["delete", "organize", "rename", "move", "revert"] | None = Field(
+        default=None, description="Omit to list; organize = naming template."
+    )
+    item_ids: list[ResourceID] = Field(default_factory=list)
+    directory: str | None = None
+    extensions: list[str] = Field(default_factory=list)
+    name: str | None = Field(default=None, description="Glob.")
+    owners: list[Annotated[FileOwner, plain_enum(FileOwner)]] = Field(
+        default_factory=lambda: [FileOwner.LOOSE]
+    )
+    min_size: int | None = None
+    max_size: int | None = None
+    pattern: str | None = Field(default=None, description="rename: regex.")
+    replacement: str = Field(
+        default="", description="\\1 or {{title}} S{{season:02}}E{{episode:02}}."
+    )
+    destination: str | None = Field(default=None, description="move: folder.")
+    by_season: bool = False
+    empty_dirs: bool = False
+    leftovers: bool = False
+    batch_id: ResourceID | None = Field(default=None, description="revert.")
+
+
+class BatchReview(MediaBatch):
+    """List library files, or review changing them as one batch."""
+
+    action: SkipJsonSchema[Literal["batch"]] = "batch"
+    owners: list[Annotated[FileOwner, plain_enum(FileOwner)]] = Field(
+        default_factory=lambda: [FileOwner.LOOSE],
+        min_length=1,
+        description="File classes it may touch.",
+    )
+
+
 class MediaConfirm(ToolArguments):
     """Apply a media change review from an earlier turn of this conversation."""
 
@@ -527,6 +581,9 @@ class AssistantTool:
     description: str
     arguments: type[BaseModel]
     admin: bool = False
+    # a smaller schema and description offered until the tool's focus is entered
+    brief: type[BaseModel] | None = None
+    brief_description: str | None = None
 
 
 TOOLS = (
@@ -683,13 +740,13 @@ TOOLS = (
     ),
     AssistantTool(
         "list_media_libraries",
-        "List accessible libraries: type, scan state, ingest bindings. No scan.",
+        "List library roots, not folders: type, scan state, ingest bindings.",
         MediaLibraryList,
     ),
     AssistantTool(
         "list_media_items",
-        "Page visible media in library order; keyword filters titles (omit for all). "
-        "No path=top-level works. total=all matches; page_counts=this page.",
+        "Page indexed items, not folders; unlisted folders may exist. Check folder "
+        "paths with review_media_batch. keyword=titles; no path=top-level works.",
         MediaItemList,
     ),
     AssistantTool(
@@ -793,10 +850,27 @@ TOOLS = (
         admin=True,
     ),
     AssistantTool(
+        "review_media_batch",
+        "List files (omit operation) or review changes "
+        "in one library. On media_library pages library_id=page_context.resource_id. "
+        "directory/destination are its relative folders, not library names; "
+        "no cross-library moves. Review paths directly; an unindexed folder can exist. "
+        "move merges shows/collections, skips duplicates, "
+        "or renames a work folder. organize uses saved naming and cannot undo; "
+        "revert only finished rename/move batches. Report can_revert. "
+        "empty_dirs clears empty folders. owners defaults loose; name other classes. "
+        "Explain planned, blocked, duplicates, leftovers and notes in the user's "
+        "language. End for confirmation; apply_media_change executes.",
+        BatchReview,
+        brief=BatchBrief,
+        admin=True,
+    ),
+    AssistantTool(
         "apply_media_change",
-        "Apply a prior turn's valid scan/rescrape/config review after the user "
-        "confirms it; returns quickly (submitted/running is not done). Repeat the "
-        "same request_id after errors; never re-review to retry.",
+        "Apply a prior turn's valid scan/rescrape/config/batch review after user "
+        "confirmation. Returns quickly: submitted/running is not done. Retry the "
+        "same request_id after errors; never re-review. Report can_revert for batches; "
+        "false means no undo, never offer it.",
         MediaConfirm,
         admin=True,
     ),
@@ -910,6 +984,7 @@ def tool_schemas(
     plan_change: bool = False,
     task_action: bool = False,
     media_change: bool | Collection[str] = False,
+    batch: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
@@ -929,6 +1004,9 @@ def tool_schemas(
             a review in the previous turn.
         media_change: Offer media changes: `True` for all after reading media this
             turn, or the named tools continuing a review from the previous turn.
+        batch: Focus on files and library management after a listing or review,
+            or when the previous turn ended with one. Other domains return in a
+            later turn.
 
     Returns:
         Chat Completions function definitions, validated again on execution. The
@@ -937,6 +1015,8 @@ def tool_schemas(
     """
     schemas = []
     for tool in available_tools(user).values():
+        if batch and tool.name not in BATCH_FOCUS:
+            continue
         if tool.name == "run_workflow" and not trial:
             continue
         if tool.name in SCHEDULE_TOOLS and not schedule:
@@ -945,9 +1025,13 @@ def tool_schemas(
             continue
         if tool.name in TASK_ACTION_TOOLS and not task_action:
             continue
-        if tool.name in MEDIA_CHANGE_TOOLS and (
-            not media_change
-            or (media_change is not True and tool.name not in media_change)
+        if (
+            not batch
+            and tool.name in MEDIA_CHANGE_TOOLS
+            and (
+                not media_change
+                or (media_change is not True and tool.name not in media_change)
+            )
         ):
             continue
         if tool.name in {
@@ -1013,7 +1097,10 @@ def tool_schemas(
             }
         ):
             continue
-        parameters = compact_schema(tool.arguments.model_json_schema())
+        short = tool.brief is not None and not batch
+        parameters = compact_schema(
+            (tool.brief if short else tool.arguments).model_json_schema()
+        )
         parameters.pop("description", None)
         encoded = dumps(parameters)
         definitions = {
@@ -1028,7 +1115,8 @@ def tool_schemas(
                 "type": "function",
                 "function": {
                     "name": tool.name,
-                    "description": tool.description,
+                    "description": (tool.brief_description if short else None)
+                    or tool.description,
                     "parameters": parameters,
                 },
             }
@@ -1094,7 +1182,9 @@ def media_resources(name: str, arguments: dict, data: dict) -> list[str]:
         ids = [item["lib_id"] for item in data["items"] if item["lib_id"]]
         if isinstance(arguments.get("library_id"), int):
             ids.append(arguments["library_id"])
-    elif name == "get_media_item" or (name == "navigate" and data.get("library_id")):
+    elif name in {"get_media_item", "review_media_batch"} or (
+        name == "navigate" and data.get("library_id")
+    ):
         ids = [data["library_id"]]
     return [media_resource(library_id) for library_id in ids]
 
@@ -1181,6 +1271,8 @@ async def execute_tool(
                     result = await MediaChangeService.review_rescrape(args, user)
                 case LibraryConfig():
                     result = await MediaChangeService.review_config(args, user)
+                case MediaBatch():
+                    result = await MediaBatchService.review(args, user)
                 case MediaConfirm():
                     result = await apply_media_change(args, conversation_id, user)
                 case PlanList():
@@ -2026,8 +2118,10 @@ async def apply_media_change(
 
     Only the newest media review of the conversation may be applied, and it must
     be valid and from a completed earlier turn; any newer media review, even a
-    failed one, a candidate list or a settings read, replaces it. A claimed
-    request replays first, so retries never apply it again.
+    failed one, a candidate list or a settings read, replaces it. A successful
+    file listing for the same library in that review's turn only adds facts;
+    listings from later turns or other libraries still replace the review.
+    A claimed request replays first, so retries never apply it again.
 
     Args:
         args: Reviewed request ID and the user's confirmation.
@@ -2052,7 +2146,22 @@ async def apply_media_change(
         if data.get("request_id") != str(args.request_id):
             continue
         reviewed = await AssistantTurn.get(id=record.turn_id)
-        ready = index == 0 and reviewed.status == "complete"
+        superseded = False
+        for later in reviews[:index]:
+            later_result = later.result or {}
+            later_data = later_result.get("data") or {}
+            if not (
+                later.turn_id == record.turn_id
+                and later.name == "review_media_batch"
+                and later_result.get("ok")
+                and "matched" in later_data
+                and "operation" not in later_data
+                and isinstance(data.get("library_id"), int)
+                and later_data.get("library_id") == data["library_id"]
+            ):
+                superseded = True
+                break
+        ready = not superseded and reviewed.status == "complete"
         change = MEDIA_REVIEWS[record.name].model_validate_json(record.arguments)
         result = await MediaChangeService.apply_change(
             MediaChangeApply(
