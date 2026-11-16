@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { invalidate } from '$app/navigation';
   import { api } from '$lib/api';
   import { Drawer, Menu } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores';
   import type { MediaLib, Resp } from '$lib/types';
+  import { notifyMediaItemsChanged } from '$lib/utils/media-batches';
   import { onMount, type Snippet } from 'svelte';
   import type { LayoutData } from './$types';
 
@@ -46,7 +48,9 @@
       try {
         const { data: libs } = await api.get('media/lib/list', { signal: controller.signal }).json<Resp<MediaLib[]>>();
         if (!controller.signal.aborted) {
+          const finished = ids.filter((id) => !libs.some((lib) => lib.id === id && lib.scanning));
           scanning = scanning.filter((id) => !ids.includes(id) || libs.some((lib) => lib.id === id && lib.scanning));
+          for (const id of finished) notifyMediaItemsChanged(id);
         }
       } catch {
         if (!controller.signal.aborted) {
@@ -68,9 +72,12 @@
       const id = (event as CustomEvent<{ library_id?: number }>).detail?.library_id;
       if (typeof id === 'number' && !scanning.includes(id)) scanning = [...scanning, id];
     };
+    const changed = () => void invalidate('app:media-libraries');
     window.addEventListener('media-library-scan', submitted);
+    window.addEventListener('media-library-changed', changed);
     return () => {
       window.removeEventListener('media-library-scan', submitted);
+      window.removeEventListener('media-library-changed', changed);
       abortController.abort();
     };
   });

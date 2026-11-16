@@ -77,13 +77,17 @@
     captureScrollPosition(from, to, view, standaloneMode.current);
   });
 
-  // show an assistant rescrape in this library's list at once
+  // show completed assistant changes in this library's current list
   onMount(() => {
     const changed = (event: Event) => {
       if ((event as CustomEvent<{ library_id?: number }>).detail?.library_id === lib?.id) search();
     };
     window.addEventListener('media-item-changed', changed);
-    return () => window.removeEventListener('media-item-changed', changed);
+    window.addEventListener('media-library-changed', changed);
+    return () => {
+      window.removeEventListener('media-item-changed', changed);
+      window.removeEventListener('media-library-changed', changed);
+    };
   });
 
   // read the library and list filters when a message is sent, since this page is reused across libraries
@@ -270,7 +274,7 @@
             class:btn-active={selecting}
             aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
             aria-pressed={selecting}
-            use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select') }}
+            use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select'), followCursor: true }}
             onclick={toggleSelecting}
           >
             <iconify-icon icon={selecting ? icons.dismiss : icons.listCheck} width="1rem" aria-hidden="true"

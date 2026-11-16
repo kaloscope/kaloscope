@@ -5,6 +5,7 @@
   import { _, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { MediaBatch, MediaBatchEntry, MediaBatchOutcome, Page, Resp } from '$lib/types';
+  import { watchMediaBatch } from '$lib/utils/media-batches';
   import { formatBytes } from '$lib/utils/number';
   import { onDestroy } from 'svelte';
 
@@ -79,6 +80,7 @@
       total = list.data.total ?? 0;
       failed = false;
       if (batch.state === 'running') {
+        watchMediaBatch(batch.id);
         timer = setTimeout(load, 2000);
       } else if (wasRunning) {
         onfinish?.();
@@ -124,15 +126,17 @@
    * Apply the reviewed plan on the user's confirmation and follow its progress.
    */
   function apply() {
+    const batchId = id;
     loading.start();
     api
-      .post(`media/batch/${id}/apply`)
+      .post(`media/batch/${batchId}/apply`)
       .json<Resp<MediaBatchOutcome & { stale?: boolean; pending?: boolean }>>()
       .then(({ data }) => {
         if (data.stale || data.pending) {
           alert({ level: 'warning', message: data.stale ? 'media_batch_stale' : 'media_batch_pending' });
-        } else if (data.outcome !== 'running') {
-          onfinish?.();
+        } else if (data.applied !== false) {
+          watchMediaBatch(batchId);
+          if (data.outcome !== 'running') onfinish?.();
         }
         return load();
       })

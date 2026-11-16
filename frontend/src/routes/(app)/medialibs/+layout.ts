@@ -6,9 +6,11 @@ import type { LayoutLoad } from './$types';
 /**
  * Load media library navigation and scan states.
  *
+ * @param context - Load context used to register library dependencies.
  * @returns The library menus and their backing media libraries.
  */
-export const load: LayoutLoad = async () => {
+export const load: LayoutLoad = async (context) => {
+  context.depends('app:media-libraries');
   const menus: Menu[] = [];
   let libs: MediaLib[] = [];
 
