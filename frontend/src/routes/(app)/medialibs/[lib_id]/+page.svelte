@@ -119,6 +119,21 @@
   }
 
   /**
+   * Activate a focused poster without handling keys from its nested controls.
+   *
+   * @param event - Keyboard event from the poster or one of its descendants.
+   * @param item - Item to open or select.
+   */
+  function activate(event: KeyboardEvent, item: MediaItem) {
+    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      if (!event.repeat) {
+        open(item);
+      }
+    }
+  }
+
+  /**
    * Start or leave selection without keeping earlier picks.
    */
   function toggleSelecting() {
@@ -274,14 +289,15 @@
       {@const pointerClass = 'cursor-pointer transition-colors hover:text-primary'}
       {@const transClass = 'transition-all duration-300'}
       {@const btnClass = 'text-white hover:bg-base-300 hover:text-base-content'}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
         tabindex="0"
         role="button"
-        class="group @container relative cursor-pointer"
+        class="group @container relative cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        aria-label={item.title ?? item.name}
         aria-pressed={selecting ? selected.includes(item.id) : undefined}
         onmouseenter={() => (backdrop = item.backdrop ?? item.poster ?? backdrop)}
         onclick={() => open(item)}
+        onkeydown={(event) => activate(event, item)}
       >
         <Rating score={item.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.875rem,8cqw,1rem)]" />
         {#if selecting}
@@ -316,16 +332,15 @@
         />
       </div>
       <div class="@container flex-col-center gap-1 p-1">
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <div
-          tabindex="0"
-          role="button"
-          class="line-clamp-1 text-[clamp(0.875rem,8cqw,1rem)] font-semibold {pointerClass}"
+        <button
+          type="button"
+          class="line-clamp-1 text-[clamp(0.875rem,8cqw,1rem)] font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary {pointerClass}"
           title={item.title ?? item.name}
+          aria-pressed={selecting ? selected.includes(item.id) : undefined}
           onclick={() => open(item)}
         >
           {item.title ?? item.name}
-        </div>
+        </button>
         <div class="text-sm opacity-50">{item.year}</div>
       </div>
     {/snippet}

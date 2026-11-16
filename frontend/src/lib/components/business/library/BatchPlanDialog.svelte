@@ -21,6 +21,8 @@
   let failed = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let id = 0;
+  let request = 0;
+  let opened = false;
 
   // the modal dialog instance
   let modal: Modal;
@@ -34,6 +36,7 @@
    */
   export const showModal = (batchId: number) => {
     id = batchId;
+    opened = true;
     batch = null;
     entries = [];
     page = 1;
@@ -44,21 +47,27 @@
   };
 
   /**
-   * Load the batch header and the current page, and keep refreshing while it runs.
+   * Load the latest batch view and keep refreshing while it runs.
+   *
+   * Ignore superseded responses and failures, including those from an earlier opening.
    */
   async function load() {
+    if (!opened) {
+      return;
+    }
     clearTimeout(timer);
-    const current = id;
+    const current = ++request;
+    const batchId = id;
     try {
       const searchParams: Record<string, string | number> = { page_num: page, page_size: PAGE_SIZE };
       if (status) {
         searchParams.status = status;
       }
       const [details, list] = await Promise.all([
-        api.get(`media/batch/${current}`).json<Resp<MediaBatch>>(),
-        api.get(`media/batch/${current}/entries`, { searchParams }).json<Resp<Page<MediaBatchEntry>>>()
+        api.get(`media/batch/${batchId}`).json<Resp<MediaBatch>>(),
+        api.get(`media/batch/${batchId}/entries`, { searchParams }).json<Resp<Page<MediaBatchEntry>>>()
       ]);
-      if (current !== id) {
+      if (current !== request) {
         return;
       }
       const wasRunning = batch?.state === 'running';
@@ -73,8 +82,19 @@
         onfinish?.();
       }
     } catch {
-      failed = true;
+      if (current === request) {
+        failed = true;
+      }
     }
+  }
+
+  /**
+   * Stop polling and discard pending reads when the dialog closes or is destroyed.
+   */
+  function stopRefreshing() {
+    opened = false;
+    request += 1;
+    clearTimeout(timer);
   }
 
   /**
@@ -117,7 +137,7 @@
       .finally(() => loading.end());
   }
 
-  onDestroy(() => clearTimeout(timer));
+  onDestroy(stopRefreshing);
 </script>
 
 <Modal
@@ -125,7 +145,7 @@
   title={$_('media.batch.title')}
   maxWidth="56rem"
   bind:this={modal}
-  onclose={() => clearTimeout(timer)}
+  onclose={stopRefreshing}
 >
   {#if failed}
     <p class="py-6 text-sm text-base-content/60">{$_('media.batch.unavailable')}</p>
