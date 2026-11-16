@@ -75,7 +75,7 @@
 </script>
 
 <Container type="settings">
-  <div class="mt-2 -mb-12 flex-col-center gap-2">
+  <div class="mt-2 -mb-6 flex-col-center gap-2">
     <Image
       circle
       shadow

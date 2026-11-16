@@ -1,7 +1,7 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
-  import { Button, Container, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
+  import { Button, Container, Empty, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -201,9 +201,9 @@
         <button class="btn btn-sm" onclick={load}>{$_('action.retry')}</button>
       </div>
     {:else if tokens.length === 0}
-      <p class="py-8 text-center text-sm text-base-content/70">{$_('access_token.empty')}</p>
+      <Empty compact icon={icons.key} title={$_('access_token.empty')} />
     {:else}
-      <ul class="divide-y divide-border rounded-field border bg-base-100">
+      <ul class="inset-list">
         {#each tokens as token (token.id)}
           <li class="p-4">
             <div class="flex items-center gap-3">

@@ -19,20 +19,19 @@
   let { children, title, tip }: SettingProps = $props();
 </script>
 
-<div class="w-full">
-  <div class="flex items-center justify-between text-xl">
-    <span class="font-bold">{title}</span>
+<section class="w-full">
+  <div class="mb-3 flex items-center justify-between gap-2">
+    <h2 class="section-title"><span class="truncate">{title}</span></h2>
     {#if tip}
       <span
-        class="flex-center cursor-help"
+        class="flex-center cursor-help text-xl opacity-60 transition-opacity hover:opacity-100"
         use:tooltip={{ content: tip, placement: 'left', trigger: sniffer.isDesktop() ? 'mouseenter' : 'click' }}
       >
         <iconify-icon icon={icons.questionCircle}></iconify-icon>
       </span>
     {/if}
   </div>
-  <div class="divider"></div>
-  <div class="flex flex-col gap-4 p-1 [&_form]:flex [&_form]:flex-col [&_form]:gap-4">
+  <div class="flex flex-col gap-4 card-surface p-4 sm:p-5 [&_form]:flex [&_form]:flex-col [&_form]:gap-4">
     {@render children()}
   </div>
-</div>
+</section>

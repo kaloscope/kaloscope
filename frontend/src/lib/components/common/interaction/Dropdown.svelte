@@ -116,7 +116,7 @@
   </summary>
   <div
     bind:this={dropdownContent}
-    class="dropdown-content overflow-auto rounded-box border bg-base-100 shadow-xl [&_.menu]:w-full {contentClass}"
+    class="dropdown-content overflow-auto popover-surface [&_.menu]:w-full {contentClass}"
     style:max-height={contentMaxHeight}
     style:width={contentWidth}
   >

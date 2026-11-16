@@ -56,28 +56,28 @@
 </svelte:head>
 
 <Navbar />
-<main class="hero min-h-(--ks-lvh) bg-base-200">
-  <div class="hero-content mb-20 w-full flex-col gap-6">
+<main class="hero min-h-(--ks-lvh) bg-aurora">
+  <div class="hero-content mb-20 w-full flex-col gap-8">
     <div class="flex-center flex-col gap-4">
       <div class="flex-center gap-2">
         <Logo size="2.5rem" />
         <span class="app-name text-4xl text-shadow-md">{$_('app.name', { locale: 'en-US' })}</span>
       </div>
       <div class="text-center">
-        <h2 class="text-2xl font-bold text-surface">{$_('app.setup_welcome')}</h2>
+        <h2 class="text-2xl font-bold tracking-tight text-surface">{$_('app.setup_welcome')}</h2>
         <p class="mt-2 text-sm opacity-70">{$_('app.setup_description')}</p>
       </div>
     </div>
-    <div class="card w-full max-w-96 border bg-base-100 shadow-2xl">
+    <div class="w-full max-w-96 card-auth">
       <form
         method="post"
-        class="card-body"
+        class="p-6 sm:p-7"
         use:enhance={({ formData, cancel }) => {
           cancel();
           createAdmin(formData);
         }}
       >
-        <fieldset class="fieldset">
+        <fieldset class="fieldset gap-y-2">
           <Label small>{$_('field.username')}</Label>
           <label class="input w-full">
             <iconify-icon icon={icons.user}></iconify-icon>
@@ -93,7 +93,7 @@
             <iconify-icon icon={icons.key}></iconify-icon>
             <input class="grow" {...schema.confirm_pwd} />
           </label>
-          <button type="submit" class="btn mt-6 btn-primary" disabled={$loading !== null}>
+          <button type="submit" class="btn mt-6 h-11 rounded-full shadow-sm btn-primary" disabled={$loading !== null}>
             {$_('app.setup_create_admin')}
             {#if $loading}
               <span class="loading loading-xs loading-dots"></span>

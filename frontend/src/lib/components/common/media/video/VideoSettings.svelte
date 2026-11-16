@@ -1218,7 +1218,7 @@
           </div>
           <div class="px-1 text-xs text-white/30">{mediaPath}</div>
           <div
-            class="relative mt-2 h-40 w-full overflow-y-auto rounded-box border"
+            class="relative mt-2 h-40 w-full overflow-y-auto rounded-card border"
             style="border-color: color-mix(in oklab, #fff 10%, transparent) !important;"
           >
             <Overlay loading={$searching} fixed={false} animation="spinner" />

@@ -398,7 +398,7 @@
           }}
         />
       </div>
-      <div class="relative mt-2 h-34 overflow-y-auto rounded-box border">
+      <div class="relative mt-2 h-34 overflow-y-auto rounded-card border">
         <Overlay loading={$searching} fixed={false} animation="spinner" />
         <table class="table table-pin-rows table-fixed table-xs">
           <thead>

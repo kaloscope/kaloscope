@@ -108,7 +108,7 @@
   bind:this={modal}
 >
   {#if repos.length > 0}
-    <ul class="list overflow-hidden rounded-box border shadow-sm">
+    <ul class="list overflow-hidden rounded-card border shadow-sm">
       <li
         class="bg-gradient px-3 py-1 text-xs text-base-content/50"
         style="border-bottom: 1px inset var(--color-border)"

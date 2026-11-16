@@ -6,6 +6,8 @@
     children: Snippet;
     /** Whether to show the loading overlay. */
     loading?: boolean | null;
+    /** The placeholder layout shown while loading, replacing the overlay. */
+    skeleton?: Snippet;
     /** Whether to use the dynamic viewport height. */
     dvh?: boolean | null;
     /** The class names for the container. */
@@ -34,19 +36,21 @@
       width: '100%',
       minWidth: '24rem',
       maxWidth: '40rem',
-      rowGap: '4rem',
+      rowGap: '2.5rem',
       padding: '1rem 1rem 4rem'
     }
   };
 </script>
 
 <script lang="ts">
-  import { Overlay } from '$lib/components';
+  import { Overlay, Skeleton } from '$lib/components';
+  import { _ } from '$lib/i18n';
   import { fade } from 'svelte/transition';
 
   let {
     children,
     loading,
+    skeleton,
     dvh = false,
     class: _class,
     type = 'default',
@@ -66,13 +70,42 @@
   style:min-width={minWidth || preset.minWidth}
   style:max-width={maxWidth || preset.maxWidth}
 >
-  <Overlay dvh {loading} />
+  {#if skeleton || type === 'settings'}
+    {#if loading !== null && loading !== undefined}
+      <!-- stay invisible during the short grace period to avoid flashing -->
+      <div class="transition-opacity duration-300 {loading ? '' : 'opacity-0'}" aria-busy="true">
+        <span class="sr-only" role="status">{$_('data.loading')}</span>
+        {#if skeleton}
+          {@render skeleton()}
+        {:else}
+          <!-- the default placeholder for setting sections -->
+          <div class="flex flex-col" style:row-gap={rowGap || preset.rowGap} style:padding={padding || preset.padding}>
+            {#each [3, 2] as rows (rows)}
+              <div>
+                <Skeleton type="block" class="mb-4 h-5 w-36" />
+                <div class="flex flex-col gap-5 card-surface p-4 sm:p-5">
+                  {#each { length: rows }, i}
+                    <div class="flex flex-col gap-2">
+                      <Skeleton type="block" class="h-3 {i % 2 ? 'w-32' : 'w-24'}" />
+                      <Skeleton type="block" class="h-9 w-full" />
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  {:else}
+    <Overlay dvh {loading} />
+  {/if}
   {#if loading === null || loading === undefined}
     <div
       class="flex flex-col {dvh ? 'h-(--ks-svh) sm:h-(--ks-lvh)' : ''}"
       style:row-gap={rowGap || preset.rowGap}
       style:padding={padding || preset.padding}
-      in:fade
+      in:fade={{ duration: 150 }}
     >
       {@render children()}
     </div>

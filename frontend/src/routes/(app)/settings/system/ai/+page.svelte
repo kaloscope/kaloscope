@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, Container, ProviderEditor, ProviderIcon, Setting, alert, confirm } from '$lib/components';
+  import { Button, Container, Empty, ProviderEditor, ProviderIcon, Setting, alert, confirm } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -130,9 +130,9 @@
   {#if !loadError}
     <Setting title={$_('ai.configured')}>
       {#if providers.length === 0}
-        <p class="py-8 text-center text-sm opacity-50">{$_('ai.empty')}</p>
+        <Empty compact icon={icons.botSquare} title={$_('ai.empty')} />
       {:else}
-        <ul class="divide-y divide-border rounded-field border bg-base-100">
+        <ul class="inset-list">
           {#each providers as provider (provider.id)}
             <li class="flex min-w-0 items-center gap-3 p-4">
               <div class="min-w-0 flex-1">

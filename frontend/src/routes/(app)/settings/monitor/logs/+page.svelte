@@ -257,7 +257,7 @@
 </script>
 
 <Container dvh padding="0.5rem" class="lg:px-2">
-  <div class="log-shell flex min-h-0 flex-1 flex-col overflow-hidden rounded-box border shadow-sm">
+  <div class="log-shell flex min-h-0 flex-1 flex-col overflow-hidden rounded-card border shadow-sm">
     <div class="log-toolbar flex flex-wrap items-center border-b">
       <span class="connection-status inline-flex items-center rounded font-mono">
         <span class="connection-dot rounded-full" data-state={connectionStatus}></span>

@@ -146,8 +146,31 @@
       "cron": "Cron Expression"
     }
   },
+  "empty": {
+    "boards": {
+      "title": "Nothing on your dashboard yet",
+      "tip": "Publish a search workflow with a board to see trending lists and weekly schedules here.",
+      "action": "Browse Templates"
+    },
+    "indexers": {
+      "title": "No indexers yet",
+      "tip": "Indexers are workflows that search sites for you. Publish one to start searching.",
+      "action": "Browse Templates"
+    },
+    "medialibs": {
+      "title": "No media libraries yet",
+      "tip": "Add a folder as a library to browse your movies, shows, comics, and novels here.",
+      "action": "Set Up Libraries"
+    },
+    "downloaders": {
+      "title": "No downloader connected",
+      "tip": "Connect a downloader to start downloads and follow their progress here.",
+      "action": "Set Up Downloaders"
+    }
+  },
   "data": {
     "nodata": "No Data Found",
+    "loading": "Loading…",
     "paginator": {
       "total": "{0} entries",
       "first": "First",

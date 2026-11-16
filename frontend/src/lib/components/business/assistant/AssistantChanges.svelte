@@ -12,7 +12,7 @@
 {#if $assistantCanvas}
   {@const state = $assistantCanvas}
   {@const busy = state.phase === 'saving' || state.phase === 'reverting'}
-  <section class="rounded-box border bg-base-100 p-3 text-sm" aria-label={$_('assistant.canvas.title')}>
+  <section class="rounded-card border bg-base-100 p-3 text-sm" aria-label={$_('assistant.canvas.title')}>
     <div class="flex items-center gap-2" role="status">
       {#if state.phase === 'editing' || busy}
         <span class="loading loading-sm loading-spinner" aria-hidden="true"></span>

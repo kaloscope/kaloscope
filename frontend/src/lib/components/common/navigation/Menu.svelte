@@ -78,6 +78,9 @@
   </div>
   {#each menus as menu (menu.title)}
     <li class="menu-title">{$_(menu.title)}</li>
+    {#if menu.routes.length === 0}
+      <li class="pointer-events-none px-3 py-1 text-xs opacity-40">{$_('data.nodata')}</li>
+    {/if}
     {#each menu.routes as route, i (i)}
       {@const active = page.url.pathname === route.path}
       <li class="group/menu justify-center">

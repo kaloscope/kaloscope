@@ -106,7 +106,7 @@
         onclick={search}
       />
     </div>
-    <div class="relative mt-2 h-40 w-full overflow-y-auto rounded-box border">
+    <div class="relative mt-2 h-40 w-full overflow-y-auto rounded-card border">
       <Overlay loading={$searching} fixed={false} animation="spinner" />
       <table class="table table-pin-rows table-fixed table-xs">
         <thead>

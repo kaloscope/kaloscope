@@ -31,9 +31,8 @@
 </script>
 
 <script lang="ts" generics="T">
-  import { Overlay } from '$lib/components';
+  import { Empty, Overlay, Skeleton, type SkeletonProps } from '$lib/components';
   import { _ } from '$lib/i18n';
-  import { icons } from '$lib/icons';
   import type { Snippet } from 'svelte';
   import { flip } from 'svelte/animate';
   import { fade } from 'svelte/transition';
@@ -57,9 +56,25 @@
     rowClass?: string;
     /** Whether clicking a row toggles its checkbox. */
     rowSelect?: boolean;
+    /** The placeholder shown when there is no data. */
+    empty?: Snippet;
+    /** The placeholder rows shown while the first data is loading. */
+    skeleton?: SkeletonProps | false;
   };
 
-  let { header, data, row, uniqueKey, loading, class: _class, tableClass, rowClass, rowSelect }: TableProps = $props();
+  let {
+    header,
+    data,
+    row,
+    uniqueKey,
+    loading,
+    class: _class,
+    tableClass,
+    rowClass,
+    rowSelect,
+    empty,
+    skeleton
+  }: TableProps = $props();
   let notLoading = $derived(loading === null || loading === undefined);
   let notEmpty = $derived(data.length > 0);
 </script>
@@ -75,6 +90,20 @@
       <tbody class="relative" in:fade>
         <Overlay {loading} />
         {@render body()}
+      </tbody>
+    {:else if !notLoading && skeleton}
+      <!-- stay invisible during the short grace period to avoid flashing -->
+      <tbody class="transition-opacity duration-300 {loading ? '' : 'opacity-0'}" aria-busy="true">
+        <tr class="sr-only">
+          <td><span role="status">{$_('data.loading')}</span></td>
+        </tr>
+        {#each { length: 6 }, i}
+          <tr class="border-base-content/10">
+            <td class="px-0" colspan="1000">
+              <Skeleton type="row" {...skeleton} class={i % 2 ? 'opacity-80' : ''} />
+            </td>
+          </tr>
+        {/each}
       </tbody>
     {:else}
       <tbody class="relative" in:fade>
@@ -113,10 +142,11 @@
   <tr class="border-b-0">
     <td class="h-96" colspan="1000">
       {#if notLoading}
-        <div class="flex-col-center h-full gap-2 opacity-20" in:fade={{ duration: 200 }}>
-          <iconify-icon icon={icons.collectionsEmpty} width="5rem" aria-hidden="true"></iconify-icon>
-          <span class="text-2xl">{$_('data.nodata')}</span>
-        </div>
+        {#if empty}
+          {@render empty()}
+        {:else}
+          <Empty />
+        {/if}
       {/if}
     </td>
   </tr>

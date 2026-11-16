@@ -97,7 +97,7 @@
   <div class="pointer-events-none toast toast-end layer-5 {bottom}" in:fly={{ y: 200 }} out:fade>
     {#each alerts.entries() as [id, alert] (id)}
       {@const { icon, color } = mappings[alert.level ?? 'info']}
-      <div role="alert" class="alert border bg-base-100" in:slide={{ duration: 100 }} out:fade>
+      <div role="alert" class="alert popover-surface border-0" in:slide={{ duration: 100 }} out:fade>
         <iconify-icon {icon} style:color width="1.5rem" class="size-6"></iconify-icon>
         <span>{$_(`alert.${alert.message}`, { default: alert.message })}</span>
       </div>

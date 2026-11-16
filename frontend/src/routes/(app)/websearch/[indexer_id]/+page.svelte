@@ -16,6 +16,7 @@
     Paginator,
     Search,
     SearchHit,
+    Skeleton,
     type PaginatorProps
   } from '$lib/components';
   import { createFormSchema, createLoading } from '$lib/helpers';
@@ -50,6 +51,11 @@
     {
       pushHistory: false
     }
+  );
+
+  // the grid columns for the cover shape
+  let gridClass = $derived(
+    `grid-cols-2 ${aspectRatio(display?.cover_ratio) > 1 ? 'grid-cols-sparse' : 'grid-cols-compact'}`
   );
 
   // the data view instance
@@ -268,6 +274,28 @@
 </script>
 
 <Container class="pull-to-refresh" loading={$outerLoading}>
+  {#snippet skeleton()}
+    <div class="flex w-full flex-col lg:px-2">
+      <div class="flex min-h-14 items-center justify-center gap-2 p-2">
+        <Skeleton type="block" class="h-8 w-full max-w-xl" />
+      </div>
+      {#if viewModes?.[0] === 'grid'}
+        <ul class="grid grid-cols-2 gap-2 px-2 py-4 lg:gap-4 {gridClass}">
+          <Skeleton count={12} ratio={display?.cover_ratio ?? '16/9'} />
+        </ul>
+      {:else}
+        <div class="px-1 py-2">
+          <Skeleton
+            type="row"
+            count={8}
+            ratio={display?.cover_ratio ?? '16/9'}
+            class="border-b border-base-content/10"
+          />
+        </div>
+      {/if}
+    </div>
+  {/snippet}
+
   <DataView
     bind:this={view}
     bind:mode={query.view_mode as ViewMode}
@@ -276,8 +304,9 @@
     loading={$innerLoading}
     hideOnScroll={standaloneMode.current}
     filtersClass="sm:justify-center"
-    gridClass="grid-cols-2 {aspectRatio(display?.cover_ratio) > 1 ? 'grid-cols-sparse' : 'grid-cols-compact'}"
-    itemClass="rounded-sm bg-base-100 shadow-sm lg:hover:shadow-lg lg:mb-4"
+    {gridClass}
+    itemClass="card-surface card-hover overflow-hidden"
+    skeleton={{ ratio: display?.cover_ratio ?? '16/9' }}
   >
     {#snippet filters()}
       <Search

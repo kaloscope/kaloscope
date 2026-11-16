@@ -30,18 +30,31 @@
   // throttled vibrate function
   const vibrate = throttle(() => navigator.vibrate?.(20), 500);
 
+  // how long a view transition may wait for its first frame before the navigation goes ahead without it
+  const VIEW_TRANSITION_TIMEOUT = 500;
+
   onNavigate((navigation) => {
     // vibrate if user preference is enabled
     $user?.preferences?.vibration && vibrate();
-    // start view transition if supported and not on Safari
-    if (document.startViewTransition && !sniffer.isSafari()) {
-      return new Promise((resolve) => {
-        document.startViewTransition(async () => {
-          resolve();
-          await navigation.complete;
-        });
-      });
+    // start view transition if supported, not on Safari, and the page is being shown
+    if (!document.startViewTransition || sniffer.isSafari() || document.visibilityState !== 'visible') {
+      return;
     }
+    return new Promise<void>((resolve) => {
+      let fallback: ReturnType<typeof setTimeout> | undefined = undefined;
+      const transition = document.startViewTransition(async () => {
+        clearTimeout(fallback);
+        resolve();
+        await navigation.complete;
+      });
+      // a page that renders no frames never starts the transition, which would hold the navigation forever
+      fallback = setTimeout(() => {
+        transition.skipTransition();
+        resolve();
+      }, VIEW_TRANSITION_TIMEOUT);
+      // a transition the browser abandons must not hold the navigation either
+      transition.ready.catch(() => resolve());
+    });
   });
 </script>
 

@@ -57,7 +57,7 @@
 </Dropdown>
 
 <Modal icon={icons.language} title={$_('app.switch_language')} bind:this={modal}>
-  <ul class="menu max-h-[50vh] w-full flex-nowrap gap-1 overflow-y-auto rounded-box border">
+  <ul class="menu max-h-[50vh] w-full flex-nowrap gap-1 overflow-y-auto rounded-card border">
     {@render languages()}
   </ul>
 </Modal>

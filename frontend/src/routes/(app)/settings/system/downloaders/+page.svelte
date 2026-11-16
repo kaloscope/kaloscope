@@ -71,15 +71,16 @@
   uniqueKey="id"
   class="pull-to-refresh"
   gridClass="grid-cols-sparse"
-  itemClass="z-1 rounded-field border shadow-sm hover:shadow-lg"
-  tailClass="rounded-field border-1 border-dashed duration-300 opacity-20 hover:opacity-50 hover:shadow-lg"
+  itemClass="z-1 card-surface card-hover"
+  tailClass="rounded-card border-1 border-dashed duration-300 opacity-30 hover:opacity-60"
+  skeleton={{ ratio: '4/1', lines: 3 }}
   ondragged={(data) => {
     downloaders = data;
     sort();
   }}
 >
   {#snippet item(downloader, index)}
-    <div class="flex justify-between gap-2 rounded-t-field bg-base-200 p-4">
+    <div class="flex justify-between gap-2 rounded-t-card bg-base-200/60 p-4">
       <div class="grid grid-flow-col items-center gap-2" title={downloader.version}>
         <Image
           transparent

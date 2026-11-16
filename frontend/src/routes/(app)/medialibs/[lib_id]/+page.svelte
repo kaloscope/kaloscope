@@ -10,11 +10,14 @@
     BatchPlanDialog,
     Container,
     DataView,
+    Empty,
     Image,
     MediaActions,
+    MediaLibEmpty,
     Paginator,
     Rating,
     Search,
+    Skeleton,
     type PaginatorProps
   } from '$lib/components';
   import { LibType } from '$lib/enums';
@@ -49,7 +52,7 @@
   );
 
   // the data view instance
-  let view: DataView<MediaItem>;
+  let view: DataView<MediaItem> | undefined = $state();
 
   // the items to display
   let items: MediaItem[] = $state([]);
@@ -120,21 +123,6 @@
       selected = selected.filter((id) => id !== item.id);
     } else {
       selected = [...selected, item.id];
-    }
-  }
-
-  /**
-   * Activate a focused poster without handling keys from its nested controls.
-   *
-   * @param event - Keyboard event from the poster or one of its descendants.
-   * @param item - Item to open or select.
-   */
-  function activate(event: KeyboardEvent, item: MediaItem) {
-    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-      event.preventDefault();
-      if (!event.repeat) {
-        open(item);
-      }
     }
   }
 
@@ -245,134 +233,186 @@
   });
 </script>
 
-<Container class="pull-to-refresh" loading={$outerLoading}>
-  <DataView
-    bind:this={view}
-    mode="grid"
-    data={items}
-    loading={$innerLoading}
-    hideOnScroll={standaloneMode.current}
-    filtersClass="flex-wrap items-center sm:flex-nowrap sm:justify-center"
-    gridClass="grid-cols-2 grid-cols-compact"
-    itemClass="mb-4 z-1"
-  >
-    {#snippet filters()}
-      <Search
-        label={$_('field.keyword')}
-        bind:value={query.keyword}
-        onsearch={() => {
-          query.page_num = 1;
-          search(true);
-        }}
-        maxWidth="36rem"
-      />
-      {#if $user?.role === 'admin'}
-        <div class="contents sm:flex sm:shrink-0 sm:items-center sm:gap-2">
-          <button
-            type="button"
-            class="btn btn-square shrink-0 btn-sm"
-            class:btn-active={selecting}
-            aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
-            aria-pressed={selecting}
-            use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select'), followCursor: true }}
-            onclick={toggleSelecting}
-          >
-            <iconify-icon icon={selecting ? icons.dismiss : icons.listCheck} width="1rem" aria-hidden="true"
-            ></iconify-icon>
-          </button>
-          {#if selecting}
-            <div class="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-start">
-              <span class="text-sm whitespace-nowrap text-base-content/60" role="status">
-                {$_('media.batch.selected', $number(selected.length))}
-              </span>
-              <button
-                type="button"
-                class="btn shrink-0 btn-outline btn-error btn-sm"
-                disabled={selected.length === 0 || $reviewLoading !== null}
-                onclick={reviewDeletion}
-              >
-                <iconify-icon icon={icons.delete} width="1rem" aria-hidden="true"></iconify-icon>
-                {$_('media.batch.delete_selected')}
-              </button>
-            </div>
-          {/if}
+{#if data.libs.length === 0}
+  <MediaLibEmpty />
+{:else}
+  <Container class="pull-to-refresh" loading={$outerLoading}>
+    {#snippet skeleton()}
+      <div class="flex w-full flex-col lg:px-2">
+        <div class="flex min-h-14 items-center justify-center gap-2 p-2">
+          <Skeleton type="block" class="h-8 w-full max-w-xl" />
         </div>
-      {/if}
+        <ul class="grid grid-cols-compact grid-cols-2 gap-2 px-2 py-4 lg:gap-4">
+          <Skeleton plain count={16} ratio="2/3" />
+        </ul>
+      </div>
     {/snippet}
+    <DataView
+      bind:this={view}
+      mode="grid"
+      data={items}
+      loading={$innerLoading}
+      hideOnScroll={standaloneMode.current}
+      filtersClass="flex-wrap items-center sm:flex-nowrap sm:justify-center"
+      gridClass="grid-cols-2 grid-cols-compact"
+      itemClass="mb-3 z-1"
+      skeleton={{ ratio: '2/3', plain: true }}
+    >
+      {#snippet empty()}
+        <Empty icon={lib ? LibType[lib.lib_type].icon : undefined} />
+      {/snippet}
 
-    <!-- grid view -->
-    {#snippet item(item)}
-      {@const pointerClass = 'cursor-pointer transition-colors hover:text-primary'}
-      {@const transClass = 'transition-all duration-300'}
-      {@const btnClass = 'text-white hover:bg-base-300 hover:text-base-content'}
-      <div
-        tabindex="0"
-        role="button"
-        class="group @container relative cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-        aria-label={item.title ?? item.name}
-        aria-pressed={selecting ? selected.includes(item.id) : undefined}
-        onmouseenter={() => (backdrop = item.backdrop ?? item.poster ?? backdrop)}
-        onclick={() => open(item)}
-        onkeydown={(event) => activate(event, item)}
-      >
-        <Rating score={item.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.875rem,8cqw,1rem)]" />
-        {#if selecting}
-          <input
-            type="checkbox"
-            class="checkbox absolute top-1 right-1 z-1 checkbox-sm checkbox-primary not-checked:bg-base-100"
-            checked={selected.includes(item.id)}
+      {#snippet filters()}
+        <Search
+          label={$_('field.keyword')}
+          bind:value={query.keyword}
+          onsearch={() => {
+            query.page_num = 1;
+            search(true);
+          }}
+          maxWidth="36rem"
+        />
+        {#if $user?.role === 'admin'}
+          <div class="contents sm:flex sm:shrink-0 sm:items-center sm:gap-2">
+            <button
+              type="button"
+              class="btn btn-square shrink-0 btn-sm"
+              class:btn-active={selecting}
+              aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
+              aria-pressed={selecting}
+              use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select'), followCursor: true }}
+              onclick={toggleSelecting}
+            >
+              <iconify-icon icon={selecting ? icons.dismiss : icons.listCheck} width="1rem" aria-hidden="true"
+              ></iconify-icon>
+            </button>
+            {#if selecting}
+              <div class="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-start">
+                <span class="text-sm whitespace-nowrap text-base-content/60" role="status">
+                  {$_('media.batch.selected', $number(selected.length))}
+                </span>
+                <button
+                  type="button"
+                  class="btn shrink-0 btn-outline btn-error btn-sm"
+                  disabled={selected.length === 0 || $reviewLoading !== null}
+                  onclick={reviewDeletion}
+                >
+                  <iconify-icon icon={icons.delete} width="1rem" aria-hidden="true"></iconify-icon>
+                  {$_('media.batch.delete_selected')}
+                </button>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      {/snippet}
+
+      <!-- grid view -->
+      {#snippet item(item)}
+        {@const pointerClass = 'cursor-pointer transition-colors hover:text-primary'}
+        {@const transClass = 'transition-all duration-300'}
+        {@const btnClass = 'text-white hover:bg-base-300 hover:text-base-content'}
+        <!-- items open as links, or toggle their selection while items are being selected -->
+        {@const href = selecting ? undefined : `${page.url.pathname}/${item.id}`}
+        {@const picked = selected.includes(item.id)}
+        <div
+          role="presentation"
+          class="group @container relative"
+          onmouseenter={() => (backdrop = item.backdrop ?? item.poster ?? backdrop)}
+        >
+          <Rating
+            score={item.rating}
+            class="pointer-events-none absolute top-1.5 left-1.5 z-1 text-[clamp(0.875rem,8cqw,1rem)]"
+          />
+          {#if selecting}
+            <input
+              type="checkbox"
+              class="pointer-events-none checkbox absolute top-1.5 right-1.5 z-1 checkbox-sm checkbox-primary not-checked:bg-base-100"
+              checked={picked}
+              tabindex="-1"
+              aria-hidden="true"
+            />
+          {/if}
+          <div
+            class:hidden={$user?.role !== 'admin' || selecting}
+            class="absolute right-0 bottom-0 z-1 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 {transClass}"
+          >
+            <MediaActions
+              {item}
+              danmaku={lib?.lib_type === 'movie' || lib?.lib_type === 'tv_show'}
+              class="dropdown-left dropdown-end"
+              triggerClass={btnClass}
+              onscrape={() => search()}
+              ondelete={() => search()}
+            />
+          </div>
+          <!-- the title below is the keyboard and screen-reader entry; the cover only widens the click target -->
+          <svelte:element
+            this={selecting ? 'button' : 'a'}
+            {href}
+            type={selecting ? 'button' : undefined}
             tabindex="-1"
             aria-hidden="true"
-          />
-        {/if}
-        <div
-          class:hidden={$user?.role !== 'admin' || selecting}
-          class="absolute right-0 bottom-0 z-1 p-1 opacity-0 group-hover:opacity-100 {transClass}"
-        >
-          <MediaActions
-            {item}
-            danmaku={lib?.lib_type === 'movie' || lib?.lib_type === 'tv_show'}
-            class="dropdown-left dropdown-end"
-            triggerClass={btnClass}
-            onscrape={() => search()}
-            ondelete={() => search()}
-          />
+            class="block w-full cursor-pointer"
+            onclick={selecting ? () => open(item) : undefined}
+          >
+            <Image
+              proxy="store"
+              src={item.poster}
+              icon={lib ? LibType[lib.lib_type].icon : undefined}
+              width="100%"
+              ratio="2/3"
+              class="lib-poster rounded-card! group-hover:brightness-75 {transClass}"
+            />
+          </svelte:element>
         </div>
-        <Image
-          proxy="store"
-          src={item.poster}
-          icon={lib ? LibType[lib.lib_type].icon : undefined}
-          width="100%"
-          ratio="2/3"
-          class="shadow-sm group-hover:brightness-60 hover:shadow-lg {transClass}"
-        />
-      </div>
-      <div class="@container flex-col-center gap-1 p-1">
-        <button
-          type="button"
-          class="line-clamp-1 text-[clamp(0.875rem,8cqw,1rem)] font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary {pointerClass}"
-          title={item.title ?? item.name}
-          aria-pressed={selecting ? selected.includes(item.id) : undefined}
-          onclick={() => open(item)}
-        >
-          {item.title ?? item.name}
-        </button>
-        <div class="text-sm opacity-50">{item.year}</div>
-      </div>
-    {/snippet}
+        <div class="@container flex-col-center gap-0.5 px-1 pt-2">
+          <svelte:element
+            this={selecting ? 'button' : 'a'}
+            {href}
+            type={selecting ? 'button' : undefined}
+            class="line-clamp-1 text-center text-[clamp(0.8125rem,8cqw,0.9375rem)] font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary {pointerClass}"
+            title={item.title ?? item.name}
+            role={selecting ? 'button' : 'link'}
+            aria-pressed={selecting ? picked : undefined}
+            onclick={selecting ? () => open(item) : undefined}
+          >
+            {item.title ?? item.name}
+          </svelte:element>
+          <div class="min-h-4 text-xs opacity-50">{item.year}</div>
+        </div>
+      {/snippet}
 
-    {#snippet paginator(disabled)}
-      <Paginator {disabled} {...pagination} bind:current={query.page_num} size={query.page_size} />
-    {/snippet}
-  </DataView>
-</Container>
+      {#snippet paginator(disabled)}
+        <Paginator {disabled} {...pagination} bind:current={query.page_num} size={query.page_size} />
+      {/snippet}
+    </DataView>
+  </Container>
 
-<Backdrop proxy="store" src={backdrop} />
+  <Backdrop proxy="store" src={backdrop} />
 
-<BatchPlanDialog
-  bind:this={planDialog}
-  onfinish={() => {
-    selecting = false;
-    search();
-  }}
-/>
+  <BatchPlanDialog
+    bind:this={planDialog}
+    onfinish={() => {
+      selecting = false;
+      search();
+    }}
+  />
+{/if}
+
+<style>
+  /* lift the poster off the page and raise it on hover */
+  :global(.lib-poster) {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-base-content) 8%, transparent),
+      0 4px 10px -4px color-mix(in oklab, var(--color-shade) 22%, transparent);
+  }
+
+  @media (hover: hover) and (width >= 64rem) {
+    :global(.group:hover .lib-poster) {
+      transform: translateY(-3px);
+      box-shadow:
+        0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
+        0 16px 28px -12px color-mix(in oklab, var(--color-shade) 34%, transparent);
+    }
+  }
+</style>

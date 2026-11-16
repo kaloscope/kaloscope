@@ -18,6 +18,7 @@
     ImageViewer,
     MediaActions,
     Rating,
+    Skeleton,
     TextViewer,
     VideoPlayer,
     type ImageViewerOptions,
@@ -822,6 +823,31 @@
 <svelte:window onpagehide={saveProgress} />
 
 <Container class="pull-to-refresh history-back navbar-hidden" loading={$loading}>
+  {#snippet skeleton()}
+    <div class="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-10">
+      <div class="flex flex-col gap-6 sm:flex-row sm:gap-8">
+        <Skeleton type="block" class="aspect-2/3 w-56 shrink-0 self-center rounded-card! sm:self-start" />
+        <div class="flex min-w-0 flex-1 flex-col gap-4 pt-1">
+          <Skeleton type="block" class="h-9 w-3/5" />
+          <div class="flex gap-2">
+            <Skeleton type="block" class="h-6 w-14 rounded-full!" />
+            <Skeleton type="block" class="h-6 w-14 rounded-full!" />
+            <Skeleton type="block" class="h-6 w-14 rounded-full!" />
+          </div>
+          <div class="mt-2 flex flex-col gap-2.5">
+            <Skeleton type="block" class="h-3 w-full" />
+            <Skeleton type="block" class="h-3 w-11/12" />
+            <Skeleton type="block" class="h-3 w-4/5" />
+            <Skeleton type="block" class="h-3 w-2/3" />
+          </div>
+        </div>
+      </div>
+      <Skeleton type="block" class="mt-10 h-5 w-32" />
+      <div class="mt-4 flex flex-col gap-2">
+        <Skeleton type="block" count={4} class="h-16 w-full rounded-card!" />
+      </div>
+    </div>
+  {/snippet}
   {#if media}
     <!-- selected chapter details already include server-side inheritance -->
     {@const readingMeta = mediaType === 'video' ? null : _media ? _meta : meta}
@@ -835,7 +861,7 @@
 
     <!-- back button -->
     <button
-      class="btn absolute top-2 left-2 z-1 btn-circle size-10 bg-blur-80 btn-ghost"
+      class="btn absolute top-2 left-2 z-2 btn-circle size-10 border-0 bg-blur-80 btn-ghost shadow-sm"
       aria-label="Back"
       onclick={historyBack}
     >
@@ -843,15 +869,22 @@
     </button>
 
     <!-- main content -->
-    <div class="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
-      <div class="flex flex-col gap-6 sm:flex-row">
+    <div class="relative z-1 mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-10">
+      <div class="flex flex-col gap-6 sm:flex-row sm:gap-8">
         <!-- poster -->
         <div class="relative self-center sm:self-start">
-          <Image proxy="store" src={media?.poster} icon={posterIcon} width="14rem" ratio="2/3" class="shadow-lg" />
+          <Image
+            proxy="store"
+            src={media?.poster}
+            icon={posterIcon}
+            width="14rem"
+            ratio="2/3"
+            class="detail-poster rounded-card!"
+          />
           {#if !parts.length && !hasTextChapters}
             <div class="absolute inset-0 flex-center">
               <button
-                class="group btn btn-circle size-20 btn-enlarge bg-black/30 text-white/60"
+                class="group btn btn-circle size-20 btn-enlarge bg-black/35 text-white/80 backdrop-blur-sm"
                 aria-label={$_(mediaType === 'video' ? 'media.play' : 'media.read')}
                 onclick={() => (mediaType === 'video' ? play() : read())}
               >
@@ -864,7 +897,9 @@
         <div class="flex min-w-0 flex-1 flex-col gap-3">
           <!-- titles -->
           <div class="flex items-start gap-2">
-            <h1 class="min-w-0 flex-1 text-2xl font-bold sm:text-3xl">{media?.title ?? media?.name}</h1>
+            <h1 class="min-w-0 flex-1 text-2xl leading-tight font-bold tracking-tight wrap-break-word sm:text-4xl">
+              {media?.title ?? media?.name}
+            </h1>
             {#if $user?.role === 'admin' && (mediaType !== 'video' || !media.parent)}
               <MediaActions item={media} class="dropdown-end" onscrape={() => refreshMetadata(media!.id)} />
             {/if}
@@ -899,15 +934,15 @@
           <!-- badges -->
           <div class="flex flex-wrap gap-2">
             {#if media.year}
-              <span class="badge badge-outline">{media.year}</span>
+              <span class="detail-chip">{media.year}</span>
             {/if}
             {#if meta?.mpaa}
-              <span class="badge badge-outline">{meta.mpaa}</span>
+              <span class="detail-chip">{meta.mpaa}</span>
             {/if}
             {#if meta?.country}
-              <span class="badge badge-outline">{meta.country}</span>
+              <span class="detail-chip">{meta.country}</span>
             {/if}
-            <Rating score={media.rating} class="h-6 border" />
+            <Rating score={media.rating} class="h-6" />
           </div>
 
           <!-- tagline -->
@@ -919,7 +954,7 @@
           {#if meta?.genres?.length}
             <div class="flex flex-wrap gap-1.5">
               {#each meta.genres as genre, i (i)}
-                <span class="badge badge-sm opacity-80 badge-primary">{genre}</span>
+                <span class="badge badge-soft badge-sm badge-primary">{genre}</span>
               {/each}
             </div>
           {/if}
@@ -930,12 +965,12 @@
               {mediaTitle(_media)}
             </div>
           {/if}
-          <p class="mt-1 text-sm leading-relaxed opacity-80">{_meta?.plot ?? meta?.plot}</p>
+          <p class="mt-1 text-sm leading-relaxed whitespace-pre-line opacity-80">{_meta?.plot ?? meta?.plot}</p>
 
           <!-- continue playback or reading -->
           {#if mediaType === 'video' ? watchHistory?.media : hasReadingHistory}
             <button
-              class="btn mt-2 h-9 w-full gap-1.5 rounded-full px-4 font-medium shadow-sm btn-primary sm:w-fit"
+              class="btn mt-2 h-10 w-full gap-1.5 rounded-full px-5 font-medium shadow-sm btn-primary sm:w-fit"
               disabled={watchLoading}
               onclick={() => (mediaType === 'video' ? continuePlay() : read())}
             >
@@ -963,24 +998,24 @@
           .filter(Boolean)
           .join(' · ')}
         {#if cols || facts || readingMeta.isbn}
-          <div class="mt-6 space-y-3">
+          <div class="mt-8 space-y-3 card-glass p-4">
             {#if cols}
               <dl class="grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
                 {#if authors}
                   <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.authors')}</dt>
+                    <dt class="detail-label">{$_('metadata.fields.authors')}</dt>
                     <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{authors}</dd>
                   </div>
                 {/if}
                 {#if illustrators}
                   <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.illustrators')}</dt>
+                    <dt class="detail-label">{$_('metadata.fields.illustrators')}</dt>
                     <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{illustrators}</dd>
                   </div>
                 {/if}
                 {#if readingMeta.publisher}
                   <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.publisher')}</dt>
+                    <dt class="detail-label">{$_('metadata.fields.publisher')}</dt>
                     <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{readingMeta.publisher}</dd>
                   </div>
                 {/if}
@@ -999,22 +1034,25 @@
       <!-- staff -->
       {#if meta?.directors?.length || meta?.writers?.length || meta?.studios?.length}
         {@const cols = [meta?.directors, meta?.writers, meta?.studios].filter((arr) => arr?.length).length}
-        <div class="mt-6 grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
+        <div
+          class="mt-8 grid gap-4 card-glass p-4 max-sm:grid-cols-1!"
+          style="grid-template-columns: repeat({cols}, minmax(0, 1fr))"
+        >
           {#if meta?.directors?.length}
             <div>
-              <span class="font-semibold text-primary/80">{$_('metadata.fields.directors')}</span>
+              <span class="detail-label">{$_('metadata.fields.directors')}</span>
               <p class="text-sm opacity-70">{meta.directors.join(', ')}</p>
             </div>
           {/if}
           {#if meta?.writers?.length}
             <div>
-              <span class="font-semibold text-primary/80">{$_('metadata.fields.writers')}</span>
+              <span class="detail-label">{$_('metadata.fields.writers')}</span>
               <p class="text-sm opacity-70">{meta.writers.join(', ')}</p>
             </div>
           {/if}
           {#if meta?.studios?.length}
             <div>
-              <span class="font-semibold text-primary/80">{$_('metadata.fields.studios')}</span>
+              <span class="detail-label">{$_('metadata.fields.studios')}</span>
               <p class="text-sm opacity-70">{meta.studios.join(', ')}</p>
             </div>
           {/if}
@@ -1023,10 +1061,10 @@
 
       <!-- actors -->
       {#if meta?.actors?.length}
-        <div class="mt-6">
-          <h2 class="mb-3 text-lg font-semibold">{$_('metadata.fields.actors')}</h2>
+        <div class="mt-8">
+          <h2 class="mb-4 section-title">{$_('metadata.fields.actors')}</h2>
           <div
-            class="flex gap-3 overflow-x-auto pb-3"
+            class="scrollbar-none flex gap-3 overflow-x-auto pb-1"
             onwheel={(event) => {
               event.preventDefault();
               event.currentTarget.scrollLeft += event.deltaY;
@@ -1034,7 +1072,7 @@
           >
             {#each meta.actors as actor, i (i)}
               <div class="flex w-24 shrink-0 flex-col items-center gap-1 text-center">
-                <Image proxy="store" src={actor.thumb} text={actor.name} width="4.5rem" circle />
+                <Image proxy="store" src={actor.thumb} text={actor.name} width="4.5rem" circle class="detail-avatar" />
                 <div class="line-clamp-1 text-xs font-medium" title={actor.name}>{actor.name}</div>
                 <div class="line-clamp-1 text-xs opacity-50" title={actor.role}>{actor.role}</div>
               </div>
@@ -1045,8 +1083,8 @@
 
       <!-- parts -->
       {#if parts.length}
-        <div class="mt-6">
-          <h2 class="mb-3 text-lg font-semibold">
+        <div class="mt-8">
+          <h2 class="mb-3 section-title">
             {#if mediaType === 'image'}
               {$_('media.image.chapters')}
             {:else if media.lib?.lib_type === 'tv_show'}
@@ -1055,16 +1093,23 @@
               {$_('media.parts')}
             {/if}
           </h2>
-          <div class="flex max-h-144 flex-col gap-2 overflow-y-scroll px-2 py-3">
+          <div class="flex max-h-144 flex-col gap-1 overflow-y-auto card-glass p-1.5">
             {#each parts as part (part.id)}
               {@const active = _media?.id === part.id}
-              {@const activeClass = active ? 'bg-primary/15' : 'bg-gradient hover:bg-base-content/15'}
+              {@const activeClass = active ? 'detail-row-active' : ''}
               {@const transClass = 'transition-colors duration-300'}
               <button
-                class="media-part flex items-center rounded-lg px-3 py-2 text-left {transClass} {activeClass}"
+                class="media-part detail-row flex items-center px-3 py-2 text-left {activeClass}"
                 onclick={() => selectMedia(part)}
               >
-                <Image proxy="store" src={part.poster} icon={posterIcon} width="5rem" ratio="16/9" />
+                <Image
+                  proxy="store"
+                  src={part.poster}
+                  icon={posterIcon}
+                  width="5rem"
+                  ratio="16/9"
+                  class="rounded-md!"
+                />
                 <div class="flex min-w-0 flex-1 flex-col gap-0.5 px-3">
                   <span class="truncate text-sm font-medium {transClass}" class:text-primary={active}>
                     {mediaType === 'video' ? mediaTitle(part) : (part.title ?? part.name)}
@@ -1117,12 +1162,11 @@
 
       <!-- novel chapters -->
       {#if mediaType === 'text' && (chaptersLoading || chaptersError || hasTextChapters)}
-        <div class="mt-6">
-          <h2 class="mb-3 text-lg font-semibold">{$_('media.text.chapters')}</h2>
+        <div class="mt-8">
+          <h2 class="mb-3 section-title">{$_('media.text.chapters')}</h2>
           {#if chaptersLoading}
-            <div class="flex-center gap-3 py-6" role="status">
-              <span class="loading loading-sm loading-spinner" aria-hidden="true"></span>
-              <span class="text-sm opacity-60">{$_('media.loading_chapters')}</span>
+            <div class="flex flex-col gap-2 p-1" role="status" aria-label={$_('media.loading_chapters')}>
+              <Skeleton type="block" count={4} class="h-12 w-full rounded-card!" />
             </div>
           {:else if chaptersError}
             <div class="flex-center flex-col gap-3 py-6">
@@ -1132,10 +1176,10 @@
               <button class="btn btn-sm" onclick={loadTextChapters}>{$_('action.retry')}</button>
             </div>
           {:else}
-            <div class="flex max-h-144 flex-col gap-2 overflow-y-auto px-2 py-3">
+            <div class="flex max-h-144 flex-col gap-1 overflow-y-auto card-glass p-1.5">
               {#each textChapters as chapter, index (chapter.id)}
                 <button
-                  class="flex items-center gap-3 rounded-lg bg-gradient px-3 py-3 text-left transition-colors hover:bg-base-content/15"
+                  class="detail-row flex items-center gap-3 px-3 py-3 text-left"
                   title={chapterTitle(chapter, index)}
                   onclick={() => read(chapter.id, textVersion)}
                 >
@@ -1153,8 +1197,8 @@
 
       <!-- tags -->
       {#if meta?.tags?.length}
-        <div class="mt-6">
-          <h2 class="mb-3 text-lg font-semibold">{$_('metadata.fields.tags')}</h2>
+        <div class="mt-8">
+          <h2 class="mb-3 section-title">{$_('metadata.fields.tags')}</h2>
           <div class="flex flex-wrap gap-1.5">
             {#each meta.tags as tag, i (i)}
               <span class="badge badge-soft badge-sm text-base-content/70">{tag}</span>
@@ -1216,3 +1260,55 @@
     <Alerts dialog />
   </dialog>
 {/if}
+
+<style>
+  :global(.detail-poster) {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
+      0 24px 48px -20px color-mix(in oklab, var(--color-shade) 41%, transparent);
+  }
+
+  :global(.detail-avatar) {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-base-100) 80%, transparent);
+  }
+
+  .detail-chip {
+    display: inline-flex;
+    height: 1.5rem;
+    align-items: center;
+    border-radius: calc(infinity * 1px);
+    background-color: color-mix(in oklab, var(--color-base-100) 60%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-base-content) 14%, transparent);
+    padding-inline: 0.625rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    backdrop-filter: blur(8px);
+  }
+
+  .detail-label {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: color-mix(in oklab, var(--color-primary) 75%, var(--color-base-content));
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  /* rows share the single glass surface of their list */
+  .detail-row {
+    border-radius: min(var(--radius-field), 0.5rem);
+    cursor: pointer;
+    transition: background-color 200ms ease;
+
+    &:hover {
+      background-color: color-mix(in oklab, var(--color-base-content) 7%, transparent);
+    }
+  }
+
+  .detail-row-active,
+  .detail-row-active:hover {
+    background-color: color-mix(in oklab, var(--color-primary) 14%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-primary) 40%, transparent) inset;
+  }
+</style>

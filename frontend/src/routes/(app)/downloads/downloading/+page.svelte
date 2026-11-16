@@ -11,7 +11,9 @@
     Checkbox,
     DataView,
     DownloadDelConfirm,
+    DownloaderEmpty,
     downloadPrompt,
+    Empty,
     HCell,
     Paginator,
     Search,
@@ -23,6 +25,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { DownloadAction, Downloader, DownloadTask, Page, Resp } from '$lib/types';
+  import { pollWhileVisible } from '$lib/utils/timing';
   import { onMount, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
 
@@ -37,6 +40,8 @@
   let name: string = $state('');
   let downloader: number | null = $state(null);
   let downloaders: Downloader[] = $state([]);
+  // whether the downloader list has loaded without any entry
+  let noDownloader: boolean = $state(false);
   let deleteConfirm: DownloadDelConfirm;
   let headerCheckbox: Checkbox;
   let navigatorClipboard = $state(false);
@@ -208,22 +213,28 @@
       .json<Resp<Downloader[]>>()
       .then(({ data }) => {
         downloaders = data;
+        noDownloader = data.length === 0;
       });
-    // refresh every second
-    const refreshInterval = setInterval(() => {
-      search(pagination.current, pagination.size, true);
-    }, 1000);
+    // refresh every second while the page is visible
+    const stopPolling = pollWhileVisible(() => search(pagination.current, pagination.size, true), 1000);
     // show an assistant action at once, keeping the page and selection
     const changed = () => search(pagination.current, pagination.size, true);
     window.addEventListener('download-task-changed', changed);
     return () => {
-      clearInterval(refreshInterval);
+      stopPolling();
       window.removeEventListener('download-task-changed', changed);
     };
   });
 </script>
 
 <DataView dvh rowSelect loading={$loading} data={tasks} uniqueKey="id">
+  {#snippet empty()}
+    {#if noDownloader}
+      <DownloaderEmpty />
+    {:else}
+      <Empty icon={icons.download} />
+    {/if}
+  {/snippet}
   {#snippet filters()}
     <Select
       filter

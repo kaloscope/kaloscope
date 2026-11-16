@@ -153,7 +153,7 @@
 </Dropdown>
 
 <Modal icon={icons.colorSwatch} title={$_('app.switch_theme')} bind:this={modal}>
-  <ul class="menu max-h-[50vh] w-full flex-nowrap gap-1 overflow-y-auto rounded-box border">
+  <ul class="menu max-h-[50vh] w-full flex-nowrap gap-1 overflow-y-auto rounded-card border">
     {@render themes()}
   </ul>
 </Modal>

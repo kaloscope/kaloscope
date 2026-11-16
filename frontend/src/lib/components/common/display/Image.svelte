@@ -66,7 +66,6 @@
   import { icons } from '$lib/icons';
   import { extractInitial } from '$lib/utils/text';
   import { debounce } from '$lib/utils/timing';
-  import { fade } from 'svelte/transition';
 
   let {
     preset = null,
@@ -105,6 +104,21 @@
     }
   });
 
+  // the source that has finished loading
+  let loadedSrc: string | null = $state(null);
+  let loaded = $derived(!!src && loadedSrc === src);
+
+  /**
+   * Reveal an image that was already complete before its load handler was attached.
+   *
+   * @param node - Image element.
+   */
+  function reveal(node: HTMLImageElement) {
+    if (node.complete && node.naturalWidth > 0) {
+      loadedSrc = src;
+    }
+  }
+
   // the default aspect ratio
   let aspectRatio = $derived(ratio || '1/1');
 
@@ -122,7 +136,9 @@
   // the dynamic class names
   let roundedClass = $derived(circle ? 'rounded-full' : 'rounded-sm');
   let btnClass = $derived(onclick ? 'btn-scale' : '');
-  let bgClass = $derived(transparent ? 'bg-transparent' : !src ? 'bg-base-300/70' : '');
+  let bgClass = $derived(
+    transparent ? 'bg-transparent' : !src ? 'image-fallback' : loaded ? '' : 'skeleton skeleton-soft'
+  );
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -142,16 +158,37 @@
       <img
         src={proxyImage(src, proxy)}
         alt=""
-        class="size-full object-cover"
+        class="size-full object-cover transition-opacity duration-300 {loaded ? 'opacity-100' : 'opacity-0'}"
         loading="lazy"
         draggable={false}
+        onload={() => (loadedSrc = src)}
         onerror={() => (src = null)}
-        in:fade
+        use:reveal
       />
     {/key}
   {:else if text}
     <span class="text-xl font-bold opacity-60">{extractInitial(text)}</span>
   {:else if icon}
-    <iconify-icon {icon} width="100%" height="100%" style:aspect-ratio={aspectRatio} class="opacity-50"></iconify-icon>
+    <span class="@container flex-center size-full">
+      <iconify-icon {icon} width="100%" height="100%" class="image-fallback-icon opacity-40"></iconify-icon>
+    </span>
   {/if}
 </div>
+
+<style>
+  /* placeholder surface for a missing image */
+  .image-fallback {
+    background-color: color-mix(in oklab, var(--color-base-content) 8%, var(--color-base-100));
+    background-image: linear-gradient(
+      140deg,
+      color-mix(in oklab, var(--color-base-100) 45%, transparent),
+      transparent 70%
+    );
+  }
+
+  /* fill small boxes, but keep the icon modest inside large covers */
+  .image-fallback-icon {
+    width: clamp(min(100cqw, 2.5rem), 40cqw, 4.5rem);
+    aspect-ratio: 1;
+  }
+</style>
