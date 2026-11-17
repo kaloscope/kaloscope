@@ -1224,6 +1224,8 @@
     class="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none border-0 p-0"
     aria-label={$_('media.read')}
     oncancel={(event) => {
+      // a file picker's cancel bubbles up from inside; only Escape on the dialog itself closes it
+      if (event.target !== event.currentTarget) return;
       event.preventDefault();
       closeReader();
     }}

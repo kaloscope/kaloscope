@@ -132,6 +132,8 @@
     class="modal transition-none {_class}"
     transition:fade={{ duration: TRANSITION_DURATION }}
     oncancel={(event) => {
+      // a file picker's cancel bubbles up from inside; only Escape on the dialog itself closes it
+      if (event.target !== event.currentTarget) return;
       event.preventDefault();
       close();
     }}
