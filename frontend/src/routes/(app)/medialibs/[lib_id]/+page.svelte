@@ -314,7 +314,7 @@
         {@const picked = selected.includes(item.id)}
         <div
           role="presentation"
-          class="group @container relative"
+          class="lib-cover group @container relative"
           onmouseenter={() => (backdrop = item.backdrop ?? item.poster ?? backdrop)}
         >
           <Rating
@@ -410,9 +410,23 @@
       0 4px 10px -4px color-mix(in oklab, var(--color-shade) 22%, transparent);
   }
 
+  /* the whole cover moves, so the rating, checkbox, and actions menu rise with the poster */
+  :global(.lib-cover) {
+    transition: transform 300ms ease;
+  }
+
+  /* keep an open actions menu above neighboring covers */
+  :global(.lib-cover:hover),
+  :global(.lib-cover:focus-within) {
+    z-index: 2;
+  }
+
   @media (hover: hover) and (width >= 64rem) {
-    :global(.group:hover .lib-poster) {
+    :global(.lib-cover:hover) {
       transform: translateY(-3px);
+    }
+
+    :global(.group:hover .lib-poster) {
       box-shadow:
         0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
         0 16px 28px -12px color-mix(in oklab, var(--color-shade) 34%, transparent);
