@@ -254,7 +254,7 @@
       data={items}
       loading={$innerLoading}
       hideOnScroll={standaloneMode.current}
-      filtersClass="flex-wrap items-center sm:flex-nowrap sm:justify-center"
+      filtersClass="flex-wrap items-center sm:grid sm:grid-cols-[1fr_minmax(0,36rem)_1fr]"
       gridClass="grid-cols-2 grid-cols-compact"
       itemClass="mb-3 z-1"
       skeleton={{ ratio: '2/3', plain: true }}
@@ -268,24 +268,13 @@
             search(true);
           }}
           maxWidth="36rem"
+          class="sm:col-start-2 sm:w-full"
         />
         {#if $user?.role === 'admin'}
-          <div class="contents sm:flex sm:shrink-0 sm:items-center sm:gap-2">
-            <button
-              type="button"
-              class="btn btn-square shrink-0 btn-sm"
-              class:btn-active={selecting}
-              aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
-              aria-pressed={selecting}
-              disabled={!selecting && items.length === 0}
-              use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select'), followCursor: true }}
-              onclick={toggleSelecting}
-            >
-              <iconify-icon icon={selecting ? icons.dismiss : icons.listCheck} width="1rem" aria-hidden="true"
-              ></iconify-icon>
-            </button>
+          <!-- the batch controls sit at the far right on wider screens: count, delete, then cancel -->
+          <div class="contents sm:col-start-3 sm:flex sm:items-center sm:gap-2 sm:justify-self-end">
             {#if selecting}
-              <div class="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-start">
+              <div class="flex w-full items-center justify-between gap-2 max-sm:order-1 sm:w-auto sm:justify-start">
                 <span class="text-sm whitespace-nowrap text-base-content/60" role="status">
                   {$_('media.batch.selected', $number(selected.length))}
                 </span>
@@ -300,6 +289,19 @@
                 </button>
               </div>
             {/if}
+            <button
+              type="button"
+              class="btn btn-square shrink-0 btn-sm"
+              class:btn-active={selecting}
+              aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
+              aria-pressed={selecting}
+              disabled={!selecting && items.length === 0}
+              use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select'), followCursor: true }}
+              onclick={toggleSelecting}
+            >
+              <iconify-icon icon={selecting ? icons.dismiss : icons.listCheck} width="1rem" aria-hidden="true"
+              ></iconify-icon>
+            </button>
           </div>
         {/if}
       {/snippet}
