@@ -383,6 +383,7 @@ def test_parent_changed(tmp_path, edit, selection):
                 else [item.id for item in episodes],
             )
             review = await MediaBatchService.review(change, ADMIN)
+
             if edit == "unindexed":
                 write(root, "Show/late.mkv")
             elif edit == "body":
@@ -782,6 +783,7 @@ def test_mcp(monkeypatch, tmp_path):
                 }
             }
             read_only = await call(app, "apply_media_change", arguments, token="admin")
+
             write_token = (
                 await MCPAccessTokenService.create(
                     admin.id,
@@ -1668,6 +1670,7 @@ def test_move_movie(monkeypatch, tmp_path):
             assert result["outcome"] == "completed"
             assert video.path == str(root / "Loose (2020)/Loose.2020.mkv")
             assert video.nfo_path == str(root / "Loose (2020)/Loose.2020.nfo")
+
             # the folder takes over what the library knows about the movie
             assert (folder.path, folder.title, folder.year, folder.unique_id) == (
                 str(root / "Loose (2020)"),
@@ -1677,6 +1680,7 @@ def test_move_movie(monkeypatch, tmp_path):
             )
             assert folder.nfo_path == video.nfo_path
             assert crowd["blocked"]["reasons"] == {"identity_mismatch": 1}
+
             assert undone["outcome"] == "completed"
             assert (restored.path, restored.parent_id) == (
                 str(root / "Loose.2020.mkv"),

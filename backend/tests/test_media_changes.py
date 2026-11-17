@@ -626,13 +626,16 @@ def test_candidates(monkeypatch, tmp_path):
             )
             assert first["plot"].endswith("…") and len(first["plot"]) <= 100
             assert second["year"] == 1999 and unusable["usable"] is False
+
             graph_id, params = env.engine.calls[-1]
             assert graph_id == env.movie_graph.id
             assert params["$manual"] is True and params["nfo_type"] == "movie"
             assert params["path"] == env.movie.path and params["page_size"] == 5
+
             # listing saves nothing
             assert Path(env.movie.nfo_path).read_bytes() == before
             assert not await MediaChangeReceipt.exists()
+
             # a missing title falls back to the name, like the metadata dialog
             again = await rescrape_review(env.owner, item_id=env.movie.id)
             assert again["query"]["title"] == "Old Movie"
@@ -845,6 +848,7 @@ def test_stale(monkeypatch, tmp_path, edit):
         async with media(monkeypatch, tmp_path) as env:
             item = env.show if edit == "episode" else env.movie
             change, reviewed = await chosen(env.owner, item.id)
+
             if edit == "nfo":
                 await write_nfo(
                     NFOType.MOVIE, env.movie.nfo_path, {"title": "Edited by hand"}
@@ -1583,6 +1587,7 @@ def test_mcp(monkeypatch, tmp_path):
             )["token"]
             scanned = await call(app, "apply_media_change", arguments, token=write)
             replay = await call(app, "apply_media_change", arguments, token=write)
+
             listed = await call(
                 app,
                 "review_media_rescrape",
@@ -1598,6 +1603,7 @@ def test_mcp(monkeypatch, tmp_path):
                 app, "review_media_rescrape", {"change": change}, token="admin"
             )
             details = preview["structuredContent"]
+
             other = {
                 **change,
                 "candidate": listed["structuredContent"]["candidates"][1]["key"],
@@ -1628,6 +1634,7 @@ def test_mcp(monkeypatch, tmp_path):
             data.pop("request_id")
             shared["data"].pop("request_id")
             assert shared["data"] == data
+
             assert not listed["structuredContent"]["valid"]
             assert details["valid"] and details["changes"]
             assert conflict["structuredContent"]["conflict"]
@@ -1665,6 +1672,7 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
     assert not tools.MEDIA_CHANGE_TOOLS & {
         schema["function"]["name"] for schema in tools.tool_schemas(admin)
     }
+
     for focus in ({"plan_only": True}, {"authoring": True}):
         assert not tools.MEDIA_CHANGE_TOOLS & names(
             {"tools": tools.tool_schemas(admin, media_change=True, **focus)}
@@ -1673,6 +1681,7 @@ def test_sizes_and_compaction(monkeypatch, tmp_path):
     assert not tools.MEDIA_CHANGE_TOOLS & names(
         {"tools": tools.tool_schemas(reader, media_change=True)}
     )
+
     # the active preview keeps its effects and choices when compacted
     for data in (listed, preview, scan):
         source = {

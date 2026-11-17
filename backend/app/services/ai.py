@@ -78,6 +78,7 @@ class AIProviderService(BaseService[AIProvider], model=AIProvider):
             and not provider.api_key
         ):
             raise KaloscopeException(ErrorCode.AI_KEY_UNAVAILABLE, status_code=409)
+
         return provider
 
     @classmethod
@@ -116,6 +117,7 @@ class AIProviderService(BaseService[AIProvider], model=AIProvider):
         """
         if not provider.api_key:
             return None
+
         try:
             return await asyncio.to_thread(
                 fernet_decrypt,
@@ -153,6 +155,7 @@ class AIProviderService(BaseService[AIProvider], model=AIProvider):
             secret = await asyncio.to_thread(
                 fernet_decrypt, provider.api_key, KaloscopeConfig.get().secret_key_path
             )
+
         # isolate credentials from the media client's persistent cache and cookies
         async with httpx.AsyncClient(transport=NetworkTransport(http2=True)) as client:
             return await fetch_models(client, obj.base_url, obj.preset, secret)
@@ -205,6 +208,7 @@ class AIProviderService(BaseService[AIProvider], model=AIProvider):
                     )
                     if provider is None:
                         raise NotFoundException
+
                 if (
                     provider is not None
                     and provider.api_key
@@ -229,8 +233,10 @@ class AIProviderService(BaseService[AIProvider], model=AIProvider):
                             KaloscopeConfig.get().secret_key_path,
                             create_key=not has_credentials,
                         )
+
                 if provider is None:
                     return await AIProvider.create(using_db=connection, **data)
+
                 provider.update_from_dict(data)
                 await provider.save(using_db=connection)
                 return provider

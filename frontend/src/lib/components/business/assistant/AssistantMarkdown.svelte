@@ -93,17 +93,21 @@
     :global(:where(p, ul, ol, blockquote, pre, table, hr)) {
       margin-block: 0.5rem;
     }
+
     :global(:where(h3, h4, h5, h6)) {
       margin-block: 0.875rem 0.375rem;
       font-size: 0.875rem;
       font-weight: 600;
     }
+
     :global(:where(li)) {
       margin-block: 0.125rem;
     }
+
     :global(:where(li > ul, li > ol)) {
       margin-block: 0.125rem;
     }
+
     :global(:where(pre)) {
       padding: 0.625rem 0.75rem;
       border-radius: var(--radius-field);
@@ -111,21 +115,26 @@
       line-height: 1.25rem;
       overflow-wrap: normal;
     }
+
     :global(:where(blockquote)) {
       font-style: normal;
       font-weight: inherit;
       color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
     }
+
     :global(:where(blockquote p)::before),
     :global(:where(blockquote p)::after) {
       content: none;
     }
+
     :global(:where(th, td)) {
       padding: 0.25rem 0.5rem;
     }
+
     > :global(:first-child) {
       margin-top: 0;
     }
+
     > :global(:last-child) {
       margin-bottom: 0;
     }

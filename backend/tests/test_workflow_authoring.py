@@ -544,6 +544,7 @@ def test_html_inspection(monkeypatch):
             )
         ),
     )
+
     result = asyncio.run(
         authoring.probe_http_request(
             HTTPProbe(
@@ -1026,6 +1027,7 @@ def test_curl_stalled_stream(monkeypatch, action):
 
         monkeypatch.setattr(authoring, "AsyncSession", Client)
         monkeypatch.setattr(http_node, "resolve_proxy", AsyncMock(return_value=None))
+
         task = asyncio.create_task(
             authoring.probe_http_request(
                 HTTPProbe(
@@ -1036,6 +1038,7 @@ def test_curl_stalled_stream(monkeypatch, action):
             )
         )
         await started.wait()
+
         if action == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -1046,6 +1049,7 @@ def test_curl_stalled_stream(monkeypatch, action):
             assert not result.body_complete and result.text_truncated
             assert len(result.text) == authoring.MAX_SAMPLE_CHARS
             assert not result.formatted.valid
+
         assert transfer.cancelled()
 
     asyncio.run(run())
@@ -1076,6 +1080,7 @@ def test_assistant_parity(monkeypatch):
         )
         assert result["ok"]
         assert result["data"] == direct.model_dump(mode="json")
+
         fixture = {
             "template": "{{ items|length }}",
             "context": {"items": [1, 2]},

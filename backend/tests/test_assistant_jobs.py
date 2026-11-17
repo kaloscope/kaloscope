@@ -90,6 +90,7 @@ async def schedules():
                 {"interval_num": 30, "interval_unit": "seconds"},
             ),
         ]
+
         jobs = []
         for index, (graph, state, trigger, timing) in enumerate(settings):
             job = await FlowJob.create(
@@ -107,6 +108,7 @@ async def schedules():
                 updated_at=start - timedelta(seconds=index),
             )
             jobs.append(job)
+
         reader = cast(
             UserInfo,
             SimpleNamespace(
@@ -115,6 +117,7 @@ async def schedules():
                 perms=Permissions(indexer_ids=[graphs[0].id]),
             ),
         )
+
         yield SimpleNamespace(owner=owner, reader=reader, graphs=graphs, jobs=jobs)
 
 
@@ -289,6 +292,7 @@ def test_timing():
             assert not await FlowLog.exists()
             assert {item["workflow_id"] for item in items.values()} == {41, 42, 43}
             assert items[101]["workflow_name"] == "Alpha scan"
+
             description = tools.available_tools(fixture.owner)[
                 "list_workflow_jobs"
             ].description
@@ -525,6 +529,7 @@ def test_history_permissions(monkeypatch, source):
             }[source]
             assert turn.resource_ids == expected_resources
             assert turn.context == context
+
             page = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert page["content"] == "Private schedule facts"
             original = await call(
@@ -534,6 +539,7 @@ def test_history_permissions(monkeypatch, source):
                 conversation["id"],
             )
             assert original["ok"]
+
             await AssistantConversation.filter(id=conversation["id"]).update(
                 summary={"goals": ["Private schedule summary"]},
                 summary_resources=turn.resource_ids,
@@ -546,11 +552,13 @@ def test_history_permissions(monkeypatch, source):
             assert {item["workflow_id"] for item in current_jobs["data"]["items"]} == {
                 42
             }
+
             page = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert page["content"] == ""
             assert page["tools"] == []
             assert page["context"] is None
             assert page["error"] == "permission_denied"
+
             queries = [{"turn_id": turn.id}] + [
                 {"tool_call_id": item.call_id}
                 for item in await AssistantToolCall.filter(turn_id=turn.id)
@@ -564,6 +572,7 @@ def test_history_permissions(monkeypatch, source):
                 owner, {}, "read_conversation_history", conversation["id"]
             )
             assert index["data"]["items"] == []
+
             current = await Sessions.begin(conversation["id"], request("next"), owner)
             create = AsyncMock()
             messages, _, _ = await history.prepare_context(
@@ -580,6 +589,7 @@ def test_history_permissions(monkeypatch, source):
             )
             assert (await Sessions.owned(conversation["id"], owner)).summary == {}
             create.assert_not_awaited()
+
             owner.perms = Permissions(indexer_ids=expected_resources)
             restored = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert restored["content"] == "Private schedule facts"
@@ -646,6 +656,7 @@ def test_query_budget(monkeypatch):
         assert facts["filters"] == data["filters"]
         assert facts["timezone"] == "UTC"
         assert body.get("tool_choice") != "none"
+
         return response(
             [
                 chunk(
@@ -676,6 +687,7 @@ def test_query_budget(monkeypatch):
                 await FlowJob.create(
                     graph=graph, state="running", trigger=trigger, **timing
                 )
+
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -688,6 +700,7 @@ def test_query_budget(monkeypatch):
                     "ordering": "graph__name",
                 },
             }
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(

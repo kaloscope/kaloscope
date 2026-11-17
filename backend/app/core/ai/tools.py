@@ -923,12 +923,14 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
     if isinstance(value, dict):
         if value == {"$ref": "#/$defs/JSONType"}:
             return {}
+
         name = value.get("$ref", "").removeprefix("#/$defs/")
         if definitions and name in definitions:
             value = {
                 **definitions[name],
                 **{key: item for key, item in value.items() if key != "$ref"},
             }
+
         result = {
             key: compact_schema(item, definitions)
             for key, item in value.items()
@@ -939,6 +941,7 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
             and not (key == "maximum" and item == SAFE_INTEGER)
             and not (key == "default" and item is None)
         }
+
         if "$defs" in result:
             result["$defs"] = {
                 key: {
@@ -953,6 +956,7 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
             }
             if not result["$defs"]:
                 result.pop("$defs")
+
         variants = result.get("anyOf")
         if (
             isinstance(variants, list)
@@ -966,7 +970,9 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
             result["type"] = [nullable["type"], "null"]
             if "enum" in nullable:
                 result["enum"] = [*nullable["enum"], None]
+
         return result
+
     if isinstance(value, list):
         return [compact_schema(item, definitions) for item in value]
     return value
@@ -1102,6 +1108,7 @@ def tool_schemas(
             (tool.brief if short else tool.arguments).model_json_schema()
         )
         parameters.pop("description", None)
+
         encoded = dumps(parameters)
         definitions = {
             name: value
@@ -1110,6 +1117,7 @@ def tool_schemas(
             or encoded.count(dumps(f"#/$defs/{name}")) == 1
         }
         parameters = compact_schema(parameters, definitions)
+
         schemas.append(
             {
                 "type": "function",
@@ -1121,6 +1129,7 @@ def tool_schemas(
                 },
             }
         )
+
     return schemas
 
 
@@ -1216,6 +1225,7 @@ async def execute_tool(
     tool = available_tools(user).get(name)
     if tool is None:
         return tool_error(ErrorCode.FORBIDDEN, "Use only the tools provided to you.")
+
     try:
         args = tool.arguments.model_validate_json(arguments)
     except ValidationError as exc:
@@ -1359,6 +1369,7 @@ async def execute_tool(
                         return result
                 case WorkflowValidation() | WorkflowPreview() | SnapshotQuery():
                     document = await resolve_document(args, conversation_id, user)
+
                     if isinstance(args, SnapshotQuery):
                         value = document[args.collection]
                         if args.node_id is not None:
@@ -1376,6 +1387,7 @@ async def execute_tool(
                                 value = value["data"][args.field_id]
                         for key in args.path:
                             value = value[key]
+
                         result = {
                             "base": {
                                 "workflow_id": args.workflow_id,
@@ -1415,6 +1427,7 @@ async def execute_tool(
                                 "the first edit. Do not use a saved or historical "
                                 f"base. Current snapshot_id: {canvas_snapshot_id}.",
                             )
+
                         proposal = apply_changes(document, args.changes)
                         (
                             preview,
@@ -1428,6 +1441,7 @@ async def execute_tool(
                             user,
                             GraphDocument.model_validate(document),
                         )
+
                         result = preview.model_dump(mode="json")
                         result["change_count"] = len(preview.changes)
                         result["changes"] = [
@@ -1451,6 +1465,7 @@ async def execute_tool(
                         result["base_kind"] = (
                             "snapshot" if args.snapshot_id else "saved_draft"
                         )
+
                         from app.services.assistant_sessions import (
                             AssistantSessionService,
                         )
@@ -1464,6 +1479,7 @@ async def execute_tool(
                             user,
                         )
                         result["proposal_snapshot_id"] = snapshot.id
+
                         if canvas is not None:
                             from app.services.assistant_proposals import (
                                 AssistantProposalService,
@@ -1485,6 +1501,7 @@ async def execute_tool(
                                     original.document, snapshot.document
                                 )
                             )
+
                         while (
                             result["changes"]
                             and len(dumps(result)) > MAX_TOOL_RESULT_BYTES
@@ -1529,6 +1546,7 @@ async def execute_tool(
                         result = compact_node_schemas(result)
                 case HistoryQuery():
                     result = await read_history(args, conversation_id, user)
+
         encoded = dumps(
             result.model_dump(mode="json") if isinstance(result, BaseModel) else result
         )
@@ -1537,6 +1555,7 @@ async def execute_tool(
                 ErrorCode.ASSISTANT_RESULT_LIMIT,
                 "The result is too large. Narrow the query or reduce the page size.",
             )
+
         return {"ok": True, "data": loads(encoded)}
     except KaloscopeException as exc:
         code = (
@@ -1666,6 +1685,7 @@ async def run_reviewed(
     )
     if call is None:
         raise NotFoundException
+
     if (
         canvas is not None
         and args.workflow_id == canvas["resource_id"]
@@ -1679,10 +1699,12 @@ async def run_reviewed(
             "Run the current canvas: its workflow/version and the latest "
             "proposal_snapshot_id, or the page snapshot before any edit.",
         )
+
     graph = await FlowGraphService.get_accessible(args.workflow_id, user)
     FlowGraphService._check_version(graph, args.draft_version)
     source = "saved_draft"
     document = graph.draft or {"nodes": [], "edges": []}
+
     if args.snapshot_id is not None:
         snapshot = await AssistantSessionService.read_snapshot(
             conversation_id, args.snapshot_id, user
@@ -1693,11 +1715,13 @@ async def run_reviewed(
         ):
             raise NotFoundException
         source, document = snapshot.origin, snapshot.document
+
     turn_ids = await retry_chain(call.turn_id, conversation_id)
     digest = FlowRunService.digest(document, args.entry, args.params)
     key = hashlib.sha256(
         f"{user.id}:{conversation_id}:{turn_ids[-1]}:{args.workflow_id}:{digest}".encode()
     ).hexdigest()[:16]
+
     keys: set[str] = set()
     blocked = False
     for record in (
@@ -1728,6 +1752,7 @@ async def run_reviewed(
         ):
             # an identical call reads the same run; another may follow an unseen one
             blocked = True
+
     if key not in keys:
         message = None
         if len(keys) >= 3:
@@ -1747,6 +1772,7 @@ async def run_reviewed(
                 "status": "refused",
                 "message": message,
             }
+
     return await trial_run(
         args.workflow_id,
         document,
@@ -1790,6 +1816,7 @@ async def create_plan(
     )
     if call is None:
         raise NotFoundException
+
     turn_ids = await retry_chain(call.turn_id, conversation_id)
     for earlier in (
         await AssistantToolCall.filter(
@@ -1806,6 +1833,7 @@ async def create_plan(
         plan = await DownloadPlan.get_or_none(creation_key=key)
         if plan is not None:
             return await DownloadPlanService.creation_result(plan, user, replayed=True)
+
     records = (
         await AssistantToolCall.filter(
             turn__conversation_id=conversation_id,
@@ -1824,6 +1852,7 @@ async def create_plan(
                 return await DownloadPlanService.creation_result(
                     plan, user, replayed=True
                 )
+
             reviewed_turn = await AssistantTurn.get(id=record.turn_id)
             if (
                 index
@@ -1840,6 +1869,7 @@ async def create_plan(
                         "creating."
                     ),
                 }
+
             review = data.get("ingestion")
             return await DownloadPlanService.create_once(
                 DownloadPlanCreate(
@@ -1856,6 +1886,7 @@ async def create_plan(
                 ),
                 user,
             )
+
     raise NotFoundException
 
 
@@ -1881,6 +1912,7 @@ async def create_task(
     )
     if call is None:
         raise NotFoundException
+
     records = (
         await AssistantToolCall.filter(
             turn__conversation_id=conversation_id, name="validate_download_task"
@@ -1892,6 +1924,7 @@ async def create_task(
         data = (record.result or {}).get("data") or {}
         if not (data.get("valid") and data.get("request_id") == str(args.request_id)):
             continue
+
         reviewed = await AssistantTurn.get(id=record.turn_id)
         # the service replays a committed request before any other check
         replayable = index == 0 and (
@@ -1911,6 +1944,7 @@ async def create_task(
             else None,
             confirmed=args.confirmed and replayable,
         )
+
         result = await DownloadTaskService.create_once(body, user)
         if not replayable and not result.get("created"):
             return {
@@ -1921,6 +1955,7 @@ async def create_task(
                 "the turn, and wait for the user's final confirmation.",
             }
         return result
+
     raise NotFoundException
 
 
@@ -1960,9 +1995,11 @@ async def apply_schedule(
     for index, (record, data, target) in enumerate(reviews):
         if data.get("request_id") != str(args.request_id):
             continue
+
         reviewed = await AssistantTurn.get(id=record.turn_id)
         superseded = any(other == target for _, _, other in reviews[:index])
         ready = not superseded and reviewed.status == "complete"
+
         result = await FlowJobService.apply_change(
             ScheduleApply(
                 request_id=args.request_id,
@@ -1983,6 +2020,7 @@ async def apply_schedule(
                 "confirmation.",
             }
         return result
+
     raise NotFoundException
 
 
@@ -2022,11 +2060,13 @@ async def apply_plan_change(
     for index, (record, data) in enumerate(reviews):
         if data.get("request_id") != str(args.request_id):
             continue
+
         reviewed = await AssistantTurn.get(id=record.turn_id)
         superseded = any(
             other["plan_id"] == data["plan_id"] for _, other in reviews[:index]
         )
         ready = not superseded and reviewed.status == "complete"
+
         result = await DownloadPlanService.apply_change(
             DownloadPlanApply(
                 request_id=args.request_id,
@@ -2047,6 +2087,7 @@ async def apply_plan_change(
                 "confirmation.",
             }
         return result
+
     raise NotFoundException
 
 
@@ -2086,8 +2127,10 @@ async def apply_task_action(
     for index, (record, data) in enumerate(reviews):
         if data.get("request_id") != str(args.request_id):
             continue
+
         reviewed = await AssistantTurn.get(id=record.turn_id)
         ready = index == 0 and reviewed.status == "complete"
+
         result = await DownloadTaskService.apply_action(
             DownloadTaskActionApply(
                 request_id=args.request_id,
@@ -2108,6 +2151,7 @@ async def apply_task_action(
                 "confirmation.",
             }
         return result
+
     raise NotFoundException
 
 
@@ -2145,6 +2189,7 @@ async def apply_media_change(
         data = (record.result or {}).get("data") or {}
         if data.get("request_id") != str(args.request_id):
             continue
+
         reviewed = await AssistantTurn.get(id=record.turn_id)
         superseded = False
         for later in reviews[:index]:
@@ -2161,6 +2206,7 @@ async def apply_media_change(
             ):
                 superseded = True
                 break
+
         ready = not superseded and reviewed.status == "complete"
         change = MEDIA_REVIEWS[record.name].model_validate_json(record.arguments)
         result = await MediaChangeService.apply_change(
@@ -2183,6 +2229,7 @@ async def apply_media_change(
                 "confirmation.",
             }
         return result
+
     raise NotFoundException
 
 
@@ -2216,6 +2263,7 @@ async def create_workflow(
     )
     if call is None:
         raise NotFoundException
+
     FlowGraphService.require_editor(user)
     turn_ids: list[int] = []
     turn_id = call.turn_id
@@ -2226,6 +2274,7 @@ async def create_workflow(
             id=turn_id, conversation_id=conversation_id
         )
         turn_id = turn.retry_of if turn else None
+
     earlier = (
         await AssistantToolCall.filter(
             turn_id__in=turn_ids, name=CREATE_TOOL, status="complete"
@@ -2238,6 +2287,7 @@ async def create_workflow(
         data = earlier.result["data"]
         await FlowGraphService.get_accessible(data["workflow_id"], user)
         return {**data, "replayed": True}
+
     async with in_transaction():
         graph = await FlowGraphService.create_draft(
             GraphDraftCreate(
@@ -2265,6 +2315,7 @@ async def create_workflow(
             result={"id": call_id, "name": CREATE_TOOL, "ok": True, "data": data},
             status="complete",
         )
+
     return data
 
 
@@ -2298,6 +2349,7 @@ async def read_history(
         if call is None:
             raise NotFoundException
         turn_id = call.turn_id
+
     if turn_id is None:
         query = AssistantTurn.filter(conversation_id=conversation_id).exclude(
             status="streaming"
@@ -2305,6 +2357,7 @@ async def read_history(
         if args.before is not None:
             query = query.filter(id__lt=args.before)
         turns = await query.order_by("-id").limit(6)
+
         items = []
         for record in turns[:5]:
             if await AssistantSessionService.allowed(record.resource_ids, user):
@@ -2323,11 +2376,13 @@ async def read_history(
             "next_before": turns[4].id if len(turns) > 5 else None,
             "historical": True,
         }
+
     turn = await AssistantTurn.get_or_none(id=turn_id, conversation_id=conversation_id)
     if turn is None:
         raise NotFoundException
     if not await AssistantSessionService.allowed(turn.resource_ids, user):
         raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
+
     source_facts = None
     if args.tool_call_id is not None:
         call = await AssistantToolCall.get_or_none(
@@ -2335,6 +2390,7 @@ async def read_history(
         )
         if call is None:
             raise NotFoundException
+
         value = dumps(
             {"name": call.name, "arguments": call.arguments, "result": call.result}
         ).decode()
@@ -2365,6 +2421,7 @@ async def read_history(
                 "context": turn.context,
             }
         ).decode()
+
         facts = [
             tool_facts(call.result)
             for call in calls
@@ -2378,6 +2435,7 @@ async def read_history(
             "tool_count": count,
             "omitted_tools": count - len(facts),
         }
+
     return {
         "turn_id": turn.id,
         "historical": True,

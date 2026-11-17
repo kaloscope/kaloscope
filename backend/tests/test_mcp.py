@@ -259,6 +259,7 @@ def test_protocol(mode):
                 "apply_media_change",
                 "cancel_media_batch",
             }
+
             for tool in result.tools:
                 assert tool.annotations is not None
                 assert tool.output_schema is not None
@@ -316,6 +317,7 @@ def test_protocol(mode):
                     "apply_media_change",
                 }:
                     assert tool.annotations.open_world_hint is True
+
                 assert (
                     not {"ctx", "token", "url"} & tool.input_schema["properties"].keys()
                 )
@@ -325,6 +327,7 @@ def test_protocol(mode):
                     for definition in schema.get("$defs", {}).values():
                         if "enum" in definition:
                             assert definition.get("description")
+
                 schema = tool.output_schema
                 Draft202012Validator.check_schema(schema)
                 assert schema["type"] == "object"
@@ -339,6 +342,7 @@ def test_protocol(mode):
                     assert "api_key" not in fields
                     assert fields["has_api_key"]["type"] == "boolean"
                     assert schema["$defs"]["AIProtocol"]["enum"] == ["chat_completions"]
+
             result = await client.call_tool("list_workflows", {})
             assert result.is_error
             content = result.content[0]
@@ -495,6 +499,7 @@ def test_draft_repair():
                 ],
                 "edges": [],
             }
+
             created = await call(
                 app,
                 "create_workflow_draft",
@@ -512,6 +517,7 @@ def test_draft_repair():
             assert metadata["draft_version"] == 1
             assert metadata["editor_path"] == f"/settings/workflows/graphs/{graph_id}"
             assert (await FlowGraph.get(id=graph_id)).definition is None
+
             published = await FlowGraphService.publish_graph(
                 graph_id, GraphWrite(**original, draft_version=1), identity
             )
@@ -529,6 +535,7 @@ def test_draft_repair():
                 logs["structuredContent"]["runs"][0][1]["error"]
                 == "http_request_failed"
             )
+
             details = await call(
                 app, "get_workflow", {"workflow_id": graph_id}, token="writer"
             )
@@ -541,6 +548,7 @@ def test_draft_repair():
                 token="admin",
             )
             assert validated["structuredContent"]["valid"]
+
             proposed["draft_version"] = details["structuredContent"]["draft_version"]
             preview = await call(
                 app,
@@ -554,6 +562,7 @@ def test_draft_repair():
                 == "https://old.test"
             )
             assert (await FlowGraph.get(id=graph_id)).draft_version == 2
+
             saved = await call(
                 app,
                 "save_workflow_draft",
@@ -566,6 +575,7 @@ def test_draft_repair():
             assert graph.state == GraphState.MODIFIED
             assert not await FlowJob.all().exists()
             assert not await FlowTrigger.all().exists()
+
             stale = await call(
                 app,
                 "save_workflow_draft",
@@ -576,6 +586,7 @@ def test_draft_repair():
                 stale["isError"]
                 and "flow_draft_conflict" in stale["content"][0]["text"]
             )
+
             history = await call(
                 app, "list_workflow_drafts", {"workflow_id": graph_id}, token="writer"
             )
@@ -1048,6 +1059,7 @@ def test_media_reads(tmp_path):
             ]
             assert [lib["id"] for lib in libraries] == [library.id]
             assert libraries[0]["scanning"] is True
+
             listed = await call(
                 app,
                 "list_media_items",
@@ -1056,12 +1068,15 @@ def test_media_reads(tmp_path):
             assert [row["id"] for row in listed["structuredContent"]["items"]] == [
                 item.id
             ]
+
             empty_page = await call(
                 app, "list_media_items", {"page_num": 2, "page_size": 1}
             )
             assert empty_page["structuredContent"] == {"total": 1, "items": []}
+
             excluded = await call(app, "list_media_items", {"library_id": private.id})
             assert excluded["structuredContent"]["total"] == 0
+
             details = (await call(app, "get_media_item", {"item_id": item.id}))[
                 "structuredContent"
             ]
@@ -1071,6 +1086,7 @@ def test_media_reads(tmp_path):
                 "isError"
             ]
             assert (await call(app, "get_media_item", {"item_id": 9999}))["isError"]
+
             admin = await call(app, "list_media_libraries", token="admin")
             assert len(admin["structuredContent"]["items"]) == 2
             assert await MediaItem.all().values() == before
@@ -1332,6 +1348,7 @@ def test_node_knowledge(monkeypatch):
                     if example.get("template"):
                         assert "// PURPOSE:" in example["default"]
                         assert example["readonly"]
+
             assert counts == [
                 await model.all().count() for model in (FlowGraph, FlowJob, FlowLog)
             ]
@@ -1369,6 +1386,7 @@ def test_authoring_tools(monkeypatch):
                 "context": {"items": [1, 2]},
                 "mode": "expression",
             }
+
             result = await call(
                 app, "validate_workflow_template", {"validation": fixture}
             )
@@ -1387,6 +1405,7 @@ def test_authoring_tools(monkeypatch):
                 result = await call(app, "probe_http_request", probe, token=name)
                 assert result["isError"]
                 assert "read-only" in result["content"][0]["text"]
+
                 identity = app.shared_ctx.sessions[name]
                 issued = await MCPAccessTokenService.create(
                     identity.id,
@@ -1402,6 +1421,7 @@ def test_authoring_tools(monkeypatch):
                         "items": [{"id": "one"}]
                     }
                     assert result["structuredContent"]["body_complete"]
+
             assert len(requests) == 1
             assert counts == [
                 await model.all().count()

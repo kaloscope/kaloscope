@@ -107,6 +107,7 @@ class AINode(Node):
             raise KaloscopeException(
                 ErrorCode.AI_CONFIG_INVALID, status_code=400
             ) from None
+
         try:
             ENV.parse(config.system_prompt)
             ENV.parse(config.prompt)
@@ -114,6 +115,7 @@ class AINode(Node):
             raise KaloscopeException(
                 ErrorCode.AI_PROMPT_INVALID, status_code=400
             ) from None
+
         output_validator(config)
         return config
 
@@ -149,6 +151,7 @@ class AINode(Node):
         node_data.pop("$error", None)
         try:
             config = cls.configuration(node_data)
+
             try:
                 config = AICompletionConfig.model_validate(
                     {
@@ -163,6 +166,7 @@ class AINode(Node):
                 raise KaloscopeException(
                     ErrorCode.AI_PROMPT_INVALID, status_code=400
                 ) from None
+
             result = await AIProviderService.complete(config)
             context.replace(config.result_key, result)
         except KaloscopeException as error:

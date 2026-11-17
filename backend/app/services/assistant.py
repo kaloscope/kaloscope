@@ -179,6 +179,7 @@ def _error_code(error: Exception) -> ErrorCode:
         return ErrorCode.AI_OUTPUT_TRUNCATED
     if isinstance(error, ContentFilterFinishReasonError):
         return ErrorCode.AI_OUTPUT_REFUSED
+
     if isinstance(error, APIStatusError):
         if error.status_code in {401, 403}:
             return ErrorCode.AI_AUTH_FAILED
@@ -187,6 +188,7 @@ def _error_code(error: Exception) -> ErrorCode:
         if error.status_code in {400, 404, 405, 422}:
             return ErrorCode.AI_REQUEST_REJECTED
         return ErrorCode.AI_REQUEST_FAILED
+
     if isinstance(error, (APIError, httpx.HTTPError)):
         return ErrorCode.AI_REQUEST_FAILED
     return ErrorCode.AI_RESPONSE_INVALID
@@ -230,12 +232,14 @@ class AssistantService:
                 "conversation_id": turn.conversation_id,
             },
         )
+
         try:
             async with asyncio.timeout(TURN_TIMEOUT):
                 if not await AssistantSessionService.allowed(turn.resource_ids, user):
                     raise KaloscopeException(
                         ErrorCode.PERMISSION_DENIED, status_code=403
                     )
+
                 model = AIModelSelection.model_validate(turn.model)
                 provider = await AIProviderService.resolve_model(model)
                 secret = await AIProviderService.decrypt_key(provider)
@@ -252,6 +256,7 @@ class AssistantService:
                         "OpenAI-Project",
                     ):
                         request.headers.pop(header, None)
+
                     if secret:
                         request.headers["Authorization"] = f"Bearer {secret}"
 
@@ -300,8 +305,10 @@ class AssistantService:
         text = ""
         finished = False
         last_saved = monotonic()
+
         try:
             turn = await AssistantSessionService.begin(conversation_id, body, user)
+
             async with aclosing(cls.stream(turn, user)) as events:
                 async for event in events:
                     if event.event == "text_delta":
@@ -378,6 +385,7 @@ class AssistantService:
         )
         # the previous turn listed or reviewed a batch: keep its focus
         batch_focus = "review_media_batch" in reviewed
+
         current_context = turn.context
         plan_authoring = (
             bool(
@@ -394,6 +402,7 @@ class AssistantService:
             and (current_context or {}).get("page_type") != "workflow_designer"
         )
         plan_tools = plan_authoring
+
         input_budget, output_budget = budgets(
             turn.model["model_id"], preset=provider.preset
         )
@@ -406,6 +415,7 @@ class AssistantService:
             # and a batch review only lists or plans; the floor budget keeps
             # it until media is read, for room
             media_change = {"review_media_batch"}
+
         schemas = tool_schemas(
             user,
             plan_authoring=plan_authoring,
@@ -416,6 +426,7 @@ class AssistantService:
             media_change=media_change,
             batch=batch_focus,
         )
+
         workflow_authoring = False
         self_contained = False
         ingestion_authoring = False
@@ -434,6 +445,7 @@ class AssistantService:
         finish_requested = False
         text_length = 0
         continuation = []
+
         yield AssistantEvent(event="compacting", data={"active": True})
         messages, usage, compacted = await prepare_context(
             client, turn, user, SYSTEM_PROMPT, schemas, provider.preset
@@ -442,6 +454,7 @@ class AssistantService:
         yield AssistantEvent(
             event="compacting", data={"active": False, "compacted": compacted}
         )
+
         openai_options = provider.preset == AIProviderPreset.OPENAI
         thinking = provider.preset == AIProviderPreset.DEEPSEEK
 
@@ -457,6 +470,7 @@ class AssistantService:
                 else []
             )
             request_schemas = [] if finish_only else schemas
+
             if context_size([*messages, *ending], request_schemas) > min(
                 MAX_CONTEXT_BYTES, input_budget - output_budget
             ):
@@ -487,6 +501,7 @@ class AssistantService:
                         }
                     ):
                         raise
+
                     finish_only = True
                     request_schemas = []
                     ending = [{"role": "system", "content": FINAL_ANSWER_PROMPT}]
@@ -499,12 +514,14 @@ class AssistantService:
                         provider.preset,
                         continuation,
                     )
+
                 for key in usage:
                     usage[key] += summary_usage[key]
                 usage_reported = usage_reported or any(summary_usage.values())
                 yield AssistantEvent(
                     event="compacting", data={"active": False, "compacted": compacted}
                 )
+
             request_messages = [*messages, *ending]
             if context_size(request_messages, request_schemas) > min(
                 MAX_CONTEXT_BYTES, input_budget - output_budget
@@ -512,14 +529,17 @@ class AssistantService:
                 raise KaloscopeException(ErrorCode.ASSISTANT_CONTEXT_LIMIT)
             if not await AssistantSessionService.allowed(turn.resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
+
             generation_output = output_budget
             if canvas is not None or workflow_authoring:
                 _, generation_output = budgets(
                     turn.model["model_id"], authoring=True, preset=provider.preset
                 )
+
             reasoning_details = []
             text_prefix = ""
             text_started = False
+
             async with client.chat.completions.stream(
                 model=turn.model["model_id"],
                 messages=request_messages,
@@ -565,6 +585,7 @@ class AssistantService:
                         yield AssistantEvent(event="text_delta", data={"text": delta})
                     elif event.type == "refusal.delta":
                         raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED)
+
                 completion = await stream.get_final_completion()
 
             if text_prefix:
@@ -586,12 +607,14 @@ class AssistantService:
                 await AssistantSessionService.checkpoint(turn, usage=turn.usage)
             if len(completion.choices) != 1:
                 raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
+
             choice = completion.choices[0]
             message = choice.message
             if message.refusal or choice.finish_reason == "content_filter":
                 raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED)
             if choice.finish_reason == "length":
                 raise KaloscopeException(ErrorCode.AI_OUTPUT_TRUNCATED)
+
             calls = message.tool_calls or []
             if choice.finish_reason == "stop" and not calls:
                 if not message.content or not message.content.strip():
@@ -605,10 +628,12 @@ class AssistantService:
                     },
                 )
                 return
+
             if choice.finish_reason != "tool_calls" or not calls:
                 raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
             if finish_only or len(calls) > MAX_BATCH_TOOL_CALLS:
                 raise KaloscopeException(ErrorCode.AI_ASSISTANT_LIMIT)
+
             call_ids: set[str] = set()
             for call in calls:
                 if (
@@ -619,9 +644,11 @@ class AssistantService:
                 ):
                     raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
                 call_ids.add(call.id)
+
             if tool_count + len(calls) > MAX_TOOL_CALLS:
                 finish_requested = True
                 continue
+
             tool_count += len(calls)
             messages.append(
                 {
@@ -655,6 +682,7 @@ class AssistantService:
             if thinking:
                 messages[-1].setdefault("reasoning_content", "")
             continuation.append(messages[-1])
+
             for call in calls:
                 info = {"id": uuid4().hex, "name": call.function.name}
                 yield AssistantEvent(event="tool_start", data=info)
@@ -665,6 +693,7 @@ class AssistantService:
                     arguments=call.function.arguments,
                     offset=text_length,
                 )
+
                 result = await execute_tool(
                     call.function.name,
                     call.function.arguments,
@@ -681,6 +710,7 @@ class AssistantService:
                 ):
                     canvas_snapshot_id = result["data"]["proposal_snapshot_id"]
                 full_result = {**info, **result}
+
                 if (
                     not workflow_authoring
                     and result["ok"]
@@ -727,6 +757,7 @@ class AssistantService:
                         task_action=task_action,
                         media_change=media_change,
                     )
+
                 if (
                     not trial_ready
                     and result["ok"]
@@ -747,6 +778,7 @@ class AssistantService:
                         task_action=task_action,
                         media_change=media_change,
                     )
+
                 if (
                     not schedule_ready
                     and result["ok"]
@@ -766,6 +798,7 @@ class AssistantService:
                         task_action=task_action,
                         media_change=media_change,
                     )
+
                 if (
                     not workflow_authoring
                     and result["ok"]
@@ -784,6 +817,7 @@ class AssistantService:
                         task_action=task_action,
                         media_change=media_change,
                     )
+
                 if (
                     not task_action
                     and result["ok"]
@@ -804,6 +838,7 @@ class AssistantService:
                         task_action=True,
                         media_change=media_change,
                     )
+
                 if (
                     media_change is not True
                     and result["ok"]
@@ -824,6 +859,7 @@ class AssistantService:
                         task_action=task_action,
                         media_change=True,
                     )
+
                 if (
                     result["ok"]
                     and call.function.name == "get_workflow_reference"
@@ -848,6 +884,7 @@ class AssistantService:
                         task_action=task_action,
                         media_change=media_change,
                     )
+
                 if result["ok"] and call.function.name in {
                     "list_node_types",
                     "validate_workflow",
@@ -859,11 +896,13 @@ class AssistantService:
                         if schema["function"]["name"]
                         not in {"get_download_plan", "list_download_plans"}
                     ]
+
                 if result["ok"] and call.function.name == "review_media_batch":
                     batch_focus = True
                 if batch_focus:
                     # a plan and its samples need the room other tools would take
                     schemas = tool_schemas(user, batch=True)
+
                 # a result committed together with its effect is authoritative
                 await AssistantToolCall.filter(
                     turn_id=turn.id, call_id=info["id"], status="running"
@@ -871,6 +910,7 @@ class AssistantService:
                     result=full_result,
                     status="complete" if result["ok"] else "error",
                 )
+
                 resource_ids = []
                 try:
                     arguments = loads(call.function.arguments)
@@ -884,6 +924,7 @@ class AssistantService:
                         # finish creation so the app can open the editable designer
                         finish_requested = True
                         resource_ids.append(result["data"]["workflow_id"])
+
                     if result["ok"]:
                         if call.function.name in {
                             "search_indexer",
@@ -898,6 +939,7 @@ class AssistantService:
                             )
                             if library_id:
                                 resource_ids.append(f"media_lib:{library_id}")
+
                         if call.function.name in {
                             "validate_download_task",
                             "create_download_task",
@@ -908,6 +950,7 @@ class AssistantService:
                                 resource_ids.append(
                                     media_resource(download["transfer_lib_id"])
                                 )
+
                         if call.function.name == "get_library_ingestion" or (
                             call.function.name
                             in {
@@ -933,11 +976,13 @@ class AssistantService:
                             )
                             if review.get("workflow_id"):
                                 resource_ids.append(review["workflow_id"])
+
                         resource_ids.extend(
                             media_resources(
                                 call.function.name, arguments, result["data"]
                             )
                         )
+
                     if (
                         result["ok"]
                         and call.function.name == "read_conversation_history"
@@ -954,6 +999,7 @@ class AssistantService:
                             id__in=source_ids, conversation_id=turn.conversation_id
                         ):
                             resource_ids.extend(source.resource_ids)
+
                     if result["ok"] and call.function.name == "list_workflows":
                         resource_ids.extend(
                             item["id"] for item in result["data"]["items"]
@@ -962,6 +1008,7 @@ class AssistantService:
                         resource_ids.extend(
                             item["workflow_id"] for item in result["data"]["items"]
                         )
+
                     if (
                         result["ok"]
                         and call.function.name in SCHEDULE_TOOLS
@@ -969,6 +1016,7 @@ class AssistantService:
                     ):
                         # a schedule reveals its workflow; job IDs are not workflows
                         resource_ids.append(result["data"]["workflow_id"])
+
                     if (
                         result["ok"]
                         and call.function.name in PLAN_CHANGE_TOOLS
@@ -991,6 +1039,7 @@ class AssistantService:
                             for library_id in libraries
                             if library_id
                         )
+
                     if (
                         result["ok"]
                         and call.function.name in TASK_ACTION_TOOLS
@@ -1000,12 +1049,14 @@ class AssistantService:
                         resource_ids.append(
                             media_resource(result["data"]["transfer_lib_id"])
                         )
+
                     if result["ok"] and call.function.name in MEDIA_CHANGE_TOOLS:
                         # media changes reveal their library and workflows
                         data = result["data"]
                         if isinstance(data.get("library_id"), int):
                             resource_ids.append(media_resource(data["library_id"]))
                         resource_ids.extend(media_change_workflows(data))
+
                     if result["ok"] and call.function.name == "list_download_plans":
                         # each listed plan reveals its indexer and transfer library
                         for item in result["data"]["items"]:
@@ -1016,6 +1067,7 @@ class AssistantService:
                                 )
                 except (ValueError, TypeError, AttributeError):
                     pass
+
                 await AssistantSessionService.record_resources(turn, resource_ids)
                 yield AssistantEvent(event="tool_result", data={**info, **result})
                 messages.append(
@@ -1026,6 +1078,7 @@ class AssistantService:
                     }
                 )
                 continuation.append(messages[-1])
+
             if finish_requested:
                 # the creation result already supplies the app's handoff card
                 yield AssistantEvent(
@@ -1037,6 +1090,7 @@ class AssistantService:
                     },
                 )
                 return
+
             if workflow_authoring and canvas:
                 # the current canvas already supplies the target and creation handoff
                 schemas = [
@@ -1055,4 +1109,5 @@ class AssistantService:
                         ),
                     }
                 ]
+
         raise KaloscopeException(ErrorCode.AI_ASSISTANT_LIMIT)

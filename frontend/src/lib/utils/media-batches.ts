@@ -23,8 +23,10 @@ export function notifyMediaItemsChanged(libraryId: number): void {
  */
 export function watchMediaBatch(batchId: number): void {
   if (watchers.has(batchId)) return;
+
   const controller = new AbortController();
   watchers.set(batchId, controller);
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   controller.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
 
@@ -42,7 +44,9 @@ export function watchMediaBatch(batchId: number): void {
           context: { silentErrors: true }
         })
         .json<Resp<MediaBatch>>();
+
       if (controller.signal.aborted) return;
+
       if (data.state !== 'running') {
         watchers.delete(batchId);
         if (data.state === 'finished') notifyMediaItemsChanged(data.library_id);
@@ -50,11 +54,13 @@ export function watchMediaBatch(batchId: number): void {
       }
     } catch (error) {
       if (controller.signal.aborted) return;
+
       if (isHTTPError(error) && [401, 403, 404].includes(error.response.status)) {
         watchers.delete(batchId);
         return;
       }
     }
+
     timer = setTimeout(() => void check(), 2000);
   }
 

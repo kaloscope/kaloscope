@@ -182,6 +182,7 @@ _READ_TOOLS = frozenset(
         "get_media_batch",
     }
 )
+
 _WRITE_TOOLS = frozenset(
     {
         "search_indexer",
@@ -199,6 +200,7 @@ _WRITE_TOOLS = frozenset(
         "cancel_media_batch",
     }
 )
+
 DRAFT_WRITE = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=True,
@@ -1323,6 +1325,7 @@ def create_server() -> MCPServer:
             document, outdated = await FlowRunService.saved_draft(
                 graph, draft_version, key
             )
+
             return await trial_run(
                 workflow_id,
                 document,
@@ -1357,6 +1360,7 @@ def create_server() -> MCPServer:
         request = ctx.request_context.request
         assert request is not None
         watcher = request.state.app.ctx.lib_watcher
+
         return ItemsResult[LibraryStatus](
             items=await _read(MediaLibService.list_libraries(user, watcher))
         )
@@ -2088,6 +2092,7 @@ async def start_mcp(app: Sanic) -> None:
             enable_dns_rebinding_protection=False
         ),
     )
+
     ready = asyncio.get_running_loop().create_future()
     app.ctx.mcp_task = asyncio.create_task(_run_http(app, ready), name="mcp-http")
     await ready
@@ -2129,6 +2134,7 @@ async def handle_http(request: Request) -> HTTPResponse:
         ],
         "state": {"user": request.ctx.user, "app": request.app},
     }
+
     received = False
     status = 500
     headers = {}
@@ -2163,6 +2169,7 @@ async def handle_http(request: Request) -> HTTPResponse:
             body.extend(message.get("body", b""))
 
     await request.app.ctx.mcp_http(scope, receive, send)
+
     return raw(
         bytes(body), status=status, headers=headers, content_type="application/json"
     )

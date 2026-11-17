@@ -47,6 +47,7 @@ async def library(tmp_path, layout):
         lib = await MediaLib.create(
             lib_type=LibType.MOVIE, dir=str(tmp_path), name="Movies", priority=1
         )
+
         graphs = []
         for index, (state, asynchronous) in enumerate(layout, start=1):
             graph = await FlowGraph.create(
@@ -60,6 +61,7 @@ async def library(tmp_path, layout):
                 asynchronous=asynchronous,
             )
             graphs.append(graph)
+
         yield lib, graphs
     finally:
         await Tortoise.close_connections()

@@ -95,6 +95,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         """
         if not token or not _TOKEN_PATTERN.fullmatch(token):
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
+
         now = timezone.now()
         active = MCPAccessToken.filter(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
@@ -104,9 +105,11 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         record = await active.select_related("user").first()
         if record is None or record.created_at is None:
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
+
         # recheck existence when recording usage, without restoring deleted records
         if not await active.update(last_used_at=now):
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
+
         user = record.user
         return MCPUserInfo(
             mcp_scope=record.scope,

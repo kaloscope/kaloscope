@@ -55,6 +55,7 @@ def substitute(
     if not pairs:
         re.compile(pattern)
         return []
+
     try:
         done = subprocess.run(
             [sys.executable, "-I", "-c", _CHILD],
@@ -67,7 +68,9 @@ def substitute(
         raise TimeoutError("regular expression took too long") from error
     except subprocess.CalledProcessError as error:
         raise re.error("regular expression could not be applied") from error
+
     answer = loads(done.stdout)
     if "error" in answer:
         raise re.error(answer["error"])
+
     return answer["result"]

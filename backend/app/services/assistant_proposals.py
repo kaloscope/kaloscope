@@ -295,9 +295,11 @@ class AssistantProposalService:
         proposal = await cls.owned(conversation_id, proposal_id, user)
         graph = await cls._graph(proposal, user)
         document, base = await cls._documents(proposal)
+
         parsed = GraphDocument.model_validate(document)
         structure = await validate_document(parsed, graph.category, complete=False)
         validation = await validate_document(parsed, graph.category)
+
         return {
             "proposal": describe_proposal(proposal),
             "base_snapshot_id": proposal.base_snapshot_id,
@@ -347,6 +349,7 @@ class AssistantProposalService:
                 ErrorCode.ASSISTANT_CANVAS_CHANGED, status_code=409
             )
         FlowGraphService.require_editor(user)
+
         try:
             async with in_transaction():
                 claimed = await AssistantProposal.filter(
@@ -368,6 +371,7 @@ class AssistantProposalService:
                     updated_at=timezone.now(),
                 )
             raise
+
         return await cls._report(await AssistantProposal.get(id=proposal.id), user)
 
     @classmethod
@@ -389,10 +393,12 @@ class AssistantProposalService:
             graph = await FlowGraphService.get_accessible(proposal.workflow_id, user)
         except NotFoundException:
             return {"status": "failed", "error": ErrorCode.NOT_FOUND}
+
         if not graph.editable:
             return {"status": "failed", "error": ErrorCode.FLOW_NOT_EDITABLE}
         if graph.draft_version != proposal.base_version:
             return {"status": "conflict", "error": ErrorCode.FLOW_DRAFT_CONFLICT}
+
         proposed, base = await cls._documents(proposal)
         if base is None:
             raise KaloscopeException(
@@ -404,6 +410,7 @@ class AssistantProposalService:
                 "saved_version": graph.draft_version,
                 "error": None,
             }
+
         try:
             saved = await FlowGraphService.save_graph(
                 proposal.workflow_id,
@@ -417,6 +424,7 @@ class AssistantProposalService:
                 case ErrorCode.FLOW_GRAPH_INVALID | ErrorCode.FLOW_NOT_EDITABLE:
                     return {"status": "failed", "error": exc.message}
             raise
+
         return {"status": "saved", "saved_version": saved.draft_version, "error": None}
 
     @classmethod

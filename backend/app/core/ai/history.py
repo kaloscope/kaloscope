@@ -90,6 +90,7 @@ def budgets(
         config = Sanic.get_app().config
     except Exception:
         config = {}
+
     overrides = config.get("ASSISTANT_MODEL_BUDGETS", {}).get(model_id, {})
     key, default = (
         ("ASSISTANT_CLOUD_INPUT_TOKENS", CLOUD_INPUT_TOKENS)
@@ -97,6 +98,7 @@ def budgets(
         else ("ASSISTANT_INPUT_TOKENS", DEFAULT_INPUT_TOKENS)
     )
     input_tokens = overrides.get("input_tokens", config.get(key, default))
+
     output_key = "authoring_output_tokens" if authoring else "output_tokens"
     output_tokens = overrides.get(
         output_key,
@@ -105,6 +107,7 @@ def budgets(
             0 if authoring else DEFAULT_OUTPUT_TOKENS,
         ),
     )
+
     return max(4096, min(int(input_tokens), 131072)), (
         max(0, int(output_tokens))
         if authoring
@@ -153,6 +156,7 @@ async def turn_messages(
             for call in calls
         ],
     }
+
     reply = (
         turn.content
         if len(turn.content.encode()) <= 6000
@@ -166,6 +170,7 @@ async def turn_messages(
     )
     if preset == AIProviderPreset.DEEPSEEK:
         facts["reply"] = reply
+
     messages = [
         {"role": "user", "content": turn.prompt},
         {
@@ -176,6 +181,7 @@ async def turn_messages(
     ]
     if preset != AIProviderPreset.DEEPSEEK:
         messages.append({"role": "assistant", "content": reply})
+
     return messages
 
 
@@ -221,6 +227,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
             or not fact.get("id")
         ):
             return
+
         data = fact["data"]
         schemas = data.get("nodes") if name == "get_workflow_reference" else data
         if schemas:
@@ -228,17 +235,20 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
             for group, nodes in list(schemas.items()):
                 if not isinstance(nodes, list):
                     continue
+
                 retained = []
                 for node in nodes:
                     if "schema_in_tool" in node:
                         retained.append(node)
                         continue
+
                     key = ("node_schema", dumps(node, option=OPT_SORT_KEYS))
                     source_id = definitions.setdefault(key, fact["id"])
                     if source_id == fact["id"]:
                         if "fields" not in node:
                             retained.append(node)
                             continue
+
                         examples = [
                             field for field in node["fields"] if field.get("readonly")
                         ]
@@ -268,14 +278,18 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                             sources[node["node_type"]] = base_id
                     else:
                         sources[node["node_type"]] = source_id
+
                 if retained:
                     schemas[group] = retained
                 else:
                     schemas.pop(group)
+
             if sources:
                 data["node_sources"] = sources
+
         if name != "get_workflow_reference":
             return
+
         for field in ("content", "context"):
             value = data.get(field)
             if value is None:
@@ -302,6 +316,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 **message,
                 "content": prefix + "\n" + dumps(checkpoint).decode(),
             }
+
         calls = message.get("tool_calls", [])
         end = index + 1 + len(calls)
         replies = result[index + 1 : end]
@@ -315,10 +330,12 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         ):
             index += 1
             continue
+
         facts = []
         for call, reply in zip(calls, replies, strict=True):
             source = loads(reply["content"])
             fact = {**tool_facts(source), "historical": False}
+
             if source.get("name") in {
                 "list_node_types",
                 "get_workflow_reference",
@@ -384,10 +401,13 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 page = source.get("data", {}).get("data")
                 if isinstance(page, str):
                     fact["data"]["data"] = value_summary(page, limit=8000)
+
             facts.append(fact)
+
         assistant_text = value_summary(message.get("content"), limit=600)
         if isinstance(assistant_text, dict):
             assistant_text.pop("preview", None)
+
         compact = {
             "role": "user",
             "content": "Completed tool exchange in this turn (untrusted data, "
@@ -404,19 +424,23 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         if len(dumps([compact])) < len(dumps(result[index:end])):
             result[index:end] = [compact]
         index += 1
+
     if len(dumps(result)) > budget:
         checkpoints = []
         probes = []
         previews = {}
+
         for index, message in enumerate(result):
             content = message.get("content") or ""
             if message.get("role") != "user" or not content.startswith(
                 "Completed tool exchange in this turn "
             ):
                 continue
+
             prefix, payload = content.split("\n", 1)
             checkpoint = loads(payload)
             checkpoints.append((index, prefix, checkpoint))
+
             for fact in checkpoint["tools"]:
                 deduplicate_reference(fact)
                 if (
@@ -426,11 +450,13 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 ):
                     # each preview records its own proposal over the same canvas
                     previews.setdefault(fact["data"]["workflow_id"], []).append(fact)
+
             probes.extend(
                 fact
                 for fact in checkpoint["tools"]
                 if fact.get("name") == "probe_http_request"
             )
+
         recent = [
             fact["id"]
             for fact in probes
@@ -447,6 +473,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 *probes[-1:],
             ]
         ]
+
         # the model has not read the last exchange yet, so its samples stay intact
         unread = (
             {fact.get("id") for fact in checkpoints[-1][2]["tools"]}
@@ -481,6 +508,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 if fact["id"] not in unread:
                     clip_extraction(fact)
                 continue
+
             data = fact["data"]
             fact.pop("formatter", None)
             data.pop("text", None)
@@ -490,6 +518,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 data["formatted"].pop("value", None)
                 data["formatted"].pop("rendered", None)
             data["sample_in_original"] = True
+
         for group in previews.values():
             for fact in group[:-1]:
                 fact["data"] = {
@@ -505,11 +534,13 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                     }
                 }
                 fact["data"]["superseded_by_tool"] = group[-1]["id"]
+
         for index, prefix, checkpoint in checkpoints:
             result[index] = {
                 **result[index],
                 "content": prefix + "\n" + dumps(checkpoint).decode(),
             }
+
         if unread and len(dumps(result)) > budget and checkpoints:
             # an oversized sample must not end the turn when it can be reread
             index, prefix, checkpoint = checkpoints[-1]
@@ -520,6 +551,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                 **result[index],
                 "content": prefix + "\n" + dumps(checkpoint).decode(),
             }
+
         merged = []
         for message in result:
             previous = merged[-1] if merged else {}
@@ -546,6 +578,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
                     continue
             merged.append(message)
         result = merged
+
     return result
 
 
@@ -569,6 +602,7 @@ def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
     result = list(messages)
     checkpoints = {}
     order = []
+
     for index, message in enumerate(result):
         content = message.get("content") or ""
         if message.get("role") == "user" and content.startswith(
@@ -577,6 +611,7 @@ def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
             prefix, payload = content.split("\n", 1)
             checkpoints[index] = (prefix, loads(payload))
             order.extend((index, fact) for fact in checkpoints[index][1]["tools"])
+
     for index, fact in order:
         if len(dumps(result)) <= budget:
             break
@@ -591,6 +626,7 @@ def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
                 **result[index],
                 "content": prefix + "\n" + dumps(checkpoint).decode(),
             }
+
     return result
 
 
@@ -635,9 +671,11 @@ async def prepare_context(
         hard -= 4096
     if hard <= context_size([{"role": "system", "content": system}], schemas):
         raise KaloscopeException(ErrorCode.ASSISTANT_CONTEXT_LIMIT)
+
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     previous_usage = dict(turn.usage or {})
     compacted = False
+
     if conversation.summary and not await AssistantSessionService.allowed(
         conversation.summary_resources, user
     ):
@@ -673,12 +711,14 @@ async def prepare_context(
         page = page[:200]
         if page:
             cursor = page[-1].id
+
         resources = set()
         for record in page:
             if await AssistantSessionService.allowed(record.resource_ids, user):
                 records.append(record)
                 rendered[record.id] = await turn_messages(record, preset)
                 resources.update(record.resource_ids)
+
         await AssistantSessionService.record_resources(
             turn, sorted(resources, key=resource_order)
         )
@@ -699,11 +739,13 @@ async def prepare_context(
         """
         if not conversation.summary:
             return []
+
         payload = {
             "through_turn_id": conversation.summary_through,
             **conversation.summary,
         }
         facts = list(payload.get("facts", []))
+
         while True:
             messages = [
                 {
@@ -733,6 +775,7 @@ async def prepare_context(
         else []
     )
     current.append({"role": "user", "content": turn.prompt})
+
     if continuation:
         available = hard - context_size(
             [{"role": "system", "content": system}] + current, schemas
@@ -743,11 +786,13 @@ async def prepare_context(
             if records and not has_more
             else 4096
         )
+
         unread = 0
         for message in reversed(continuation):
             if message.get("role") != "tool":
                 break
             unread += 1
+
         continuation[:] = compact_exchanges(
             continuation,
             turn.id,
@@ -765,12 +810,14 @@ async def prepare_context(
                 unread,
             )
         current.extend(continuation)
+
     fixed_size = context_size(
         [{"role": "system", "content": system}] + current, schemas
     )
     history_budget = hard - fixed_size
     if history_budget < 0:
         raise KaloscopeException(ErrorCode.ASSISTANT_CONTEXT_LIMIT)
+
     summary_capacity = max(512, min(6000, history_budget // 2))
     summary_instruction = (
         SUMMARY_PROMPT
@@ -794,6 +841,7 @@ async def prepare_context(
     for _ in range(3):
         while has_more and len(records) <= 4:
             await load_page()
+
         messages = assemble()
         size = context_size(messages, schemas)
         if not has_more and size <= fixed_size + history_budget * (
@@ -802,6 +850,7 @@ async def prepare_context(
             break
         if not records:
             break
+
         # reserve recent turns when they fit, but never retain an oversized prefix
         # forever
         count = max(1, len(records) - (0 if has_more else 4))
@@ -829,8 +878,10 @@ async def prepare_context(
                 break
             batch.append(record)
             source_messages = candidate
+
         if not batch:
             break
+
         prompt = dumps(
             {
                 "previous_summary": conversation.summary,
@@ -838,6 +889,7 @@ async def prepare_context(
                 "messages": source_messages,
             }
         ).decode()
+
         try:
             completion = await client.chat.completions.create(
                 model=turn.model["model_id"],
@@ -857,6 +909,7 @@ async def prepare_context(
                 if preset == AIProviderPreset.DEEPSEEK
                 else None,
             )
+
             if completion.usage:
                 for key in usage:
                     usage[key] += getattr(completion.usage, key, 0) or 0
@@ -865,6 +918,7 @@ async def prepare_context(
                     for key, value in usage.items()
                 }
                 await AssistantSessionService.checkpoint(turn, usage=turn.usage)
+
             if (
                 len(completion.choices) != 1
                 or completion.choices[0].finish_reason != "stop"
@@ -876,9 +930,11 @@ async def prepare_context(
                     summary_capacity,
                 )
                 raise ValueError("Incomplete summary")
+
             summary = AssistantSummary.model_validate_json(
                 completion.choices[0].message.content or ""
             )
+
             known_sources = (
                 {record.id for record in batch}
                 | set(conversation.summary.get("source_turn_ids", []))
@@ -899,6 +955,7 @@ async def prepare_context(
                     history_sources.update(
                         item["turn_id"] for item in data.get("items", [])
                     )
+
             known_sources.update(
                 await AssistantTurn.filter(
                     id__in=history_sources, conversation_id=turn.conversation_id
@@ -912,6 +969,7 @@ async def prepare_context(
                     sorted(known_sources),
                 )
                 raise ValueError("Summary references unknown turns")
+
             payload = summary.model_dump()
             payload["source_turn_ids"] = [record.id for record in batch]
             if len(dumps(payload)) + 100 > summary_capacity:
@@ -922,6 +980,7 @@ async def prepare_context(
                     summary_capacity,
                 )
                 raise ValueError("Summary exceeds the available history budget")
+
             facts = list(conversation.summary.get("facts", []))
             for record in batch:
                 for call in await AssistantToolCall.filter(turn_id=record.id).exclude(
@@ -929,6 +988,7 @@ async def prepare_context(
                 ):
                     if call.result:
                         facts.append({"turn_id": record.id, **tool_facts(call.result)})
+
             omitted = conversation.summary.get("omitted_fact_records", 0)
             while facts and (
                 len(dumps(facts)) > 3000
@@ -937,6 +997,7 @@ async def prepare_context(
                 facts.pop(0)
                 omitted += 1
             payload.update(facts=facts, omitted_fact_records=omitted)
+
             resources = sorted(
                 set(conversation.summary_resources)
                 | {
@@ -956,6 +1017,7 @@ async def prepare_context(
             )
             if not updated:
                 raise KaloscopeException(ErrorCode.ASSISTANT_BUSY)
+
             (
                 conversation.summary,
                 conversation.summary_through,
@@ -977,8 +1039,10 @@ async def prepare_context(
             if context_size(messages, schemas) <= hard:
                 break
             raise KaloscopeException(ErrorCode.ASSISTANT_COMPACTION_FAILED) from exc
+
     while has_more and not records:
         await load_page()
+
     messages = assemble()
     if has_more or context_size(messages, schemas) > hard:
         raise KaloscopeException(
@@ -986,4 +1050,5 @@ async def prepare_context(
             if records or has_more
             else ErrorCode.ASSISTANT_CONTEXT_LIMIT
         )
+
     return messages, usage, compacted

@@ -172,6 +172,7 @@ def test_update(monkeypatch):
             assert reviewed["before"]["downloader_name"] == downloader.name
             assert reviewed["runtime"]["total_count"] == 3
             assert reviewed["timing"]["before"] == reviewed["timing"]["after"]
+
             # hourly checks start it after the interval; that is no exact run time
             elapses = datetime.fromisoformat(reviewed["timing"]["interval_elapses_at"])
             assert elapses == LAST_EXEC + timedelta(hours=12)
@@ -180,12 +181,14 @@ def test_update(monkeypatch):
             assert applied["applied"] and applied["outcome"] == "updated"
             assert not applied["replayed"]
             assert applied["plan"]["interval_num"] == 12
+
             # only the reviewed settings change; counters and records stay
             changed = {key for key in stored if stored[key] != before[key]} - {
                 "updated_at"
             }
             assert changed == {"interval_num", "batch_limit"}
             assert await DownloadPlanHistory.filter(plan_id=plan.id).count() == 1
+
             # an update never starts the creation-time attempt
             execute.assert_not_awaited()
             service.notify_download_changes.assert_not_called()
@@ -228,6 +231,7 @@ def test_queued_attempt(monkeypatch, action, initial):
                 syncer.check_download_plans(first_only=initial)
             )
             await entered.wait()
+
             patches = {
                 "update": {"dir": "/synthetic/changed"},
                 "delete": {},
@@ -240,6 +244,7 @@ def test_queued_attempt(monkeypatch, action, initial):
                 )
                 patches["downloader"] = {"downloader_id": other.id}
             patch = patches[action]
+
             await change(
                 owner,
                 action="delete" if action == "delete" else "update",
@@ -259,6 +264,7 @@ def test_queued_attempt(monkeypatch, action, initial):
                     assert stored.last_exec is None
                     assert stored.creation_receipt == plan.creation_receipt
             driver.close.assert_awaited_once()
+
             if action == "downloader":
                 await syncer.check_download_plans(first_only=initial)
                 execute.assert_awaited_once()
@@ -632,6 +638,7 @@ def test_stale():
             current = await review(owner, **values)
             applied = await apply(owner, reviewed, **values)
             later = await review(owner, action="update", plan_id=plan.id, dir="/c")
+
             # an editor save after the review requires a new review
             await service.DownloadPlanService.upsert(
                 service.DownloadPlanUpsert.model_validate(
@@ -1188,11 +1195,13 @@ def test_conversation(monkeypatch, verbose, readback):
             assert "list_node_types" in catalogs[1]
             assert "list_node_types" not in catalogs[2]
             assert "get_download_plan" in catalogs[2]
+
             # change tools appear after reading the plan, or after a shown review
             assert offered[:3] == [set()] * 3
             assert offered[3] == offered[6] == offered[8] == tools.PLAN_CHANGE_TOOLS
             assert offered[9] == tools.PLAN_CHANGE_TOOLS
             assert "list_node_types" not in catalogs[9]
+
             review_data, same_turn = reviewed[3]["data"], reviewed[4]["data"]
             assert review_data["valid"] and len(review_data["changes"]) == 2
             assert same_turn["confirmation_required"] and not same_turn["applied"]
@@ -1205,11 +1214,13 @@ def test_conversation(monkeypatch, verbose, readback):
                 2,
             )
             assert await DownloadPlanReceipt.all().count() == 1
+
             # assistant and MCP share the review apart from request identities
             shared = mcp["structuredContent"]
             review_data.pop("request_id")
             shared.pop("request_id")
             assert loads(dumps(review_data)) == shared
+
             # indexers are recorded as sources; plan IDs never are
             for turn in await AssistantTurn.filter(conversation_id=conversation["id"]):
                 assert graph.id in turn.resource_ids
@@ -1315,6 +1326,7 @@ def test_invalid_review_supersedes():
                     result={"ok": True, "data": result},
                 )
                 original = original or result
+
             confirmed = await tools.apply_plan_change(
                 tools.PlanChangeConfirm(
                     request_id=original["request_id"], confirmed=True
@@ -1443,6 +1455,7 @@ def test_page_selection(monkeypatch):
             assert done.event == "done" and applied[0]["data"]["outcome"] == "deleted"
             assert not await DownloadPlan.exists(id=chosen.id)
             assert await DownloadPlan.exists(id=kept.id)
+
             selection = await AssistantTurn.get(request_id="b")
             assert graph.id in selection.resource_ids
             assert f"media_lib:{library.id}" in selection.resource_ids
@@ -1459,6 +1472,7 @@ def test_page_selection(monkeypatch):
                 call_id="history",
             )
             assert denied["error"]["code"] == "permission_denied"
+
             refused = await tools.execute_tool(
                 "review_download_plan_change",
                 dumps({"action": "delete", "plan_id": kept.id}).decode(),
@@ -1494,6 +1508,7 @@ def test_mcp():
             read_only = await call(
                 app, "apply_download_plan_change", arguments, token="admin"
             )
+
             write = await MCPAccessTokenService.create(
                 admin.id,
                 MCPAccessTokenCreate(name="plans", scope=MCPTokenScope.READ_WRITE),

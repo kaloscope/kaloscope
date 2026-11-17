@@ -58,14 +58,17 @@
     if (!opened) {
       return;
     }
+
     clearTimeout(timer);
     const current = ++request;
     const batchId = id;
+
     try {
       const searchParams: Record<string, string | number> = { page_num: page, page_size: PAGE_SIZE };
       if (status) {
         searchParams.status = status;
       }
+
       const [details, list] = await Promise.all([
         api.get(`media/batch/${batchId}`).json<Resp<MediaBatch>>(),
         api.get(`media/batch/${batchId}/entries`, { searchParams }).json<Resp<Page<MediaBatchEntry>>>()
@@ -73,12 +76,14 @@
       if (current !== request) {
         return;
       }
+
       const wasRunning = batch?.state === 'running';
       batch = details.data;
       onstate?.(batch);
       entries = list.data.items;
       total = list.data.total ?? 0;
       failed = false;
+
       if (batch.state === 'running') {
         watchMediaBatch(batch.id);
         timer = setTimeout(load, 2000);

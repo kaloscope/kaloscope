@@ -195,12 +195,14 @@ async def scheduling(monkeypatch):
         add_task=lambda work: engine.runs.append(asyncio.ensure_future(work))
     )
     engine._scheduler = AsyncIOScheduler(timezone=pytz.utc)
+
     monkeypatch.setattr(
         FlowJobService,
         "app_ctx",
         classmethod(lambda cls: SimpleNamespace(flow_engine=engine)),
     )
     engine._scheduler.start(paused=True)
+
     loops = [
         asyncio.create_task(engine._event_consumer()),
         asyncio.create_task(engine._job_listener()),
@@ -328,13 +330,16 @@ def test_create(monkeypatch, timing):
             assert reviewed["defaults"]["bootparams"] == {}
             assert reviewed["timezone"] == "UTC"
             assert "Enabled at once" in reviewed["notes"][0]
+
             assert result["applied"] and result["outcome"] == "created"
             assert result["job_id"] != graph.id
             assert replay["replayed"] and replay["job_id"] == result["job_id"]
             assert respelled["replayed"] and respelled["job_id"] == result["job_id"]
+
             job = await FlowJob.get(id=result["job_id"])
             assert job.state == "running" and job.bootparams == {}
             assert await FlowJob.all().count() == 1
+
             # stored times are UTC instants of the offset input
             for name in ("run_date", "interval_start", "interval_end"):
                 if name in timing:
@@ -342,6 +347,7 @@ def test_create(monkeypatch, timing):
                     assert stored.utcoffset() == timedelta(0)
                     assert stored == instant(timing[name])
                     assert after[name] == stored.isoformat()
+
             # the review predicts the registration the scheduler actually made
             scheduled = registered(engine, job.id).next_run_time
             first = reviewed["first_run"]
@@ -351,6 +357,7 @@ def test_create(monkeypatch, timing):
             else:
                 assert abs(scheduled - estimate) < timedelta(seconds=5)
                 assert first["rule"].startswith("One interval after registration")
+
             # and both follow the documented trigger rules
             if timing["trigger"] == "cron":
                 assert (scheduled.hour, scheduled.minute) == (1, 30)
@@ -366,6 +373,7 @@ def test_create(monkeypatch, timing):
             else:
                 start = instant(timing["interval_start"])
                 assert scheduled == start + timedelta(hours=6)
+
             local = instant(first["local"])
             assert local == estimate and local.utcoffset() == timedelta(hours=8)
 
@@ -1108,6 +1116,7 @@ def test_mcp(monkeypatch):
             read_only = await call(
                 app, "apply_workflow_schedule", application_args, token="admin"
             )
+
             write = await MCPAccessTokenService.create(
                 admin.id,
                 MCPAccessTokenCreate(name="schedules", scope=MCPTokenScope.READ_WRITE),
@@ -1243,19 +1252,23 @@ def test_conversation(monkeypatch, verbose):
             assert offered[0] == set() and offered[1] == tools.SCHEDULE_TOOLS
             assert offered[4] == tools.SCHEDULE_TOOLS
             assert offered[6] == set() and offered[7] == tools.SCHEDULE_TOOLS
+
             review_data = reviewed[2]["data"]
             same_turn = reviewed[3]["data"]
             assert review_data["valid"] and review_data["first_run"]["local"]
             assert same_turn["confirmation_required"] and not same_turn["applied"]
+
             created = confirmed[0]["data"]
             assert created["applied"] and created["outcome"] == "created"
             assert repeated[1]["data"]["replayed"]
             assert repeated[1]["data"]["job_id"] == created["job_id"]
+
             job = await FlowJob.get(id=created["job_id"])
             assert job.cron_expr == "30 1 * * mon-fri" and job.state == "running"
             assert await FlowJob.all().count() == 1
             assert registered(engine, job.id) is not None
             assert f"Schedule {job.id} already has" in duplicate["issues"][0]["message"]
+
             # assistant and MCP share the review apart from request identities
             shared = mcp["structuredContent"]
             for result in (review_data, shared):
@@ -1419,6 +1432,7 @@ def test_invalid_review_supersedes(monkeypatch):
                     result={"ok": True, "data": result},
                 )
                 original = original or result
+
             confirmed = await tools.apply_schedule(
                 tools.ScheduleConfirm(
                     request_id=original["request_id"], confirmed=True
@@ -1510,6 +1524,7 @@ def test_page_selection(monkeypatch):
             assert done.event == "done" and applied[0]["data"]["outcome"] == "paused"
             assert (await FlowJob.get(id=chosen.id)).state == "paused"
             assert (await FlowJob.get(id=kept.id)).state == "running"
+
             selection = await AssistantTurn.get(request_id="b")
             assert second.id in selection.resource_ids
             assert chosen.id not in selection.resource_ids
@@ -1525,6 +1540,7 @@ def test_page_selection(monkeypatch):
                 call_id="history",
             )
             assert denied["error"]["code"] == "permission_denied"
+
             refused = await tools.execute_tool(
                 "review_workflow_schedule",
                 dumps({"action": "enable", "job_id": chosen.id}).decode(),
@@ -1552,6 +1568,7 @@ def test_finished_schedule(monkeypatch, trigger, paused):
             job = await schedule(graph, trigger=trigger, **timing)
             if paused:
                 await change(owner, action="pause", job_id=job.id)
+
             settings = (
                 {"run_date": soon(days=1)}
                 if trigger == "date"
@@ -1560,6 +1577,7 @@ def test_finished_schedule(monkeypatch, trigger, paused):
             _, result = await change(owner, action="update", job_id=job.id, **settings)
             if paused:
                 await change(owner, action="enable", job_id=job.id)
+
             await settle(engine)
 
             assert result["applied"]

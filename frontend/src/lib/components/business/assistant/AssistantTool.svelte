@@ -15,6 +15,7 @@
   import BatchPlanDialog from '../library/BatchPlanDialog.svelte';
 
   const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
+
   const trialStatus = $derived.by(() => {
     if (tool.name !== 'run_workflow' || tool.status !== 'complete' || !tool.result?.ok) return null;
     const result = tool.result.data;
@@ -27,6 +28,7 @@
     }
     return result.status;
   });
+
   // reviewed schedule, plan, task and media changes share their review and outcome lines
   const changeKind = $derived(
     // batches share the media apply tool but report unit counts, not one target
@@ -47,18 +49,22 @@
           } as Record<string, string>
         )[tool.name]
   );
+
   const batch = $derived(
     changeKind === 'media_batch' && tool.result?.ok ? (tool.result.data as unknown as MediaBatchOutcome) : null
   );
   // the stored plan a review or an outcome refers to
   const batchId = $derived(batch?.batch_id ?? null);
+
   let planDialog: BatchPlanDialog | undefined = $state();
   // a reviewed plan may be confirmed, stopped or finished in its dialog
   let livePlan = $state<MediaBatch | null>(null);
   const reviewedBatch = $derived(tool.name === 'review_media_batch' && batch?.valid ? batchId : null);
+
   $effect(() => {
     const id = reviewedBatch;
     if (id === null) return;
+
     api
       .get(`media/batch/${id}`, { retry: 0 })
       .json<Resp<MediaBatch>>()
@@ -69,9 +75,11 @@
         // an expired plan keeps the review's own status
       });
   });
+
   const livePlanStatus = $derived(
     livePlan && livePlan.state !== 'reviewed' ? (livePlan.state === 'running' ? 'running' : livePlan.outcome) : null
   );
+
   /**
    * Translate a change status, using the wording shared by every change kind when the kind has no line of its own.
    *
@@ -99,6 +107,7 @@
     }
     return result.valid === false ? 'invalid' : 'refused';
   });
+
   const statusIcon = $derived.by(() => {
     if (trialStatus === 'running' || trialStatus === 'submitting') return icons.clock;
     if (trialStatus && trialStatus !== 'completed') return icons.warning;
@@ -125,6 +134,7 @@
     if (tool.status === 'error') return icons.warning;
     return icons.subtractCircle;
   });
+
   const detail = $derived(tool.result?.data ? JSON.stringify(tool.result.data, null, 2) : '');
   const error = $derived(
     tool.result?.error

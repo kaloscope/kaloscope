@@ -225,6 +225,7 @@ def test_http_contract(application, monkeypatch):
                 name="Unconfigured", base_url="https://example.test"
             )
             await app._startup()
+
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -236,6 +237,7 @@ def test_http_contract(application, monkeypatch):
                     )
                     assert denied.status_code == 401
                 assert users == []
+
                 headers = {"authorization": "Bearer browser-session"}
                 models = await client.get("/_api/assistant/models", headers=headers)
                 assert models.json()["data"] == [
@@ -243,10 +245,12 @@ def test_http_contract(application, monkeypatch):
                 ]
                 assert "private.example" not in models.text
                 assert "encrypted-secret" not in models.text
+
                 retired = await client.post(
                     "/_api/assistant/chat", json=BODY, headers=headers
                 )
                 assert retired.status_code == 404
+
                 created = await client.post(
                     "/_api/assistant/conversations",
                     json={"model": BODY["model"]},
@@ -254,6 +258,7 @@ def test_http_contract(application, monkeypatch):
                 )
                 conversation_id = created.json()["data"]["id"]
                 path = f"/_api/assistant/conversations/{conversation_id}"
+
                 reply = await client.post(
                     path + "/chat",
                     json={
@@ -275,13 +280,16 @@ def test_http_contract(application, monkeypatch):
                 )
                 assert users[0].id == 1
                 assert users[0].perms.indexer_ids == []
+
                 history = await client.get(path + "/turns", headers=headers)
                 assert history.headers["cache-control"] == "no-store"
                 assert history.json()["data"]["items"][0]["content"] == "你好\n世界"
+
                 renamed = await client.patch(
                     path, json={"title": "Restored chat"}, headers=headers
                 )
                 assert renamed.json()["data"]["title"] == "Restored chat"
+
                 app.shared_ctx.sessions["other-session"] = SimpleNamespace(
                     id=2,
                     role=UserRole.ADMIN,
@@ -290,6 +298,7 @@ def test_http_contract(application, monkeypatch):
                 other_headers = {"authorization": "Bearer other-session"}
                 other = await client.get(path + "/turns", headers=other_headers)
                 assert other.status_code == 404
+
                 app.shared_ctx.sessions["browser-session"].role = UserRole.ADMIN
                 graph = await FlowGraph.create(
                     name="Upload fixture", category="indexer", state="draft"
@@ -311,6 +320,7 @@ def test_http_contract(application, monkeypatch):
                 }
                 upload = {"workflow_id": graph.id, "draft_version": 0, "canvas": canvas}
                 assert len(dumps(upload)) > 128 * 1024
+
                 for auth, status in (
                     ({"authorization": "Bearer invalid"}, 401),
                     (other_headers, 404),
@@ -319,22 +329,26 @@ def test_http_contract(application, monkeypatch):
                         path + "/snapshots", json=upload, headers=auth
                     )
                     assert denied.status_code == status
+
                 attached = await client.post(
                     path + "/snapshots", json=upload, headers=headers
                 )
                 assert attached.status_code == 200
                 assert attached.headers["cache-control"] == "no-store"
                 reference = attached.json()["data"]
+
                 app.shared_ctx.sessions["browser-session"].role = UserRole.USER
                 denied = await client.post(
                     path + "/snapshots", json=upload, headers=headers
                 )
                 assert denied.status_code == 403
+
                 app.shared_ctx.sessions["browser-session"].role = UserRole.ADMIN
                 repeated = await client.post(
                     path + "/snapshots", json=upload, headers=headers
                 )
                 assert repeated.json()["data"] == reference
+
                 for attachment in (
                     {},
                     {"canvas": {"nodes": [], "edges": []}},
@@ -361,6 +375,7 @@ def test_http_contract(application, monkeypatch):
                         headers=headers,
                     )
                     assert rejected.status_code == 400
+
                 reply = await client.post(
                     path + "/chat",
                     json={
@@ -380,19 +395,23 @@ def test_http_contract(application, monkeypatch):
                     headers=headers,
                 )
                 assert "event: done" in reply.text
+
                 history = await client.get(path + "/turns", headers=headers)
                 stored = history.json()["data"]["items"][-1]["context"]
                 assert "canvas" not in stored
                 assert stored["snapshot_id"] == reference["snapshot_id"]
                 await graph.refresh_from_db()
                 assert graph.draft is None
+
                 listing = await client.get(
                     "/_api/assistant/conversations", headers=other_headers
                 )
                 assert listing.json()["data"]["items"] == []
+
                 await client.delete(path, headers=headers)
                 missing = await client.get(path + "/turns", headers=headers)
                 assert missing.status_code == 404
+
                 ids = []
                 for title in ("First selected chat", "Second selected chat"):
                     created = await client.post(
@@ -401,6 +420,7 @@ def test_http_contract(application, monkeypatch):
                         headers=headers,
                     )
                     ids.append(created.json()["data"]["id"])
+
                 batch_path = "/_api/assistant/conversations/delete"
                 for auth, status in (
                     ({"authorization": "Bearer invalid"}, 401),
@@ -410,6 +430,7 @@ def test_http_contract(application, monkeypatch):
                         batch_path, json={"ids": ids}, headers=auth
                     )
                     assert denied.status_code == status
+
                 invalid = await client.post(
                     batch_path, json={"ids": []}, headers=headers
                 )
@@ -520,6 +541,7 @@ def test_canvas_edit_routes(application):
                 canvas_snapshot_id=capture.id,
             )
             await Sessions.finish(turn, status="complete", content="Ready")
+
             record = await AssistantProposal.get(id=preview["data"]["proposal_id"])
             path = (
                 f"/_api/assistant/conversations/{conversation['id']}"
@@ -532,6 +554,7 @@ def test_canvas_edit_routes(application):
                 "base_snapshot_id": capture.id,
             }
             await app._startup()
+
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -540,6 +563,7 @@ def test_canvas_edit_routes(application):
                     path + "/canvas", headers={"authorization": "Bearer other"}
                 )
                 assert other.status_code == 404
+
                 view = await client.get(path + "/canvas", headers=owner)
                 assert view.headers["cache-control"] == "no-store"
                 assert view.json()["data"]["change_count"] == 1
@@ -548,6 +572,7 @@ def test_canvas_edit_routes(application):
                     view.json()["data"]["canvas"]["nodes"][0]["data"]["url"]
                     == "https://new.test"
                 )
+
                 for obsolete in (path, path + "/changes", path + "/value"):
                     assert (
                         await client.get(obsolete, headers=owner)
@@ -555,6 +580,7 @@ def test_canvas_edit_routes(application):
                 assert (
                     await client.post(path + "/refresh", json=decision, headers=owner)
                 ).status_code == 404
+
                 missing_base = {
                     key: value
                     for key, value in decision.items()
@@ -575,6 +601,7 @@ def test_canvas_edit_routes(application):
                     path + "/confirm", json={**decision, "user_id": 2}, headers=owner
                 )
                 assert extra.status_code == 400
+
                 changed = await client.post(
                     path + "/confirm",
                     json={**decision, "digest": "f" * 64},
@@ -582,6 +609,7 @@ def test_canvas_edit_routes(application):
                 )
                 assert changed.status_code == 409
                 assert changed.json()["message"] == "assistant_proposal_changed"
+
                 # earlier owner responses set a session cookie
                 client.cookies.clear()
                 assert (await client.get(path + "/outcome")).status_code == 401
@@ -590,11 +618,13 @@ def test_canvas_edit_routes(application):
                         path + "/outcome", headers={"authorization": "Bearer other"}
                     )
                 ).status_code == 404
+
                 pending = await client.get(path + "/outcome", headers=owner)
                 assert pending.headers["cache-control"] == "no-store"
                 assert pending.json()["data"]["proposal"]["status"] == "pending"
                 assert pending.json()["data"]["workflow"] is None
                 assert "canvas" not in pending.json()["data"]
+
                 for _ in range(2):
                     saved = await client.post(
                         path + "/confirm", json=decision, headers=owner
@@ -602,16 +632,19 @@ def test_canvas_edit_routes(application):
                     assert saved.json()["data"]["proposal"]["status"] == "saved"
                     assert saved.json()["data"]["proposal"]["saved_version"] == 1
                     assert saved.json()["data"]["workflow"]["draft_version"] == 1
+
                 cancelled = await client.post(
                     path + "/cancel", json=missing_base, headers=owner
                 )
                 assert cancelled.json()["data"]["proposal"]["status"] == "saved"
+
                 await graph.refresh_from_db()
                 assert graph.draft_version == 1
                 await graph.delete()
                 assert (
                     await client.get(path + "/canvas", headers=owner)
                 ).status_code == 404
+
                 recovered = await client.get(path + "/outcome", headers=owner)
                 assert recovered.json()["data"]["proposal"]["status"] == "saved"
                 assert recovered.json()["data"]["workflow"] is None

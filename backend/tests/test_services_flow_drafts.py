@@ -114,9 +114,11 @@ def test_concurrent_writes():
             assert isinstance(failures[0], KaloscopeException)
             assert failures[0].status_code == 409
             assert failures[0].message == "flow_draft_conflict"
+
             await graph.refresh_from_db()
             assert graph.draft_version == 1
             assert await FlowDraftRevision.filter(graph_id=graph.id).count() == 1
+
             with pytest.raises(KaloscopeException, match="flow_draft_conflict"):
                 await FlowGraphService.publish_graph(graph.id, draft(), ADMIN)
 
@@ -178,6 +180,7 @@ def test_preview():
                 "validation",
                 "editor_path",
             }
+
             await graph.refresh_from_db()
             assert graph.draft_version == 0
             assert await FlowDraftRevision.all().count() == 0
@@ -310,6 +313,7 @@ def test_edge_paths():
             }
             graph.draft = original
             await graph.save()
+
             proposed = deepcopy(original)
             proposed["edges"][0]["selected"] = False
             unchanged = await FlowGraphService.preview_draft(

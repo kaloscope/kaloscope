@@ -12,8 +12,10 @@ export function errorCode(error: unknown, fallback: string): string {
     const message = (error.data as { message?: unknown } | undefined)?.message;
     if (typeof message === 'string' && /^[a-z][a-z0-9_]+$/.test(message)) return message;
   }
+
   if (error instanceof Error && typeof error.message === 'string' && /^assistant_[a-z0-9_]+$/.test(error.message)) {
     return error.message;
   }
+
   return fallback;
 }

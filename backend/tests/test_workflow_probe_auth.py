@@ -144,6 +144,7 @@ async def indexer(*, token=True, expires=None):
             value={"name": "Fixture", "token": TOKEN},
             expires=expires,
         )
+
     return graph
 
 
@@ -192,12 +193,14 @@ def test_node_parity(monkeypatch, saved_session):
             assert saved_session.ctx.cookies.get_cookie("example.test").value == COOKIE
             assert await FlowVariable.all().values() == variables
             assert await GlobalCookie.all().count() == await FlowLog.all().count() == 0
+
             context = Context.__new__(Context)
             context.globalvars = {}
             context.localvars = {"$auth": variables[0]["value"]}
             context.bootparams = fixtures
             context.storage = TrackableDict()
             context.union()
+
             async with httpx.AsyncClient(
                 cookies=saved_session.ctx.cookies,
                 transport=httpx.MockTransport(handler),
@@ -215,6 +218,7 @@ def test_node_parity(monkeypatch, saved_session):
                     },
                     context=context,
                 )
+
             assert context.storage["items"] == result.formatted.value["items"]
 
     asyncio.run(run())
@@ -607,6 +611,7 @@ def test_tool_parity(monkeypatch, saved_session):
                     app, "probe_http_request", {"probe": args}, token=name
                 )
                 assert result["isError"] and "read-only" in str(result)
+
                 user = app.shared_ctx.sessions[name]
                 token = await MCPAccessTokenService.create(
                     user.id,
@@ -628,6 +633,7 @@ def test_tool_parity(monkeypatch, saved_session):
                         token=token["token"],
                     )
                     assert denied["isError"]
+
                     denied = await tools.execute_tool(
                         "probe_http_request",
                         dumps(invalid).decode(),
@@ -636,6 +642,7 @@ def test_tool_parity(monkeypatch, saved_session):
                         call_id="invalid-probe",
                     )
                     assert not denied["ok"]
+
                     assistant = await tools.execute_tool(
                         "probe_http_request",
                         dumps(args).decode(),
@@ -645,6 +652,7 @@ def test_tool_parity(monkeypatch, saved_session):
                     )
                     assert assistant["ok"]
                     assert result["structuredContent"] == assistant["data"]
+
             assert len(network) == 2
             assert await GlobalCookie.all().count() == await FlowLog.all().count() == 0
 
@@ -714,15 +722,18 @@ def test_history_access(monkeypatch, saved_session):
             assert events[-1].event == "done"
             turn = await AssistantTurn.get(request_id="probe")
             assert turn.resource_ids == [graph.id]
+
             stored = await AssistantToolCall.get(turn_id=turn.id)
             assert stored.result["ok"] and stored.result["data"]["redacted"]
             assert TOKEN not in dumps(stored.result).decode()
+
             owner.role, owner.perms = UserRole.USER, Permissions(indexer_ids=[])
             restored = await Sessions.turns(conversation["id"], owner)
             assert (
                 not restored["items"][0]["content"]
                 and not restored["items"][0]["tools"]
             )
+
             denied = await tools.execute_tool(
                 "read_conversation_history",
                 dumps({"turn_id": turn.id}).decode(),
@@ -731,6 +742,7 @@ def test_history_access(monkeypatch, saved_session):
                 call_id="history",
             )
             assert denied["error"]["code"] == "permission_denied"
+
             await AssistantConversation.filter(id=conversation["id"]).update(
                 summary={"goals": ["Private fixture"]},
                 summary_resources=[graph.id],
@@ -741,6 +753,7 @@ def test_history_access(monkeypatch, saved_session):
             messages, _, _ = await history.prepare_context(
                 completion_client(create), current, owner, "system", [], None
             )
+
             assert "Private" not in dumps(messages).decode()
             assert len(streams) == 2
 

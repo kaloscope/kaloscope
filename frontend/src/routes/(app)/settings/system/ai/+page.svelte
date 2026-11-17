@@ -23,6 +23,7 @@
   async function load(): Promise<void> {
     loading.start();
     loadError = false;
+
     try {
       const [saved, defaults] = await Promise.all([
         api.get('ai/provider/list').json<Resp<AIProvider[]>>(),
@@ -67,6 +68,7 @@
       enabled: input.checked
     };
     pendingId = provider.id;
+
     try {
       const { data } = await api.post('ai/provider/upsert', { json: payload }).json<Resp<AIProvider>>();
       saved(data);
@@ -86,6 +88,7 @@
    */
   async function remove(id: number): Promise<void> {
     pendingId = id;
+
     try {
       await api.post(`ai/provider/${id}/delete`);
       providers = providers.filter((provider) => provider.id !== id);

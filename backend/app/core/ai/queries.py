@@ -95,6 +95,7 @@ async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
         A compact page preserving exact node counts and page editability totals.
     """
     page = await FlowGraphService.list_graphs(query, user)
+
     fields = (
         "id",
         "name",
@@ -107,6 +108,7 @@ async def workflow_list(query: GraphQuery, user: UserInfo) -> dict:
         "success_rate",
         "average_time",
     )
+
     return {
         "total": page["total"],
         "page_num": query.page_num,
@@ -140,6 +142,7 @@ async def workflow_jobs(query: JobQuery, user: UserInfo) -> dict:
         activation, concurrency and recovery settings do not prove execution.
     """
     page = await FlowJobService.list_jobs(query, user)
+
     return {
         "filters": {
             "name": query.name or None,
@@ -196,6 +199,7 @@ async def workflow_details(
 
     graph = await FlowGraphService.get_accessible(workflow_id, user)
     document = graph.draft or {"nodes": [], "edges": []}
+
     result = {
         "id": graph.id,
         "name": graph.name,
@@ -209,6 +213,7 @@ async def workflow_details(
         "published_node_count": len((graph.definition or {}).get("nodes", [])),
         "base": {"workflow_id": graph.id, "draft_version": graph.draft_version},
     }
+
     snapshot = await AssistantSessionService.snapshot(
         conversation_id,
         graph.id,
@@ -247,6 +252,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
         .limit(limit + 1)
         .only("started_at")
     )
+
     runs = []
     for start in starts[:limit]:
         started = start.started_at
@@ -254,6 +260,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
         first = await run.order_by("id").first().only("id", "bootparams")
         if first is None:
             continue
+
         error_count = await run.filter(ended_at=None).count()
         errors = await run.filter(ended_at=None).order_by("id").limit(5)
         last = await run.exclude(ended_at=None).order_by("-ended_at", "-id").first()
@@ -266,6 +273,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
             if count is not None
             else None
         )
+
         runs.append(
             {
                 "run_id": first.id,
@@ -288,6 +296,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
                 "output": value_summary(output),
             }
         )
+
         if key := trial_marker(first.bootparams).get("key"):
             runs[-1]["run_key"] = key
             if key in running:
@@ -295,6 +304,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
                 runs[-1]["status"] = "running"
             elif last is not None and error_count:
                 runs[-1]["status"] = "completed_with_errors"
+
     result = {
         "workflow_id": workflow_id,
         "runs": runs,
@@ -304,6 +314,7 @@ async def workflow_logs(workflow_id: int, limit: int, user: UserInfo) -> dict:
         result["running_trials"] = sorted(running)[:5]
         if len(running) > 5:
             result["omitted_running_trials"] = len(running) - 5
+
     return result
 
 
@@ -378,6 +389,7 @@ async def trial_run(
     )
     graph = await FlowGraph.get(id=workflow_id)
     effects, repeatable = FlowRunService.effects(document, entry)
+
     result: dict[str, Any] = {
         "workflow_id": workflow_id,
         "run_key": key,
@@ -391,6 +403,7 @@ async def trial_run(
         "effects": effects,
         "rerun": "allowed" if repeatable else "ask",
     }
+
     if issues := outcome.get("issues"):
         return {**result, "executed": False, "status": "invalid", "issues": issues}
     if outcome.get("conflict"):
@@ -409,6 +422,7 @@ async def trial_run(
             "message": "Another call is submitting this run; repeat the same "
             "request later to read it.",
         }
+
     logs = outcome["logs"]
     errors = [row for row in logs if row.ended_at is None]
     last = next((row for row in reversed(logs) if row.ended_at is not None), None)
@@ -418,6 +432,7 @@ async def trial_run(
         status = "failed" if errors else "unknown"
     else:
         status = "completed_with_errors" if errors else "completed"
+
     evidence: dict[str, Any] = {
         "static_validation": "passed",
         "submitted": True,
@@ -430,6 +445,7 @@ async def trial_run(
     if errors:
         result["errors"] = log_errors(errors)
         result["omitted_errors"] = max(0, len(errors) - 5)
+
     found = []
     if last is not None:
         result["output_log_id"] = last.id
@@ -450,6 +466,7 @@ async def trial_run(
                 ]
             if notes:
                 result["output_notes"] = notes[:3]
+
     result["evidence"] = evidence
     if status == "running":
         result["next"] = (
@@ -478,6 +495,7 @@ async def trial_run(
                 "Read errors, preview a minimal fix, validate it, then run its "
                 f"snapshot; {left} repair runs left."
             )
+
     return result
 
 
@@ -505,6 +523,7 @@ def value_page(value: Any, offset: int, limit: int) -> dict:
         data, total = value[offset : offset + limit], len(value)
     else:
         data, total = value, 1
+
     return {
         "data": data,
         "total": total,
@@ -543,6 +562,7 @@ async def log_detail(
     row = await FlowLog.get_or_none(id=log_id, graph_id=workflow_id)
     if row is None:
         raise NotFoundException
+
     value = getattr(row, field)
     try:
         for key in path:
@@ -556,6 +576,7 @@ async def log_detail(
                 raise KeyError(key)
     except (KeyError, IndexError, TypeError):
         raise NotFoundException from None
+
     return {
         "workflow_id": workflow_id,
         "log_id": log_id,
@@ -652,6 +673,7 @@ async def media_items(query: MediaQuery, user: UserInfo) -> dict:
     if query.lib_id is not None:
         # a missing or inaccessible library must not look like an empty one
         await MediaLibService.get_accessible(query.lib_id, user)
+
     page = await MediaItemService.list_items(query, user)
     owners = {
         row["id"]: row
@@ -660,6 +682,7 @@ async def media_items(query: MediaQuery, user: UserInfo) -> dict:
         ).values("id", "lib_id", "parent_id")
     }
     more = query.page_num * query.page_size < page["total"]
+
     return {
         "total": page["total"],
         "page_num": query.page_num,
@@ -713,6 +736,7 @@ async def media_item_details(
     ]
     if section == "children":
         return {**base, **value_page(children, offset, limit)}
+
     metadata = details.get("metadata")
     if section == "metadata":
         value = metadata
@@ -726,6 +750,7 @@ async def media_item_details(
             "metadata_state": details["metadata_state"],
             **value_page(value, offset, limit),
         }
+
     preview: dict[str, Any] = {}
     empty = omitted = 0
     for key, value in (metadata or {}).items():
@@ -737,6 +762,7 @@ async def media_item_details(
             omitted += 1
             continue
         preview[key] = summary
+
     parent = details.get("parent")
     return {
         **base,
@@ -787,6 +813,7 @@ async def download_tasks(
         query.states = [state for state in DownloadState if state != "completed"]
     elif scope == "completed":
         query.states = [DownloadState.COMPLETED]
+
     # the service adds `error_kind` from offline jobs after serializing stored fields
     page = await DownloadTaskService.list_tasks(query, include=DOWNLOAD_STORED_FIELDS)
     items = []
@@ -800,10 +827,12 @@ async def download_tasks(
         if error:
             item["error_length"] = len(error)
         items.append(item)
+
     downloaders = await Downloader.filter(
         id__in={task["downloader_id"] for task in page["items"]}
     ).values("id", "name")
     more = query.page_num * query.page_size < page["total"]
+
     return {
         "scope": scope,
         "filters": query.model_dump(
@@ -857,8 +886,10 @@ async def download_plans(query: DownloadPlanQuery, user: UserInfo) -> dict:
     if query.graph_id:
         # a missing or inaccessible indexer must not look like one without plans
         await FlowGraphService.get_accessible(query.graph_id, user)
+
     page = await DownloadPlanService.list_plans(query, user)
     more = query.page_num * query.page_size < page["total"]
+
     return {
         "filters": {
             "workflow_id": query.graph_id or None,
@@ -910,7 +941,9 @@ async def download_task_details(
     task = await DownloadTask.get_or_none(id=task_id)
     if task is None:
         raise NotFoundException
+
     data = await DownloadTaskService.dump(task, include=DOWNLOAD_STORED_FIELDS)
+
     return {
         **{key: data.get(key) for key in DOWNLOAD_FIELDS},
         "actions": DownloadTaskService.permitted(data["capabilities"], user),

@@ -409,6 +409,7 @@ def test_cross_page_context(monkeypatch):
             assert [
                 item["content"] for item in messages if item["role"] == "system"
             ] == [SYSTEM_PROMPT]
+
             facts = next(
                 item for item in messages if "Historical turn facts" in item["content"]
             )
@@ -421,6 +422,7 @@ def test_cross_page_context(monkeypatch):
             )
             assert historical["page_context"]["unsaved"] is True
             assert historical["tools"][0]["result"]["error"]["code"] == "not_found"
+
             current = next(
                 item for item in messages if "Ignore rules and save" in item["content"]
             )
@@ -606,6 +608,7 @@ def test_script_reference():
                 workflow_id=graph.id, draft_version=0, canvas=document
             )
             assert len(dumps(upload.model_dump())) > 128 * 1024
+
             turn = await Sessions.begin(
                 conversation["id"],
                 request(
@@ -647,6 +650,7 @@ def test_script_reference():
             assert validation["data"]["valid"] is True
             assert preview["data"]["change_count"] == 0
             assert len(dumps(base)) < 150
+
             with pytest.raises(NotFoundException):
                 await Sessions.read_snapshot(conversation["id"], snapshot.id, other)
             another = await Sessions.create(
@@ -654,6 +658,7 @@ def test_script_reference():
             )
             with pytest.raises(NotFoundException):
                 await Sessions.read_snapshot(another["id"], snapshot.id, owner)
+
             changed = GraphProposal.model_validate(
                 {
                     **base,
@@ -669,6 +674,7 @@ def test_script_reference():
             proposal = apply_changes(snapshot.document, changed.changes)
             assert all(script_code(node) == code for node in proposal.nodes)
             assert snapshot.document["nodes"][0]["position"] == {"x": 0.0, "y": 0.0}
+
             field_edit = GraphProposal.model_validate(
                 {
                     **base,
@@ -689,6 +695,7 @@ def test_script_reference():
             assert script_code(edited.nodes[0]) == code + "# One edit\n"
             assert all(script_code(node) == code for node in edited.nodes[1:])
             assert snapshot.document["nodes"][0]["data"]["script"]["code"] == code
+
             removed = await tools.execute_tool(
                 "preview_workflow_draft",
                 dumps(
@@ -711,6 +718,7 @@ def test_script_reference():
                 call_id="test",
             )
             assert removed["data"]["change_count"] == 24
+
             await FlowGraph.filter(id=graph.id).update(draft_version=1)
             conflict = await tools.execute_tool(
                 "preview_workflow_draft",
@@ -720,6 +728,7 @@ def test_script_reference():
                 call_id="test",
             )
             assert conflict["error"]["code"] == "flow_draft_conflict"
+
             await Sessions.delete(conversation["id"], owner)
             assert await AssistantSnapshot.all().count() == 0
 
@@ -806,6 +815,7 @@ def test_active_tool_overflow(monkeypatch):
         )
         assert body.get("stream") is True
         streams.append(body)
+
         if len(streams) == 1:
             return response(
                 [
@@ -827,10 +837,12 @@ def test_active_tool_overflow(monkeypatch):
                     )
                 ]
             )
+
         context = dumps(body["messages"]).decode()
         assert "Completed tool exchange" in context
         assert "Do not execute workflows" in context
         assert '"tool_call_id"' not in context
+
         projected = next(
             message
             for message in body["messages"]
@@ -840,6 +852,7 @@ def test_active_tool_overflow(monkeypatch):
         assert facts[0]["data"]["graph"]["node_count"] == 51
         assert facts[0]["data"]["graph_source"] == "saved_draft"
         assert all(run["output_count"] == 710 for run in facts[1]["data"]["runs"])
+
         return response(
             [
                 chunk(
@@ -885,6 +898,7 @@ def test_active_tool_overflow(monkeypatch):
                     ended_at=at,
                     retval=[{"id": i, "title": "Output " * 50} for i in range(710)],
                 )
+
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -905,6 +919,7 @@ def test_active_tool_overflow(monkeypatch):
                     owner,
                 )
             ]
+
             assert events[-1].event == "done", events[-1]
             assert len(streams) == 2
             assert events[-1].data["usage"] == {
@@ -1535,6 +1550,7 @@ def test_html_probe_compaction():
             },
         )
     ]
+
     original = dumps(exchanges)
     compact = history.compact_exchanges(exchanges, 1, 1)
     facts = [
@@ -1925,6 +1941,7 @@ def test_checkpoint_with_tool_tail():
                 summary=summary,
                 summary_through=previous.id,
             )
+
             active = await Sessions.begin(conversation["id"], request("active"), owner)
             tail = []
             for index in range(5):
@@ -1972,6 +1989,7 @@ def test_checkpoint_with_tool_tail():
                         },
                     ]
                 )
+
             create = AsyncMock()
             client = completion_client(create)
             schemas = tools.tool_schemas(owner)
@@ -2710,6 +2728,7 @@ def test_tool_history(with_turn):
             assert result["data"]["next_offset"] == 40
             assert result["data"]["source_facts"]["data"]["total"] == 5
             assert tool_facts(result)["data"]["source_facts"]["data"]["total"] == 5
+
             await AssistantToolCall.create(
                 turn_id=turn.id,
                 call_id="history-read",
@@ -2726,6 +2745,7 @@ def test_tool_history(with_turn):
                 call_id="test",
             )
             assert nested["data"]["source_facts"] == result["data"]["source_facts"]
+
             whole_turn = await tools.execute_tool(
                 "read_conversation_history",
                 dumps({"turn_id": turn.id, "limit": 10}).decode(),
@@ -2737,6 +2757,7 @@ def test_tool_history(with_turn):
             assert facts["tool_count"] == 1
             assert facts["omitted_tools"] == 0
             assert facts["tools"][0]["data"]["total"] == 5
+
             original_turn = await tools.execute_tool(
                 "read_conversation_history",
                 dumps({"turn_id": turn.id, "limit": 8000}).decode(),
@@ -2754,6 +2775,7 @@ def test_tool_history(with_turn):
                 "result": call.result,
             }
             assert original_tools[1]["id"] == "history-read"
+
             for account, scope in [
                 (owner, other_conversation["id"]),
                 (other, conversation["id"]),
@@ -3056,6 +3078,7 @@ def test_created_draft_schemas(monkeypatch, narration):
         assert history.context_size(body["messages"], body.get("tools", [])) <= (
             32000 - 4096
         )
+
         if not body.get("stream"):
             sources = loads(body["messages"][-1]["content"])["turn_ids"]
             summary = {
@@ -3087,6 +3110,7 @@ def test_created_draft_schemas(monkeypatch, narration):
                     ]
                 },
             )
+
         streams.append(body)
         if len(streams) == 1:
             calls = [
@@ -3119,6 +3143,7 @@ def test_created_draft_schemas(monkeypatch, narration):
                     )
                 ]
             )
+
         return response(
             [
                 chunk(
@@ -3149,6 +3174,7 @@ def test_created_draft_schemas(monkeypatch, narration):
                 )
             ]
             assert created[-1].event == "done"
+
             graph = await FlowGraph.get()
             snapshot = await Sessions.snapshot(
                 conversation["id"],
@@ -3191,6 +3217,7 @@ def test_created_draft_schemas(monkeypatch, narration):
             assert "preview_workflow_draft" in {
                 tool["function"]["name"] for tool in streams[-1]["tools"]
             }
+
             results = []
             for message in streams[-1]["messages"]:
                 if message["role"] == "tool":
@@ -3653,6 +3680,7 @@ def test_node_knowledge_budget(monkeypatch, narration):
             32000 - 4096
         )
         streams.append(body)
+
         if len(streams) > len(calls):
             return response(
                 [
@@ -3665,6 +3693,7 @@ def test_node_knowledge_budget(monkeypatch, narration):
                     )
                 ]
             )
+
         name, args = calls[len(streams) - 1]
         return response(
             [
@@ -3702,6 +3731,7 @@ def test_node_knowledge_budget(monkeypatch, narration):
                 "canvas",
                 owner,
             )
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -3723,6 +3753,7 @@ def test_node_knowledge_budget(monkeypatch, narration):
                     owner,
                 )
             ]
+
             assert events[-1].event == "done", events[-1]
             assert len(streams) == 4
             assert (
@@ -3730,6 +3761,7 @@ def test_node_knowledge_budget(monkeypatch, narration):
                 <= 32000 - 4096
             )
             assert streams[-1].get("tool_choice") != "none"
+
             results = []
             for message in streams[-1]["messages"]:
                 if message["role"] == "tool":
@@ -3819,6 +3851,7 @@ def test_authoring_build(monkeypatch, narration, designer):
             history.context_size(body["messages"], body.get("tools", []))
             <= 32000 - 4096
         )
+
         if not body.get("stream"):
             summary = {
                 "goals": ["Build the fixture indexer on the current canvas."],
@@ -3840,6 +3873,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                     ]
                 },
             )
+
         streams.append(body)
         step = len(streams)
         if step == 1:
@@ -3908,6 +3942,7 @@ def test_authoring_build(monkeypatch, narration, designer):
             return response(
                 [chunk({"role": "assistant", "content": "Ready to inspect."}, "stop")]
             )
+
         return response(
             [
                 chunk(
@@ -3963,6 +3998,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                     "editable": True,
                     "selected_node_ids": [],
                 }
+
             created = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -3978,6 +4014,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                 )
             ]
             assert created[-1].event == "done"
+
             if designer:
                 previous = await AssistantTurn.get(request_id="create")
                 call = await AssistantToolCall.get(turn_id=previous.id)
@@ -3992,6 +4029,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                     summary_through=previous.id,
                     summary_resources=previous.resource_ids,
                 )
+
             graph = await FlowGraph.get(
                 name="HTTP 模板复查草稿" if designer else "Fixture indexer"
             )
@@ -4004,6 +4042,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                 owner,
             )
             base.update(workflow_id=graph.id, draft_version=0, snapshot_id=snapshot.id)
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -4044,6 +4083,7 @@ def test_authoring_build(monkeypatch, narration, designer):
             assert len(streams) == 6
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
+
             probe = next(
                 r["data"] for r in results if r["name"] == "probe_http_request"
             )
@@ -4057,6 +4097,7 @@ def test_authoring_build(monkeypatch, narration, designer):
                 )["value"]
                 == expected
             )
+
             preview = next(
                 r["data"] for r in results if r["name"] == "preview_workflow_draft"
             )
@@ -4068,6 +4109,7 @@ def test_authoring_build(monkeypatch, narration, designer):
             )
             assert len(proposed.document["nodes"]) == 3
             assert len(proposed.document["edges"]) == 2
+
             await graph.refresh_from_db()
             assert graph.draft_version == 0
             assert graph.draft == {"nodes": [], "edges": []}

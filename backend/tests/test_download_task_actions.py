@@ -1261,9 +1261,11 @@ def test_conversation(monkeypatch, verbose):
     assert offered[0] == offered[2] == set()
     assert offered[1] == offered[3] == offered[6] == tools.TASK_ACTION_TOOLS
     assert offered[7] == tools.TASK_ACTION_TOOLS
+
     # similar tasks stay distinct and nothing is reviewed until one is chosen
     assert [result["name"] for result in asked] == ["list_download_tasks"]
     assert {item["id"] for item in asked[0]["data"]["items"]} == {21, 22}
+
     review_data, same_turn = reviewed[1]["data"], reviewed[2]["data"]
     assert review_data["valid"] and review_data["task_id"] == 21
     assert same_turn["confirmation_required"] and not same_turn["applied"]
@@ -1271,6 +1273,7 @@ def test_conversation(monkeypatch, verbose):
     assert repeated[1]["data"]["replayed"]
     assert repeated[1]["data"]["task"]["state"] == "paused"
     assert len(env.remote.requests) == 1 and paused == "paused"
+
     # task and downloader IDs are never recorded as workflows or libraries
     for turn in stored:
         assert not {21, 22, 3} & set(turn.resource_ids)
@@ -1543,6 +1546,7 @@ def test_mcp(monkeypatch):
                     arguments,
                     token=tokens[reader.id],
                 )
+
                 delete = {"task_id": 23, "action": "delete", "delete_files": True}
                 denied = await call(
                     app,
@@ -1563,6 +1567,7 @@ def test_mcp(monkeypatch):
                     conversation_id=1,
                     call_id="parity",
                 )
+
                 removal = deleting["structuredContent"]
                 application_args = {
                     "request_id": removal["request_id"],
@@ -1597,6 +1602,7 @@ def test_mcp(monkeypatch):
                 assert deleted["structuredContent"]["outcome"] == "deleted"
                 assert [path for path, _ in remote.requests] == ["/pause", "/delete"]
                 assert remote.requests[1][1]["deleteFiles"] == "true"
+
                 # assistant and MCP share the review apart from request identities
                 removal.pop("request_id")
                 shared["data"].pop("request_id")

@@ -212,6 +212,7 @@ def indexer_changes():
         ("detail", "output", "each", "loop_continue"),
         ("each", "output", "end", "input"),
     ]
+
     return [
         {
             "op": "add_node",
@@ -479,6 +480,7 @@ def test_engine_feeds_plans(monkeypatch, runtime):
             assert pages[2] == {"items": []}
             # the third card exceeds page_size, so its detail page is never requested
             assert "/torrent/t105" not in {r.url.path for r in detail_requests}
+
             for page, previous in ((pages[0], None), (pages[1], ["t101", "t102"])):
                 checked = check(
                     "{{ page|tojson }}",
@@ -491,6 +493,7 @@ def test_engine_feeds_plans(monkeypatch, runtime):
                     },
                 )
                 assert checked.valid is (previous is None), checked.issues
+
             assert preview["status"] == "ok" and preview["returned_count"] == 2
             assert sample["valid"], sample["issues"]
             assert attempt["added"] == 2, attempt
@@ -575,6 +578,7 @@ def recipe_graph():
         "SIZE": "normalize-space(./td[4])",
     }.items():
         formatter = formatter.replace(name, f'"{xpath}"')
+
     nodes = {
         "start": {
             "$schema": "search_start",
@@ -602,6 +606,7 @@ def recipe_graph():
         },
     }
     edges = re.findall(r"(\w+)\.(\w+) -> (\w+)\.(\w+)", guide.split("Edges", 1)[1])
+
     return {
         "nodes": [
             {"id": key, "type": "node", "position": {"x": 0, "y": 0}, "data": data}
@@ -832,6 +837,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     ]
                 },
             )
+
         streams.append(body)
         step = len(streams)
         text = dumps(body["messages"]).decode()
@@ -911,6 +917,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     )
                 ]
             )
+
         return response(
             [
                 chunk(
@@ -960,6 +967,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 owner,
             )
             base.update(workflow_id=graph.id, snapshot_id=snapshot.id)
+
             events = [
                 e
                 async for e in AssistantService.persistent_stream(
@@ -982,10 +990,12 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     owner,
                 )
             ]
+
             assert events[-1].event == "done", events[-1]
             assert len(streams) == 7
             results = [e.data for e in events if e.event == "tool_result"]
             assert all(result["ok"] for result in results), results
+
             probes = [r["data"] for r in results if r["name"] == "probe_http_request"]
             assert (
                 probes[0]["formatted"]["value"]["cards"][0]["detail"]
@@ -995,6 +1005,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 probes[1]["formatted"]["value"]["details"]["t102"]["link"]
                 == "https://tracker.test/files/t102.torrent"
             )
+
             checks = [
                 r["data"] for r in results if r["name"] == "validate_workflow_template"
             ]
@@ -1007,6 +1018,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 False,
             ]
             assert checks[0]["issues"][0]["path"] == "items.0.link"
+
             preview = results[-1]["data"]
             assert preview["validation"]["valid"], preview
             proposed = await Sessions.read_snapshot(
@@ -1017,6 +1029,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 if item["op"] == "add_node":
                     assert nodes[item["node"]["id"]]["data"] == item["node"]["data"]
             assert len(site.requests) == 2
+
             await graph.refresh_from_db()
             assert graph.definition is None and graph.draft_version == 0
             assert await DownloadPlan.all().count() == await FlowLog.all().count() == 0

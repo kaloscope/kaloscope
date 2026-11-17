@@ -285,6 +285,7 @@ def test_search_recipe(monkeypatch, page):
         monkeypatch.setattr(
             authoring, "NetworkTransport", lambda **_: httpx.MockTransport(endpoint)
         )
+
         probe = await authoring.probe_http_request(
             HTTPProbe(
                 request={"url": node_data["url"]},
@@ -294,6 +295,7 @@ def test_search_recipe(monkeypatch, page):
             SimpleNamespace(role="admin"),
         )
         assert probe.formatted.valid
+
         validation = authoring.validate_workflow_template(
             TemplateValidation(
                 template=SEARCH_TEMPLATE,
@@ -302,6 +304,7 @@ def test_search_recipe(monkeypatch, page):
             )
         )
         assert validation.valid, validation
+
         ctx = context(fixture)
         async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
             monkeypatch.setattr(
@@ -313,6 +316,7 @@ def test_search_recipe(monkeypatch, page):
         await SearchEndNode.execute(
             node_data={"response": SEARCH_TEMPLATE}, context=ctx
         )
+
         assert ctx[RETVAL_KEY] == validation.value
         assert validation.value["total"] == 2
         assert [item["id"] for item in validation.value["items"]] == (
@@ -348,6 +352,7 @@ def test_details_recipe(found):
         await DetailsEndNode.execute(
             node_data={"response": DETAILS_TEMPLATE}, context=ctx
         )
+
         assert result.valid
         assert ctx[RETVAL_KEY] == result.value
         if found:
@@ -457,6 +462,7 @@ def test_movie_metadata(monkeypatch):
             (TEMPLATES_PATH / "movie.nfo").read_text(encoding="utf-8-sig"),
             result.value[0],
         )
+
         assert "<plot>A &lt; B</plot>" in xml
         assert "<rating>8.5</rating>" in xml
         assert "<premiered>2024-02-29</premiered>" in xml
