@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Iterable
 from contextlib import suppress
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -2982,21 +2982,105 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
 
         return {
             "total": page.total,
+            "items": [cls._entry_row(entry) for entry in page.items],
+        }
+
+    @classmethod
+    async def units(
+        cls, id: int, query: Pageable, status: str | None = None
+    ) -> dict[str, Any]:
+        """Page through one batch's units with the files handled alongside them.
+
+        Attach each `follows_item` entry to the unit with the same item, or else to
+        the unit whose folder contains it. Entries without such a unit stay top
+        level. Filter and page units only, so a unit and its files share a page.
+
+        Args:
+            id: Batch identity.
+            query: Page number and size; page `0` returns every unit.
+            status: Only units with this status, if given.
+
+        Returns:
+            The unit total and one page in plan order, each unit listing its
+            attached files under `children`.
+
+        Raises:
+            NotFoundException: If no batch has this identity.
+        """
+        if not await MediaChangeReceipt.exists(id=id, action=MediaAction.BATCH):
+            raise NotFoundException
+
+        rows = await MediaBatchEntry.filter(receipt_id=id).order_by("seq")
+        units = [entry for entry in rows if entry.reason != "follows_item"]
+        by_item: dict[int, MediaBatchEntry] = {}
+        for unit in units:
+            if unit.item_id is not None:
+                by_item.setdefault(unit.item_id, unit)
+        by_src = {unit.src: unit for unit in units}
+
+        children: dict[int, list[MediaBatchEntry]] = {}
+        orphans = []
+        for entry in rows:
+            if entry.reason != "follows_item":
+                continue
+            parent = by_item.get(entry.item_id) if entry.item_id is not None else None
+            if parent is None:
+                parent = next(
+                    (
+                        by_src[folder.as_posix()]
+                        for folder in PurePosixPath(entry.src).parents
+                        if folder.as_posix() in by_src
+                    ),
+                    None,
+                )
+            if parent is None:
+                orphans.append(entry)
+            else:
+                children.setdefault(parent.seq, []).append(entry)
+
+        if orphans:
+            units = sorted([*units, *orphans], key=lambda entry: entry.seq)
+        if status:
+            units = [unit for unit in units if unit.status == status]
+        page = units
+        if query.page_num:
+            start = (query.page_num - 1) * query.page_size
+            page = units[start : start + query.page_size]
+
+        return {
+            "total": len(units),
             "items": [
                 {
-                    "seq": entry.seq,
-                    "kind": entry.kind,
-                    "owner": entry.owner,
-                    "item_id": entry.item_id,
-                    "src": entry.src,
-                    "dst": entry.dst,
-                    "files": entry.files,
-                    "size": entry.size,
-                    "status": entry.status,
-                    "reason": entry.reason,
+                    **cls._entry_row(unit),
+                    "children": [
+                        cls._entry_row(child) for child in children.get(unit.seq, [])
+                    ],
                 }
-                for entry in page.items
+                for unit in page
             ],
+        }
+
+    @staticmethod
+    def _entry_row(entry: MediaBatchEntry) -> dict[str, Any]:
+        """Serialize one stored batch entry for listings.
+
+        Args:
+            entry: Stored batch entry.
+
+        Returns:
+            The entry's public fields.
+        """
+        return {
+            "seq": entry.seq,
+            "kind": entry.kind,
+            "owner": entry.owner,
+            "item_id": entry.item_id,
+            "src": entry.src,
+            "dst": entry.dst,
+            "files": entry.files,
+            "size": entry.size,
+            "status": entry.status,
+            "reason": entry.reason,
         }
 
     @classmethod

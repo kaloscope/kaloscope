@@ -665,10 +665,17 @@
     "batch": {
       "title": "批量操作",
       "unavailable": "此操作计划已失效",
-      "planned": "计划处理 {0} 项，共 {1}",
-      "blocked": "{0} 项不处理",
-      "following": "{0} 项随条目一并处理",
-      "filter_blocked": "不处理 / 随条目处理",
+      "scope": "{0, number} 项（{1, number} 个文件，共 {2}）",
+      "summary": {
+        "trash": "将把 {0}移入系统回收站",
+        "permanent": "将永久删除 {0}",
+        "rename": "将重命名 {0}",
+        "organize": "将按模板整理 {0}",
+        "move": "将移动 {0}",
+        "apply": "将更改 {0}"
+      },
+      "blocked_reasons": "{0, number} 项不会处理：{1}",
+      "files": "含 {0, number} 个文件",
       "progress": "已完成 {0} 项，跳过或失败 {1} 项，剩余 {2} 项",
       "more": "匹配文件超出单次批量上限，执行后可使用相同条件再次预览并处理剩余部分",
       "all": "全部条目",
@@ -680,6 +687,10 @@
         "trash": "将 {0} 项移入回收站",
         "permanent": "永久删除 {0} 项"
       },
+      "note": {
+        "trash": "文件可在系统回收站中恢复",
+        "permanent": "永久删除的文件无法恢复"
+      },
       "select": "批量管理",
       "selected": "已选择 {0} 项",
       "delete_selected": "删除",
@@ -688,7 +699,6 @@
         "permanent": "永久删除"
       },
       "state": {
-        "reviewed": "待执行",
         "running": "执行中",
         "finished": "已结束"
       },
@@ -703,11 +713,10 @@
       "column": {
         "path": "路径",
         "size": "大小",
-        "owner": "类别",
         "status": "状态"
       },
       "status": {
-        "planned": "计划处理",
+        "planned": "待处理",
         "blocked": "不处理",
         "started": "处理中",
         "done": "已完成",

@@ -74,3 +74,31 @@ export function resetMediaBatchWatchers(): void {
   for (const controller of watchers.values()) controller.abort();
   watchers.clear();
 }
+
+/**
+ * Join the reasons a batch left units alone, such as "download in progress (1) and being ingested (2)".
+ *
+ * @param reasons - Unit counts by reason code; reasons without units are left out.
+ * @param translate - Message formatter for reason labels and counts.
+ * @param formatNumber - Number formatter for the counts.
+ * @param language - Locale that joins the list and lower-cases the labels.
+ * @param counted - Whether each reason shows its unit count. Defaults to `true`.
+ * @returns The joined reasons, or an empty string when none has units.
+ */
+export function describeBatchReasons(
+  reasons: Record<string, number>,
+  translate: (id: string, values?: (string | number)[] | { default?: string }) => string,
+  formatNumber: (value: number) => string,
+  language?: string | null,
+  counted: boolean = true
+): string {
+  const parts = Object.entries(reasons)
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => {
+      const label = translate(`media.batch.reason.${reason}`, { default: reason });
+      // the labels stand alone elsewhere; inside a sentence they start in lower case
+      const inline = label.charAt(0).toLocaleLowerCase(language ?? undefined) + label.slice(1);
+      return counted ? translate('media.batch.reason_count', [inline, formatNumber(count)]) : inline;
+    });
+  return new Intl.ListFormat(language ?? undefined, { type: 'conjunction' }).format(parts);
+}

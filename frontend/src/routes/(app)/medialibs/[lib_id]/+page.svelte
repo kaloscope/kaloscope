@@ -25,6 +25,7 @@
   import { icons } from '$lib/icons';
   import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
   import type { MediaBatchOutcome, MediaItem, Page, Resp } from '$lib/types';
+  import { describeBatchReasons } from '$lib/utils/media-batches';
   import { compactRecord } from '$lib/utils/object';
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -140,16 +141,9 @@
    * @returns The translated reason, naming each blocking cause with its count when there is one.
    */
   function emptyReviewMessage(outcome: MediaBatchOutcome): string {
-    const reasons = Object.entries(outcome.blocked?.reasons ?? {}).filter(([, count]) => count > 0);
-    if (reasons.length > 0) {
-      const parts = reasons.map(([reason, count]) => {
-        const label = $_(`media.batch.reason.${reason}`, { default: reason });
-        // the labels stand alone elsewhere; inside a sentence they start in lower case
-        const inline = label.charAt(0).toLocaleLowerCase($locale ?? undefined) + label.slice(1);
-        return $_('media.batch.reason_count', [inline, $number(count)]);
-      });
-      const list = new Intl.ListFormat($locale ?? undefined, { type: 'conjunction' }).format(parts);
-      return $_('alert.media_batch_blocked', list);
+    const reasons = describeBatchReasons(outcome.blocked?.reasons ?? {}, $_, $number, $locale);
+    if (reasons) {
+      return $_('alert.media_batch_blocked', reasons);
     }
     // for a deletion, an `item_ids` issue means a selected item left this library
     if (outcome.issues?.some((issue) => issue.path === 'item_ids')) {

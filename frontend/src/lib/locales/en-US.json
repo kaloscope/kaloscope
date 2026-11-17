@@ -665,13 +665,20 @@
     "batch": {
       "title": "Batch Operations",
       "unavailable": "This plan is no longer available.",
-      "planned": "{0} planned · {1}",
-      "blocked": "{0} not processed",
-      "following": "{0} handled with parent item",
-      "filter_blocked": "Not processed / with item",
+      "scope": "{0, plural, one {# item} other {# items}} ({1, plural, one {# file} other {# files}}, {2})",
+      "summary": {
+        "trash": "{0} will be moved to the system Trash.",
+        "permanent": "{0} will be permanently deleted.",
+        "rename": "{0} will be renamed.",
+        "organize": "{0} will be organized by template.",
+        "move": "{0} will be moved.",
+        "apply": "{0} will be changed."
+      },
+      "blocked_reasons": "{0, plural, one {# item} other {# items}} won't be processed: {1}.",
+      "files": "Includes {0, plural, one {# file} other {# files}}",
       "progress": "{0} done · {1} skipped or failed · {2} remaining",
       "more": "Matched files exceed the single-batch limit. Preview the same selection again afterwards to process the rest.",
-      "all": "All entries",
+      "all": "All items",
       "empty": "No entries",
       "stop": "Stop",
       "stopping": "Stopping…",
@@ -679,6 +686,10 @@
         "apply": "Apply {0} Changes",
         "trash": "Move {0} to Trash",
         "permanent": "Permanently Delete {0}"
+      },
+      "note": {
+        "trash": "Files can be restored from the system Trash.",
+        "permanent": "Permanently deleted files cannot be recovered."
       },
       "select": "Batch Management",
       "selected": "{0} selected",
@@ -688,7 +699,6 @@
         "permanent": "Delete permanently"
       },
       "state": {
-        "reviewed": "Not applied",
         "running": "Running",
         "finished": "Finished"
       },
@@ -703,11 +713,10 @@
       "column": {
         "path": "Path",
         "size": "Size",
-        "owner": "Category",
         "status": "Status"
       },
       "status": {
-        "planned": "Planned",
+        "planned": "Pending",
         "blocked": "Not processed",
         "started": "In progress",
         "done": "Done",

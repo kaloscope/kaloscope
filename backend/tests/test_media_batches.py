@@ -315,6 +315,54 @@ def test_delete_with_companions(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("last", "unit", "children"),
+    [
+        (False, "Show/Show S01E01.mkv", ["Show/Show S01E01.nfo"]),
+        (
+            True,
+            "Show",
+            ["Show/Show.nfo", "Show/Show S01E01.mkv", "Show/Show S01E01.nfo"],
+        ),
+    ],
+)
+def test_units(tmp_path, last, unit, children):
+    async def run():
+        async with database():
+            lib, _, episodes = await show(tmp_path)
+            if last:
+                Path(episodes[1].path).unlink()
+                await episodes[1].delete()
+                change = deletion(lib, item_ids=[episodes[0].id])
+            else:
+                change = deletion(
+                    lib,
+                    directory="Show",
+                    name="Show S01E01.*",
+                    owners=["indexed", "companion"],
+                )
+            review = await MediaBatchService.review(change, ADMIN)
+            batch_id = review["batch_id"]
+            page = Pageable(page_num=1, page_size=50)
+
+            grouped = await MediaBatchService.units(batch_id, page)
+            blocked = await MediaBatchService.units(batch_id, page, "blocked")
+            # a file whose unit cannot be found stays visible on its own
+            await MediaBatchEntry.filter(receipt_id=batch_id, src=children[0]).update(
+                item_id=None, src="stray.nfo"
+            )
+            orphaned = await MediaBatchService.units(batch_id, page, "blocked")
+
+            assert grouped["total"] == 1
+            assert grouped["items"][0]["src"] == unit
+            assert [row["src"] for row in grouped["items"][0]["children"]] == children
+            assert blocked == {"total": 0, "items": []}
+            assert [row["src"] for row in orphaned["items"]] == ["stray.nfo"]
+            assert orphaned["items"][0]["children"] == []
+
+    asyncio.run(run())
+
+
 def test_indexed_by_filter(tmp_path):
     async def run():
         async with database():

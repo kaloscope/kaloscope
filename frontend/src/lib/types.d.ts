@@ -291,6 +291,8 @@ export type MediaBatchEntry = {
   size: number | null;
   status: 'planned' | 'blocked' | 'started' | 'done' | 'skipped' | 'failed' | 'uncertain';
   reason: string | null;
+  /** Files handled together with this unit, listed in unit listings only. */
+  children?: MediaBatchEntry[];
 };
 
 /** Outcome of applying a reviewed library batch. */
