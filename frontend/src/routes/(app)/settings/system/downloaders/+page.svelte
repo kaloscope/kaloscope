@@ -160,7 +160,7 @@
         </Dropdown>
       </div>
     </div>
-    <dl class="rounded-b-field bg-base-100 p-4 text-sm">
+    <dl class="rounded-b-card bg-base-100 p-4 text-sm">
       {@render term($_('field.host'), downloader.host)}
       <div class="divider my-0"></div>
       {@render term($_('field.port'), downloader.port)}

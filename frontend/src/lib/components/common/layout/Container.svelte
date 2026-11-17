@@ -36,7 +36,7 @@
       width: '100%',
       minWidth: '24rem',
       maxWidth: '40rem',
-      rowGap: '2.5rem',
+      rowGap: '4rem',
       padding: '1rem 1rem 4rem'
     }
   };
@@ -82,8 +82,9 @@
           <div class="flex flex-col" style:row-gap={rowGap || preset.rowGap} style:padding={padding || preset.padding}>
             {#each [3, 2] as rows (rows)}
               <div>
-                <Skeleton type="block" class="mb-4 h-5 w-36" />
-                <div class="flex flex-col gap-5 card-surface p-4 sm:p-5">
+                <Skeleton type="block" class="h-6 w-36" />
+                <div class="divider"></div>
+                <div class="flex flex-col gap-5 p-1">
                   {#each { length: rows }, i}
                     <div class="flex flex-col gap-2">
                       <Skeleton type="block" class="h-3 {i % 2 ? 'w-32' : 'w-24'}" />

@@ -168,6 +168,9 @@
     {/key}
   {:else if text}
     <span class="text-xl font-bold opacity-60">{extractInitial(text)}</span>
+  {:else if icon && transparent}
+    <!-- without a placeholder surface the icon itself is the image, as for avatars -->
+    <iconify-icon {icon} width="100%" height="100%" style:aspect-ratio={aspectRatio} class="opacity-50"></iconify-icon>
   {:else if icon}
     <span class="@container flex-center size-full">
       <iconify-icon {icon} width="100%" height="100%" class="image-fallback-icon opacity-40"></iconify-icon>

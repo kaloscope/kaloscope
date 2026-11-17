@@ -291,6 +291,10 @@
   border-top-left-radius: min(var(--radius-box), 0.75rem);
   border-top-right-radius: min(var(--radius-box), 0.75rem);
 }
+@utility rounded-b-card {
+  border-bottom-left-radius: min(var(--radius-box), 0.75rem);
+  border-bottom-right-radius: min(var(--radius-box), 0.75rem);
+}
 @utility card-surface {
   border-radius: min(var(--radius-box), 0.75rem);
   background-color: var(--color-base-100);
