@@ -363,6 +363,50 @@ def test_units(tmp_path, last, unit, children):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_hide_items(tmp_path, missing):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            if missing:
+                Path(episodes[0].path).unlink()
+            change = deletion(lib, item_ids=[episodes[0].id], delete_files=False)
+
+            review = await MediaBatchService.review(change, ADMIN)
+            details = await MediaBatchService.details(review["batch_id"])
+            result = await confirm(review, change)
+            hidden = await MediaItem.get(id=episodes[0].id)
+
+            assert review["planned"]["units"] == 1
+            assert review["deletion"] is None
+            assert review["delete_files"] is False
+            assert details["hideable"] is True and details["delete_files"] is False
+            assert result["outcome"] == "completed"
+            assert result["delete_files"] is False
+            assert not hidden.visible
+            assert (await MediaItem.get(id=episodes[1].id)).visible
+            assert (await MediaItem.get(id=parent.id)).visible
+            assert Path(episodes[0].path).exists() is not missing
+            assert Path(episodes[0].path).with_suffix(".nfo").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"extensions": ["url"]},
+        {"directory": "Show", "empty_dirs": True},
+        {"operation": "rename", "pattern": "a"},
+    ],
+)
+def test_hide_needs_items(fields):
+    fields = {"operation": "delete", "item_ids": [], **fields}
+
+    with pytest.raises(ValueError, match="delete_files"):
+        MediaBatch(library_id=1, delete_files=False, **fields)
+
+
 def test_indexed_by_filter(tmp_path):
     async def run():
         async with database():

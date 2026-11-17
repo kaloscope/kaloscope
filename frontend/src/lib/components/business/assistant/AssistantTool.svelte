@@ -236,13 +236,18 @@
   <p class="ml-8 text-xs leading-5 text-base-content/60">{changeMessage(changeKind, 'reviewed')}</p>
 {/if}
 {#if batchId !== null}
-  <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={() => planDialog?.showModal(batchId)}>
+  <button
+    type="button"
+    class="btn ml-8 btn-outline btn-sm"
+    onclick={() => planDialog?.showModal(livePlan?.id ?? batchId)}
+  >
     {$_('assistant.media_batch.view_plan')}
   </button>
   <BatchPlanDialog
     bind:this={planDialog}
     onstate={(plan) => {
-      if (reviewedBatch === plan.id) livePlan = plan;
+      // switching between keeping and deleting files moves the review to another plan
+      if (reviewedBatch !== null) livePlan = plan;
     }}
   />
 {/if}

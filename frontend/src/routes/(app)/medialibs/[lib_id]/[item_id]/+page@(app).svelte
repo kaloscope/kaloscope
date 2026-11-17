@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { beforeNavigate, replaceState } from '$app/navigation';
+  import { beforeNavigate, goto, replaceState } from '$app/navigation';
   import { page } from '$app/state';
   import { api, getCurrentRole } from '$lib/api';
   import { registerAssistantContext } from '$lib/assistant/context';
@@ -901,7 +901,12 @@
               {media?.title ?? media?.name}
             </h1>
             {#if $user?.role === 'admin' && (mediaType !== 'video' || !media.parent)}
-              <MediaActions item={media} class="dropdown-end" onscrape={() => refreshMetadata(media!.id)} />
+              <MediaActions
+                item={media}
+                libraryId={Number(page.params.lib_id)}
+                class="dropdown-end"
+                onscrape={() => refreshMetadata(media!.id)}
+              />
             {/if}
           </div>
           {#if readingMeta && (readingMeta.series || readingMeta.volume || readingMeta.number)}
@@ -1140,6 +1145,7 @@
                 {#if $user?.role === 'admin'}
                   <MediaActions
                     item={part}
+                    libraryId={Number(page.params.lib_id)}
                     class="dropdown-end ml-1"
                     triggerClass="opacity-70"
                     onclick={() => {
@@ -1147,10 +1153,15 @@
                     }}
                     onscrape={mediaType === 'image' ? () => refreshMetadata(part.id) : undefined}
                     ondelete={() => {
-                      // refresh the parent media details to update the parts list
-                      getDetails(media!.id).then((data) => {
-                        media = data;
-                      });
+                      // refresh the parent media details to update the parts list; deleting the last part
+                      // can take the parent with it, which leaves only the library to return to
+                      api
+                        .get(`media/${media!.id}`, { context: { silentErrors: true } })
+                        .json<Resp<MediaItem>>()
+                        .then(({ data }) => {
+                          media = data;
+                        })
+                        .catch(() => goto(`/medialibs/${page.params.lib_id}`));
                     }}
                   />
                 {/if}

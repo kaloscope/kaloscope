@@ -481,7 +481,6 @@
     "loading": "正在加载正文",
     "loading_chapters": "正在加载章节",
     "delete_local": "同时删除本地文件",
-    "delete_local_confirm": "确认删除本地文件？",
     "text": {
       "theme": "背景",
       "theme_options": {
@@ -664,15 +663,18 @@
     },
     "batch": {
       "title": "批量操作",
+      "delete_items": "删除 {0, number} 项",
       "unavailable": "此操作计划已失效",
       "scope": "{0, number} 项（{1, number} 个文件，共 {2}）",
+      "items": "{0, number} 项",
       "summary": {
         "trash": "将把 {0}移入系统回收站",
         "permanent": "将永久删除 {0}",
         "rename": "将重命名 {0}",
         "organize": "将按模板整理 {0}",
         "move": "将移动 {0}",
-        "apply": "将更改 {0}"
+        "apply": "将更改 {0}",
+        "hide": "将从媒体库移除 {0, number} 项，文件仍保留在磁盘上"
       },
       "blocked_reasons": "{0, number} 项不会处理：{1}",
       "files": "含 {0, number} 个文件",
@@ -685,18 +687,21 @@
       "confirm": {
         "apply": "应用 {0} 项更改",
         "trash": "将 {0} 项移入回收站",
-        "permanent": "永久删除 {0} 项"
+        "permanent": "永久删除 {0} 项",
+        "hide": "删除"
       },
       "note": {
         "trash": "文件可在系统回收站中恢复",
         "permanent": "永久删除的文件无法恢复"
       },
+      "permanent_confirm": "确定永久删除这些文件？删除后无法恢复",
       "select": "批量管理",
       "selected": "已选择 {0} 项",
       "delete_selected": "删除",
       "deletion": {
         "trash": "移入系统回收站",
-        "permanent": "永久删除"
+        "permanent": "永久删除",
+        "hide": "从媒体库移除"
       },
       "state": {
         "running": "执行中",

@@ -1,5 +1,5 @@
 import { api } from '$lib/api';
-import type { MediaBatch, Resp } from '$lib/types';
+import type { MediaBatch, MediaBatchOutcome, Resp } from '$lib/types';
 import { isHTTPError } from 'ky';
 
 const watchers = new Map<number, AbortController>();
@@ -101,4 +101,53 @@ export function describeBatchReasons(
       return counted ? translate('media.batch.reason_count', [inline, formatNumber(count)]) : inline;
     });
   return new Intl.ListFormat(language ?? undefined, { type: 'conjunction' }).format(parts);
+}
+
+type Translate = (id: string, values?: string | (string | number)[] | { default?: string }) => string;
+
+/**
+ * Review deleting library items; nothing changes until the plan is confirmed.
+ *
+ * @param libraryId - Library holding the items.
+ * @param itemIds - Items to delete.
+ * @param deleteFiles - Whether their files go too, rather than only leaving the library. Defaults to `false`.
+ * @returns The review, carrying a `batch_id` when there is a plan to confirm.
+ */
+export async function reviewItemDeletion(
+  libraryId: number,
+  itemIds: number[],
+  deleteFiles: boolean = false
+): Promise<MediaBatchOutcome> {
+  const { data } = await api
+    .post('media/batch/review', {
+      json: { library_id: libraryId, operation: 'delete', item_ids: itemIds, delete_files: deleteFiles }
+    })
+    .json<Resp<MediaBatchOutcome>>();
+  return data;
+}
+
+/**
+ * Explain why a deletion review produced no plan.
+ *
+ * @param outcome - Review that returned no batch.
+ * @param translate - Message formatter.
+ * @param formatNumber - Number formatter for the counts.
+ * @param language - Locale that joins and lower-cases the reasons.
+ * @returns The translated reason, naming each blocking cause with its count when there is one.
+ */
+export function describeEmptyReview(
+  outcome: MediaBatchOutcome,
+  translate: Translate,
+  formatNumber: (value: number) => string,
+  language?: string | null
+): string {
+  const reasons = describeBatchReasons(outcome.blocked?.reasons ?? {}, translate, formatNumber, language);
+  if (reasons) {
+    return translate('alert.media_batch_blocked', reasons);
+  }
+  // for a deletion, an `item_ids` issue means a selected item left this library
+  if (outcome.issues?.some((issue) => issue.path === 'item_ids')) {
+    return translate('alert.media_batch_mismatch');
+  }
+  return translate('alert.media_batch_empty');
 }

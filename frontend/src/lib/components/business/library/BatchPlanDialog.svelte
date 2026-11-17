@@ -1,12 +1,12 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Modal, Select, alert } from '$lib/components';
+  import { Modal, Select, alert, confirm } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _, locale, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { IconifyIcon } from 'iconify-icon';
   import type { MediaBatch, MediaBatchEntry, MediaBatchOutcome, Page, Resp } from '$lib/types';
-  import { describeBatchReasons, watchMediaBatch } from '$lib/utils/media-batches';
+  import { describeBatchReasons, describeEmptyReview, watchMediaBatch } from '$lib/utils/media-batches';
   import { formatBytes } from '$lib/utils/number';
   import { onDestroy } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
@@ -33,6 +33,10 @@
   // `all` keeps the default option from looking like a placeholder
   let status: string = $state('all');
   let failed = $state(false);
+  // the caller may name a single deleted item, which plan paths only spell as files
+  let title: string | null = $state(null);
+  // a deletion switching between keeping and removing files is reviewed again
+  let switching = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let id = 0;
   let request = 0;
@@ -55,15 +59,26 @@
     return reasons;
   });
   const blocked = $derived.by(() => Object.values(blockedReasons).reduce((sum, count) => sum + count, 0));
-  const action = $derived.by(() =>
-    batch?.operation === 'delete' ? (batch.deletion ?? 'trash') : (batch?.operation ?? 'apply')
-  );
-  const scope = $derived.by(() =>
-    batch ? $_('media.batch.scope', [batch.planned.units, batch.planned.files, formatBytes(batch.planned.bytes)]) : ''
-  );
+  // a deletion that keeps every file only removes the items from the library
+  const hiding = $derived.by(() => batch?.operation === 'delete' && batch.delete_files === false);
+  const action = $derived.by(() => {
+    if (batch?.operation === 'delete') {
+      return hiding ? 'hide' : (batch.deletion ?? 'trash');
+    }
+    return batch?.operation ?? 'apply';
+  });
+  // files that only leave the library with their items are not part of what a hide changes
+  const scope = $derived.by(() => {
+    if (!batch) {
+      return '';
+    }
+    return hiding
+      ? $_('media.batch.items', [batch.planned.units])
+      : $_('media.batch.scope', [batch.planned.units, batch.planned.files, formatBytes(batch.planned.bytes)]);
+  });
   // after applying, the scope line names the operation instead of the review sentence
   const actionLabel = $derived.by(() => {
-    if (action === 'trash' || action === 'permanent') {
+    if (action === 'trash' || action === 'permanent' || action === 'hide') {
       return $_(`media.batch.deletion.${action}`);
     }
     return action === 'apply' ? '' : $_(`media.batch.operation.${action}`);
@@ -95,6 +110,17 @@
       count: counts[value]
     }));
   });
+  const dialogTitle = $derived.by(() => {
+    if (!batch?.hideable) {
+      return $_('media.batch.title');
+    }
+    const count = batch.change.item_ids?.length ?? batch.planned.units;
+    if (count !== 1) {
+      return $_('media.batch.delete_items', [count]);
+    }
+    const name = title ?? entries[0]?.src.split('/').pop();
+    return $_('action.delete', name ? `[${name}]` : '');
+  });
   // filtering only helps when the units do not all share one status
   const filterable = $derived(status !== 'all' || groups.filter((group) => group.count > 0).length > 1);
 
@@ -102,9 +128,12 @@
    * Open the dialog for one reviewed batch.
    *
    * @param batchId - Batch whose plan and progress are shown.
+   * @param options - Display options.
+   * @param options.title - Name of the single item a deletion selects, shown in the title.
    */
-  export const showModal = (batchId: number) => {
+  export const showModal = (batchId: number, options: { title?: string } = {}) => {
     id = batchId;
+    title = options.title ?? null;
     opened = true;
     batch = null;
     entries = [];
@@ -235,6 +264,33 @@
   }
 
   /**
+   * Review the same item deletion again, keeping or removing the files, and show that plan instead.
+   *
+   * @param deleteFiles - Whether the items' files go too.
+   */
+  async function switchFiles(deleteFiles: boolean) {
+    if (!batch) {
+      return;
+    }
+    switching = true;
+    try {
+      const { data } = await api
+        .post('media/batch/review', { json: { ...batch.change, delete_files: deleteFiles } })
+        .json<Resp<MediaBatchOutcome>>();
+      if (data.batch_id) {
+        id = data.batch_id;
+        page = 1;
+        status = 'all';
+        await load();
+      } else {
+        alert({ level: 'warning', message: describeEmptyReview(data, $_, $number, $locale) });
+      }
+    } finally {
+      switching = false;
+    }
+  }
+
+  /**
    * Ask the running batch to stop before its next unit.
    */
   function stop() {
@@ -243,6 +299,17 @@
       .post(`media/batch/${id}/cancel`)
       .then(() => load())
       .finally(() => loading.end());
+  }
+
+  /**
+   * Apply the reviewed plan, asking once more before files are deleted for good.
+   */
+  function confirmApply() {
+    if (!hiding && batch?.deletion === 'permanent') {
+      confirm({ shallow: false, message: $_('media.batch.permanent_confirm'), onconfirm: apply });
+    } else {
+      apply();
+    }
   }
 
   /**
@@ -276,8 +343,8 @@
 {/snippet}
 
 <Modal
-  icon={icons.listCheck}
-  title={$_('media.batch.title')}
+  icon={batch?.hideable ? icons.delete : icons.listCheck}
+  title={dialogTitle}
   maxWidth="56rem"
   bind:this={modal}
   onclose={stopRefreshing}
@@ -300,12 +367,22 @@
         {/if}
       </div>
       <p class="text-base-content/80">
-        {#if reviewed}
+        {#if reviewed && hiding}
+          {$_('media.batch.summary.hide', [batch.planned.units])}
+        {:else if reviewed}
           {$_(`media.batch.summary.${action}`, scope)}
         {:else}
           {actionLabel ? `${actionLabel} · ${scope}` : scope}
         {/if}
       </p>
+      {#if reviewed && batch.operation === 'delete' && !hiding}
+        {@const permanent = batch.deletion === 'permanent'}
+        <p class="flex items-center gap-1.5 text-xs {permanent ? 'text-error' : 'text-base-content/60'}">
+          <iconify-icon icon={permanent ? icons.warning : icons.info} width="0.875rem" aria-hidden="true"
+          ></iconify-icon>
+          {$_(`media.batch.note.${permanent ? 'permanent' : 'trash'}`)}
+        </p>
+      {/if}
       {#if blocked}
         <p class="flex items-start gap-1.5 text-base-content/80">
           <iconify-icon icon={icons.warning} class="mt-0.5 shrink-0 text-warning" width="1rem" aria-hidden="true"
@@ -485,22 +562,35 @@
     {/if}
   {/if}
   <div class="modal-action flex-wrap items-center">
-    {#if batch?.confirmable && !failed && batch.operation === 'delete'}
-      {@const permanent = batch.deletion === 'permanent'}
-      <p class="mr-auto flex items-center gap-1.5 text-xs {permanent ? 'text-error' : 'text-base-content/60'}">
-        <iconify-icon icon={permanent ? icons.warning : icons.info} width="0.875rem" aria-hidden="true"></iconify-icon>
-        {$_(`media.batch.note.${permanent ? 'permanent' : 'trash'}`)}
-      </p>
+    {#if batch?.hideable && reviewed && !failed}
+      <!-- the box shows the plan in effect; a change reviews the other plan before it is shown -->
+      <label class="mr-auto flex cursor-pointer items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          checked={!hiding}
+          disabled={switching || $loading !== null}
+          onchange={(event) => {
+            const next = event.currentTarget.checked;
+            event.currentTarget.checked = !hiding;
+            void switchFiles(next);
+          }}
+        />
+        {$_('media.delete_local')}
+        {#if switching}<span class="loading loading-xs loading-spinner text-base-content/60"></span>{/if}
+      </label>
     {/if}
     {#if batch?.confirmable && !failed}
       <button
         type="button"
-        class="btn {batch.deletion === 'permanent' ? 'btn-error' : 'btn-primary'}"
-        disabled={$loading !== null}
-        onclick={apply}
+        class="btn {!hiding && batch.deletion === 'permanent' ? 'btn-error' : 'btn-primary'}"
+        disabled={$loading !== null || switching}
+        onclick={confirmApply}
       >
         {#if $loading !== null}<span class="loading loading-xs loading-spinner"></span>{/if}
-        {$_(`media.batch.confirm.${batch.deletion ?? 'apply'}`, $number(batch.planned.units))}
+        {hiding
+          ? $_('media.batch.confirm.hide')
+          : $_(`media.batch.confirm.${batch.deletion ?? 'apply'}`, $number(batch.planned.units))}
       </button>
     {/if}
     <button type="button" class="btn" onclick={() => modal.close()}>{$_('action.close', '')}</button>

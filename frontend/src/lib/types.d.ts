@@ -268,6 +268,12 @@ export type MediaBatch = {
   /** Whether this operation supports undo after finishing. */
   can_revert: boolean;
   deletion: 'trash' | 'permanent' | null;
+  /** Whether a deletion removes files; `false` only removes the items from the library. */
+  delete_files: boolean | null;
+  /** Whether the deletion selects items, which may leave the library without losing their files. */
+  hideable: boolean;
+  /** The reviewed request, sent again to review the other way of deleting. */
+  change: { item_ids?: number[]; delete_files?: boolean } & Record<string, unknown>;
   planned: { units: number; files: number; bytes: number; by_owner: Record<string, number> };
   blocked: { units: number; reasons: Record<string, number> };
   more: boolean;

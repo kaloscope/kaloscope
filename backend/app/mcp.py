@@ -388,7 +388,9 @@ def create_server() -> MCPServer:
             "delete with empty_dirs removes folders without any file and works "
             "with nothing left in them; leftovers also removes folders holding "
             "only loose files. revert with batch_id undoes a finished "
-            "rename or move batch. "
+            "rename or move batch. Deleting item_ids also deletes their files "
+            "unless delete_files is false, which only removes them from the "
+            "library; ask which unless the user said. "
             "Show planned and blocked counts, sample paths, the deletion mode and "
             "notes, page the plan with get_media_batch, and apply only after "
             "approval. A running batch is not done; repeat the apply call to read "
@@ -1841,8 +1843,10 @@ def create_server() -> MCPServer:
         Files are classified as `loose` (nothing uses them), `companion` (metadata,
         subtitles or artwork of an item), `unindexed` (content without an item),
         `page` (one page of a directory comic) or `indexed` (an item's body, whose
-        deletion removes the item). Summarize planned and blocked counts, the
-        deletion mode and notes in the user's language, and wait for confirmation.
+        deletion removes the item). Deleting item_ids with delete_files false keeps
+        every file and only removes the items from the library. Summarize planned
+        and blocked counts, the deletion mode and notes in the user's language, and
+        wait for confirmation.
 
         Args:
             ctx: Administrator request context.
@@ -1853,8 +1857,9 @@ def create_server() -> MCPServer:
             With one: `planned` and `blocked` units with reasons, source and
             destination samples, `unchanged` names left out, whether more matches
             remain beyond this batch, `deletion` (`trash` or `permanent`, null
-            unless deleting), notes, located issues, `revision` and, when valid, a
-            `request_id` and `batch_id` bound to this exact stored plan.
+            unless deleting files), `delete_files` for deletions, notes, located
+            issues, `revision` and, when valid, a `request_id` and `batch_id`
+            bound to this exact stored plan.
         """
         return MediaBatchReviewResult.model_validate(
             await _read(MediaBatchService.review(change, _user(ctx)))

@@ -5,6 +5,8 @@
 
   export type MediaActionsProps = {
     item: MediaItem;
+    /** Library holding the item, needed to review its deletion. */
+    libraryId: number;
     class?: string;
     triggerClass?: string;
     onclick?: () => void;
@@ -15,15 +17,43 @@
 </script>
 
 <script lang="ts">
-  import { DanmakuMatcher, Dropdown, MediaDelConfirm, MetadataScraper } from '$lib/components';
+  import { BatchPlanDialog, DanmakuMatcher, Dropdown, MetadataScraper, alert } from '$lib/components';
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
-  import { _ } from '$lib/i18n';
+  import { _, locale, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { describeEmptyReview, reviewItemDeletion } from '$lib/utils/media-batches';
+  import { mediaTitle } from '$lib/utils/media';
+  import { tick } from 'svelte';
 
-  let { item, class: _class, triggerClass, onclick, onscrape, ondelete, danmaku = false }: MediaActionsProps = $props();
+  let {
+    item,
+    libraryId,
+    class: _class,
+    triggerClass,
+    onclick,
+    onscrape,
+    ondelete,
+    danmaku = false
+  }: MediaActionsProps = $props();
   let matcher: DanmakuMatcher | null = $state(null);
   let scraper: MetadataScraper | null = $state(null);
-  let deleter: MediaDelConfirm | null = $state(null);
+  let deleter: BatchPlanDialog | null = $state(null);
+  // the plan dialog mounts on the first deletion, not once per card
+  let deleting = $state(false);
+
+  /**
+   * Review deleting this item, keeping its files by default, and show the plan.
+   */
+  async function reviewDeletion() {
+    const outcome = await reviewItemDeletion(libraryId, [item.id]);
+    if (!outcome.batch_id) {
+      alert({ level: 'warning', message: describeEmptyReview(outcome, $_, $number, $locale) });
+      return;
+    }
+    deleting = true;
+    await tick();
+    deleter?.showModal(outcome.batch_id, { title: mediaTitle(item) });
+  }
 </script>
 
 {#snippet action(icon: IconifyIcon, text: string, onclick: MouseEventHandler<HTMLElement>)}
@@ -70,7 +100,7 @@
     {/if}
     {#if ondelete}
       {@render action(icons.delete, $_('action.delete'), () => {
-        deleter?.showModal(item);
+        void reviewDeletion();
       })}
     {/if}
   </ul>
@@ -84,6 +114,6 @@
   <MetadataScraper bind:this={scraper} {item} {onscrape} />
 {/if}
 
-{#if ondelete}
-  <MediaDelConfirm bind:this={deleter} onconfirm={ondelete} />
+{#if ondelete && deleting}
+  <BatchPlanDialog bind:this={deleter} onfinish={ondelete} />
 {/if}

@@ -610,6 +610,10 @@ class MediaBatch(BaseModel):
     batch_id: PositiveInt | None = Field(
         default=None, description="revert: finished rename or move batch to undo."
     )
+    delete_files: bool = Field(
+        default=True,
+        description="delete by item_ids: false only removes them from the library.",
+    )
 
     @field_validator("extensions")
     @classmethod
@@ -668,7 +672,8 @@ class MediaBatch(BaseModel):
         Raises:
             ValueError: If item IDs are mixed with file filters, a deletion, rename
                 or move has no selector, a rule or destination is missing or misplaced,
-                organization is given file filters, or the size bounds are reversed.
+                organization is given file filters, files are kept outside an item
+                deletion, or the size bounds are reversed.
         """
         filtered = (
             self.directory is not None
@@ -694,6 +699,8 @@ class MediaBatch(BaseModel):
             raise ValueError("empty_dirs is a delete option with directory only.")
         if self.leftovers and not self.empty_dirs:
             raise ValueError("leftovers is only used with empty_dirs.")
+        if not self.delete_files and (self.operation != "delete" or not self.item_ids):
+            raise ValueError("delete_files=false only applies to deleting item_ids.")
         if self.operation in ("delete", "rename", "move") and not (
             self.item_ids or filtered or self.empty_dirs
         ):

@@ -374,6 +374,13 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         if change.operation is None:
             return cls._selection(base, entries, issues)
 
+        hiding = change.operation == "delete" and not change.delete_files
+        if hiding:
+            # an item leaves the library even when its body file is already gone
+            for entry in entries:
+                if entry.kind == "item" and entry.reason == "missing":
+                    entry.status, entry.reason = "planned", None
+
         planned = [entry for entry in entries if entry.status == "planned"]
         blocked = [entry for entry in entries if entry.status == "blocked"]
         # one item may be matched through several of its files
@@ -411,6 +418,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             )
 
         deleting = change.operation == "delete"
+        removing = deleting and not hiding
         reverting = change.operation == "revert"
         trash = KaloscopeConfig.get().filesystem_trash_mode
         reasons = _tally(entry.reason for entry in blocked)
@@ -439,6 +447,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         else "are deleted permanently; this cannot be undone."
                     )
                 )
+        elif hiding:
+            notes.append(
+                "The items only leave the library: their files and folders stay "
+                "on disk untouched, and the app cannot show the items again."
+            )
         elif deleting:
             notes.append(
                 "Files go to the system trash."
@@ -505,24 +518,24 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "Planning stopped at its time limit; review again after applying "
                 "for the remaining works."
             )
-        if deleting and owners[FileOwner.INDEXED]:
+        if removing and owners[FileOwner.INDEXED]:
             notes.append(
                 f"{owners[FileOwner.INDEXED]} indexed items are removed from the "
                 "library with their watch or reading history and their own "
                 "metadata, subtitles and artwork."
             )
-        if deleting and owners[FileOwner.COMPANION]:
+        if removing and owners[FileOwner.COMPANION]:
             notes.append(
                 f"{owners[FileOwner.COMPANION]} files are metadata, subtitles or "
                 "artwork of items that stay; those items lose them, and a later "
                 "scan may fetch metadata again."
             )
-        if deleting and owners[FileOwner.PAGE]:
+        if removing and owners[FileOwner.PAGE]:
             notes.append(
                 f"{owners[FileOwner.PAGE]} files are comic pages; their comics are "
                 "indexed again afterwards."
             )
-        if deleting and owners[FileOwner.UNINDEXED]:
+        if removing and owners[FileOwner.UNINDEXED]:
             notes.append(
                 f"{owners[FileOwner.UNINDEXED]} files are content the library "
                 "has not indexed."
@@ -532,7 +545,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 f"{reasons['owner_excluded']} matches belong to other file classes "
                 "and are not included; name them in owners to include them."
             )
-        notes.extend(cleanup_notes)
+        if not hiding:
+            # these name the parent files a deletion removes
+            notes.extend(cleanup_notes)
         if len(unique) > BATCH_LIMIT:
             notes.append(
                 f"Only the first {BATCH_LIMIT} of {len(unique)} units are in this "
@@ -542,7 +557,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         revision = _digest(
             [
                 cls._library_facts(lib),
-                ("trash" if trash else "permanent") if deleting else None,
+                ("trash" if trash else "permanent") if removing else None,
                 change.model_dump(mode="json"),
                 [
                     [entry.kind, entry.src, entry.dst, entry.identity]
@@ -565,7 +580,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "blocked": {"units": len(blocked), "reasons": dict(reasons)},
             "more": more,
             "unchanged": unchanged,
-            "deletion": ("trash" if trash else "permanent") if deleting else None,
+            "deletion": ("trash" if trash else "permanent") if removing else None,
+            "delete_files": not hiding if deleting else None,
             "can_revert": effective in ("rename", "move"),
             "sample": cls._sample(
                 [*planned, *blocked] if cleanup_notes else [*blocked, *planned]
@@ -1968,6 +1984,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "library_name": plan.get("library_name"),
             "batch_id": receipt.id,
             "can_revert": plan.get("operation") in ("rename", "move"),
+            "delete_files": not cls._hiding(receipt)
+            if plan.get("operation") == "delete"
+            else None,
             **await cls.counts(receipt.id),
             "reasons": dict(_tally(entry.reason for entry in unfinished)),
             "sample": [
@@ -2055,6 +2074,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             or plan.get("library") != cls._library_facts(lib)
             or (
                 change.operation == "delete"
+                and change.delete_files
                 and plan.get("deletion")
                 != (
                     "trash"
@@ -2155,6 +2175,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         entries = await MediaBatchEntry.filter(
             receipt_id=receipt.id, status="planned"
         ).order_by("seq")
+        hiding = cls._hiding(receipt)
         emptied: set[Path] = set()
         changed: set[Path] = set()
         reading = lib.lib_type in (LibType.NOVEL, LibType.COMIC)
@@ -2181,7 +2202,10 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             operation = (receipt.plan or {}).get("operation")
 
             try:
-                if chunk[0].kind == "dir" and chunk[0].identity:
+                if hiding and chunk[0].kind != "item":
+                    # hiding never touches files, and item selections plan only items
+                    outcomes = dict.fromkeys(ids, "owner_excluded")
+                elif chunk[0].kind == "dir" and chunk[0].identity:
                     outcomes = {chunk[0].id: await cls._remove_leftovers(chunk[0], lib)}
                 elif chunk[0].kind == "dir":
                     async with library_lock(lib.dir):
@@ -2197,6 +2221,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             if operation == "rename"
                             else cls._move_item(chunk[0], lib, root)
                             if operation == "move"
+                            else cls._hide_item(chunk[0])
+                            if hiding
                             else cls._delete_item(chunk[0], root)
                         )
                     }
@@ -2751,6 +2777,43 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         return "done"
 
     @staticmethod
+    def _hiding(receipt: MediaChangeReceipt) -> bool:
+        """Tell whether a batch only removes items from the library.
+
+        Args:
+            receipt: Batch header holding the reviewed change.
+
+        Returns:
+            Whether the batch is a deletion that keeps every file. Plans stored
+            before this choice existed always deleted files.
+        """
+        plan = receipt.plan or {}
+        change = plan.get("change") or {}
+        return plan.get("operation") == "delete" and change.get("delete_files") is False
+
+    @staticmethod
+    async def _hide_item(entry: MediaBatchEntry) -> str:
+        """Remove one reviewed item from the library and keep its files.
+
+        Args:
+            entry: Item entry marked as started.
+
+        Returns:
+            `done`, or the reason the item was left alone.
+        """
+        if entry.item_id is None:
+            return "missing"
+        try:
+            await MediaItemService.delete(entry.item_id)
+        except DoesNotExist:
+            return "missing"
+        except ContentError as error:
+            return error.code
+        except OrganizePendingError:
+            return "organize_pending"
+        return "done"
+
+    @staticmethod
     async def _delete_item(entry: MediaBatchEntry, root: Path) -> str:
         """Delete one reviewed item with its files through the library's own rules.
 
@@ -2838,12 +2901,16 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             receipt: Claimed batch with no runner alive.
         """
         lib = await MediaLib.get_or_none(id=receipt.lib_id)
+        hiding = MediaBatchService._hiding(receipt)
 
         for entry in await MediaBatchEntry.filter(
             receipt_id=receipt.id, status="started"
         ):
             status = "uncertain"
-            if entry.kind == "item" and entry.dst is None:
+            if entry.kind == "item" and hiding:
+                if not await MediaItem.exists(id=entry.item_id, visible=True):
+                    status = "done"
+            elif entry.kind == "item" and entry.dst is None:
                 if not await MediaItem.exists(id=entry.item_id):
                     status = "done"
             elif entry.kind == "item" and lib is not None:
@@ -2872,9 +2939,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             id: Batch identity.
 
         Returns:
-            The reviewed plan header, unit counts, whether it is `reviewed`,
-            `running` or `finished`, its recorded outcome, and whether its
-            operation supports undo (`can_revert`).
+            The reviewed plan header with its `change`, unit counts, whether it
+            is `reviewed`, `running` or `finished`, its recorded outcome, whether
+            its operation supports undo (`can_revert`), whether a deletion
+            removes files (`delete_files`), and whether it selects items that
+            could instead only leave the library (`hideable`).
 
         Raises:
             NotFoundException: If no batch has this identity.
@@ -2884,6 +2953,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             raise NotFoundException
 
         plan = receipt.plan
+        change = plan.get("change") or {}
         return loads(
             dumps(
                 {
@@ -2894,6 +2964,13 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "reverts": plan.get("reverts"),
                     "can_revert": plan.get("operation") in ("rename", "move"),
                     "deletion": plan.get("deletion"),
+                    "delete_files": not cls._hiding(receipt)
+                    if plan.get("operation") == "delete"
+                    else None,
+                    # only items can leave the library without losing their files
+                    "hideable": plan.get("operation") == "delete"
+                    and bool(change.get("item_ids")),
+                    "change": change,
                     "planned": plan.get("planned"),
                     "blocked": plan.get("blocked"),
                     "more": plan.get("more"),

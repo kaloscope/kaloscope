@@ -24,8 +24,8 @@
   import { _, locale, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
-  import type { MediaBatchOutcome, MediaItem, Page, Resp } from '$lib/types';
-  import { describeBatchReasons } from '$lib/utils/media-batches';
+  import type { MediaItem, Page, Resp } from '$lib/types';
+  import { describeEmptyReview, reviewItemDeletion } from '$lib/utils/media-batches';
   import { compactRecord } from '$lib/utils/object';
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -135,39 +135,19 @@
   }
 
   /**
-   * Explain why a deletion review produced no plan.
-   *
-   * @param outcome - Review that returned no batch.
-   * @returns The translated reason, naming each blocking cause with its count when there is one.
-   */
-  function emptyReviewMessage(outcome: MediaBatchOutcome): string {
-    const reasons = describeBatchReasons(outcome.blocked?.reasons ?? {}, $_, $number, $locale);
-    if (reasons) {
-      return $_('alert.media_batch_blocked', reasons);
-    }
-    // for a deletion, an `item_ids` issue means a selected item left this library
-    if (outcome.issues?.some((issue) => issue.path === 'item_ids')) {
-      return $_('alert.media_batch_mismatch');
-    }
-    return $_('alert.media_batch_empty');
-  }
-
-  /**
-   * Review deleting the selected items with their files and show the plan for confirmation.
+   * Review deleting the selected items and show the plan for confirmation.
    */
   function reviewDeletion() {
     if (!lib || selected.length === 0) {
       return;
     }
     reviewLoading.start();
-    api
-      .post('media/batch/review', { json: { library_id: lib.id, operation: 'delete', item_ids: selected } })
-      .json<Resp<MediaBatchOutcome>>()
-      .then(({ data }) => {
+    reviewItemDeletion(lib.id, selected)
+      .then((data) => {
         if (data.batch_id) {
           planDialog?.showModal(data.batch_id);
         } else {
-          alert({ level: 'warning', message: emptyReviewMessage(data) });
+          alert({ level: 'warning', message: describeEmptyReview(data, $_, $number, $locale) });
         }
       })
       .finally(() => reviewLoading.end());
@@ -356,6 +336,7 @@
           >
             <MediaActions
               {item}
+              libraryId={Number(libId)}
               danmaku={lib?.lib_type === 'movie' || lib?.lib_type === 'tv_show'}
               class="dropdown-left dropdown-end"
               triggerClass={btnClass}

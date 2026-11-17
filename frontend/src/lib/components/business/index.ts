@@ -24,7 +24,6 @@ export { default as Uploader } from './indexer/Uploader.svelte';
 export { default as BatchPlanDialog } from './library/BatchPlanDialog.svelte';
 export { default as DanmakuMatcher } from './library/DanmakuMatcher.svelte';
 export { default as MediaActions } from './library/MediaActions.svelte';
-export { default as MediaDelConfirm } from './library/MediaDelConfirm.svelte';
 export { default as MediaLibEditor } from './library/MediaLibEditor.svelte';
 export { default as MediaLibEmpty } from './library/MediaLibEmpty.svelte';
 export { default as MetadataScraper } from './library/MetadataScraper.svelte';
