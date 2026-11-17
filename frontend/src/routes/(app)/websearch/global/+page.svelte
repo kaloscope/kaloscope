@@ -222,7 +222,7 @@
       {#if $user?.role === 'admin'}
         <a href="/settings/workflows/templates" class="empty-action">
           <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>
-          {$_('empty.indexers.action')}
+          {$_('empty.browse_templates')}
         </a>
       {/if}
     </Empty>

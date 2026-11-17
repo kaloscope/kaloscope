@@ -5,16 +5,16 @@
     "setup_welcome": "Welcome",
     "setup_description": "Create an admin account to get started",
     "setup_create_admin": "Create Admin Account",
-    "login": "Login",
-    "logout": "Logout",
+    "login": "Log In",
+    "logout": "Log Out",
     "switch_theme": "Switch Theme",
     "switch_language": "Switch Language",
     "notifications": "Notifications",
-    "check_updates": "Check for Updates...",
-    "checking_updates": "Checking for updates...",
-    "up_to_date": "You are already using the latest version",
+    "check_updates": "Check for Updates…",
+    "checking_updates": "Checking for updates…",
+    "up_to_date": "You're using the latest version",
     "latest_version": "New version available:",
-    "update_check_failed": "Could not check for updates. Please try again.",
+    "update_check_failed": "Couldn't check for updates. Try again.",
     "exit_fullscreen": "Exit Full Screen",
     "enter_fullscreen": "Enter Full Screen",
     "pwa_install": "Install App",
@@ -80,7 +80,7 @@
       "help": {
         "title": "Help",
         "doc": "Documentation",
-        "issue": "Report Issue..."
+        "issue": "Report Issue…"
       }
     }
   },
@@ -105,7 +105,7 @@
       "downloading": "Downloading",
       "submitting": "Submitting",
       "submit_unknown": "Submission Unknown",
-      "remote": "Remote Download",
+      "remote": "Downloading Remotely",
       "settling": "Preparing Files",
       "pulling": "Pulling Files",
       "verifying": "Verifying Files",
@@ -149,13 +149,11 @@
   "empty": {
     "boards": {
       "title": "Nothing on your dashboard yet",
-      "tip": "Publish a search workflow with a board to see trending lists and weekly schedules here.",
-      "action": "Browse Templates"
+      "tip": "Publish a search workflow with a board to see trending lists and weekly schedules here."
     },
     "indexers": {
       "title": "No indexers yet",
-      "tip": "Indexers are workflows that search sites for you. Publish one to start searching.",
-      "action": "Browse Templates"
+      "tip": "Indexers are workflows that search sites for you. Publish one to start searching."
     },
     "medialibs": {
       "title": "No media libraries yet",
@@ -166,10 +164,11 @@
       "title": "No downloader connected",
       "tip": "Connect a downloader to start downloads and follow their progress here.",
       "action": "Set Up Downloaders"
-    }
+    },
+    "browse_templates": "Browse Templates"
   },
   "data": {
-    "nodata": "No Data Found",
+    "nodata": "No data",
     "loading": "Loading…",
     "paginator": {
       "total": "{0} entries",
@@ -204,7 +203,6 @@
     "graph": "Graph",
     "year": "Year",
     "season": "Season",
-    "episode": "Episode",
     "episode_title": "Episode Title",
     "plot": "Plot",
     "rating": "Rating",
@@ -219,47 +217,37 @@
     "batch_limit": "Batch Limit",
     "total_limit": "Total Limit",
     "total_count": "Downloaded",
-    "last_exec": "Last Executed",
+    "last_exec": "Last Run",
     "pattern": "Pattern",
     "protocol": "Protocol",
     "http_proxy": "HTTP Proxy",
     "secure_dns": "Secure DNS",
     "nameserver": "Nameserver",
-    "created": "Created Date",
-    "updated": "Updated Date",
+    "created": "Created",
+    "updated": "Updated",
     "actions": "Actions"
   },
   "entity": {
-    "log": "Log",
     "logs": "Logs",
     "user": "User",
-    "users": "Users",
     "task": "Task",
     "tasks": "Tasks",
     "rule": "Rule",
-    "rules": "Rules",
     "graph": "Graph",
     "graphs": "Graphs",
     "job": "Job",
-    "jobs": "Jobs",
     "plan": "Plan",
-    "plans": "Plans",
     "source": "Source",
     "sources": "Sources",
-    "filter": "Filter",
     "filters": "Filters",
     "template": "Template",
-    "templates": "Templates",
     "favorite": "Favorite",
     "favorites": "Favorites",
     "notification": "Notification",
     "notifications": "Notifications",
     "variable": "Variable",
-    "variables": "Variables",
     "download": "Download",
-    "downloads": "Downloads",
     "transcode": "Transcode Task",
-    "transcodes": "Transcode Tasks",
     "metadata": "Metadata",
     "media_lib": "Media Library",
     "media_libs": "Media Libraries",
@@ -273,7 +261,7 @@
     "add": "New {0}",
     "edit": "Edit {0}",
     "view": "View {0}",
-    "enter": "Enter {0}",
+    "enter": "Search by {0}",
     "scan": "Scan {0}",
     "stop": "Stop {0}",
     "start": "Start {0}",
@@ -307,13 +295,13 @@
     "move_down": "Move Down {0}",
     "toggle_on": "On",
     "toggle_off": "Off",
-    "assign_permissions": "Permissions",
+    "assign_permissions": "Assign Permissions",
     "batch_delete": "Batch Delete {0}"
   },
   "status": {
-    "up": "UP",
-    "down": "DOWN",
-    "unknown": "UNKNOWN"
+    "up": "Online",
+    "down": "Offline",
+    "unknown": "Unknown"
   },
   "session": {
     "os": "OS",
@@ -321,8 +309,8 @@
     "duration": "Login Duration",
     "activity": "Last Activity",
     "kill": {
-      "one": "Kill this session?",
-      "others": "Kill other sessions?"
+      "one": "Sign out this device?",
+      "others": "Sign out all other devices?"
     }
   },
   "access_token": {
@@ -335,9 +323,9 @@
     "expires_at": "Expires",
     "last_used_at": "Last Used",
     "unused": "Never used",
-    "read_only": "Read-only",
+    "read_only": "Read-Only",
     "scope": "Permissions",
-    "read_write": "Read-write",
+    "read_write": "Read-Write",
     "read_only_hint": "Read data within your account permissions, without making changes.",
     "read_write_hint": "Read and write data within your account permissions.",
     "status": {
@@ -355,10 +343,10 @@
     "auth_header": "Authorization Header",
     "auth_hint": "Replace <token> with the full token copied at creation. If your client has a Bearer Token field, enter only the token itself.",
     "copied": "Copied",
-    "copy_failed": "Unable to copy automatically. Copy the selected text manually.",
-    "load_failed": "Unable to load access tokens",
-    "create_failed": "Unable to create the token. Refresh the list before retrying.",
-    "delete_failed": "Unable to delete the token. Try again."
+    "copy_failed": "Couldn't copy automatically. Copy the selected text manually.",
+    "load_failed": "Couldn't load access tokens",
+    "create_failed": "Couldn't create the token. Refresh the list and try again.",
+    "delete_failed": "Couldn't delete the token. Try again."
   },
   "duration": {
     "millisecond": "Millisecond",
@@ -392,7 +380,7 @@
     },
     "dashboard": {
       "title": "Dashboard",
-      "tip": "Set the modules displayed on the dashboard.",
+      "tip": "Choose which sections appear on the dashboard.",
       "search": "Recent Searches",
       "watch": "Recent Watches",
       "read": "Recent Reads"
@@ -400,9 +388,9 @@
     "privacy": {
       "title": "Privacy",
       "tip": "Choose how long to keep each type of history.",
-      "search": "Search Records",
-      "watch": "Watch Records",
-      "read": "Reading Records",
+      "search": "Search History",
+      "watch": "Watch History",
+      "read": "Reading History",
       "permanent": "Keep Forever",
       "untrack": "Do Not Save"
     }
@@ -425,7 +413,7 @@
       "unix_socket": "Unix Socket Path",
       "unix_socket_tip": "Enter the absolute socket file path, using the mounted path inside the container for Docker deployments.",
       "rpc_secret": "RPC Secret",
-      "advanced_mode": "YAML advanced mode",
+      "advanced_mode": "YAML Advanced Mode",
       "custom_yaml_only": "Custom downloaders require a complete YAML configuration.",
       "openlist": {
         "token": "API Token",
@@ -441,10 +429,10 @@
         "supported": "Enter a URI supported by the selected tool"
       }
     },
-    "dir": "Save to",
-    "start": "Start when added",
+    "dir": "Save To",
+    "start": "Start When Added",
     "prompt": "Enter URI or choose a torrent file",
-    "supported": "Magnet link or info-hash are supported",
+    "supported": "Supports magnet links and info hashes",
     "error": {
       "submit_unknown": "Submission result is unknown",
       "instance_auth": "OpenList authentication failed",
@@ -464,28 +452,28 @@
     "delete_local": "Also delete the local files",
     "batch_delete_title": "Delete {0} Downloads",
     "transfer": {
-      "title": "Transfer after download",
-      "none": "No transfer",
-      "method": "Transfer method",
-      "substitution": "Filename substitution",
+      "title": "Transfer After Download",
+      "none": "No Transfer",
+      "method": "Transfer Method",
+      "substitution": "Filename Substitution",
       "sub_pattern": "Regular expression, e.g. ^(.+/)?",
-      "sub_repl": "Replacement string"
+      "sub_repl": "Replacement String"
     }
   },
   "media": {
     "play": "Play",
-    "continue_play": "Continue playing",
+    "continue_play": "Continue Playing",
     "read": "Read",
-    "continue_read": "Continue reading",
+    "continue_read": "Continue Reading",
     "part": "Part {0}",
     "chapter": "Content {0}",
     "parts": "Parts",
     "episodes": "Episodes",
     "rename": {
-      "template": "Automatic rename template",
+      "template": "Auto-Rename Template",
       "tip": "Rename and organize media with a template. Leave blank to disable."
     },
-    "scan_on_startup": "Full scan on startup",
+    "scan_on_startup": "Full Scan on Startup",
     "movie_layout": "Store videos directly in the library folder or in a folder per movie.",
     "tv_show_layout": "Use a folder per show under the library, with videos directly inside or in season folders.",
     "novel_layout": "Use a folder per novel under the library, containing one TXT or EPUB file.",
@@ -493,10 +481,8 @@
     "loading": "Loading content",
     "loading_chapters": "Loading chapters",
     "delete_local": "Also delete the local files",
-    "delete_local_confirm": "Are you sure you want to delete the local files?",
+    "delete_local_confirm": "Delete the local files?",
     "text": {
-      "chapters": "Chapters",
-      "settings": "Settings",
       "theme": "Theme",
       "theme_options": {
         "white": "White",
@@ -520,13 +506,11 @@
       "line_height": "Line Height",
       "para_spacing": "Paragraph Spacing",
       "padding_x": "Horizontal Padding",
-      "image_load_failed": "Failed to load image",
+      "image_load_failed": "Couldn't load image",
       "image_unavailable": "Image unavailable"
     },
     "image": {
-      "chapters": "Chapters",
-      "settings": "Settings",
-      "load_failed": "Failed to load image pages",
+      "load_failed": "Couldn't load image pages",
       "read_mode": "Read Mode",
       "read_mode_options": {
         "scroll": "Scroll",
@@ -551,7 +535,7 @@
       "rotate": "Rotate",
       "default": "Default",
       "definition": "Definition",
-      "press_rate": "Press Rate",
+      "press_rate": "Long-Press Speed",
       "landscape": {
         "title": "Landscape Mode",
         "tip": "Only certain mobile devices support locking landscape mode via the Web API.",
@@ -586,7 +570,7 @@
       "speed": "Speed",
       "opacity": "Opacity",
       "font_size": "Font Size",
-      "block": "Block",
+      "block": "Block Types",
       "merge": "Merge",
       "merge_tip": "Merge comments with identical content.",
       "block_pattern": "Regex Filter",
@@ -608,39 +592,39 @@
       "error_types": {
         "network": {
           "code": 1,
-          "msg": "video download error"
+          "msg": "Video download error"
         },
         "mse": {
           "code": 2,
-          "msg": "stream append error"
+          "msg": "Stream append error"
         },
         "parse": {
           "code": 3,
-          "msg": "parsing error"
+          "msg": "Parsing error"
         },
         "format": {
           "code": 4,
-          "msg": "wrong format"
+          "msg": "Invalid format"
         },
         "decoder": {
           "code": 5,
-          "msg": "decoding error"
+          "msg": "Decoding error"
         },
         "runtime": {
           "code": 6,
-          "msg": "grammatical errors"
+          "msg": "Runtime error"
         },
         "timeout": {
           "code": 7,
-          "msg": "play timeout"
+          "msg": "Playback timeout"
         },
         "other": {
           "code": 8,
-          "msg": "other errors"
+          "msg": "Other error"
         }
       },
       "have_nothing": "There is no information on whether audio/video is ready",
-      "have_metadata": "Audio/video metadata is ready ",
+      "have_metadata": "Audio/video metadata is ready",
       "have_current_data": "Data about the current play location is available, but there is not enough data to play the next frame/millisecond",
       "have_future_data": "Current and at least one frame of data is available",
       "have_enough_data": "The available data is sufficient to start playing",
@@ -648,7 +632,7 @@
       "network_idle": "Audio/video is active and has been selected for resources, but no network is used",
       "network_loading": "The browser is downloading the data",
       "network_no_source": "No audio/video source was found",
-      "media_err_aborted": "The fetch process is aborted by the user",
+      "media_err_aborted": "Loading was cancelled",
       "media_err_network": "An error occurred while downloading",
       "media_err_decode": "An error occurred while decoding",
       "media_err_src_not_supported": "Audio/video is not supported",
@@ -656,17 +640,17 @@
       "error": "Network is offline",
       "play_tips": "Play",
       "pause_tips": "Pause",
-      "playnext_tips": "Play next",
+      "playnext_tips": "Play Next",
       "download_tips": "Download",
       "rotate_tips": "Rotate",
       "reload_tips": "Reload",
-      "fullscreen_tips": "Fullscreen",
-      "exitfullscreen_tips": "Exit fullscreen",
-      "cssfullscreen_tips": "Cssfullscreen",
-      "exitcssfullscreen_tips": "Exit cssfullscreen",
+      "fullscreen_tips": "Full Screen",
+      "exitfullscreen_tips": "Exit Full Screen",
+      "cssfullscreen_tips": "Page Full Screen",
+      "exitcssfullscreen_tips": "Exit Page Full Screen",
       "texttrack": "Subtitle",
       "texttrack_off": "Off",
-      "pip": "PIP",
+      "pip": "Picture in Picture",
       "screenshot": "Screenshot",
       "live": "LIVE",
       "off": "Off",
@@ -750,14 +734,13 @@
         "item_changed": "Became a library item",
         "library_changed": "Library changed",
         "unsafe_path": "Outside the library",
-        "io_error": "Could not be deleted",
+        "io_error": "Couldn't be deleted",
         "organize_pending": "Organization unfinished",
         "media_source_unavailable": "Source unavailable",
         "interrupted": "Interrupted",
         "error": "Unexpected error",
         "follows_item": "Handled with its owning item",
         "page_order": "Page order depends on names",
-        "unsupported_library": "Not supported in this library",
         "template_managed": "Named by the template",
         "invalid_name": "Result is not a valid name",
         "name_conflict": "Same new name twice",
@@ -782,7 +765,9 @@
         "move": "Move"
       },
       "reverts": "Undoes batch #{0}"
-    }
+    },
+    "chapters": "Chapters",
+    "reader_settings": "Reading Settings"
   },
   "metadata": {
     "fields": {
@@ -839,7 +824,7 @@
       "qsv": "QSV",
       "vaapi": "VAAPI",
       "nvenc": "NVENC",
-      "videotoolbox": "VideoToolBox"
+      "videotoolbox": "VideoToolbox"
     },
     "vaapi_device": {
       "title": "VAAPI Device",
@@ -855,7 +840,7 @@
       "reconnecting": "Reconnecting"
     },
     "empty": "No system logs",
-    "levels": "Log levels",
+    "levels": "Log Levels",
     "follow": "Follow",
     "clear_confirm": "Clear all buffered system logs?"
   },
@@ -867,8 +852,8 @@
     "interactivity": "Toggle Interactivity",
     "autosaving": "Saving in {0} seconds",
     "autosave": {
-      "on": "Turn on AutoSave",
-      "off": "Turn off AutoSave"
+      "on": "Turn On Auto-Save",
+      "off": "Turn Off Auto-Save"
     },
     "node": {
       "group": {
@@ -982,10 +967,10 @@
     },
     "tmpl": {
       "last_sync": "Last sync: {0}",
-      "confirm_repo": "Please enter the GitHub repository full name or URL:",
-      "confirm_name": "Please confirm the name to use:",
+      "confirm_repo": "Enter the GitHub repository (owner/repo) or its URL:",
+      "confirm_name": "Confirm the name to use:",
       "confirm_upgrade": "Upgrade to the latest version? Published workflows will be unpublished.",
-      "risk_warning": "Using workflow definitions from third-party repositories may pose security risks, please ensure you trust the source."
+      "risk_warning": "Workflows from third-party repositories may pose security risks. Use only sources you trust."
     },
     "trigger": {
       "count": "Workflow Count",
@@ -997,8 +982,8 @@
   "code": {
     "evaluator": "Evaluator",
     "var_name": "Variable Name",
-    "raw_doc": "Raw Document...",
-    "eval_result": "Evaluation Result..."
+    "raw_doc": "Raw Document…",
+    "eval_result": "Evaluation Result…"
   },
   "codemirror": {
     "find": "Find",
@@ -1022,125 +1007,125 @@
   "notification": {
     "download_failed": {
       "title": "Download Failed",
-      "content": "\"{name}\" failed to download!{has_error, select, yes { Error message: {error}} other {}}"
+      "content": "“{name}” failed to download{has_error, select, yes {: {error}} other {}}"
     },
     "download_completed": {
       "title": "Download Completed",
-      "content": "\"{name}\" downloaded successfully!"
+      "content": "“{name}” finished downloading"
     }
   },
   "message": {
     "cancel": "Cancel",
     "confirm": "OK",
     "default": {
-      "title": "Confirm your action",
-      "content": "Are you sure you want to continue?"
+      "title": "Confirm Action",
+      "content": "Do you want to continue?"
     },
     "leave": {
-      "title": "Do you want to leave?",
+      "title": "Leave this page?",
       "content": "Changes you made may not be saved."
     },
     "clear": {
       "title": "Clear All",
-      "content": "Are you sure you want to delete all records?"
+      "content": "Delete all records?"
     }
   },
   "alert": {
-    "internal_server_error": "Internal server error!",
-    "unauthorized": "Unauthorized!",
-    "bad_request": "Invalid request parameters!",
-    "forbidden": "Forbidden access!",
-    "not_found": "Requested resource not found!",
-    "login_failed": "Login failed!",
-    "login_expired": "Login expired!",
-    "user_not_found": "User not found!",
-    "flow_not_found": "Workflow definition not found!",
-    "flow_not_published": "Workflow is not published!",
-    "flow_already_running": "Workflow task is already running!",
-    "flow_draft_conflict": "Workflow draft changed; copy your edits before reopening it!",
-    "flow_graph_invalid": "Invalid workflow nodes, fields, or connections; check before saving or publishing!",
-    "flow_not_editable": "Workflow is read-only; create an editable copy first!",
-    "name_already_exists": "Name already exists!",
-    "username_already_exists": "Username already exists!",
-    "pattern_already_exists": "Pattern already exists!",
-    "scan_in_progress": "Scanning in progress, please try again later!",
-    "incorrect_password": "Incorrect password!",
-    "passwords_mismatch": "Passwords don't match!",
-    "password_changed": "Password changed!",
-    "permission_denied": "Permission denied!",
-    "duplicate_directory": "Duplicate directory!",
-    "invalid_flow_graph": "Not all required fields are filled!",
-    "invalid_boot_params": "Invalid boot parameters!",
-    "invalid_yaml_config": "Invalid YAML configuration!",
-    "invalid_github_repo": "Invalid GitHub repository!",
-    "invalid_download_source": "The selected downloader does not support this source!",
-    "info_hash_collision": "Download already exists!",
-    "http_request_failed": "HTTP request failed!",
+    "internal_server_error": "Internal server error",
+    "unauthorized": "Authentication failed",
+    "bad_request": "Invalid request parameters",
+    "forbidden": "Access denied",
+    "not_found": "Requested resource not found",
+    "login_failed": "Login failed",
+    "login_expired": "Login expired",
+    "user_not_found": "User not found",
+    "flow_not_found": "Workflow not found",
+    "flow_not_published": "Workflow not published",
+    "flow_already_running": "Workflow is already running",
+    "flow_draft_conflict": "Workflow draft changed. Copy your edits before reopening it.",
+    "flow_graph_invalid": "Invalid workflow nodes, fields, or connections. Check them before saving or publishing.",
+    "flow_not_editable": "This workflow is read-only. Create an editable copy first.",
+    "name_already_exists": "Name already exists",
+    "username_already_exists": "Username already exists",
+    "pattern_already_exists": "Pattern already exists",
+    "scan_in_progress": "A scan is in progress. Try again later.",
+    "incorrect_password": "Incorrect password",
+    "passwords_mismatch": "Passwords don't match",
+    "password_changed": "Password changed",
+    "permission_denied": "Permission denied",
+    "duplicate_directory": "Duplicate directory",
+    "invalid_flow_graph": "Fill in all required fields",
+    "invalid_boot_params": "Invalid boot parameters",
+    "invalid_yaml_config": "Invalid YAML configuration",
+    "invalid_github_repo": "Invalid GitHub repository",
+    "invalid_download_source": "The selected downloader doesn't support this source",
+    "info_hash_collision": "Download already exists",
+    "http_request_failed": "HTTP request failed",
     "danmaku_server_required": "Configure the library's danmaku server first.",
     "danmaku_match_failed": "Danmaku matching failed. Retry or select another result.",
     "media_batch_stale": "The plan expired or the library changed. Review it again.",
     "media_batch_pending": "Another batch is running on this library. Try again when it has finished.",
     "media_batch_empty": "Nothing can be deleted: every selected item is left alone.",
-    "resource_load_failed": "Unable to load this content. Try another resource or try again later.",
-    "magnet_link_copied": "Magnet link copied!",
-    "select_export_items": "Please select at least one item to export.",
-    "select_delete_items": "Please select at least one item to delete.",
-    "export_items_failed": "Failed to export the items!",
-    "import_items_failed": "Failed to import the items!",
-    "import_items_success": "Successfully imported {0} items!",
-    "upgrade_success": "Upgrade successful!",
-    "file_not_exists": "File does not exist!",
-    "media_source_unavailable": "The media source is unavailable!",
-    "content_changed": "Media content changed. Please try again!",
-    "reading_history_load_failed": "Unable to load reading progress. Starting at the beginning of the chapter.",
-    "reading_progress_save_failed": "Unable to save reading progress. Please try again later!",
+    "resource_load_failed": "Couldn't load this content. Try another resource or try again later.",
+    "magnet_link_copied": "Magnet link copied",
+    "select_export_items": "Select at least one item to export.",
+    "select_delete_items": "Select at least one item to delete.",
+    "export_items_failed": "Couldn't export the items",
+    "import_items_failed": "Couldn't import the items",
+    "import_items_success": "Imported {0} items",
+    "upgrade_success": "Update complete",
+    "file_not_exists": "File not found",
+    "media_source_unavailable": "Media source unavailable",
+    "content_changed": "Media content changed. Try again.",
+    "reading_history_load_failed": "Couldn't load reading progress. Starting from the beginning of the chapter.",
+    "reading_progress_save_failed": "Couldn't save reading progress. Try again later.",
     "reading_position_reset": "The saved position is no longer available. Starting at the beginning of an available chapter.",
-    "content_not_ready": "Media content is not ready. Please try again later!",
-    "empty_content": "The media source has no readable content!",
-    "unsupported_layout": "The media directory layout is not supported!",
-    "ambiguous_layout": "The media directory contains conflicting content sources!",
-    "unsupported_media_format": "This media format is not supported!",
-    "media_limit_exceeded": "The media exceeds the reading limit!",
-    "invalid_archive": "The archive is damaged or invalid!",
-    "invalid_epub": "The EPUB structure is invalid!",
-    "invalid_image": "The image format is invalid!",
-    "invalid_metadata": "The metadata file is invalid!",
-    "metadata_write_failed": "The metadata file could not be saved!",
-    "ambiguous_metadata": "The metadata source is ambiguous!",
+    "content_not_ready": "Media content isn't ready yet. Try again later.",
+    "empty_content": "The media source has no readable content",
+    "unsupported_layout": "This media folder layout isn't supported",
+    "ambiguous_layout": "The media folder contains conflicting content sources",
+    "unsupported_media_format": "This media format isn't supported",
+    "media_limit_exceeded": "The media exceeds the reading limit",
+    "invalid_archive": "The archive is damaged or invalid",
+    "invalid_epub": "Invalid EPUB structure",
+    "invalid_image": "Invalid image format",
+    "invalid_metadata": "Invalid metadata file",
+    "metadata_write_failed": "Couldn't save the metadata file",
+    "ambiguous_metadata": "Multiple metadata files with unclear ownership",
     "ai_models_auth_failed": "Provider authentication failed. Check the API key and its permission to list models.",
     "ai_models_unsupported": "This URL does not support model discovery. Check the API URL or enter model IDs manually.",
     "ai_models_rate_limited": "The provider rate limit was reached. Try again later.",
     "ai_models_timeout": "Model discovery timed out. Check the connection and retry.",
     "ai_models_invalid_response": "The provider returned an invalid or oversized model list. Enter model IDs manually.",
-    "ai_models_fetch_failed": "Could not fetch models. Check the API URL and network, or enter model IDs manually.",
-    "ai_provider_missing": "The AI provider was deleted or is unavailable; select another provider in the node.",
-    "ai_provider_disabled": "The AI provider is disabled; enable it or select another provider in the node.",
-    "ai_model_missing": "The selected model is no longer configured; select it again in the node.",
-    "ai_key_unavailable": "The AI provider key is missing or unreadable; save a valid API key in provider settings.",
-    "ai_config_invalid": "Invalid AI node settings; check the model, prompt, limits, and output variable.",
+    "ai_models_fetch_failed": "Couldn't fetch models. Check the API URL and network, or enter model IDs manually.",
+    "ai_provider_missing": "The AI provider was deleted or is unavailable. Select another one in the node.",
+    "ai_provider_disabled": "The AI provider is disabled. Enable it or select another one in the node.",
+    "ai_model_missing": "The selected model is no longer configured. Select it again in the node.",
+    "ai_key_unavailable": "The AI provider key is missing or unreadable. Save a valid API key in provider settings.",
+    "ai_config_invalid": "Invalid AI node settings. Check the model, prompt, limits, and output variable.",
     "ai_prompt_invalid": "The AI prompt is empty, too long, or contains an invalid template or missing variable.",
-    "ai_schema_invalid": "Invalid output schema; use a Draft 2020-12 object schema without references.",
-    "ai_auth_failed": "AI authentication failed; check the API key and model permissions.",
-    "ai_rate_limited": "The AI provider rate limit or quota was exceeded; check the quota and retry later.",
-    "ai_timeout": "The AI request timed out; check the connection or increase the node timeout.",
-    "ai_request_rejected": "The AI provider rejected the request; check the API address, model, and generation parameters.",
-    "ai_request_failed": "The AI request failed; check the provider and network connection.",
+    "ai_schema_invalid": "Invalid output schema. Use a Draft 2020-12 object schema without references.",
+    "ai_auth_failed": "AI authentication failed. Check the API key and model permissions.",
+    "ai_rate_limited": "The AI provider rate limit or quota was exceeded. Check the quota and try again later.",
+    "ai_timeout": "The AI request timed out. Check the connection or increase the node timeout.",
+    "ai_request_rejected": "The AI provider rejected the request. Check the API URL, model, and generation parameters.",
+    "ai_request_failed": "The AI request failed. Check the provider and network connection.",
     "ai_response_invalid": "The AI provider returned an empty, invalid, or oversized response.",
-    "ai_output_invalid": "The AI output does not match the JSON schema; check the prompt, model, and output schema.",
-    "ai_output_truncated": "The AI output was truncated; increase the output token limit or shorten the requested response.",
-    "ai_output_refused": "The model refused the request or filtered its response; review the prompt.",
+    "ai_output_invalid": "The AI output doesn't match the JSON schema. Check the prompt, model, and output schema.",
+    "ai_output_truncated": "The AI output was truncated. Increase the output token limit or ask for a shorter response.",
+    "ai_output_refused": "The model refused the request or filtered its response. Review the prompt.",
     "ai_assistant_limit": "This request exceeded a processing limit. Narrow the scope or split the task.",
     "assistant_context_limit": "The current input is too large. Narrow the question or page snapshot. Your history is saved.",
     "assistant_context_invalid": "Couldn't read page details. Wait for the page to load and try again.",
     "assistant_models_failed": "Couldn't load models. Reopen the assistant to retry.",
     "assistant_model_required": "Select an available model.",
     "assistant_stream_invalid": "The reply format is invalid. Try again.",
-    "assistant_stream_interrupted": "Try again to generate the reply.",
+    "assistant_stream_interrupted": "Reply interrupted. Try again.",
     "assistant_busy": "A conversation is generating a reply. Refresh shortly.",
     "assistant_request_exists": "This request was already submitted. Refresh the conversation to see its result.",
     "assistant_result_limit": "The tool result is too large. Narrow the query or request a smaller page.",
     "assistant_compaction_failed": "Context summarization did not complete. Original history is preserved. Retry or select another model.",
-    "assistant_history_failed": "Could not load or update the conversation. Please retry.",
+    "assistant_history_failed": "Couldn't load or update the conversation. Try again.",
     "assistant_title_invalid": "Use a conversation title of 1–120 characters.",
     "assistant_proposal_changed": "The canvas edit record changed. Ask the assistant to edit again.",
     "assistant_canvas_changed": "The canvas changed. Send a new request using the current canvas.",
@@ -1150,8 +1135,8 @@
     "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it."
   },
   "ai": {
-    "custom": "Custom provider",
-    "configured": "Configured providers",
+    "custom": "Custom Provider",
+    "configured": "Configured Providers",
     "empty": "No providers configured",
     "base_url": "Base URL",
     "base_url_hint": "Include the API version path when needed, without /chat/completions.",
@@ -1160,18 +1145,18 @@
     "key_optional_hint": "Leave blank if this endpoint does not require authentication.",
     "key_saved": "API key configured",
     "key_missing": "No API key",
-    "test": "Test connection",
-    "test_success": "Connection successful.",
+    "test": "Test Connection",
+    "test_success": "Connection successful",
     "models": "Models",
     "models_hint": "One model ID per line, up to 100.",
     "enabled": "Enabled",
     "disabled": "Disabled",
     "toggle": "Enable {0}",
     "model_count": "{0} models",
-    "load_failed": "Could not load providers. Please retry.",
-    "save_failed": "Could not save this provider. Please retry.",
-    "update_failed": "Could not update the provider. Please retry.",
-    "delete_failed": "Could not delete the provider. Please retry.",
+    "load_failed": "Couldn't load providers. Try again.",
+    "save_failed": "Couldn't save this provider. Try again.",
+    "update_failed": "Couldn't update the provider. Try again.",
+    "delete_failed": "Couldn't delete the provider. Try again.",
     "name_required": "Enter a connection name.",
     "invalid_url": "Enter an HTTP or HTTPS URL without credentials, query parameters, or a fragment.",
     "invalid_key": "Use an API key containing only printable ASCII characters, without spaces.",
@@ -1179,10 +1164,10 @@
     "duplicate_models": "Model IDs must be unique.",
     "endpoint_key_hint": "The URL changed. Enter a new key, or leave blank to clear the saved key on save.",
     "endpoint_key_required_hint": "The URL changed. Enter a new API key.",
-    "models_fetch": "Fetch models",
+    "models_fetch": "Fetch Models",
     "models_no_match": "No matching models. Enter model IDs manually.",
     "models_empty": "No models returned. Enter model IDs manually.",
-    "models_selected": "Selected models ({0}/100)"
+    "models_selected": "Selected Models ({0}/100)"
   },
   "assistant": {
     "title": "Assistant",
@@ -1203,9 +1188,9 @@
     "you": "You",
     "unsaved": "Unsaved",
     "saved": "Saved",
-    "generating": "Generating...",
+    "generating": "Generating…",
     "incomplete": "Incomplete reply",
-    "invalid_tool_call": "Invalid tool call format. Please retry.",
+    "invalid_tool_call": "Invalid tool call format. Try again.",
     "retry": "Retry with Current Page",
     "request_failed": "The request failed. Try again.",
     "input": "Message to Assistant",
@@ -1219,7 +1204,7 @@
     "create": {
       "created": "Created empty draft “{0}” (#{1}); unpublished and not run.",
       "replayed": "Reusing draft “{0}” (#{1})",
-      "opening": "Opening draft #{0}...",
+      "opening": "Opening draft #{0}…",
       "blocked": "Open draft #{0} to continue editing.",
       "prompt": "Build this new workflow on the canvas from its purpose. List any configuration I still need to provide."
     },
@@ -1267,7 +1252,7 @@
       "review_library_scan": "Review Library Scan",
       "review_library_config": "Review Library Settings",
       "review_media_batch": "Review File Batch",
-      "review_media_rescrape": "Review Rescrape",
+      "review_media_rescrape": "Review Metadata Scrape",
       "apply_media_change": "Apply Media Change",
       "get_workflow": "Read Workflow",
       "list_node_types": "Read Node Definitions",
@@ -1277,12 +1262,12 @@
       "get_workflow_logs": "Read Run Logs",
       "validate_workflow": "Validate Workflow",
       "run_workflow": "Trial Run Workflow",
-      "preview_workflow_draft": "Edit canvas draft",
+      "preview_workflow_draft": "Edit Canvas Draft",
       "create_workflow_draft": "Create Workflow Draft",
       "navigate": "Suggest Page",
-      "read_workflow_log": "Read log details",
-      "read_workflow_snapshot": "Read graph snapshot",
-      "read_conversation_history": "Read original conversation",
+      "read_workflow_log": "Read Log Details",
+      "read_workflow_snapshot": "Read Graph Snapshot",
+      "read_conversation_history": "Read Original Conversation",
       "list_media_libraries": "Find Media Libraries",
       "list_media_items": "Find Media",
       "get_media_item": "Read Media Details",
@@ -1307,7 +1292,7 @@
       "unknown": "Outcome unknown",
       "invalid": "Validation failed",
       "conflict": "Version conflict",
-      "refused": "Not executed",
+      "refused": "Not run",
       "invalid_output": "Invalid output"
     },
     "tool_status": {
@@ -1324,45 +1309,45 @@
       "error": "Request Failed"
     },
     "saved_history": "Conversations are saved to your account. Long conversations are summarized automatically while original records stay available.",
-    "history": "Conversation history",
-    "loading_history": "Loading conversation...",
-    "rename_chat": "Rename conversation",
-    "delete_chat": "Delete conversation",
+    "history": "Conversation History",
+    "loading_history": "Loading conversation…",
+    "rename_chat": "Rename Conversation",
+    "delete_chat": "Delete Conversation",
     "delete_chat_confirm": "Delete this conversation, its messages, tool records, and snapshots? This cannot be undone.",
     "manage_history": "Manage",
     "chats_selected": "{0} selected",
     "select_chat": "Select conversation: {0}",
     "current_chat": "Current",
-    "select_loaded": "Select all loaded",
+    "select_loaded": "Select All Loaded",
     "delete_chats": "Delete ({0})",
     "delete_chats_confirm": "Delete {0} selected conversations?",
     "delete_chats_warning": "Selected conversations and all records will be deleted. This cannot be undone.",
     "delete_chats_limit": "Select up to {0} conversations at a time.",
     "chats_deleted": "Deleted {0} conversations",
     "no_history": "No saved conversations yet",
-    "load_older": "Load older records",
+    "load_older": "Load Older Records",
     "compacting": "Preparing conversation context…",
     "remote_busy": "This conversation is generating a reply",
-    "stopping": "Stopping generation...",
-    "refresh_chat": "Refresh conversation",
+    "stopping": "Stopping generation…",
+    "refresh_chat": "Refresh Conversation",
     "canvas": {
-      "title": "Assistant canvas edit",
-      "editing": "Editing the current canvas...",
+      "title": "Assistant Canvas Edit",
+      "editing": "Editing the current canvas…",
       "review": "Changes are ready to inspect",
-      "saving": "Saving the draft...",
-      "reverting": "Reverting changes...",
+      "saving": "Saving the draft…",
+      "reverting": "Reverting changes…",
       "failed": "Changes could not be loaded",
-      "locked": "Editing and auto-save are paused. You can pan, zoom and inspect code.",
+      "locked": "Editing and auto-save are paused. You can pan, zoom, and inspect code.",
       "readonly": "Read-only preview",
       "changes": "{0, plural, one {# change} other {# changes}}",
       "issues": "{0, plural, one {# note to check} other {# notes to check}}",
       "unsaved": "Not saved yet",
       "unsaved_empty": "Unsaved; reverting restores the empty draft.",
       "revert": "Revert",
-      "keep": "Keep and save draft",
-      "check_save": "Check save status",
+      "keep": "Keep and Save Draft",
+      "check_save": "Check Save Status",
       "uncertain": "Save status unknown",
-      "retry": "Load again",
+      "retry": "Load Again",
       "saved": "Kept and saved as a draft.",
       "unchanged": "Kept. The saved draft already matched.",
       "reverted": "Assistant changes reverted.",
@@ -1397,6 +1382,12 @@
       "search_invalid_input": "Invalid search settings. Expand tool details.",
       "search_invalid_output": "Invalid search result. Check tool details and workflow logs."
     },
+    "change": {
+      "conflict": "Not applied: this request does not match its review.",
+      "invalid": "Not applied. Expand the details to see the issues.",
+      "pending": "Still being applied. Confirm again later to read the result.",
+      "confirmation_required": "Not applied. Confirm the latest review first."
+    },
     "schedule": {
       "reviewed": "Not applied yet. Confirm this change to apply it.",
       "created": "Schedule #{0} created and enabled",
@@ -1406,11 +1397,7 @@
       "deleted": "Schedule #{0} deleted; a run in progress continues",
       "absent": "Schedule #{0} no longer exists; nothing changed",
       "uncertain": "Result unconfirmed. Check Schedules before any new change.",
-      "confirmation_required": "Not applied. Confirm the latest review first.",
       "stale": "Not applied: the schedule changed after review.",
-      "conflict": "Not applied: this request does not match its review.",
-      "pending": "Still being applied. Confirm again later to read the result.",
-      "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was saved."
     },
     "plan_change": {
@@ -1419,12 +1406,8 @@
       "deleted": "Plan #{0} deleted; tasks and files stay, a running attempt is not cancelled",
       "absent": "Plan #{0} no longer exists; nothing changed",
       "uncertain": "Result unconfirmed. Check Download Plans before any new change.",
-      "confirmation_required": "Not applied. Confirm the latest review first.",
       "stale": "Not applied: the plan changed after review.",
-      "conflict": "Not applied: this request does not match its review.",
-      "pending": "Still being applied. Confirm again later to read the result.",
       "failed": "Not applied; nothing was saved. Confirm again to retry.",
-      "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was saved."
     },
     "task_action": {
@@ -1435,12 +1418,8 @@
       "unavailable": "Not applied: the task changed first; nothing was sent.",
       "absent": "Task #{0} no longer exists; nothing was done",
       "uncertain": "Result unconfirmed. Check the task before trying again.",
-      "confirmation_required": "Not applied. Confirm the latest review first.",
       "stale": "Not applied: the task changed after review.",
-      "conflict": "Not applied: this request does not match its review.",
-      "pending": "Still being applied. Confirm again later to read the result.",
       "failed": "Not applied. Confirm again to retry.",
-      "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was sent."
     },
     "media_change": {
@@ -1448,18 +1427,14 @@
       "scanned": "Scan of library #{0} queued its changes; background work continues",
       "submitted": "Scan of library #{0} submitted; it continues in the background",
       "already_scanning": "Library #{0} was already scanning; nothing new started",
-      "configured": "Settings of library #{0} saved; nothing was scanned, rescraped or organized",
+      "configured": "Settings of library #{0} saved; nothing was scanned, scraped, or organized",
       "rescraped": "Metadata of item #{0} saved",
       "partial": "Item #{0} partly updated. Expand the details before trying again.",
       "running": "Still running in the background. Confirm again later to read the result.",
       "absent": "#{0} no longer exists; nothing was changed",
       "uncertain": "Result unconfirmed. Check the library before trying again.",
-      "confirmation_required": "Not applied. Confirm the latest review first.",
-      "stale": "Not applied: the target, settings or metadata changed after review.",
-      "conflict": "Not applied: this request does not match its review.",
-      "pending": "Still being applied. Confirm again later to read the result.",
+      "stale": "Not applied: the target, settings, or metadata changed after review.",
       "failed": "Not applied; nothing was changed. Confirm again to retry.",
-      "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was changed."
     },
     "media_batch": {
@@ -1473,10 +1448,8 @@
       "absent": "The library no longer exists; nothing was changed",
       "confirmation_required": "Not applied. Confirm the latest plan first.",
       "stale": "Not applied: the plan expired or the library changed after review.",
-      "conflict": "Not applied: this request does not match its review.",
       "pending": "Another batch is running. Confirm again later.",
       "failed": "Not applied; nothing was changed. Confirm again to retry.",
-      "invalid": "Not applied. Expand the details to see the issues.",
       "refused": "Not applied; nothing was changed."
     }
   }

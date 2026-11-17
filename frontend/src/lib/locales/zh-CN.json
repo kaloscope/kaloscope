@@ -10,8 +10,8 @@
     "switch_theme": "切换主题",
     "switch_language": "切换语言",
     "notifications": "消息通知",
-    "check_updates": "检查更新...",
-    "checking_updates": "正在检查更新...",
+    "check_updates": "检查更新…",
+    "checking_updates": "正在检查更新…",
     "up_to_date": "当前已是最新版本",
     "latest_version": "发现新版本：",
     "update_check_failed": "检查更新失败，请重试",
@@ -80,7 +80,7 @@
       "help": {
         "title": "帮助",
         "doc": "使用文档",
-        "issue": "报告问题..."
+        "issue": "报告问题…"
       }
     }
   },
@@ -103,12 +103,12 @@
     },
     "download_state": {
       "downloading": "下载中",
-      "submitting": "正在提交",
+      "submitting": "提交中",
       "submit_unknown": "提交结果未知",
       "remote": "远端下载中",
-      "settling": "准备远端文件",
-      "pulling": "拉取到本地",
-      "verifying": "校验本地文件",
+      "settling": "准备文件中",
+      "pulling": "拉取文件中",
+      "verifying": "校验文件中",
       "paused": "已暂停",
       "completed": "已完成",
       "error": "异常"
@@ -149,24 +149,23 @@
   "empty": {
     "boards": {
       "title": "首页还没有内容",
-      "tip": "发布带有看板的搜索流程后，热门榜单、每周放送等内容会显示在这里。",
-      "action": "浏览流程模板"
+      "tip": "发布带有看板的搜索工作流后，热门榜单、每周放送等内容会显示在这里"
     },
     "indexers": {
       "title": "还没有可用的网络搜索",
-      "tip": "网络搜索由流程提供，发布一个搜索流程即可开始使用。",
-      "action": "浏览流程模板"
+      "tip": "网络搜索由工作流提供，发布一个搜索工作流即可开始使用"
     },
     "medialibs": {
       "title": "还没有媒体库",
-      "tip": "将文件夹添加为媒体库后，即可在这里浏览电影、剧集、漫画和小说。",
+      "tip": "将文件夹添加为媒体库后，即可在这里浏览电影、剧集、漫画和小说",
       "action": "设置媒体库"
     },
     "downloaders": {
       "title": "尚未连接下载器",
-      "tip": "连接下载器后，即可在这里发起下载并查看进度。",
+      "tip": "连接下载器后，即可在这里发起下载并查看进度",
       "action": "设置下载器"
-    }
+    },
+    "browse_templates": "浏览工作流模板"
   },
   "data": {
     "nodata": "暂无数据",
@@ -204,7 +203,6 @@
     "graph": "工作流",
     "year": "年份",
     "season": "季数",
-    "episode": "集数",
     "episode_title": "剧集标题",
     "plot": "简介",
     "rating": "评分",
@@ -230,36 +228,26 @@
     "actions": "操作"
   },
   "entity": {
-    "log": "日志",
     "logs": "日志",
     "user": "用户",
-    "users": "用户",
     "task": "任务",
     "tasks": "任务",
     "rule": "规则",
-    "rules": "规则",
-    "graph": "流程",
-    "graphs": "流程",
+    "graph": "工作流",
+    "graphs": "工作流",
     "job": "定时任务",
-    "jobs": "定时任务",
     "plan": "下载计划",
-    "plans": "下载计划",
     "source": "数据源",
     "sources": "数据源",
-    "filter": "筛选条件",
     "filters": "筛选条件",
     "template": "模板",
-    "templates": "模板",
     "favorite": "收藏",
     "favorites": "收藏",
     "notification": "消息通知",
     "notifications": "消息通知",
     "variable": "变量",
-    "variables": "变量",
     "download": "下载任务",
-    "downloads": "下载任务",
     "transcode": "转码任务",
-    "transcodes": "转码任务",
     "metadata": "元数据",
     "media_lib": "媒体库",
     "media_libs": "媒体库",
@@ -273,7 +261,7 @@
     "add": "新增{0}",
     "edit": "编辑{0}",
     "view": "查看{0}",
-    "enter": "搜索{0}",
+    "enter": "按{0}搜索",
     "scan": "扫描{0}",
     "stop": "停止{0}",
     "start": "开始{0}",
@@ -321,8 +309,8 @@
     "duration": "登录时长",
     "activity": "最后活动",
     "kill": {
-      "one": "退出该次登录？",
-      "others": "退出其它登录？"
+      "one": "退出此设备的登录？",
+      "others": "退出其他所有设备的登录？"
     }
   },
   "access_token": {
@@ -378,7 +366,7 @@
     "new": "新密码",
     "current": "旧密码",
     "initial": "初始密码",
-    "confirm": "再次确认",
+    "confirm": "确认密码",
     "change": "修改密码"
   },
   "preference": {
@@ -392,7 +380,7 @@
     },
     "dashboard": {
       "title": "首页设置",
-      "tip": "设置首页中展示的模块",
+      "tip": "选择首页展示的模块",
       "search": "最近搜索",
       "watch": "最近观看",
       "read": "最近阅读"
@@ -444,7 +432,7 @@
     "dir": "保存到",
     "start": "立即开始",
     "prompt": "输入 URI 或选择种子文件",
-    "supported": "支持磁力链接或哈希值",
+    "supported": "支持磁力链接和哈希值",
     "error": {
       "submit_unknown": "提交结果未知",
       "instance_auth": "OpenList 认证失败",
@@ -493,10 +481,8 @@
     "loading": "正在加载正文",
     "loading_chapters": "正在加载章节",
     "delete_local": "同时删除本地文件",
-    "delete_local_confirm": "是否确认删除本地文件？",
+    "delete_local_confirm": "确认删除本地文件？",
     "text": {
-      "chapters": "章节",
-      "settings": "阅读设置",
       "theme": "背景",
       "theme_options": {
         "white": "纯白",
@@ -524,8 +510,6 @@
       "image_unavailable": "图片不可用"
     },
     "image": {
-      "chapters": "章节",
-      "settings": "阅读设置",
       "load_failed": "图片分页加载失败",
       "read_mode": "阅读模式",
       "read_mode_options": {
@@ -628,7 +612,7 @@
         },
         "runtime": {
           "code": 6,
-          "msg": "语法错误"
+          "msg": "运行时错误"
         },
         "timeout": {
           "code": 7,
@@ -648,7 +632,7 @@
       "network_idle": "音频/视频是活动的且已选取资源，但并未使用网络",
       "network_loading": "浏览器正在下载数据",
       "network_no_source": "未找到音频/视频来源",
-      "media_err_aborted": "取回过程被用户中止",
+      "media_err_aborted": "加载已取消",
       "media_err_network": "网络错误",
       "media_err_decode": "解码错误",
       "media_err_src_not_supported": "不支持的音频/视频格式",
@@ -662,8 +646,8 @@
       "reload_tips": "重新载入",
       "fullscreen_tips": "进入全屏",
       "exitfullscreen_tips": "退出全屏",
-      "cssfullscreen_tips": "进入样式全屏",
-      "exitcssfullscreen_tips": "退出样式全屏",
+      "cssfullscreen_tips": "网页全屏",
+      "exitcssfullscreen_tips": "退出网页全屏",
       "texttrack": "字幕",
       "texttrack_off": "关闭",
       "pip": "画中画",
@@ -690,9 +674,9 @@
       "all": "全部条目",
       "empty": "暂无条目",
       "stop": "停止",
-      "stopping": "停止中",
+      "stopping": "停止中…",
       "confirm": {
-        "apply": "执行 {0} 项更改",
+        "apply": "应用 {0} 项更改",
         "trash": "将 {0} 项移入回收站",
         "permanent": "永久删除 {0} 项"
       },
@@ -704,13 +688,13 @@
         "permanent": "永久删除"
       },
       "state": {
-        "reviewed": "尚未执行",
+        "reviewed": "尚未应用",
         "running": "执行中",
         "finished": "已结束"
       },
       "outcome": {
         "completed": "已完成",
-        "partial": "部分执行",
+        "partial": "部分应用",
         "cancelled": "已停止",
         "interrupted": "已中断",
         "running": "执行中",
@@ -757,7 +741,6 @@
         "error": "意外错误",
         "follows_item": "随所属条目一起处理",
         "page_order": "页序依赖文件名",
-        "unsupported_library": "此媒体库暂不支持",
         "template_managed": "由命名模板管理",
         "invalid_name": "结果不是有效文件名",
         "name_conflict": "新名称重复",
@@ -782,7 +765,9 @@
         "move": "移动"
       },
       "reverts": "撤销批量操作 #{0}"
-    }
+    },
+    "chapters": "章节",
+    "reader_settings": "阅读设置"
   },
   "metadata": {
     "fields": {
@@ -839,7 +824,7 @@
       "qsv": "QSV",
       "vaapi": "VAAPI",
       "nvenc": "NVENC",
-      "videotoolbox": "VideoToolBox"
+      "videotoolbox": "VideoToolbox"
     },
     "vaapi_device": {
       "title": "VAAPI 设备",
@@ -865,7 +850,7 @@
     "fitview": "适应视图",
     "minimap": "开启/关闭缩略图",
     "interactivity": "开启/关闭交互",
-    "autosaving": "{0}秒后将会保存",
+    "autosaving": "{0} 秒后保存",
     "autosave": {
       "on": "开启自动保存",
       "off": "关闭自动保存"
@@ -938,7 +923,7 @@
         "path": "文件路径",
         "text_content": "文本内容",
         "text_mode": "写入模式",
-        "exclusive": "独占",
+        "exclusive": "独占创建",
         "overwrite": "覆盖",
         "append": "追加",
         "force_end": "立即结束",
@@ -960,7 +945,7 @@
         "cache_ttl": "0 表示永不过期，缓存值在下次运行工作流时加载",
         "merge_maximum": "输出前等待的最大输入数量，超出部分将被丢弃",
         "merge_timeout": "首次输入到达后的最大等待时间",
-        "force_end": "立即结束流程，无需等待其它节点执行完毕",
+        "force_end": "立即结束工作流，无需等待其他节点执行完毕",
         "ai_max_retries": "仅重试临时请求故障，0 表示不重试，每次请求单独计算超时",
         "ai_max_tokens": "0 表示使用模型默认值，部分模型的推理 Token 也计入此限制",
         "ai_temperature": "留空使用模型默认值，值越高输出越随机，需要模型支持",
@@ -982,13 +967,13 @@
     },
     "tmpl": {
       "last_sync": "上次同步：{0}",
-      "confirm_repo": "请输入 GitHub 仓库全称或地址：",
+      "confirm_repo": "请输入 GitHub 仓库（owner/repo）或地址：",
       "confirm_name": "请确认要使用的名称：",
-      "confirm_upgrade": "是否更新到最新版本？已发布的流程将被撤回",
-      "risk_warning": "使用第三方仓库流程定义可能存在安全风险，请确保信任该来源"
+      "confirm_upgrade": "是否更新到最新版本？已发布的工作流将被撤回",
+      "risk_warning": "第三方仓库的工作流定义可能存在安全风险，请仅使用可信来源"
     },
     "trigger": {
-      "count": "流程数量",
+      "count": "工作流数量",
       "bound": "绑定的工作流",
       "sync_mode": "同步执行",
       "async_mode": "异步执行"
@@ -997,8 +982,8 @@
   "code": {
     "evaluator": "验证工具",
     "var_name": "变量名称",
-    "raw_doc": "原始文档...",
-    "eval_result": "验证结果..."
+    "raw_doc": "原始文档…",
+    "eval_result": "验证结果…"
   },
   "codemirror": {
     "find": "查找",
@@ -1022,27 +1007,27 @@
   "notification": {
     "download_failed": {
       "title": "下载失败",
-      "content": "\"{name}\" 下载失败！{has_error, select, yes {错误信息：{error}} other {}}"
+      "content": "“{name}” 下载失败{has_error, select, yes {：{error}} other {}}"
     },
     "download_completed": {
       "title": "下载完成",
-      "content": "\"{name}\" 下载完成"
+      "content": "“{name}” 下载完成"
     }
   },
   "message": {
-    "cancel": "取 消",
-    "confirm": "确 定",
+    "cancel": "取消",
+    "confirm": "确定",
     "default": {
       "title": "确认操作",
-      "content": "是否确定要继续？"
+      "content": "确定要继续吗？"
     },
     "leave": {
-      "title": "确定要离开吗？",
-      "content": "您所做的更改可能不会保存。"
+      "title": "离开此页面？",
+      "content": "你所做的更改可能不会被保存"
     },
     "clear": {
       "title": "清空记录",
-      "content": "是否确定要删除所有记录？"
+      "content": "确定删除所有记录？"
     }
   },
   "alert": {
@@ -1054,28 +1039,28 @@
     "login_failed": "登录失败",
     "login_expired": "登录已过期",
     "user_not_found": "用户不存在",
-    "flow_not_found": "流程定义不存在",
-    "flow_not_published": "流程定义未发布",
-    "flow_already_running": "流程任务已在运行",
-    "flow_draft_conflict": "流程草稿已更新，请先复制当前内容，再重新打开最新草稿",
-    "flow_graph_invalid": "流程节点、字段或连线无效，请检查后再保存或发布",
-    "flow_not_editable": "流程为只读，请先创建可编辑副本",
+    "flow_not_found": "工作流不存在",
+    "flow_not_published": "工作流未发布",
+    "flow_already_running": "工作流已在运行",
+    "flow_draft_conflict": "工作流草稿已更新，请先复制当前内容，再重新打开最新草稿",
+    "flow_graph_invalid": "工作流节点、字段或连线无效，请检查后再保存或发布",
+    "flow_not_editable": "工作流为只读，请先创建可编辑副本",
     "name_already_exists": "该名称已存在",
     "username_already_exists": "该用户名已存在",
     "pattern_already_exists": "该匹配模式已存在",
-    "scan_in_progress": "扫描进行中，请稍后再试",
+    "scan_in_progress": "扫描进行中，请稍后重试",
     "incorrect_password": "密码错误",
     "passwords_mismatch": "两次输入的密码不一致",
-    "password_changed": "密码修改成功",
+    "password_changed": "密码已修改",
     "permission_denied": "权限不足",
     "duplicate_directory": "目标目录重复",
-    "invalid_flow_graph": "必填字段未填写完整",
+    "invalid_flow_graph": "请填写所有必填字段",
     "invalid_boot_params": "无效的启动参数",
     "invalid_yaml_config": "无效的 YAML 配置",
     "invalid_github_repo": "无效的 GitHub 仓库",
     "invalid_download_source": "所选下载器不支持该来源",
     "info_hash_collision": "下载任务已存在",
-    "http_request_failed": "发送 HTTP 请求失败",
+    "http_request_failed": "HTTP 请求失败",
     "danmaku_server_required": "请先配置媒体库的弹幕服务器",
     "danmaku_match_failed": "弹幕匹配失败，请重试或选择其他结果",
     "media_batch_stale": "计划已过期或媒体库已变更，请重新预览",
@@ -1087,7 +1072,7 @@
     "select_delete_items": "请先选择要删除的数据",
     "export_items_failed": "导出数据失败",
     "import_items_failed": "导入数据失败",
-    "import_items_success": "成功导入 {0} 条数据",
+    "import_items_success": "已导入 {0} 条数据",
     "upgrade_success": "更新成功",
     "file_not_exists": "文件不存在",
     "media_source_unavailable": "无法访问媒体源文件",
@@ -1130,12 +1115,12 @@
     "ai_output_truncated": "AI 输出被截断，请增加输出 Token 限制或缩短要求的内容",
     "ai_output_refused": "模型拒绝回答或返回内容被过滤，请调整提示词",
     "ai_assistant_limit": "本次请求超出处理限制，请缩小范围或拆分任务",
-    "assistant_context_limit": "本次请求内容过多，请缩短问题或从工作流列表提问",
+    "assistant_context_limit": "当前输入内容过多，请缩小问题范围或减少页面内容，对话记录已保留",
     "assistant_context_invalid": "无法读取页面信息，请等待页面加载后重试",
     "assistant_models_failed": "模型加载失败，请重新打开助手重试",
     "assistant_model_required": "请选择可用模型",
     "assistant_stream_invalid": "回复格式异常，请重试",
-    "assistant_stream_interrupted": "请重试以重新获取回复",
+    "assistant_stream_interrupted": "回复已中断，请重试",
     "assistant_busy": "对话正在生成回复，请稍后刷新",
     "assistant_request_exists": "请求已提交，请刷新对话查看结果",
     "assistant_result_limit": "工具返回内容过多，请缩小查询范围或减少每页条数",
@@ -1188,7 +1173,7 @@
     "title": "助手",
     "open": "打开助手",
     "close": "收起助手",
-    "move": "拖动移动面板",
+    "move": "拖动以移动面板",
     "restore_position": "恢复默认位置",
     "new_chat": "新对话",
     "more": "更多操作",
@@ -1203,7 +1188,7 @@
     "you": "你",
     "unsaved": "未保存",
     "saved": "已保存",
-    "generating": "正在生成...",
+    "generating": "正在生成…",
     "incomplete": "回复未完成",
     "invalid_tool_call": "工具调用格式无效，请重试",
     "retry": "按当前页面重试",
@@ -1217,9 +1202,9 @@
     "tool_failed": "工具执行失败，请重试",
     "navigation_cancelled": "未打开目标页面",
     "create": {
-      "created": "已创建空白草稿“{0}”（#{1}），未发布或执行",
+      "created": "已创建空白草稿“{0}”（#{1}），尚未发布或运行",
       "replayed": "继续使用草稿“{0}”（#{1}）",
-      "opening": "正在打开草稿 #{0}...",
+      "opening": "正在打开草稿 #{0}…",
       "blocked": "请打开草稿 #{0} 继续编辑",
       "prompt": "根据用途在当前画布上搭建工作流，并列出需要补充的配置"
     },
@@ -1263,12 +1248,12 @@
       "review_download_plan_change": "检查下载计划变更",
       "apply_download_plan_change": "应用下载计划变更",
       "review_download_task_action": "检查下载任务操作",
-      "apply_download_task_action": "执行下载任务操作",
+      "apply_download_task_action": "应用下载任务操作",
       "review_library_scan": "检查媒体库扫描",
       "review_library_config": "检查媒体库设置",
       "review_media_batch": "检查文件批量操作",
-      "review_media_rescrape": "检查重新刮削",
-      "apply_media_change": "执行媒体变更",
+      "review_media_rescrape": "检查元数据刮削",
+      "apply_media_change": "应用媒体变更",
       "get_workflow": "读取工作流",
       "list_node_types": "读取节点定义",
       "get_workflow_reference": "读取工作流说明",
@@ -1307,7 +1292,7 @@
       "unknown": "结果未知",
       "invalid": "校验未通过",
       "conflict": "版本冲突",
-      "refused": "未执行",
+      "refused": "未运行",
       "invalid_output": "输出校验未通过"
     },
     "tool_status": {
@@ -1325,7 +1310,7 @@
     },
     "saved_history": "对话按账号保存，长对话会自动整理上下文，并保留原始记录",
     "history": "历史对话",
-    "loading_history": "正在加载对话...",
+    "loading_history": "正在加载对话…",
     "rename_chat": "重命名对话",
     "delete_chat": "删除对话",
     "delete_chat_confirm": "删除此对话及全部记录后无法恢复，是否删除？",
@@ -1341,16 +1326,16 @@
     "chats_deleted": "已删除 {0} 个对话",
     "no_history": "暂无历史对话",
     "load_older": "加载更早的记录",
-    "compacting": "正在整理上下文...",
+    "compacting": "正在整理上下文…",
     "remote_busy": "当前对话正在生成回复",
-    "stopping": "正在停止生成...",
+    "stopping": "正在停止生成…",
     "refresh_chat": "刷新对话",
     "canvas": {
       "title": "助手画布修改",
-      "editing": "正在修改当前画布...",
+      "editing": "正在修改当前画布…",
       "review": "修改完成，请在画布查看",
-      "saving": "正在保存草稿...",
-      "reverting": "正在撤回修改...",
+      "saving": "正在保存草稿…",
+      "reverting": "正在撤回修改…",
       "failed": "修改未能加载",
       "locked": "编辑与自动保存已暂停，可平移、缩放和查看代码",
       "readonly": "只读预览",
@@ -1397,6 +1382,12 @@
       "search_invalid_input": "搜索条件有误，请展开工具详情查看",
       "search_invalid_output": "搜索结果有误，请查看工具详情和工作流日志"
     },
+    "change": {
+      "conflict": "未应用：请求与预览内容不一致",
+      "invalid": "未应用，请展开工具详情查看问题",
+      "pending": "仍在应用中，请稍后再次确认以读取结果",
+      "confirmation_required": "尚未应用，请先确认最新预览"
+    },
     "schedule": {
       "reviewed": "尚未应用，请确认此变更后再应用",
       "created": "已创建并启用定时任务 #{0}",
@@ -1406,11 +1397,7 @@
       "deleted": "已删除定时任务 #{0}，进行中的运行不受影响",
       "absent": "定时任务 #{0} 已不存在，未做任何更改",
       "uncertain": "结果待确认，请先查看定时调度页面，勿重复操作",
-      "confirmation_required": "尚未应用，请先确认最新的变更预览",
       "stale": "未应用：定时任务在预览后已变更",
-      "conflict": "未应用：请求与预览内容不一致",
-      "pending": "仍在应用中，请稍后再次确认以读取结果",
-      "invalid": "未应用，请展开工具详情查看问题",
       "refused": "未应用，未保存任何更改"
     },
     "plan_change": {
@@ -1419,51 +1406,39 @@
       "deleted": "已删除下载计划 #{0}，任务与文件保留，进行中的执行不会取消",
       "absent": "下载计划 #{0} 已不存在，未做任何更改",
       "uncertain": "结果待确认，请先查看下载计划页面，勿重复操作",
-      "confirmation_required": "尚未应用，请先确认最新的变更预览",
       "stale": "未应用：下载计划在预览后已变更",
-      "conflict": "未应用：请求与预览内容不一致",
-      "pending": "仍在应用中，请稍后再次确认以读取结果",
       "failed": "未应用，未保存任何更改，可再次确认重试",
-      "invalid": "未应用，请展开工具详情查看问题",
       "refused": "未应用，未保存任何更改"
     },
     "task_action": {
-      "reviewed": "尚未执行，请确认此操作后再执行",
+      "reviewed": "尚未应用，请确认此操作后再应用",
       "changed": "下载器已接受操作，已更新下载任务 #{0}",
       "queued": "下载任务 #{0} 的操作已排队等待同步，尚未完成，请稍后查看",
       "deleted": "已删除下载任务 #{0}",
-      "unavailable": "未执行：任务已先变更，未发送任何操作",
+      "unavailable": "未应用：任务已先变更，未发送任何操作",
       "absent": "下载任务 #{0} 已不存在，未执行任何操作",
       "uncertain": "结果待确认，请先查看该任务，勿重复操作",
-      "confirmation_required": "尚未执行，请先确认最新的操作预览",
-      "stale": "未执行：任务在预览后已变更",
-      "conflict": "未执行：请求与预览内容不一致",
-      "pending": "仍在执行中，请稍后再次确认以读取结果",
-      "failed": "未执行，可再次确认重试",
-      "invalid": "未执行，请展开工具详情查看问题",
-      "refused": "未执行，未发送任何操作"
+      "stale": "未应用：任务在预览后已变更",
+      "failed": "未应用，可再次确认重试",
+      "refused": "未应用，未发送任何操作"
     },
     "media_change": {
-      "reviewed": "尚未执行，请确认此变更后再执行",
+      "reviewed": "尚未应用，请确认此变更后再应用",
       "scanned": "已扫描媒体库 #{0} 并排队处理变更，后台仍在继续",
       "submitted": "已提交媒体库 #{0} 的扫描，后台仍在继续",
       "already_scanning": "媒体库 #{0} 已在扫描中，未重复启动",
-      "configured": "已保存媒体库 #{0} 的设置，未启动扫描、重新刮削或整理",
+      "configured": "已保存媒体库 #{0} 的设置，未启动扫描、刮削或整理",
       "rescraped": "已保存条目 #{0} 的元数据",
       "partial": "条目 #{0} 部分更新，请先展开工具详情再决定",
       "running": "仍在后台执行，请稍后再次确认以读取结果",
       "absent": "#{0} 已不存在，未做任何更改",
       "uncertain": "结果待确认，请先查看媒体库，勿重复操作",
-      "confirmation_required": "尚未执行，请先确认最新的变更预览",
-      "stale": "未执行：目标、设置或元数据在预览后已变更",
-      "conflict": "未执行：请求与预览内容不一致",
-      "pending": "仍在执行中，请稍后再次确认以读取结果",
-      "failed": "未执行，未做任何更改，可再次确认重试",
-      "invalid": "未执行，请展开工具详情查看问题",
-      "refused": "未执行，未做任何更改"
+      "stale": "未应用：目标、设置或元数据在预览后已变更",
+      "failed": "未应用，未做任何更改，可再次确认重试",
+      "refused": "未应用，未做任何更改"
     },
     "media_batch": {
-      "reviewed": "尚未执行，请确认此计划后再执行",
+      "reviewed": "尚未应用，请确认此计划后再应用",
       "view_plan": "查看完整计划",
       "completed": "批量操作已完成：成功 {0} 项",
       "partial": "批量操作已结束：成功 {0} 项，跳过或失败 {1} 项，可打开计划查看原因",
@@ -1471,13 +1446,11 @@
       "interrupted": "批量操作被中断：成功 {0} 项，{2} 项待确认，请重新预览后继续",
       "running": "仍在后台执行：已完成 {0} 项，剩余 {2} 项",
       "absent": "媒体库已不存在，未做任何更改",
-      "confirmation_required": "尚未执行，请先确认最新的计划",
-      "stale": "未执行：计划已过期或媒体库在预览后已变更",
-      "conflict": "未执行：请求与预览内容不一致",
+      "confirmation_required": "尚未应用，请先确认最新的计划",
+      "stale": "未应用：计划已过期或媒体库在预览后已变更",
       "pending": "另一个批量操作正在执行，请稍后再次确认",
-      "failed": "未执行，未做任何更改，可再次确认重试",
-      "invalid": "未执行，请展开工具详情查看问题",
-      "refused": "未执行，未做任何更改"
+      "failed": "未应用，未做任何更改，可再次确认重试",
+      "refused": "未应用，未做任何更改"
     }
   }
 }

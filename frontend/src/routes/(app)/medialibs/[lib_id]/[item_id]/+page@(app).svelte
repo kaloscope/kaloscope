@@ -1086,7 +1086,7 @@
         <div class="mt-8">
           <h2 class="mb-3 section-title">
             {#if mediaType === 'image'}
-              {$_('media.image.chapters')}
+              {$_('media.chapters')}
             {:else if media.lib?.lib_type === 'tv_show'}
               {$_('media.episodes')}
             {:else}
@@ -1163,7 +1163,7 @@
       <!-- novel chapters -->
       {#if mediaType === 'text' && (chaptersLoading || chaptersError || hasTextChapters)}
         <div class="mt-8">
-          <h2 class="mb-3 section-title">{$_('media.text.chapters')}</h2>
+          <h2 class="mb-3 section-title">{$_('media.chapters')}</h2>
           {#if chaptersLoading}
             <div class="flex flex-col gap-2 p-1" role="status" aria-label={$_('media.loading_chapters')}>
               <Skeleton type="block" count={4} class="h-12 w-full rounded-card!" />

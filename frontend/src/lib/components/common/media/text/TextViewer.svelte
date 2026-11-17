@@ -413,7 +413,7 @@
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
         <div class="flex items-center gap-1">
-          <h3 class="text-base font-bold">{$_('media.text.chapters')}</h3>
+          <h3 class="text-base font-bold">{$_('media.chapters')}</h3>
           <!-- svelte-ignore a11y_consider_explicit_label -->
           <button class="btn border-0 bg-transparent shadow-none btn-xs" style:color={colors.text} onclick={toggleSort}>
             <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
@@ -565,7 +565,7 @@
       transition:fly={{ x: 300, duration: 200 }}
     >
       <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">{$_('media.text.settings')}</h3>
+        <h3 class="text-base font-bold">{$_('media.reader_settings')}</h3>
         <button
           class="btn border-0 bg-transparent shadow-none btn-xs"
           style:color={colors.text}
