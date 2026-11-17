@@ -359,9 +359,11 @@
 @utility popover-surface {
   border-radius: min(var(--radius-box), 0.75rem);
   background-color: var(--color-base-100);
+  /* a real border, so callers that swap the shadow still keep a clear edge */
+  border: 1px solid var(--color-border);
   box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--color-base-content) 8%, transparent),
-    0 16px 36px -12px color-mix(in oklab, var(--color-shade) 24%, transparent);
+    0 12px 32px -8px color-mix(in oklab, var(--color-shade) 30%, transparent),
+    0 4px 10px -4px color-mix(in oklab, var(--color-shade) 16%, transparent);
 }
 
 /* grouped rows nested inside a card */
