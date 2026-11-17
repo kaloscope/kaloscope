@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 from tortoise import Tortoise
+from tortoise.backends.base.client import TransactionalDBClient
+from tortoise.connection import get_connections
 from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
@@ -86,6 +88,33 @@ def test_startup_scan(tmp_path, library_services, initial):
             await Tortoise.close_connections()
 
     asyncio.run(run())
+
+
+def test_observer_outside_transaction(tmp_path, library_services):
+    observer, _ = library_services
+    connections = []
+    observer.side_effect = lambda _lib: connections.append(
+        get_connections().get("default")
+    )
+
+    async def run():
+        await Tortoise.init(
+            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            await MediaLibService.upsert(
+                MediaLibUpsert(
+                    dir=str(tmp_path), lib_type=LibType.MOVIE, name="Library"
+                )
+            )
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+    assert len(connections) == 1
+    assert not isinstance(connections[0], TransactionalDBClient)
 
 
 @pytest.mark.parametrize("relationship", ["same", "parent", "child"])

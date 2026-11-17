@@ -2012,9 +2012,33 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         await MediaLib.bulk_update(libs, fields=["priority"])
 
     @classmethod
-    @atomic()
     async def upsert(cls, obj: MediaLibUpsert) -> MediaLib:
-        """Create or update a media library.
+        """Create or update a media library, then watch a new one.
+
+        Start watching only after the transaction commits. Watcher tasks inherit
+        the caller's context, so starting them inside the transaction would bind
+        them to its connection for their whole lifetime.
+
+        Args:
+            obj: Media library data.
+
+        Raises:
+            KaloscopeException: If the name or directory already exists.
+            BadRequestException: If the settings do not fit the library type.
+
+        Returns:
+            Media library instance.
+        """
+        lib = await cls._save(obj)
+        if not obj.id:
+            # initial discovery must see the committed workflow bindings
+            await cls.app_ctx().lib_watcher.add_observer(lib)
+        return lib
+
+    @classmethod
+    @atomic()
+    async def _save(cls, obj: MediaLibUpsert) -> MediaLib:
+        """Validate and persist a media library with its ingest triggers.
 
         Preserve startup scanning and rename settings omitted from updates.
 
@@ -2023,6 +2047,7 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
 
         Raises:
             KaloscopeException: If the name or directory already exists.
+            BadRequestException: If the settings do not fit the library type.
 
         Returns:
             Media library instance.
@@ -2085,11 +2110,6 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         await FlowTriggerService.bind_triggers(
             GraphCategory.INGEST, lib.id, obj.triggers
         )
-        if not obj.id:
-            # initial discovery must see the library's workflow bindings
-            watcher = cls.app_ctx().lib_watcher
-            await watcher.add_observer(lib)
-
         return lib
 
     @classmethod
