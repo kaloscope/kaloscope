@@ -220,6 +220,9 @@
           return;
         }
         outerLoading.start();
+        // selection belongs to the previous library
+        selecting = false;
+        selected = [];
         // initialize query parameters
         const params = page.url.searchParams;
         query.keyword = params.get('keyword') || '';
@@ -275,6 +278,7 @@
               class:btn-active={selecting}
               aria-label={$_(selecting ? 'message.cancel' : 'media.batch.select')}
               aria-pressed={selecting}
+              disabled={!selecting && items.length === 0}
               use:tooltip={{ content: $_(selecting ? 'message.cancel' : 'media.batch.select'), followCursor: true }}
               onclick={toggleSelecting}
             >
@@ -340,15 +344,19 @@
               ondelete={() => search()}
             />
           </div>
-          <!-- the title below is the keyboard and screen-reader entry; the cover only widens the click target -->
-          <svelte:element
-            this={selecting ? 'button' : 'a'}
+          <!-- the title below is the keyboard and screen-reader entry; the cover only widens the click
+          target, and stays one element in both modes so toggling selection never rebuilds the poster -->
+          <a
             {href}
-            type={selecting ? 'button' : undefined}
             tabindex="-1"
             aria-hidden="true"
             class="block w-full cursor-pointer"
-            onclick={selecting ? () => open(item) : undefined}
+            onclick={(event) => {
+              if (selecting) {
+                event.preventDefault();
+                open(item);
+              }
+            }}
           >
             <Image
               proxy="store"
@@ -358,7 +366,7 @@
               ratio="2/3"
               class="lib-poster rounded-card! group-hover:brightness-75 {transClass}"
             />
-          </svelte:element>
+          </a>
         </div>
         <div class="@container flex-col-center gap-0.5 px-1 pt-2">
           <svelte:element
