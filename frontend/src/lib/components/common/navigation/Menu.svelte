@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { Menu, MenuRoute, Signpost } from '$lib/types';
+  import type { IconifyIcon } from 'iconify-icon';
   import type { Snippet } from 'svelte';
 
   export type MenuProps = {
@@ -20,7 +21,7 @@
   import { Image, Logo } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { freeze, signposts } from '$lib/stores';
+  import { freeze, menuIcon, signposts } from '$lib/stores';
   import { onMount } from 'svelte';
 
   let { menus, interpolation = {}, translate = true, action }: MenuProps = $props();
@@ -51,22 +52,27 @@
       // set the signposts based on the current page
       const pathname = page.url.pathname;
       let titles: Signpost[] = [];
+      let icon: IconifyIcon | null = null;
       loop: for (const menu of menus) {
         for (const route of menu.routes) {
           if (route.path && pathname.startsWith(route.path)) {
             const routeTranslate = route.translate ?? translate;
             titles = [menu.title, routeTranslate ? route.title : { title: route.title, translate: false }];
+            // a string icon is an image address, which placeholders cannot draw
+            icon = typeof route.icon === 'string' ? null : route.icon;
             break loop;
           }
         }
       }
       signposts.set(titles);
+      menuIcon.set(icon);
     };
     updateSignposts();
     afterNavigate(updateSignposts);
     // clear the signposts when the component is destroyed
     return () => {
       signposts.set([]);
+      menuIcon.set(null);
     };
   });
 </script>

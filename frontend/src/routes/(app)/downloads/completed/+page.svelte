@@ -198,7 +198,7 @@
     {#if noDownloader}
       <DownloaderEmpty />
     {:else}
-      <Empty icon={icons.fileCheck} />
+      <Empty />
     {/if}
   {/snippet}
   {#snippet filters()}

@@ -10,7 +10,6 @@
     BatchPlanDialog,
     Container,
     DataView,
-    Empty,
     Image,
     MediaActions,
     MediaLibEmpty,
@@ -258,10 +257,6 @@
       itemClass="mb-3 z-1"
       skeleton={{ ratio: '2/3', plain: true }}
     >
-      {#snippet empty()}
-        <Empty icon={lib ? LibType[lib.lib_type].icon : undefined} />
-      {/snippet}
-
       {#snippet filters()}
         <Search
           label={$_('field.keyword')}

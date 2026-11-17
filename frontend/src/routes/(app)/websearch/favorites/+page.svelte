@@ -2,17 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import {
-    Cell,
-    DataView,
-    Empty,
-    HCell,
-    Image,
-    Paginator,
-    Uploader,
-    confirm,
-    type PaginatorProps
-  } from '$lib/components';
+  import { Cell, DataView, HCell, Image, Paginator, Uploader, confirm, type PaginatorProps } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -88,9 +78,6 @@
 </script>
 
 <DataView loading={$loading} data={favorites} skeleton={{ ratio: '1/1' }}>
-  {#snippet empty()}
-    <Empty icon={icons.star} />
-  {/snippet}
   {#snippet header()}
     <HCell width="100%" text={$_('entity.favorites')} />
     <HCell actions />

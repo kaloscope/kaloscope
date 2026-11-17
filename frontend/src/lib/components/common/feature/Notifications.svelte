@@ -201,7 +201,7 @@
     </button>
   </div>
   {#if notifications.length === 0}
-    <Empty compact />
+    <Empty compact icon={icons.alertUrgent} />
   {:else}
     <ul class="flex max-h-[50vh] flex-col gap-3 overflow-y-auto">
       {#each notifications as notification (notification.id)}

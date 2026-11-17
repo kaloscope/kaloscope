@@ -7,7 +7,7 @@
 
 <!-- placeholder for an installation without media libraries -->
 <div class="flex-center min-h-[60vh] w-full">
-  <Empty icon={icons.library} title={$_('empty.medialibs.title')} description={$_('empty.medialibs.tip')}>
+  <Empty title={$_('empty.medialibs.title')} description={$_('empty.medialibs.tip')}>
     {#if $user?.role === 'admin'}
       <a href="/settings/system/medialibs" class="empty-action">
         <iconify-icon icon={icons.addCircle} width="1rem" aria-hidden="true"></iconify-icon>

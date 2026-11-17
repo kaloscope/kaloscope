@@ -214,7 +214,7 @@
         <button class="btn btn-sm" onclick={load}>{$_('action.retry')}</button>
       </div>
     {:else if tokens.length === 0}
-      <Empty compact icon={icons.key} title={$_('access_token.empty')} />
+      <Empty compact title={$_('access_token.empty')} />
     {:else}
       <ul class="inset-list">
         {#each tokens as token (token.id)}

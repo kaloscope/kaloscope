@@ -133,7 +133,7 @@
   {#if !loadError}
     <Setting title={$_('ai.configured')}>
       {#if providers.length === 0}
-        <Empty compact icon={icons.botSquare} title={$_('ai.empty')} />
+        <Empty compact title={$_('ai.empty')} />
       {:else}
         <ul class="inset-list">
           {#each providers as provider (provider.id)}

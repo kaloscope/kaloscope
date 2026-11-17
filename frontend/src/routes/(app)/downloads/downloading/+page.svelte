@@ -232,7 +232,7 @@
     {#if noDownloader}
       <DownloaderEmpty />
     {:else}
-      <Empty icon={icons.download} />
+      <Empty />
     {/if}
   {/snippet}
   {#snippet filters()}

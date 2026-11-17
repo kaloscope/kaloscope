@@ -3,6 +3,7 @@ import { goto } from '$app/navigation';
 import { page } from '$app/state';
 import type { DataView } from '$lib/components';
 import type { ScrollPosition, Signpost, User } from '$lib/types';
+import type { IconifyIcon } from 'iconify-icon';
 import { compactRecord } from '$lib/utils/object';
 import { normalizePathname } from '$lib/utils/url';
 import { tick } from 'svelte';
@@ -13,6 +14,9 @@ export const user = writable<User | null>(null);
 export const token = persisted<string>('token');
 export const freeze = writable<boolean>(false);
 export const signposts = writable<Signpost[]>([]);
+// icons of the current page's menu route and top-level section, shown by empty placeholders
+export const menuIcon = writable<IconifyIcon | null>(null);
+export const navIcon = writable<IconifyIcon | null>(null);
 export const positions = writable<Record<string, ScrollPosition>>({});
 export const urlparams = persisted<Record<string, string>>('urlparams');
 export const histories = persisted<Record<string, string>>('histories');

@@ -212,13 +212,7 @@
     />
   </div>
   {#if isEmpty && !data.menus[1]?.routes.length}
-    <Empty
-      compact
-      class="mt-6"
-      icon={icons.globeSearch}
-      title={$_('empty.indexers.title')}
-      description={$_('empty.indexers.tip')}
-    >
+    <Empty compact class="mt-6" title={$_('empty.indexers.title')} description={$_('empty.indexers.tip')}>
       {#if $user?.role === 'admin'}
         <a href="/settings/workflows/templates" class="empty-action">
           <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>

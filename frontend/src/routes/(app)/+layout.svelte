@@ -4,7 +4,7 @@
   import { api } from '$lib/api';
   import { AssistantPanel, Dock, Navbar } from '$lib/components';
   import { headTitle } from '$lib/i18n';
-  import { freeze, histories, positions, subroutes, urlparams, user } from '$lib/stores';
+  import { freeze, histories, navIcon, positions, subroutes, urlparams, user } from '$lib/stores';
   import type { Resp, User } from '$lib/types';
   import { compactRecord } from '$lib/utils/object';
   import { normalizePathname } from '$lib/utils/url';
@@ -17,6 +17,12 @@
 
   // the main route of the current page
   let mainRoute = $derived(data.navs.find((nav) => page.url.pathname.startsWith(nav.path)));
+
+  // the section icon for empty placeholders on pages without a menu route of their own
+  $effect(() => {
+    const icon = mainRoute?.icon;
+    navIcon.set(icon && typeof icon !== 'string' ? icon : null);
+  });
 
   // the back button to go back to the previous page
   let historyBack: boolean = $state(false);

@@ -6,7 +6,7 @@
 </script>
 
 <!-- placeholder for an installation without downloaders -->
-<Empty icon={icons.cloudArrowDown} title={$_('empty.downloaders.title')} description={$_('empty.downloaders.tip')}>
+<Empty title={$_('empty.downloaders.title')} description={$_('empty.downloaders.tip')}>
   {#if $user?.role === 'admin'}
     <a href="/settings/system/downloaders" class="empty-action">
       <iconify-icon icon={icons.addCircle} width="1rem" aria-hidden="true"></iconify-icon>

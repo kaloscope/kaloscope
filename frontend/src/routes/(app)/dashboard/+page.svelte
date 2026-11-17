@@ -639,12 +639,7 @@
   <!-- nothing to show -->
   {#if settled && Object.keys(boards).length === 0}
     <div class="flex-center {historyCount > 0 ? '' : 'min-h-[60vh]'}">
-      <Empty
-        compact={historyCount > 0}
-        icon={icons.dashboardBar}
-        title={$_('empty.boards.title')}
-        description={$_('empty.boards.tip')}
-      >
+      <Empty compact={historyCount > 0} title={$_('empty.boards.title')} description={$_('empty.boards.tip')}>
         {#if $user?.role === 'admin'}
           <a href="/settings/workflows/templates" class="empty-action">
             <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>
