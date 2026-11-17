@@ -300,6 +300,10 @@ export type MediaBatchOutcome = {
   outcome?: 'completed' | 'partial' | 'cancelled' | 'interrupted' | 'running' | 'absent';
   library_id?: number;
   batch_id?: number;
+  /** Units the review left alone, counted by reason. */
+  blocked?: { units: number; reasons: Record<string, number> };
+  /** Located problems that kept the review from producing a plan. */
+  issues?: { path: string; message: string }[];
   can_revert?: boolean;
   done?: number;
   skipped?: number;

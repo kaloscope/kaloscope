@@ -21,7 +21,7 @@
   } from '$lib/components';
   import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
-  import { _, number } from '$lib/i18n';
+  import { _, locale, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
   import type { MediaBatchOutcome, MediaItem, Page, Resp } from '$lib/types';
@@ -134,6 +134,31 @@
   }
 
   /**
+   * Explain why a deletion review produced no plan.
+   *
+   * @param outcome - Review that returned no batch.
+   * @returns The translated reason, naming each blocking cause with its count when there is one.
+   */
+  function emptyReviewMessage(outcome: MediaBatchOutcome): string {
+    const reasons = Object.entries(outcome.blocked?.reasons ?? {}).filter(([, count]) => count > 0);
+    if (reasons.length > 0) {
+      const parts = reasons.map(([reason, count]) => {
+        const label = $_(`media.batch.reason.${reason}`, { default: reason });
+        // the labels stand alone elsewhere; inside a sentence they start in lower case
+        const inline = label.charAt(0).toLocaleLowerCase($locale ?? undefined) + label.slice(1);
+        return $_('media.batch.reason_count', [inline, $number(count)]);
+      });
+      const list = new Intl.ListFormat($locale ?? undefined, { type: 'conjunction' }).format(parts);
+      return $_('alert.media_batch_blocked', list);
+    }
+    // for a deletion, an `item_ids` issue means a selected item left this library
+    if (outcome.issues?.some((issue) => issue.path === 'item_ids')) {
+      return $_('alert.media_batch_mismatch');
+    }
+    return $_('alert.media_batch_empty');
+  }
+
+  /**
    * Review deleting the selected items with their files and show the plan for confirmation.
    */
   function reviewDeletion() {
@@ -148,7 +173,7 @@
         if (data.batch_id) {
           planDialog?.showModal(data.batch_id);
         } else {
-          alert({ level: 'warning', message: 'media_batch_empty' });
+          alert({ level: 'warning', message: emptyReviewMessage(data) });
         }
       })
       .finally(() => reviewLoading.end());
