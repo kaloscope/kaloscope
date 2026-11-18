@@ -182,7 +182,7 @@
           />
           <span class="text-lg font-thin {triggerGraphId === trigger.graph_id ? '' : 'opacity-30'}">{index + 1}</span>
         </span>
-        <div class="flex items-center gap-2 list-col-grow">
+        <div class="list-col-grow flex items-center gap-2">
           <Image
             transparent
             src={graphs.find((g) => g.id === trigger.graph_id)?.icon}
@@ -215,7 +215,7 @@
           <input type="radio" class="radio radio-xs" checked={true} />
           <span class="text-lg font-thin">{triggers.length + 1}</span>
         </span>
-        <select class="select appearance-none list-col-grow select-sm" bind:value={graph}>
+        <select class="list-col-grow select appearance-none select-sm" bind:value={graph}>
           {#each unboundGraphs as graph (graph.id)}
             <option value={graph}>{graph.name}</option>
           {/each}

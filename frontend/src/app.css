@@ -1,4 +1,7 @@
+@layer theme, base, xyflow, components, utilities;
 @import 'tailwindcss';
+@import '@xyflow/svelte/style.css';
+
 @plugin '@tailwindcss/typography';
 @plugin 'daisyui' {
   /* https://v5.daisyui.com/docs/config/ */

@@ -438,7 +438,7 @@
     {/if}
 
     <div class="mt-3 max-h-[50vh] overflow-auto rounded-field border border-base-content/10">
-      <table class="table table-pin-rows table-sm">
+      <table class="table-pin-rows table table-sm">
         <thead>
           <tr>
             <th>{$_('media.batch.column.path')}</th>

@@ -6,7 +6,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { FlowGraph, NodeSchema, Resp } from '$lib/types';
-  import { useStore, type Node } from '@xyflow/svelte';
+  import { useSvelteFlow, type Node } from '@xyflow/svelte';
   import type { Writable } from 'svelte/store';
   import { v7 as uuidv7 } from 'uuid';
 
@@ -24,7 +24,7 @@
 
   let schemas: Record<string, NodeSchema[]> = $state({});
   const loading = createLoading();
-  const { fitView } = $derived(useStore());
+  const { fitView } = useSvelteFlow();
 
   /**
    * Check if the node is disabled.

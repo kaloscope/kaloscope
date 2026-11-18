@@ -3,7 +3,7 @@
   import { assistantCanvas } from '$lib/assistant/canvas';
   import { icons } from '$lib/icons';
   import type { Field, NodeSchema } from '$lib/types';
-  import { useEdges, useNodes, useStore, type NodeProps } from '@xyflow/svelte';
+  import { useSvelteFlow, useSvelteFlowStore, type NodeProps } from '@xyflow/svelte';
   import { v7 as uuidv7 } from 'uuid';
   import NodeHandle from './NodeHandle.svelte';
   import * as _fields from './fields';
@@ -13,18 +13,12 @@
   const fields: Record<string, any> = _fields;
 
   // get node props
-  let { id, data }: NodeProps = $props();
+  let { id, data, selected }: NodeProps = $props();
   const schema: NodeSchema = $derived(data.$schema as NodeSchema);
-
-  // get all nodes and edges
-  const nodes = useNodes();
-  const edges = useEdges();
-
-  // check if the node is selected
-  const selected = $derived(nodes.current.find((node) => node.id === id)?.selected ?? false);
+  const { getNode, addNodes, deleteElements } = useSvelteFlow();
 
   // check if the node is interactive
-  const store = useStore();
+  const store = useSvelteFlowStore();
   let interactive = $derived(store.nodesDraggable || store.nodesConnectable || store.elementsSelectable);
   const canvasLocked = $derived($assistantCanvas !== null);
 
@@ -48,20 +42,17 @@
   function copyNode(event: MouseEvent) {
     event.stopPropagation();
     if (!interactive || canvasLocked) return;
-    const node = nodes.current.find((node) => node.id === id);
+    const node = getNode(id);
     if (!node) {
       return;
     }
-    nodes.current = [
-      ...nodes.current,
-      {
-        ...node,
-        id: uuidv7(),
-        position: { x: node.position.x + 30, y: node.position.y + 30 },
-        data: $state.snapshot(node.data),
-        selected: false
-      }
-    ];
+    addNodes({
+      ...node,
+      id: uuidv7(),
+      position: { x: node.position.x + 30, y: node.position.y + 30 },
+      data: $state.snapshot(node.data),
+      selected: false
+    });
   }
 
   /**
@@ -72,8 +63,7 @@
   function deleteNode(event: MouseEvent) {
     event.stopPropagation();
     if (!interactive || canvasLocked) return;
-    nodes.current = nodes.current.filter((node) => node.id !== id);
-    edges.current = edges.current.filter((edge) => edge.source !== id && edge.target !== id);
+    void deleteElements({ nodes: [{ id }] });
   }
 
   /**

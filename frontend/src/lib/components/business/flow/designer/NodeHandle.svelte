@@ -1,7 +1,7 @@
 <script lang="ts">
   import { _ } from '$lib/i18n';
   import type { Handle as HandleProps } from '$lib/types';
-  import { Handle, useNodeConnections, useStore } from '@xyflow/svelte';
+  import { Handle, useNodeConnections, useSvelteFlowStore } from '@xyflow/svelte';
   import { onDestroy } from 'svelte';
   import type { Instance } from 'tippy.js';
   import tippy from 'tippy.js';
@@ -10,8 +10,8 @@
   let { nodeId, id, handle_type: type, position, maxconn, style }: NodeHandleProps = $props();
 
   // check if the handle is connectable
-  const store = useStore();
-  const connections = $derived(useNodeConnections({ id: nodeId, handleType: type, handleId: id }));
+  const store = useSvelteFlowStore();
+  const connections = useNodeConnections(() => ({ id: nodeId, handleType: type, handleId: id }));
   const isConnectable = $derived(store.nodesConnectable && connections.current.length < maxconn);
 
   // dynamic class names

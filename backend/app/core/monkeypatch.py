@@ -2,7 +2,6 @@ import os
 import ssl
 from typing import cast
 
-import httpx
 import sanic.mixins.startup as startup
 from sanic import Sanic
 from sanic.constants import LocalCertCreator
@@ -21,10 +20,6 @@ def apply_monkey_patches():
 
     # preserve SQLite rows and indexes during migrations
     _patch_tortoise_sqlite_migrations()
-
-    # patch hishel cache layer
-    _patch_hishel_headers()
-    _patch_hishel_force_cache()
 
 
 def _patched_get_ssl_context(app: Sanic, ssl: ssl.SSLContext | None) -> ssl.SSLContext:
@@ -78,159 +73,3 @@ def _patch_tortoise_sqlite_migrations():
         await original(self, model, old_field, new_field)
 
     SqliteSchemaEditor._alter_field = _alter_field
-
-
-def _patch_hishel_headers():
-    """Preserve request timeouts and separate cookie headers.
-
-    Keep `Set-Cookie` values separate as required by RFC 7230.
-    """
-    import hishel._async_httpx as _async
-    from hishel import Request as _HishelRequest
-    from hishel import Response as _HishelResponse
-    from hishel._core._headers import Headers as _HishelHeaders
-
-    def _httpx_to_hishel_headers(httpx_headers) -> _HishelHeaders:
-        """Preserve repeated headers when converting cache data.
-
-        Args:
-            httpx_headers: HTTPX headers to convert.
-
-        Returns:
-            Cache headers without transfer encoding.
-        """
-        raw: dict[str, list[str]] = {}
-        for k, v in httpx_headers.multi_items():
-            raw.setdefault(k.lower(), []).append(v)
-        raw.pop("transfer-encoding", None)
-        return _HishelHeaders(raw)
-
-    def _hishel_to_header_tuples(h: _HishelHeaders) -> list[tuple[str, str]]:
-        """Expand cache headers into separate name and value pairs.
-
-        Args:
-            h: Cache header mapping.
-
-        Returns:
-            Individual header pairs with repeated values preserved.
-        """
-        pairs: list[tuple[str, str]] = []
-        for key in h:
-            for v in h.get_list(key) or []:
-                pairs.append((key, v))
-        return pairs
-
-    # replace _httpx_to_internal
-    _orig_httpx_to_internal = _async._httpx_to_internal
-
-    def _httpx_to_internal(value):
-        """Convert HTTP data without losing timeouts or cookie headers.
-
-        Args:
-            value: HTTPX request, response or other supported value.
-
-        Returns:
-            Equivalent cache value with transport metadata preserved.
-        """
-        if isinstance(value, httpx.Request):
-            request = _orig_httpx_to_internal(value)
-            if "timeout" in value.extensions:
-                request.metadata = {
-                    **request.metadata,
-                    "timeout": value.extensions["timeout"],
-                }
-            return request
-        if not isinstance(value, httpx.Response):
-            return _orig_httpx_to_internal(value)
-
-        headers = _httpx_to_hishel_headers(value.headers)
-
-        if not value.is_stream_consumed:
-            return _HishelResponse(
-                status_code=value.status_code,
-                headers=headers,
-                stream=value.aiter_raw(chunk_size=131072),  # 128 KB
-                metadata={},
-            )
-
-        from hishel._utils import make_async_iterator
-
-        stream = make_async_iterator([value.content])
-        if "content-encoding" in value.headers:
-            filtered = {
-                k: list(headers.get_list(k) or [])
-                for k in headers
-                if k != "content-encoding"
-            }
-            filtered["content-length"] = [str(len(value.content))]
-            headers = _HishelHeaders(filtered)
-        return _HishelResponse(
-            status_code=value.status_code,
-            headers=headers,
-            stream=stream,
-            metadata={},
-        )
-
-    # replace _internal_to_httpx
-    _orig_internal_to_httpx = _async._internal_to_httpx
-
-    def _internal_to_httpx(value):
-        """Restore HTTP data with separate repeated headers.
-
-        Args:
-            value: Cache request, response or other supported value.
-
-        Returns:
-            Equivalent HTTPX value.
-        """
-        from hishel._async_httpx import _IteratorStream
-
-        if isinstance(value, _HishelRequest):
-            return httpx.Request(
-                method=value.method,
-                url=value.url,
-                headers=_hishel_to_header_tuples(value.headers),
-                stream=_IteratorStream(value._aiter_stream()),
-                extensions=value.metadata,
-            )
-        elif isinstance(value, _HishelResponse):
-            return httpx.Response(
-                status_code=value.status_code,
-                headers=_hishel_to_header_tuples(value.headers),
-                stream=_IteratorStream(value._aiter_stream()),
-                extensions=value.metadata,
-            )
-        else:
-            return _orig_internal_to_httpx(value)
-
-    _async._httpx_to_internal = _httpx_to_internal
-    _async._internal_to_httpx = _internal_to_httpx
-
-
-def _patch_hishel_force_cache():
-    """Honor an explicit cache TTL despite origin cache headers.
-
-    Set `Cache-Control` from `hishel_ttl` before the cache policy runs.
-    """
-    from hishel._async_httpx import AsyncCacheTransport
-
-    _orig_request_sender = AsyncCacheTransport.request_sender
-
-    async def _patched_request_sender(self, request):
-        """Apply an explicit cache TTL to the origin response.
-
-        Args:
-            request: Cache request with optional TTL metadata.
-
-        Returns:
-            Response with the requested cache policy.
-        """
-        response = await _orig_request_sender(self, request)
-        ttl = request.metadata.get("hishel_ttl")
-        if ttl is not None:
-            if "cache-control" in response.headers:
-                del response.headers["cache-control"]
-            response.headers["cache-control"] = f"max-age={ttl:.0f}"
-        return response
-
-    AsyncCacheTransport.request_sender = _patched_request_sender

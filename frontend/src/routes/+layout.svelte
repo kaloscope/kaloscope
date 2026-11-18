@@ -16,7 +16,6 @@
   import '@fontsource/audiowide';
   import '@fontsource/zcool-qingke-huangyou';
   // import style sources
-  import '@xyflow/svelte/dist/style.css';
   import 'tippy.js/animations/scale.css';
   import 'tippy.js/dist/tippy.css';
   import 'xgplayer/dist/index.min.css';

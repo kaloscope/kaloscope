@@ -108,7 +108,7 @@
     </div>
     <div class="relative mt-2 h-40 w-full overflow-y-auto rounded-card border">
       <Overlay loading={$searching} fixed={false} animation="spinner" />
-      <table class="table table-pin-rows table-fixed table-xs">
+      <table class="table-pin-rows table table-fixed table-xs">
         <thead>
           <tr class="text-xs font-semibold text-base-content/40 uppercase">
             <th class="w-6 sm:w-8"></th>

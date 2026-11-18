@@ -14,8 +14,8 @@
     BackgroundVariant,
     MarkerType,
     SvelteFlow,
-    useStore,
     useSvelteFlow,
+    useSvelteFlowStore,
     type Edge,
     type IsValidConnection,
     type Node
@@ -35,7 +35,7 @@
   const { screenToFlowPosition } = useSvelteFlow();
   const sidebar = $derived(readonly ? writable<boolean | null>(false) : mediaQuery('(min-width: 40rem)'));
   const loading = createLoading();
-  const store = $derived(useStore());
+  const store = $derived(useSvelteFlowStore());
 
   let nodes = $state.raw<Node[]>([]);
   let edges = $state.raw<Edge[]>([]);
@@ -453,6 +453,7 @@
 <style>
   :global {
     .svelte-flow {
+      color-scheme: inherit;
       --xy-edge-stroke-width-default: 2 !important;
       --xy-connectionline-stroke-width-default: 2 !important;
 

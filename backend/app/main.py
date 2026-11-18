@@ -22,6 +22,7 @@ from app.core.cookiejar import SQLiteCookieJar
 from app.core.dl.syncer import DLSyncer
 from app.core.exceptions import error_handler
 from app.core.flow.engine import FlowEngine
+from app.core.http_cache import CacheOriginTransport, configure_request_cache
 from app.core.logstream import (
     LOG_ACTIONS_CAPACITY,
     LOG_QUEUE_CAPACITY,
@@ -33,7 +34,6 @@ from app.core.logstream import (
 from app.core.media.watcher import LibWatcher
 from app.core.middleware import SessionHolder, on_request, on_response
 from app.core.monkeypatch import apply_monkey_patches
-from app.core.network import NetworkTransport
 from app.core.transcode.transcoder import shutdown_monitors
 from app.mcp import close_mcp, start_mcp
 from app.utils.crypto import load_key
@@ -345,9 +345,11 @@ async def start_http_client(app: Sanic):
         http2=True,
         follow_redirects=True,
         cookies=app.ctx.cookies,
+        event_hooks={"request": [configure_request_cache]},
         transport=AsyncCacheTransport(
-            next_transport=NetworkTransport(http2=True),
-            storage=AsyncSqliteStorage(database_path=_cache_path(app)),
+            next_transport=CacheOriginTransport(http2=True),
+            rfc=True,
+            storage=_http_cache_storage(app),
         ),
     )
     # initialize the curl_cffi client
@@ -487,14 +489,16 @@ def _worker(app: Sanic) -> str:
     return app.m.name if hasattr(app, "m") else "main"
 
 
-def _cache_path(app: Sanic) -> Path:
-    """Get worker-specific cache database path.
+def _http_cache_storage(app: Sanic) -> AsyncSqliteStorage:
+    """Use Hishel's default database filename in a worker-specific directory.
 
     Args:
         app: The Sanic application instance.
 
     Returns:
-        Cache database path.
+        HTTP cache storage for this worker.
     """
-    worker = _worker(app)
-    return Path(app_config.get_workspace("cache")) / f"{worker}.db"
+    storage = AsyncSqliteStorage()
+    directory = Path(app_config.get_workspace("cache")) / _worker(app)
+    storage.database_path = directory / storage.database_path.name
+    return storage

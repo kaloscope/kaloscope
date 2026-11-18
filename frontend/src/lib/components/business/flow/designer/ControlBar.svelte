@@ -17,7 +17,7 @@
   import { mediaQuery } from '$lib/stores';
   import type { AssistantPageContext, FlowGraph, FlowGraphContext, Resp } from '$lib/types';
   import { debounce } from '$lib/utils/timing';
-  import { MiniMap, useStore, type Edge, type Node } from '@xyflow/svelte';
+  import { MiniMap, useSvelteFlowStore, type Edge, type Node } from '@xyflow/svelte';
   import { isHTTPError } from 'ky';
   import { getContext, hasContext, onMount, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
@@ -43,7 +43,7 @@
 
   let graphEditor: GraphEditor | null = $state(null);
   const minimap = mediaQuery('(min-width: 40rem)');
-  const store = useStore();
+  const store = useSvelteFlowStore();
   const canvasLocked = $derived(!!graph && $assistantCanvas?.workflowId === graph.id);
 
   // ignore some properties of nodes to avoid unnecessary history records

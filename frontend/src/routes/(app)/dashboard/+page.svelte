@@ -544,7 +544,7 @@
       </div>
       {#if board.resources.length > 0}
         {@const weekMode = !!board.config.board?.calendar?.week && board.resources.length === 7}
-        <div class="board-tabs tabs tabs-border" transition:fade>
+        <div class="board-tabs tabs-border tabs" transition:fade>
           {#each board.resources as rsrcs, index (index)}
             {@const week = weekMode ? getWeekMeta(new Date(), index, board.config.board?.calendar?.week_start) : null}
             <label
@@ -737,7 +737,7 @@
 
     &:hover {
       box-shadow:
-        0 0 0 1px color-mix(in oklab, var(--color-primary) 30%, transparent),
+        0 0 0 1px color-mix(in oklab, var(--color-base-content) 7%, transparent),
         0 6px 16px -8px color-mix(in oklab, var(--color-shade) 19%, transparent);
 
       .history-delete-button {
