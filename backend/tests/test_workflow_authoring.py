@@ -265,7 +265,7 @@ def test_request_matches_node(monkeypatch, content_type, body, expected):
         assert str(request.url) == "https://example.test/search?q=a%2Fb"
         assert request.content == expected
         assert "x-hishel-ttl" not in request.headers
-        assert request.extensions["hishel_ttl"] == 60
+        assert request.extensions["caching"]["ttl"] == 60
 
 
 def test_redirect_cookies(monkeypatch):

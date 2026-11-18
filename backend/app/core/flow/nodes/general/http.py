@@ -19,6 +19,7 @@ from app.core.flow.fields import (
     URLField,
 )
 from app.core.flow.nodes.base import Node, general_node
+from app.core.http_cache import workflow_cache_extensions
 from app.core.network import resolve_proxy
 from app.core.renderer import render
 from app.utils.json import try_loads
@@ -104,27 +105,7 @@ class HTTPNode(Node):
                 if (k := h["key"].strip()) and (v := h["value"].strip())
             ]
         )
-
-        # extract X-Hishel-* headers into extensions
-        # https://hishel.com/metadata.html
-        extensions: dict[str, Any] = {}
-        hishel_headers: list[str] = []
-        for key, value in headers.items():
-            if key.lower().startswith("x-hishel-"):
-                hishel_headers.append(key)
-                # convert X-Hishel-Ttl → hishel_ttl
-                hishel_key = key[2:].lower().replace("-", "_")
-                # convert value to appropriate type
-                if value.lower() in ("true", "false"):
-                    extensions[hishel_key] = value.lower() == "true"
-                else:
-                    try:
-                        extensions[hishel_key] = float(value)
-                    except ValueError:
-                        extensions[hishel_key] = value
-        # remove hishel headers
-        for key in hishel_headers:
-            del headers[key]
+        extensions = workflow_cache_extensions(headers)
 
         # request body
         binary, form, json = None, None, None
@@ -218,8 +199,8 @@ class HTTPNode(Node):
                 getattr(app_ctx, "curl_cffi", None),
             )
             if isinstance(response, httpx.Response) and response.extensions.get(
-                "hishel_from_cache"
-            ):
+                "caching", {}
+            ).get("from_cache"):
                 logger.debug(
                     'HTTP Response: served from cache "%s %s"',
                     response.http_version,

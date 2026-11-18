@@ -871,7 +871,7 @@
 >
   <div>
     <div class="video-settings-header">
-      <div class="video-settings-tabs tabs tabs-border">
+      <div class="video-settings-tabs tabs-border tabs">
         {@render tabLabel('video', icons.videoFill, $_('media.video.settings'))}
         {#if localMedia}
           {@render tabLabel('subtitle', icons.subtitlesFilled, $_('media.xgplayer.texttrack'))}
@@ -1222,7 +1222,7 @@
             style="border-color: color-mix(in oklab, #fff 10%, transparent) !important;"
           >
             <Overlay loading={$searching} fixed={false} animation="spinner" />
-            <table class="table table-pin-rows table-fixed table-xs">
+            <table class="table-pin-rows table table-fixed table-xs">
               <thead>
                 <tr class="bg-[#1e1e1e]/95 text-xs font-semibold text-white/40 uppercase">
                   <th class="w-6 sm:w-8"></th>
