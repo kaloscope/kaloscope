@@ -7,11 +7,12 @@
 <script lang="ts">
   import { beforeNavigate, goto, replaceState } from '$app/navigation';
   import { page } from '$app/state';
-  import { api, getCurrentRole, proxyImage } from '$lib/api';
+  import { api, getCurrentRole } from '$lib/api';
   import { registerAssistantContext } from '$lib/assistant/context';
   import {
     alert,
     Alerts,
+    Backdrop,
     Container,
     Image,
     ImageViewer,
@@ -48,7 +49,6 @@
   import { isHTTPError } from 'ky';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
-  import { fade } from 'svelte/transition';
 
   // the loading state
   const loading = createLoading();
@@ -856,24 +856,17 @@
   {#if media}
     <!-- selected chapter details already include server-side inheritance -->
     {@const readingMeta = mediaType === 'video' ? null : _media ? _meta : meta}
-    {@const backdrop = _media?.backdrop ?? media.backdrop}
-    {@const backdropSrc = proxyImage(backdrop ?? _media?.poster ?? media.poster, 'store')}
     {@const playable = !parts.length && !hasTextChapters}
     {@const resumable = mediaType === 'video' ? !!watchHistory?.media : hasReadingHistory}
     {@const manageable = $user?.role === 'admin' && (mediaType !== 'video' || !media.parent)}
 
-    <!-- backdrop band behind the header that fades into the page; a poster stand-in is blurred into a color wash -->
-    {#if backdropSrc}
-      {#key backdropSrc}
-        <div
-          class="detail-backdrop pointer-events-none absolute inset-x-0 top-0 h-[min(75svh,38rem)] overflow-hidden"
-          class:detail-backdrop-poster={!backdrop}
-          transition:fade
-        >
-          <img src={backdropSrc} alt="" class="size-full object-cover object-[center_25%]" />
-        </div>
-      {/key}
-    {/if}
+    <!-- backdrop band behind the header; a poster stands in only as a color wash -->
+    <Backdrop
+      layout="header"
+      proxy="store"
+      src={_media?.backdrop ?? media.backdrop}
+      fallback={_media?.poster ?? media.poster}
+    />
 
     <!-- back button -->
     <button
@@ -1297,27 +1290,6 @@
 {/if}
 
 <style>
-  /* fade the backdrop out toward the content instead of dimming the whole page */
-  .detail-backdrop {
-    opacity: 0.35;
-    mask-image: linear-gradient(to bottom, black 0%, rgb(0 0 0 / 55%) 45%, transparent 100%);
-
-    img {
-      filter: blur(2px);
-      transform: scale(1.02);
-    }
-  }
-
-  /* a poster stands in for a missing backdrop only as a soft color wash */
-  .detail-backdrop-poster {
-    opacity: 0.45;
-
-    img {
-      filter: blur(40px) saturate(1.4);
-      transform: scale(1.2);
-    }
-  }
-
   :global(.detail-poster) {
     box-shadow:
       0 0 0 1px color-mix(in oklab, var(--color-base-content) 8%, transparent),
