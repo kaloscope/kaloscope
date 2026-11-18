@@ -45,6 +45,7 @@ export type AssistantTool = {
   // latest recorded decision for a preview; live previews start pending without it
   proposal?: AssistantProposal;
 };
+
 export type AssistantTurn = {
   id: string;
   serverId?: number;
@@ -57,6 +58,7 @@ export type AssistantTurn = {
   canvasError?: string;
   tools: AssistantTool[];
 };
+
 type AssistantState = {
   open: boolean;
   input: string;
@@ -78,6 +80,7 @@ type AssistantState = {
   busy: boolean;
   stopping: boolean;
 };
+
 type AssistantHandoff = {
   id: number;
   conversationId: number;
@@ -117,6 +120,7 @@ function initialState(): AssistantState {
 }
 
 export const assistant = writable<AssistantState>(initialState());
+
 export const assistantRestoring = derived(
   assistant,
   (state) =>
@@ -124,7 +128,9 @@ export const assistantRestoring = derived(
     !state.turns.length &&
     ((!state.historyLoaded && state.conversationsLoading) || state.historyLoading)
 );
+
 const selectedConversations = persisted<Record<number, number | null>>('assistant-conversations');
+
 let active: AbortController | null = null;
 let modelRequest: AbortController | null = null;
 let historyRequest: AbortController | null = null;
@@ -132,8 +138,10 @@ let listRequest: AbortController | null = null;
 let stopRequest: AbortController | null = null;
 let stopTimer: ReturnType<typeof setTimeout> | undefined;
 let conversationRevision = 0;
+
 // a created draft waiting for its own designer before the follow-up request builds it
 export const assistantHandoff = writable<AssistantHandoff | null>(null);
+
 let handoffRevision = 0;
 let handoffTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -182,6 +190,7 @@ function recoverStoppedConversation(conversationId: number, requestId: string): 
   // a late list response must not overwrite a newer authoritative status
   listRequest?.abort();
   listRequest = null;
+
   const controller = new AbortController();
   stopRequest = controller;
   assistant.update((state) => ({ ...state, stopping: true, conversationsLoading: false }));
@@ -194,6 +203,7 @@ function recoverStoppedConversation(conversationId: number, requestId: string): 
    */
   async function check(): Promise<void> {
     attempts += 1;
+
     try {
       const { data } = await api
         .get(`assistant/conversations/${conversationId}/turns`, {
@@ -208,12 +218,15 @@ function recoverStoppedConversation(conversationId: number, requestId: string): 
             items: { request_id: string; status: AssistantTurn['status'] }[];
           }>
         >();
+
       if (stopRequest !== controller || get(assistant).conversation?.id !== conversationId) return;
+
       assistant.update((state) => ({
         ...state,
         conversation: data.conversation,
         conversations: state.conversations.map((item) => (item.id === conversationId ? data.conversation : item))
       }));
+
       const stopped = data.items.find((item) => item.request_id === requestId);
       if (!data.conversation.busy || (stopped && stopped.status !== 'streaming')) cancelStopRecovery();
     } catch {
@@ -230,10 +243,12 @@ function recoverStoppedConversation(conversationId: number, requestId: string): 
 }
 
 let accountId = get(user)?.id;
+
 token.subscribe(() => {
   accountId = undefined;
   resetSession();
 });
+
 user.subscribe((value) => {
   // the token already clears a new login; its first profile must not close a just-opened panel
   if (value) {
@@ -338,12 +353,15 @@ async function openCreatedWorkflow(conversationId: number, workflowId: number): 
   const id = ++handoffRevision;
   const path = `${workflowPath}/${workflowId}`;
   assistantHandoff.set({ id, conversationId, workflowId, path, phase: 'opening' });
+
   const block = () => assistantHandoff.update((value) => (value?.id === id ? { ...value, phase: 'blocked' } : value));
+
   // a decision pending on the current canvas must be resolved before leaving it
   if (get(assistantCanvas)) {
     block();
     return;
   }
+
   if (normalizePathname(page.url.pathname) !== path) {
     try {
       await goto(path);
@@ -351,11 +369,13 @@ async function openCreatedWorkflow(conversationId: number, workflowId: number): 
       // a failed navigation is reported below like a cancelled one
     }
   }
+
   if (get(assistantHandoff)?.id !== id) return;
   if (normalizePathname(page.url.pathname) !== path) {
     block();
     return;
   }
+
   handoffTimer = setTimeout(block, 15000);
   resumeHandoff();
 }
@@ -370,6 +390,7 @@ function resumeHandoff(): void {
   const handoff = get(assistantHandoff);
   const state = get(assistant);
   if (!handoff || state.conversation?.id !== handoff.conversationId) return;
+
   if (
     state.busy ||
     state.stopping ||
@@ -379,14 +400,17 @@ function resumeHandoff(): void {
     get(assistantCanvas)
   )
     return;
+
   const designer = readAssistantEditor();
   if (designer?.resource_id !== handoff.workflowId || designer.route !== handoff.path || !designer.editable) return;
+
   clearHandoff();
   void sendAssistant(handoff.path, undefined, get(_)('assistant.create.prompt'));
 }
 
 // recheck a pending handoff when a designer loads or the conversation becomes idle
 assistantEditorRevision.subscribe(() => queueMicrotask(resumeHandoff));
+
 assistant.subscribe(() => {
   if (get(assistantHandoff)) queueMicrotask(resumeHandoff);
 });
@@ -423,15 +447,19 @@ function isModelAvailable(model: AIModelSelection | null, providers: AssistantMo
  */
 export async function loadAssistantModels(): Promise<void> {
   if (modelRequest) return;
+
   const controller = new AbortController();
   modelRequest = controller;
+
   // use a request-local timer so a previous fast refresh cannot reveal this spinner early
   const loading = createLoading();
   const unsubscribe = loading.subscribe((modelsLoading) => {
     if (modelRequest === controller) assistant.update((state) => ({ ...state, modelsLoading }));
   });
+
   loading.start();
   assistant.update((state) => ({ ...state, modelsError: null }));
+
   try {
     const { data } = await api
       .get('assistant/models', {
@@ -439,7 +467,9 @@ export async function loadAssistantModels(): Promise<void> {
         context: { silentErrors: true }
       })
       .json<Resp<AssistantModelProvider[]>>();
+
     if (modelRequest !== controller) return;
+
     assistant.update((state) => {
       let model = state.model;
       if (model) {
@@ -538,10 +568,12 @@ export function newAssistantConversation(): void {
 export async function loadAssistantConversations(older = false, restore = false): Promise<void> {
   const state = get(assistant);
   if (stopRequest || listRequest || (older && !state.conversationsBefore)) return;
+
   const controller = new AbortController();
   listRequest = controller;
   const revision = conversationRevision;
   assistant.update((value) => ({ ...value, conversationsLoading: true }));
+
   try {
     const { data } = await api
       .get('assistant/conversations', {
@@ -550,7 +582,9 @@ export async function loadAssistantConversations(older = false, restore = false)
         context: { silentErrors: true }
       })
       .json<Resp<{ items: AssistantConversation[]; next_before: number | null }>>();
+
     if (listRequest !== controller) return;
+
     assistant.update((value) => ({
       ...value,
       conversations: older ? [...value.conversations, ...data.items] : data.items,
@@ -560,6 +594,7 @@ export async function loadAssistantConversations(older = false, restore = false)
         ? (data.items.find((item) => item.id === value.conversation!.id) ?? value.conversation)
         : null
     }));
+
     if (restore && revision === conversationRevision && !get(assistant).conversation && !get(assistant).turns.length) {
       const selected = accountId === undefined ? undefined : get(selectedConversations)?.[accountId];
       const id =
@@ -593,14 +628,17 @@ export async function loadAssistantConversation(id: number, older = false): Prom
     (older && (state.stopping || !state.turnsBefore || state.conversation?.id !== id))
   )
     return;
+
   if (!older) {
     cancelStopRecovery();
     clearHandoff();
   }
+
   const controller = new AbortController();
   historyRequest = controller;
   if (!older) conversationRevision += 1;
   assistant.update((value) => ({ ...value, historyLoading: true, error: null }));
+
   try {
     const { data } = await api
       .get(`assistant/conversations/${id}/turns`, {
@@ -609,7 +647,9 @@ export async function loadAssistantConversation(id: number, older = false): Prom
         context: { silentErrors: true }
       })
       .json<Resp<{ conversation: AssistantConversation; items: AssistantTurn[]; next_before: number | null }>>();
+
     if (historyRequest !== controller) return;
+
     const items = data.items.map((turn) => ({ ...turn, serverId: Number(turn.id) }));
     assistant.update((value) => {
       let model = value.model;
@@ -624,6 +664,7 @@ export async function loadAssistantConversation(id: number, older = false): Prom
         model
       };
     });
+
     if (!older) rememberConversation(data.conversation.id);
   } catch (error) {
     if (historyRequest === controller) {
@@ -651,13 +692,17 @@ export async function changeAssistantConversation(id: number, title?: string): P
     await deleteAssistantConversations([id]);
     return;
   }
+
   if (get(assistantCanvas) || get(assistant).busy || historyRequest) return;
+
   cancelStopRecovery();
   const controller = new AbortController();
   historyRequest = controller;
   assistant.update((value) => ({ ...value, historyLoading: true, error: null }));
+
   try {
     if (!title.trim() || title.trim().length > 120) throw new Error('assistant_title_invalid');
+
     const { data } = await api
       .patch(`assistant/conversations/${id}`, {
         json: { title: title.trim() },
@@ -666,7 +711,9 @@ export async function changeAssistantConversation(id: number, title?: string): P
         context: { silentErrors: true }
       })
       .json<Resp<AssistantConversation>>();
+
     if (historyRequest !== controller) return;
+
     assistant.update((value) => (value.conversation?.id === id ? { ...value, conversation: data } : value));
     await loadAssistantConversations();
   } catch (error) {
@@ -689,14 +736,17 @@ export async function changeAssistantConversation(id: number, title?: string): P
 export async function deleteAssistantConversations(ids: number[]): Promise<boolean> {
   const state = get(assistant);
   if (get(assistantCanvas) || state.busy || historyRequest || !ids.length) return false;
+
   const selected = new Set(ids);
   const controller = new AbortController();
   historyRequest = controller;
   conversationRevision += 1;
+
   // discard in-flight metadata pages so they cannot restore deleted records
   listRequest?.abort();
   listRequest = null;
   assistant.update((value) => ({ ...value, historyLoading: true, conversationsLoading: false, error: null }));
+
   try {
     await api.post('assistant/conversations/delete', {
       json: { ids: [...selected] },
@@ -704,13 +754,16 @@ export async function deleteAssistantConversations(ids: number[]): Promise<boole
       retry: 0,
       context: { silentErrors: true }
     });
+
     if (historyRequest !== controller) return false;
+
     const current = get(assistant).conversation;
     if (current && selected.has(current.id)) {
       cancelStopRecovery();
       clearHandoff();
       rememberConversation(null);
     }
+
     assistant.update((value) => ({
       ...value,
       conversations: value.conversations.filter((item) => !selected.has(item.id)),
@@ -718,6 +771,7 @@ export async function deleteAssistantConversations(ids: number[]): Promise<boole
         ? { conversation: null, turns: [], turnsBefore: null }
         : {})
     }));
+
     return true;
   } catch (error) {
     if (historyRequest === controller) {
@@ -753,11 +807,13 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
   )
     return;
   if (get(assistantCanvas)) return;
+
   const retry = retryId
     ? state.turns.find((turn) => turn.id === retryId && (turn.status !== 'complete' || turn.canvasError))
     : null;
   const prompt = (handoffPrompt ?? retry?.prompt ?? state.input).trim();
   if (!prompt) return;
+
   let context: AssistantPageContext | null;
   try {
     if (!isModelAvailable(state.model, state.models)) throw new Error('assistant_model_required');
@@ -769,10 +825,12 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
     assistant.update((value) => ({ ...value, error: errorCode(error, 'assistant_context_invalid') }));
     return;
   }
+
   // a new request supersedes any created draft still waiting for its designer
   clearHandoff();
   const requestHandoffRevision = handoffRevision;
   conversationRevision += 1;
+
   const turn: AssistantTurn = {
     id: uuidv4(),
     prompt,
@@ -791,6 +849,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
     busy: true,
     turns: [...value.turns, turn]
   }));
+
   let timedOut = false;
   let idle: ReturnType<typeof setTimeout>;
   const timeout = () => {
@@ -812,6 +871,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
     clearTimeout(idle);
   };
   activity();
+
   let started = false;
   let submittedConversationId: number | null = null;
   let submittedContext: AssistantStoredContext | null = null;
@@ -825,6 +885,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
    */
   function update(change: (value: AssistantTurn) => void): void {
     if (active !== controller) return;
+
     assistant.update((value) => {
       const turns = value.turns.map((item) => {
         if (item.id !== turn.id) return item;
@@ -843,6 +904,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
    */
   function receive(event: AssistantStreamEvent): void {
     controller.signal.throwIfAborted();
+
     if (event.event === 'start') {
       if (started) throw new Error('assistant_stream_invalid');
       started = true;
@@ -851,7 +913,9 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       });
       return;
     }
+
     if (!started && event.event !== 'error') throw new Error('assistant_stream_invalid');
+
     if (event.event === 'compacting') {
       if (active === controller)
         assistant.update((value) => ({
@@ -862,11 +926,13 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         }));
       return;
     }
+
     if (event.event === 'tool_start' && event.data.name === 'preview_workflow_draft') {
       beginAssistantCanvas(turn.id, context, stopAssistant);
       // reveal the decision controls if the panel was closed before editing started
       if (get(assistantCanvas)) openAssistant();
     }
+
     update((value) => {
       switch (event.event) {
         case 'text_delta':
@@ -879,8 +945,10 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         case 'tool_result': {
           const tool = value.tools.find((tool) => tool.id === event.data.id && tool.name === event.data.name);
           if (!tool || tool.status !== 'running') throw new Error('assistant_stream_invalid');
+
           tool.result = event.data;
           tool.status = event.data.ok ? 'complete' : 'error';
+
           if (tool.name === 'create_download_plan' && event.data.ok && event.data.data?.created) {
             window.dispatchEvent(new Event('download-plan-created'));
           }
@@ -894,6 +962,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'apply_download_task_action' && event.data.ok && event.data.data?.applied !== false) {
             window.dispatchEvent(new Event('download-task-changed'));
           }
+
           // refresh batches after execution and show scans, rescrapes or saved settings
           if (
             tool.name === 'apply_media_change' &&
@@ -931,6 +1000,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           break;
       }
     });
+
     if (
       event.event === 'tool_result' &&
       event.data.name === 'preview_workflow_draft' &&
@@ -942,10 +1012,12 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       const preview = get(assistant)
         .turns.find((item) => item.id === turn.id)
         ?.tools.find((tool) => tool.id === event.data.id);
+
       if (preview && isSaveablePreview(preview)) {
         const proposalId = preview.result!.data!.proposal_id as number;
         const conversationId = submittedConversationId;
         const snapshotId = submittedContext.snapshot_id;
+
         // keep checkpoint reads ordered without blocking model events or heartbeat reads
         canvasUpdates = canvasUpdates.then(() =>
           updateAssistantCanvas(
@@ -960,6 +1032,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         );
       }
     }
+
     if (event.event === 'done' || event.event === 'error') disarm();
   }
 
@@ -974,11 +1047,14 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           context: { silentErrors: true }
         })
         .json<Resp<AssistantConversation>>();
+
       if (active !== controller) return;
+
       conversation = data;
       rememberConversation(data.id);
       assistant.update((value) => ({ ...value, conversation: data }));
     }
+
     if (context?.page_type === 'workflow_designer') {
       const { canvas, ...metadata } = context;
       const { data } = await api
@@ -989,7 +1065,9 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           context: { silentErrors: true }
         })
         .json<Resp<{ snapshot_id: number }>>();
+
       if (active !== controller) return;
+
       submittedContext = { ...metadata, snapshot_id: data.snapshot_id };
       update((value) => {
         value.context = submittedContext;
@@ -998,6 +1076,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
     } else {
       submittedContext = context;
     }
+
     submittedConversationId = conversation.id;
     const response = await api.post(`assistant/conversations/${conversation.id}/chat`, {
       json: {
@@ -1014,16 +1093,20 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       context: { silentErrors: true },
       headers: { Accept: 'text/event-stream' }
     });
+
     if (!response.headers.get('content-type')?.startsWith('text/event-stream') || !response.body) {
       throw new Error('assistant_stream_invalid');
     }
+
     const terminal = await consumeAssistantStream(response.body, receive, activity);
     if (terminal === 'done') await canvasUpdates;
+
     const completed =
       terminal === 'done' && active === controller
         ? get(assistant).turns.find((item) => item.id === turn.id && item.status === 'complete')
         : undefined;
     if (completed) created = createdWorkflow(completed);
+
     if (completed && submittedContext?.page_type === 'workflow_designer' && submittedContext.snapshot_id) {
       // the backend advances its snapshot chain only after successful previews
       const preview = completed.tools.filter(isSaveablePreview).at(-1);
@@ -1054,10 +1137,12 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         if (tool.status === 'running') tool.status = 'interrupted';
       });
     });
+
     if (active === controller) {
       active = null;
       const current = get(assistant);
       assistant.update((value) => ({ ...value, busy: false, compacting: false }));
+
       if (
         current.open &&
         current.stopping &&
@@ -1069,6 +1154,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         cancelStopRecovery();
         void loadAssistantConversations();
       }
+
       // leaving and returning to the original page still cancels automatic opening
       if (created !== null && submittedConversationId !== null && handoffRevision === requestHandoffRevision) {
         void openCreatedWorkflow(submittedConversationId, created);

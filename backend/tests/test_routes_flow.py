@@ -414,6 +414,7 @@ def test_indexer_login_access(application):
                 with pytest.raises(ForbiddenException) as exc_info:
                     await call_route(handler, call, id=indexer.id)
                 assert exc_info.value.message == ErrorCode.PERMISSION_DENIED
+
             application.ctx.flow_engine.execute.assert_not_awaited()
             assert (await FlowVariable.get(graph_id=indexer.id)).value == {
                 "name": "Owner",
@@ -428,14 +429,17 @@ def test_indexer_login_access(application):
                 routes.get_indexer_auth, request(reader), id=indexer.id
             )
             assert response_json(status) == {"name": "Owner"}
+
             config = await call_route(
                 routes.get_indexer_config, request(reader), id=indexer.id
             )
             assert response_json(config)["auth"]["login"] == {"required": True}
+
             executed = await call_route(
                 routes.execute_graph, request(reader, path, login), id=indexer.id
             )
             assert response_json(executed) == {"name": "Intruder"}
+
             logout = await call_route(
                 routes.indexer_logout, request(reader, body={}), id=indexer.id
             )
@@ -476,12 +480,14 @@ def test_job_control(application):
                 with pytest.raises(ForbiddenException) as exc_info:
                     await call_route(handler, request(reader, body={}), id=job.id)
                 assert exc_info.value.status_code == 403
+
             engine.pause_job.assert_not_awaited()
             engine.resume_job.assert_not_awaited()
 
             for handler in (routes.pause_job, routes.resume_job):
                 response = await call_route(handler, request(admin, body={}), id=job.id)
                 assert response.status == 204
+
             engine.pause_job.assert_awaited_once_with(job.id)
             engine.resume_job.assert_awaited_once_with(job.id)
 
@@ -540,6 +546,7 @@ def test_execution_access(application):
                     routes.execute_graph, request(user, path, body), id=graph_id
                 )
                 assert response_json(response) == []
+
             assert [
                 (call.kwargs["graph_id"], call.kwargs["recovery_id"])
                 for call in engine.execute.await_args_list
@@ -619,6 +626,7 @@ def test_graph_transfer():
                     routes.export_graphs, request(reader, path, {"ids": [graph.id]})
                 )
             assert exc_info.value.status_code == 403
+
             exported = await call_route(
                 routes.export_graphs, request(admin, path, {"ids": [graph.id]})
             )
@@ -634,6 +642,7 @@ def test_graph_transfer():
                 )
             assert exc_info.value.status_code == 403
             assert not await FlowGraph.exists()
+
             imported = await call_route(
                 routes.import_graphs, upload(admin, path, exported.body)
             )

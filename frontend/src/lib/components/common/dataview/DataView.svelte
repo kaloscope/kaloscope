@@ -1,4 +1,5 @@
 <script lang="ts" generics="T">
+  import type { SkeletonProps } from '$lib/components';
   import type { ScrollPosition, ViewMode, ViewModes } from '$lib/types';
   import { throttle } from '$lib/utils/timing';
   import type { Snippet } from 'svelte';
@@ -36,6 +37,11 @@
     /** The grid item snippet. */
     item?: Snippet<[T, number]>;
 
+    /** The placeholder shown when there is no data. */
+    empty?: Snippet;
+    /** The placeholders shown while the first data is loading. */
+    skeleton?: SkeletonProps | false;
+
     /** Whether to show the loading overlay. */
     loading?: boolean | null;
     /** Whether to hide the operation panel on scroll. */
@@ -71,6 +77,9 @@
     gridClass,
     itemClass,
     item,
+
+    empty,
+    skeleton = {},
 
     loading,
     hideOnScroll = false,
@@ -185,9 +194,9 @@
   >
     <div class={dvh && hideOnScroll ? 'min-h-[calc(100%+1px)]' : ''}>
       {#if mode === 'grid' && item}
-        <Grid {data} {uniqueKey} {loading} {item} {itemClass} {gridClass} />
+        <Grid {data} {uniqueKey} {loading} {item} {itemClass} {gridClass} {empty} {skeleton} />
       {:else if header && row}
-        <Table {data} {uniqueKey} {loading} {header} {row} {rowSelect} {rowClass} {tableClass} />
+        <Table {data} {uniqueKey} {loading} {header} {row} {rowSelect} {rowClass} {tableClass} {empty} {skeleton} />
       {/if}
       {#if paginator}
         {@render paginator(loading !== undefined && loading !== null)}

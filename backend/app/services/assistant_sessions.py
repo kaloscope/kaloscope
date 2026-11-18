@@ -138,6 +138,7 @@ class AssistantSessionService:
         query = AssistantConversation.filter(user_id=user.id)
         if before is not None:
             query = query.filter(id__lt=before)
+
         items = await query.order_by("-id").limit(31)
         return {
             "items": [cls.describe(item) for item in items[:30]],
@@ -162,6 +163,7 @@ class AssistantSessionService:
         conversation = await cls.owned(conversation_id, user)
         if not title.strip():
             raise KaloscopeException(ErrorCode.BAD_REQUEST, status_code=400)
+
         conversation.title = title.strip()
         await conversation.save(update_fields=["title", "updated_at"])
         return cls.describe(conversation)
@@ -199,13 +201,16 @@ class AssistantSessionService:
         ids = set(conversation_ids)
         if not ids:
             raise BadRequestException
+
         async with in_transaction():
             conversations = AssistantConversation.filter(id__in=ids, user_id=user.id)
             if await conversations.count() != len(ids):
                 raise NotFoundException
+
             await conversations.filter(
                 Q(active_request=None) | Q(lease_until__lt=timezone.now())
             ).delete()
+
             # sqlite deletion counts include cascaded records, so inspect the parents
             if await conversations.exists():
                 raise KaloscopeException(ErrorCode.ASSISTANT_BUSY, status_code=409)
@@ -254,10 +259,12 @@ class AssistantSessionService:
         """
         conversation = await cls.owned(conversation_id, user)
         await cls.recover(conversation)
+
         query = AssistantTurn.filter(conversation_id=conversation_id)
         if before is not None:
             query = query.filter(id__lt=before)
         records = await query.order_by("-id").limit(21)
+
         items = []
         visible = []
         for turn in reversed(records[:20]):
@@ -295,6 +302,7 @@ class AssistantSessionService:
             for tool in item["tools"]:
                 if tool["id"] in proposals:
                     tool["proposal"] = proposals[tool["id"]]
+
         return {
             "conversation": cls.describe(conversation),
             "items": items,
@@ -314,6 +322,7 @@ class AssistantSessionService:
             or conversation.lease_until >= timezone.now()
         ):
             return
+
         async with in_transaction():
             released = await AssistantConversation.filter(
                 id=conversation.id,
@@ -360,10 +369,12 @@ class AssistantSessionService:
         """
         await cls.owned(conversation_id, user)
         await FlowGraphService.get_accessible(workflow_id, user)
+
         data = compress_document(document)
         encoded = dumps(data)
         if len(encoded) > MAX_SNAPSHOT_BYTES:
             raise KaloscopeException(ErrorCode.ASSISTANT_CONTEXT_LIMIT)
+
         record, _ = await AssistantSnapshot.get_or_create(
             conversation_id=conversation_id,
             workflow_id=workflow_id,
@@ -396,6 +407,7 @@ class AssistantSessionService:
         )
         if record is None:
             raise NotFoundException
+
         await FlowGraphService.get_accessible(record.workflow_id, user)
         return record
 
@@ -421,6 +433,7 @@ class AssistantSessionService:
         )
         if previous is None:
             return set()
+
         calls = await AssistantToolCall.filter(
             turn_id=previous.id,
             name__in=[
@@ -440,6 +453,7 @@ class AssistantSessionService:
                 "create_download_task",
             ],
         )
+
         download_created = any(
             call.name in {"create_download_plan", "create_download_task"}
             and (data := (call.result or {}).get("data") or {}).get("created")
@@ -452,6 +466,7 @@ class AssistantSessionService:
             "validate_download_plan",
             "validate_download_task",
         }
+
         return {
             # a completed action keeps its own management tools available
             _MEDIA_REVIEW_BY_ACTION[data["action"]]
@@ -504,6 +519,7 @@ class AssistantSessionService:
         """
         conversation = await cls.owned(conversation_id, user)
         await cls.recover(conversation)
+
         context = body.context.model_dump(mode="json") if body.context else None
         resource_ids: list[int | str] = []
         if context:
@@ -531,6 +547,7 @@ class AssistantSessionService:
                     resource_ids.append(plan.graph_id)
                     if plan.transfer_lib_id:
                         resource_ids.append(media_resource(plan.transfer_lib_id))
+
             # download pages show shared tasks, so they add nothing to recheck
             if not await cls.allowed(resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
@@ -540,6 +557,7 @@ class AssistantSessionService:
                     id=selected["job_id"], graph_id=selected["workflow_id"]
                 ).exists():
                     raise BadRequestException
+
         async with in_transaction():
             claimed = await AssistantConversation.filter(
                 id=conversation_id, user_id=user.id, active_request=None
@@ -566,6 +584,7 @@ class AssistantSessionService:
                 .exists()
             ):
                 raise NotFoundException
+
             if isinstance(body.context, WorkflowDesignerContext):
                 if context is None:
                     raise BadRequestException
@@ -587,6 +606,7 @@ class AssistantSessionService:
                         "edge_count": len(snapshot.document["edges"]),
                     },
                 )
+
             turn = await AssistantTurn.create(
                 conversation_id=conversation_id,
                 request_id=body.request_id,
@@ -600,6 +620,7 @@ class AssistantSessionService:
                 await AssistantConversation.filter(id=conversation_id).update(
                     title=body.prompt.strip()[:120]
                 )
+
         return turn
 
     @staticmethod

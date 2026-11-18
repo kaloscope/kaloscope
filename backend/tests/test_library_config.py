@@ -571,6 +571,7 @@ def test_tv_naming(monkeypatch, tmp_path, split_seasons):
             assert await snapshot(tmp_path) == before
             assert sample["status"] == "moves"
             assert sample["more_paths"] == (2 if split_seasons else 1)
+
             planned = await organizer.preview_organization(
                 env.shows, TV_TEMPLATE, env.show
             )
@@ -580,6 +581,7 @@ def test_tv_naming(monkeypatch, tmp_path, split_seasons):
                 )
                 for entry in planned["paths"]
             }
+
             # numbered metadata renames; files without metadata keep their names
             expected = {
                 "S01E01.mkv": Path("Old Show/Season 01/S01E01 - Pilot.mkv"),
@@ -602,6 +604,7 @@ def test_tv_naming(monkeypatch, tmp_path, split_seasons):
             lib = await MediaLib.get(id=env.shows.id)
             async with library_lock(lib.dir):
                 await organizer.organize_items(lib, [env.show.id])
+
             for path in proposed.values():
                 assert (Path(lib.dir) / path).is_file()
 
@@ -646,6 +649,7 @@ def test_naming_limits(monkeypatch, tmp_path):
             taken = root / "Old Movie (2001)"
             taken.mkdir()
             (taken / "Old Movie (2001).mkv").write_bytes(b"other")
+
             # works without metadata and without a year
             for name, data in (
                 ("No Metadata", None),
@@ -672,6 +676,7 @@ def test_naming_limits(monkeypatch, tmp_path):
                     dir=str(folder),
                     name=name,
                 )
+
             await MediaEvent.create(
                 lib=env.movies, src_path=str(root), event_type="organize", payload={}
             )
@@ -696,6 +701,7 @@ def test_naming_limits(monkeypatch, tmp_path):
             assert naming["pending_organization"] is True
             assert reviewed["valid"]
             assert str(root) not in dumps(naming).decode()
+
             issues = {
                 entry: (samples[entry]["status"], samples[entry]["issue"])
                 for entry in samples
@@ -799,6 +805,7 @@ def test_stale(monkeypatch, tmp_path, edit):
                 "add_workflow_ids": [20],
             }
             reviewed = await review(env.owner, env.movies.id, add_workflow_ids=[20])
+
             if edit == "language":
                 await MediaLib.filter(id=env.movies.id).update(language=Language.ZH_CN)
             elif edit == "template":
@@ -1355,6 +1362,7 @@ def test_missing_scraper_conversation(monkeypatch, tmp_path, verbose):
             created["id"] = draft["workflow_id"]
             stored_draft = await FlowGraph.get(id=created["id"])
             untouched = await rows_of(env.shows)
+
             _, early = await converse(
                 conversation["id"], env.owner, "Bind that draft.", key="b"
             )
@@ -1516,6 +1524,7 @@ def test_mcp(monkeypatch, tmp_path):
                 conversation_id=1,
                 call_id="parity",
             )
+
             arguments = {
                 "application": {
                     "request_id": data["request_id"],
@@ -1553,6 +1562,7 @@ def test_mcp(monkeypatch, tmp_path):
             assert altered["structuredContent"]["conflict"]
             assert saved["structuredContent"]["outcome"] == "configured"
             assert replay["structuredContent"]["replayed"]
+
             # assistant and MCP share the review apart from request identities
             data.pop("request_id")
             shared["data"].pop("request_id")

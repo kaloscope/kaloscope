@@ -494,7 +494,7 @@
   }}
 />
 
-<div class="shrink-0 overflow-auto rounded-box border {_class}" style:min-width={minWidth} style:max-width={maxWidth}>
+<div class="shrink-0 overflow-auto rounded-card border {_class}" style:min-width={minWidth} style:max-width={maxWidth}>
   <div class={editorClass} bind:this={editor}></div>
   <div class="flex items-center justify-between border-t px-2 py-0.5 {panelClass}">
     <span class="flex-center gap-1">

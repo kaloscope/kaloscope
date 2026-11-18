@@ -106,11 +106,13 @@ def apply_changes(document: dict, changes: list[GraphEdit]) -> GraphDocument:
     edges = {edge["id"]: edge for edge in copied["edges"]}
     if len(nodes) != len(copied["nodes"]) or len(edges) != len(copied["edges"]):
         raise ValueError("Base contains duplicate identifiers")
+
     for change in changes:
         if isinstance(change, (SetField, RemoveField, RemoveNode, MoveNode)):
             if change.node_id not in nodes:
                 raise ValueError("Unknown node")
             node = nodes[change.node_id]
+
         match change:
             case SetField():
                 node["data"][change.field_id] = deepcopy(change.value)
@@ -139,6 +141,7 @@ def apply_changes(document: dict, changes: list[GraphEdit]) -> GraphDocument:
                 if change.edge_id not in edges:
                     raise ValueError("Unknown edge")
                 del edges[change.edge_id]
+
     return GraphDocument(nodes=list(nodes.values()), edges=list(edges.values()))
 
 
@@ -173,6 +176,7 @@ def graph_outline(document: dict) -> dict:
                 )
             fields["$schema"] = str(node["data"].get("$schema"))
             nodes[node["id"]] = fields
+
         return {
             "nodes": nodes,
             "edges": [
@@ -199,6 +203,7 @@ def value_summary(value: Any, *, limit: int = 1200) -> Any:
     encoded = dumps(value)
     if len(encoded) <= limit:
         return value
+
     result: dict[str, Any] = {"truncated": True, "bytes": len(encoded)}
     if isinstance(value, list):
         result.update(
@@ -216,6 +221,7 @@ def value_summary(value: Any, *, limit: int = 1200) -> Any:
         result.update(type="string", characters=len(value), preview=value[:200])
     else:
         result.update(type=type(value).__name__)
+
     return result
 
 
@@ -246,6 +252,7 @@ def graph_summary(document: dict) -> dict:
         "omitted_nodes": max(0, len(nodes) - 30),
         "omitted_edges": max(0, len(edges) - 40),
     }
+
     while len(dumps(result)) > 6000 and (result["nodes"] or result["edges"]):
         if result["edges"]:
             result["edges"].pop()
@@ -253,6 +260,7 @@ def graph_summary(document: dict) -> dict:
         else:
             result["nodes"].pop()
             result["omitted_nodes"] += 1
+
     return result
 
 
@@ -269,6 +277,7 @@ RUN_FACTS = (
     "evidence",
     "output_log_id",
 )
+
 # plan change identities and outcomes retained; settings stay in the original record
 PLAN_CHANGE_FACTS = (
     "valid",
@@ -381,6 +390,7 @@ def tool_facts(result: dict) -> dict:
     data = result.get("data", {})
     if not isinstance(data, dict):
         data = {}
+
     if result.get("name") == "run_workflow":
         # outputs, issues and guidance stay in the original run record
         data = {key: data[key] for key in RUN_FACTS if key in data}
@@ -409,9 +419,11 @@ def tool_facts(result: dict) -> dict:
                 | ({"season": entry["season"]} if "season" in entry else {})
                 for entry in data["candidates"]
             ]
+
     facts = {}
     if result.get("name") == "get_workflow" and isinstance(data.get("graph"), dict):
         facts["graph_source"] = "saved_draft"
+
     for key, value in data.items():
         if (
             key == "rendered"
@@ -421,6 +433,7 @@ def tool_facts(result: dict) -> dict:
         ):
             # the parsed value and validation issues already describe this result
             continue
+
         if key == "source_facts":
             # history reads already project and flatten the original tool facts
             facts[key] = value
@@ -499,10 +512,12 @@ def tool_facts(result: dict) -> dict:
             facts[key] = value_summary(value, limit=600)
         else:
             facts[key] = value
+
     if "changes" in facts:
         facts["omitted_changes"] = data.get(
             "change_count", len(data["changes"]) + data.get("omitted_changes", 0)
         ) - len(facts["changes"])
+
     return {
         **{key: result[key] for key in ("id", "name", "ok", "error") if key in result},
         "data": facts,

@@ -56,11 +56,12 @@
   uniqueKey="login_id"
   class="pull-to-refresh"
   gridClass="lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
-  itemClass="rounded-field border shadow-sm"
+  itemClass="card-surface"
+  skeleton={{ ratio: '4/1', lines: 3 }}
 >
   {#snippet item(session, index)}
     {@const { browser, device, os } = UAParser(session.user_agent)}
-    <div class="flex justify-between gap-2 rounded-t-field bg-base-200 p-4">
+    <div class="flex justify-between gap-2 rounded-t-card bg-base-200/60 p-4">
       <div class="grid grid-flow-col items-center gap-2" title={session.user_agent}>
         <Image
           transparent
@@ -106,7 +107,7 @@
         {/if}
       </div>
     </div>
-    <dl class="rounded-b-field bg-base-100 p-4 text-sm">
+    <dl class="rounded-b-card bg-base-100 p-4 text-sm">
       {@render term($_('session.os'), os.name ? `${os.name} ${os.version ?? ''}` : 'Unknown')}
       <div class="divider my-0"></div>
       {@render term($_('session.ip'), session.client_ip)}

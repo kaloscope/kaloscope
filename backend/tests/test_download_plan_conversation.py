@@ -314,10 +314,12 @@ def test_truncation(monkeypatch):
             assert result["omitted_count"] == 20 - result["returned_count"]
             assert result["total"] == 80 and result["next_page"] == 2
             assert len(dumps(result)) < 8000
+
             execute.return_value = {"items": [{"id": "bad"}], "total": 1}
             invalid = await service.DownloadPlanService.search_indexer(body, owner)
             assert invalid["status"] == "invalid_output" and invalid["issues"]
             assert "total" not in invalid
+
             execute.return_value = {"items": [{} for _ in range(20)]}
             invalid_output = await service.DownloadPlanService.search_indexer(
                 body, owner
@@ -325,6 +327,7 @@ def test_truncation(monkeypatch):
             assert "issue_count" not in invalid_output
             assert invalid_output["issues_truncated"]
             assert len(invalid_output["issues"]) == 10
+
             body.filters = {f"undeclared-{i}": "value" for i in range(100)}
             invalid_input = await service.DownloadPlanService.search_indexer(
                 body, owner
@@ -408,6 +411,7 @@ def test_confirmation_gate(latest_status):
             assert result["request_id"] == str(body.request_id)
             assert await DownloadPlan.all().count() == 0
             service.notify_download_changes.assert_not_called()
+
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -436,6 +440,7 @@ def test_confirmation_gate(latest_status):
                 name="create_download_plan",
                 arguments=args,
             )
+
             blocked = await tools.execute_tool(
                 "create_download_plan",
                 args,
@@ -445,6 +450,7 @@ def test_confirmation_gate(latest_status):
             )
             assert blocked["ok"] and blocked["data"]["confirmation_required"]
             assert await DownloadPlan.all().count() == 0
+
             turn.status = "complete"
             await turn.save()
             confirm = await AssistantTurn.create(
@@ -474,6 +480,7 @@ def test_confirmation_gate(latest_status):
                 and await DownloadPlan.all().count() == 0
             )
             await newer.delete()
+
             for confirmation in ({}, {"confirmed": False}):
                 unconfirmed = await tools.execute_tool(
                     "create_download_plan",
@@ -488,6 +495,7 @@ def test_confirmation_gate(latest_status):
                 assert unconfirmed["data"]["confirmation_required"]
                 assert await DownloadPlan.all().count() == 0
                 service.notify_download_changes.assert_not_called()
+
             created = await tools.execute_tool(
                 "create_download_plan",
                 args,
@@ -518,6 +526,7 @@ def test_mcp_search(monkeypatch):
                 denied = await call(app, "search_indexer", args, token=account)
                 assert denied["isError"]
             engine.assert_not_called()
+
             tokens = {}
             for account in ("reader", "admin"):
                 token = await MCPAccessTokenService.create(
@@ -528,10 +537,12 @@ def test_mcp_search(monkeypatch):
             assert (await call(app, "search_indexer", args, token=tokens["reader"]))[
                 "isError"
             ]
+
             result = await call(app, "search_indexer", args, token=tokens["admin"])
             assert not result.get("isError"), result
             assert result["structuredContent"]["status"] == "ok"
             assert result["structuredContent"]["items"][0]["title"] == "Lantern"
+
             body.confirmed = False
             unconfirmed = await call(
                 app,
@@ -557,6 +568,7 @@ def test_conversation(monkeypatch, verbose):
     def handler(upstream):
         body = loads(upstream.content)
         assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
+
         if not body.get("stream"):
             return httpx.Response(
                 200,
@@ -581,10 +593,12 @@ def test_conversation(monkeypatch, verbose):
                     ]
                 },
             )
+
         streams.append(body)
         number, step = stage["number"], stage["step"]
         stage["step"] += 1
         flow = fixture["graph_id"]
+
         actions = [
             [
                 (
@@ -625,6 +639,7 @@ def test_conversation(monkeypatch, verbose):
                 ),
             ],
         ][number]
+
         if step >= len(actions):
             content = [
                 "Choose the published indexer for Lantern.",
@@ -636,6 +651,7 @@ def test_conversation(monkeypatch, verbose):
                 "Created one plan.",
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
+
         name, args = actions[step]
         if number >= 2 or (step >= 2 and number):
             names = {item["function"]["name"] for item in body["tools"]}
@@ -645,6 +661,7 @@ def test_conversation(monkeypatch, verbose):
                 "validate_download_plan",
             } <= names
             assert "preview_workflow_draft" not in names
+
         return response(
             [
                 chunk(
@@ -692,6 +709,7 @@ def test_conversation(monkeypatch, verbose):
                     "filters": {"category": "movie"},
                 },
             )
+
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -733,6 +751,7 @@ def test_conversation(monkeypatch, verbose):
                         == 0
                     )
                     service.notify_download_changes.assert_not_called()
+
             assert execute.await_count == 2
             assert (
                 execute.call_args_list[0].args[1]["keyword"]
@@ -741,6 +760,7 @@ def test_conversation(monkeypatch, verbose):
             )
             assert "category" not in execute.call_args_list[0].args[1]
             assert execute.call_args_list[1].args[1]["category"] == "movie"
+
             assert await DownloadPlan.all().count() == 1
             plan = await DownloadPlan.first()
             assert plan.keyword == "Lantern" and plan.filters == {"category": "movie"}

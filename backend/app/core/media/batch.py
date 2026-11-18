@@ -152,6 +152,7 @@ def build_index(lib: MediaLib, items: list[MediaItem]) -> LibraryIndex:
     """
     index = LibraryIndex(Path(lib.dir).absolute(), lib.lib_type)
     reading = lib.lib_type in READING_TYPES
+
     for item in items:
         if reading:
             if item.format in _ARCHIVES:
@@ -162,10 +163,12 @@ def build_index(lib: MediaLib, items: list[MediaItem]) -> LibraryIndex:
             else:
                 index.directories[item.path] = item.id
             continue
+
         if item.path == item.dir:
             index.directories[item.path] = item.id
         else:
             index.bodies[item.path] = item.id
+
         for value in (item.nfo_path, item.danmaku_path):
             if value:
                 index.owned[value] = item.id
@@ -173,6 +176,7 @@ def build_index(lib: MediaLib, items: list[MediaItem]) -> LibraryIndex:
         for value in (item.poster, item.backdrop):
             if value and not urlsplit(value).scheme and not value.startswith("//"):
                 index.owned[os.path.normpath(base / value)] = item.id
+
     facts: dict[str, list[tuple[Any, ...]]] = {}
     for kind, lookup in (("body", index.bodies), ("owned", index.owned)):
         for path, item_id in lookup.items():
@@ -185,6 +189,7 @@ def build_index(lib: MediaLib, items: list[MediaItem]) -> LibraryIndex:
     ):
         for path, value in lookup.items():
             facts.setdefault(path, []).append((kind, value))
+
     index.folders.update((path, tuple(sorted(rows))) for path, rows in facts.items())
     return index
 
@@ -263,10 +268,12 @@ def _video_owners(
     holder = index.directories.get(base)
     if holder is None and indexed:
         holder = next(iter(indexed.values()))
+
     result: dict[str, tuple[FileOwner, int | None]] = {}
     for name in names:
         path = f"{base}/{name}"
         stem, suffix = _name_parts(name)
+
         if path in index.bodies:
             result[name] = (FileOwner.INDEXED, index.bodies[path])
         elif name in videos:
@@ -301,6 +308,7 @@ def _video_owners(
             result[name] = (FileOwner.COMPANION, holder)
         else:
             result[name] = (FileOwner.LOOSE, None)
+
     return result
 
 
@@ -332,12 +340,14 @@ def _reading_owners(
         if page_item is not None
         else index.directories.get(base)
     )
+
     result: dict[str, tuple[FileOwner, int | None]] = {}
     for name in names:
         path = f"{base}/{name}"
         stem, suffix = _name_parts(name)
         stem = stem.casefold()
         image = suffix in IMAGE_EXTENSIONS
+
         if path in index.bodies:
             result[name] = (FileOwner.INDEXED, index.bodies[path])
         elif hidden or is_ignored_name(name):
@@ -363,6 +373,7 @@ def _reading_owners(
             result[name] = (FileOwner.UNINDEXED, None)
         else:
             result[name] = (FileOwner.LOOSE, None)
+
     return result
 
 
@@ -430,6 +441,7 @@ def _walk(start: Path, known: _Walk | None, limit: int, deadline: float) -> _Wal
     """
     if known is not None and monotonic() - known.at > WALK_SECONDS:
         known = None
+
     walk = _Walk()
     visited = 0
     pending = [start]
@@ -439,6 +451,7 @@ def _walk(start: Path, known: _Walk | None, limit: int, deadline: float) -> _Wal
             mtime = os.stat(current, follow_symlinks=False).st_mtime_ns
         except FileNotFoundError:
             continue
+
         listing = known.directories.get(current) if known else None
         # a change in the same clock tick as the last read would go unnoticed
         if (
@@ -458,6 +471,7 @@ def _walk(start: Path, known: _Walk | None, limit: int, deadline: float) -> _Wal
                             break
                         if entry.name.startswith(".organizing-"):
                             continue
+
                         info = entry.stat(follow_symlinks=False)
                         if stat.S_ISLNK(info.st_mode):
                             link = Path(entry.path)
@@ -471,6 +485,7 @@ def _walk(start: Path, known: _Walk | None, limit: int, deadline: float) -> _Wal
                             continue
                         elif not stat.S_ISREG(info.st_mode):
                             continue
+
                         listing.files[entry.name] = (
                             info.st_dev,
                             info.st_ino,
@@ -479,12 +494,15 @@ def _walk(start: Path, known: _Walk | None, limit: int, deadline: float) -> _Wal
                         )
             except FileNotFoundError:
                 continue
+
         if walk.truncated or visited > limit or monotonic() > deadline:
             walk.truncated = True
             break
+
         walk.directories[current] = listing
         walk.files += len(listing.files)
         pending.extend(listing.directories)
+
     return walk
 
 
@@ -538,26 +556,31 @@ def scan_files(
     _safe_path(root, target)
     if not target.is_dir():
         raise ValueError("directory does not exist in this library")
+
     classify = _reading_owners if index.lib_type in READING_TYPES else _video_owners
     pattern = name.casefold() if name else None
     suffixes = set(extensions or ())
     scan = FileScan()
+
     start = root if whole else target
     walk = _walk(
         start, None if fresh else _WALKS.get(str(root)), limit, monotonic() + seconds
     )
     scan.truncated = walk.truncated
+
     if start == root and not walk.truncated and walk.files <= WALK_FILES:
         _WALKS.pop(str(root), None)
         while len(_WALKS) >= WALK_ROOTS:
             del _WALKS[next(iter(_WALKS))]
         _WALKS[str(root)] = walk
+
     for current, listing in walk.directories.items():
         scan.links.update(listing.links)
         if not listing.files or not (
             current == target or current.is_relative_to(target)
         ):
             continue
+
         wanted = [
             (entry_name, identity)
             for entry_name, identity in listing.files.items()
@@ -571,6 +594,7 @@ def scan_files(
         if not wanted:
             # page totals are only read for comics with matched pages
             continue
+
         base = str(current)
         key = index.folder_key(base)
         owners = listing.owners
@@ -582,12 +606,14 @@ def scan_files(
             scan.pages[page_item] = sum(
                 1 for owner, _ in owners.values() if owner == FileOwner.PAGE
             )
+
         for entry_name, identity in wanted:
             size = identity[2]
             owner, item_id = owners[entry_name]
             scan.matches.append(
                 FileMatch(current / entry_name, size, owner, item_id, list(identity))
             )
+
     scan.matches.sort(key=lambda match: str(match.path))
     return scan
 
@@ -670,6 +696,7 @@ def plan_deletion(
         for item_id, count in selected_pages.items()
         if count >= scan.pages.get(item_id, count)
     }
+
     writable: dict[Path, bool] = {}
     entries = []
     for match in scan.matches:
@@ -681,9 +708,11 @@ def plan_deletion(
             match.identity,
             match.item_id,
         )
+
         parent = match.path.parent
         if parent not in writable:
             writable[parent] = os.access(parent, os.W_OK | os.X_OK)
+
         reason = None
         if match.owner not in allowed:
             reason = "owner_excluded"
@@ -699,7 +728,9 @@ def plan_deletion(
             reason = "not_writable"
         if reason:
             entry.status, entry.reason = "blocked", reason
+
         entries.append(entry)
+
     selected = {
         entry.item_id
         for entry in entries
@@ -712,6 +743,7 @@ def plan_deletion(
             and entry.item_id in selected
         ):
             entry.status, entry.reason = "blocked", "follows_item"
+
     return entries
 
 
@@ -749,6 +781,7 @@ def item_entries(
             None,
             item.id,
         )
+
         if item.path in index.bodies:
             try:
                 entry.identity = _fingerprint(path)
@@ -759,11 +792,13 @@ def item_entries(
             entry.files = len(rows) or 1
             sizes = [row.size for row in rows if row.size is not None]
             entry.size = sum(sizes) if sizes else item.size
+
         if entry.status == "planned" and (
             {item.id, *(row.id for row in rows)} & busy_items
         ):
             entry.status, entry.reason = "blocked", "ingesting"
         entries.append(entry)
+
     return entries
 
 
@@ -789,6 +824,7 @@ def delete_files(root: Path, units: list[tuple[int, str, list[int]]]) -> dict[in
             if _fingerprint(path) != identity:
                 outcomes[entry_id] = "content_changed"
                 continue
+
             delete_path(path)
             outcomes[entry_id] = "done"
         except FileNotFoundError:
@@ -797,6 +833,7 @@ def delete_files(root: Path, units: list[tuple[int, str, list[int]]]) -> dict[in
             outcomes[entry_id] = "unsafe_path"
         except OSError:
             outcomes[entry_id] = "io_error"
+
     return outcomes
 
 
@@ -814,6 +851,7 @@ def prune_directories(root: Path, directories: set[Path], kept: set[str]):
             if path == root or not path.is_relative_to(root):
                 break
             candidates.add(path)
+
     for path in sorted(candidates, key=lambda entry: len(entry.parts), reverse=True):
         if str(path) in kept or path.is_symlink():
             continue
@@ -840,6 +878,7 @@ def item_matches(index: LibraryIndex, items: list[MediaItem]) -> FileScan:
     """
     scan = FileScan()
     reading = index.lib_type in READING_TYPES
+
     for item in sorted(items, key=lambda row: row.path):
         path = Path(item.path)
         if item.path in index.bodies:
@@ -852,7 +891,9 @@ def item_matches(index: LibraryIndex, items: list[MediaItem]) -> FileScan:
             identity, size = [item.id], item.size or 0
         else:
             continue
+
         scan.matches.append(FileMatch(path, size, FileOwner.INDEXED, item.id, identity))
+
     return scan
 
 
@@ -893,6 +934,7 @@ def rename_targets(
     # rule, not rendered values, leaves a title such as `$5 a Day` alone
     replacement = _DOLLAR.sub(lambda match: f"\\g<{match[1] or match[2]}>", replacement)
     templated = is_template(replacement)
+
     parts = []
     pairs = []
     for name, directory, saved in names:
@@ -911,6 +953,7 @@ def rename_targets(
             rendered = render(replacement, context=context, sandboxed=True)
         parts.append(suffix)
         pairs.append((rendered, old))
+
     targets: list[str | None] = []
     for stem, suffix in zip(substitute(pattern, pairs), parts, strict=True):
         stem = stem.strip()
@@ -927,6 +970,7 @@ def rename_targets(
             )
             else target
         )
+
     return targets
 
 
@@ -995,6 +1039,7 @@ def plan_renames(
     entries: list[PlanEntry] = []
     unchanged = 0
     targets: dict[str, list[PlanEntry]] = {}
+
     renamed = iter(
         rename_targets(
             pattern,
@@ -1013,6 +1058,7 @@ def plan_renames(
             ],
         )
     )
+
     for match in scan.matches:
         entry = PlanEntry(
             "item" if match.owner == FileOwner.INDEXED else "file",
@@ -1022,6 +1068,7 @@ def plan_renames(
             match.identity,
             match.item_id,
         )
+
         reason = None
         if match.owner not in allowed:
             reason = "owner_excluded"
@@ -1036,6 +1083,7 @@ def plan_renames(
             if target == match.path.name:
                 unchanged += 1
                 continue
+
             destination = match.path.with_name(target) if target else None
             if destination is None or (
                 index.lib_type in READING_TYPES and is_ignored_name(target or "")
@@ -1060,13 +1108,16 @@ def plan_renames(
                     reason = "not_writable"
                 else:
                     targets.setdefault(str(destination).casefold(), []).append(entry)
+
         if reason:
             entry.status, entry.reason = "blocked", reason
         entries.append(entry)
+
     for group in targets.values():
         if len(group) > 1:
             for entry in group:
                 entry.status, entry.reason = "blocked", "name_conflict"
+
     return entries, unchanged
 
 
@@ -1099,6 +1150,7 @@ def rename_files(
             if path.parent != target.parent:
                 outcomes[entry_id] = "unsafe_path"
                 continue
+
             if source.casefold() == destination.casefold():
                 # exclusive renaming refuses a name that differs only by case
                 os.rename(path, target)
@@ -1113,6 +1165,7 @@ def rename_files(
             outcomes[entry_id] = "unsafe_path"
         except OSError:
             outcomes[entry_id] = "io_error"
+
     return outcomes
 
 
@@ -1148,6 +1201,7 @@ def plan_reading_relocation(
         not create_parent and not target.parent.is_dir()
     ):
         raise FileNotFoundError(str(source))
+
     renames = [(source, target)]
     if source.is_file():
         wanted = f"{source.stem}.opf".casefold()
@@ -1156,12 +1210,14 @@ def plan_reading_relocation(
                 renames.append((sibling, target.with_suffix(sibling.suffix)))
     if any(os.path.lexists(new) and not _case_alias(old, new) for old, new in renames):
         raise FileExistsError(str(target))
+
     moves = []
     for old, new in renames:
         move = {"src": str(old), "dst": str(new), "identity": _fingerprint(old)}
         if old != new and str(old).casefold() == str(new).casefold():
             move["temporary"] = str(old.with_name(f".organizing-{uuid4().hex}"))
         moves.append(move)
+
     return {
         "moves": moves,
         "mapping": {str(old): str(new) for old, new in renames},
@@ -1191,6 +1247,7 @@ def restore_reading(root: Path, moves: list[dict[str, Any]]) -> bool:
             temporary = Path(move["temporary"]) if move.get("temporary") else None
             if temporary is not None:
                 _safe_path(root, temporary)
+
             current = (
                 temporary
                 if temporary is not None and os.path.lexists(temporary)
@@ -1208,11 +1265,13 @@ def restore_reading(root: Path, moves: list[dict[str, Any]]) -> bool:
                     continue
                 else:
                     return False
+
             if _fingerprint(current) != move["identity"]:
                 return False
             rename_exclusive(current, old)
         except (OSError, ValueError):
             return False
+
     return True
 
 
@@ -1242,6 +1301,7 @@ def empty_directories(
     _safe_path(root, target)
     if not target.is_dir():
         raise ValueError("directory does not exist in this library")
+
     registered = set(index.directories) | set(index.page_dirs) | set(index.containers)
     empty: set[Path] = set()
     visited = 0
@@ -1249,6 +1309,7 @@ def empty_directories(
         visited += len(names) + len(files)
         if visited > limit:
             return [], True
+
         path = Path(current)
         if (
             not files
@@ -1260,6 +1321,7 @@ def empty_directories(
             )
         ):
             empty.add(path)
+
     empty.discard(root)
     return sorted(path for path in empty if path.parent not in empty), False
 
@@ -1288,6 +1350,7 @@ def leftover_directories(
     target = root / directory if directory else root
     blocked: set[Path] = set()
     totals: dict[Path, list[int]] = {}
+
     for match in scan.matches:
         kept = (
             match.owner != FileOwner.LOOSE
@@ -1303,9 +1366,11 @@ def leftover_directories(
                 total = totals.setdefault(parent, [0, 0])
                 total[0] += 1
                 total[1] += match.size
+
     for registered in (*index.directories, *index.page_dirs, *index.containers):
         path = Path(registered)
         blocked.update((path, *path.parents))
+
     found = {
         path
         for path in totals
@@ -1334,6 +1399,7 @@ def remove_directories(root: Path, units: list[tuple[int, str]]) -> dict[int, st
             if path == root or path.is_symlink() or not path.is_dir():
                 outcomes[entry_id] = "missing"
                 continue
+
             below = list(os.walk(path, topdown=False, followlinks=False))
             if any(files for _, _, files in below) or any(
                 (Path(current) / name).is_symlink()
@@ -1342,6 +1408,7 @@ def remove_directories(root: Path, units: list[tuple[int, str]]) -> dict[int, st
             ):
                 outcomes[entry_id] = "not_empty"
                 continue
+
             for current, _, _ in below:
                 os.rmdir(current)
             outcomes[entry_id] = "done"
@@ -1349,4 +1416,5 @@ def remove_directories(root: Path, units: list[tuple[int, str]]) -> dict[int, st
             outcomes[entry_id] = "unsafe_path"
         except OSError:
             outcomes[entry_id] = "io_error"
+
     return outcomes

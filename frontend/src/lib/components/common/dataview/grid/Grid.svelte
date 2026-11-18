@@ -1,7 +1,6 @@
 <script lang="ts" generics="T">
-  import { Overlay } from '$lib/components';
+  import { Empty, Overlay, Skeleton, type SkeletonProps } from '$lib/components';
   import { _ } from '$lib/i18n';
-  import { icons } from '$lib/icons';
   import { throttle } from '$lib/utils/timing';
   import type { Snippet } from 'svelte';
   import { flip } from 'svelte/animate';
@@ -34,6 +33,10 @@
     itemClass?: string;
     /** The class names for the tail item. */
     tailClass?: string;
+    /** The placeholder shown when there is no data. */
+    empty?: Snippet;
+    /** The placeholder cards shown while the first data is loading. */
+    skeleton?: SkeletonProps | false;
   };
 
   let {
@@ -49,7 +52,9 @@
     class: _class,
     gridClass,
     itemClass,
-    tailClass
+    tailClass,
+    empty,
+    skeleton
   }: GridProps = $props();
   let notLoading = $derived(loading === null || loading === undefined);
   let notEmpty = $derived(data.length > 0 || !!tail);
@@ -125,7 +130,19 @@
 <svelte:window ondragover={(event) => event.preventDefault()} />
 
 <div class="w-full px-2 py-4 {_class}" in:fade>
-  {#if notEmpty}
+  {#if data.length === 0 && !notLoading && skeleton}
+    <span class="sr-only" role="status">{$_('data.loading')}</span>
+    <!-- stay invisible during the short grace period to avoid flashing -->
+    <ul
+      role="list"
+      style:gap
+      style:grid-template-columns={cols ? `repeat(${cols}, minmax(0, 1fr))` : ''}
+      class="relative grid gap-2 transition-opacity duration-300 lg:gap-4 {gridClass} {loading ? '' : 'opacity-0'}"
+      aria-busy="true"
+    >
+      <Skeleton count={12} {...skeleton} />
+    </ul>
+  {:else if notEmpty}
     <ul
       role="list"
       style:gap
@@ -173,12 +190,13 @@
 {/snippet}
 
 {#snippet nodata()}
-  <li class="col-span-full h-96">
+  <li class="col-span-full flex-center min-h-96">
     {#if notLoading}
-      <div class="flex-col-center h-full gap-2 opacity-20" in:fade={{ duration: 200 }}>
-        <iconify-icon icon={icons.collectionsEmpty} width="5rem" aria-hidden="true"></iconify-icon>
-        <span class="text-2xl">{$_('data.nodata')}</span>
-      </div>
+      {#if empty}
+        {@render empty()}
+      {:else}
+        <Empty />
+      {/if}
     {/if}
   </li>
 {/snippet}

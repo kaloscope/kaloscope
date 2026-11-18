@@ -17,8 +17,10 @@
   } = $props();
 
   const uid = $props.id();
+
   let search = $state('');
   let input: HTMLTextAreaElement;
+
   let selected = $derived(
     value
       .split(/\r?\n/)

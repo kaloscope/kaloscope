@@ -704,6 +704,7 @@ def test_mcp_parity(tmp_path):
             admin = app.shared_ctx.sessions["admin"]
             arguments = {"library_id": data.shows.id}
             original = await bindings(data.shows.id)
+
             mcp = await call(app, "get_library_ingestion", arguments, token="admin")
             assistant = await tools.execute_tool(
                 "get_library_ingestion",
@@ -712,6 +713,7 @@ def test_mcp_parity(tmp_path):
                 conversation_id=1,
                 call_id="ingestion",
             )
+
             fixture = {"template": EPISODE_TEMPLATE, "mode": "episode"}
             fixture["context"] = {"html": EPISODE_HTML, **EPISODE}
             checked = await call(
@@ -727,6 +729,7 @@ def test_mcp_parity(tmp_path):
                 conversation_id=1,
                 call_id="check",
             )
+
             plan = {
                 "plan": data.body.plan.model_dump(mode="json"),
                 "ingest_workflow_id": data.series.id,
@@ -749,6 +752,7 @@ def test_mcp_parity(tmp_path):
             )
             unchanged = await bindings(data.shows.id)
             planned = await DownloadPlan.exists()
+
             write = await MCPAccessTokenService.create(
                 admin.id,
                 MCPAccessTokenCreate(name="tv", scope=MCPTokenScope.READ_WRITE),
@@ -900,17 +904,20 @@ def test_completion(tmp_path, monkeypatch, layout):
                 str(season),
                 str(number),
             )
+
             # each request reached only its own route
             assert [path for path, _ in remote] == [
                 "/search",
                 "/episodes",
             ], remote
             assert remote[1][1] == {"q": "The Wayfinder Journals"}
+
             for nfo in (series_nfo, episode_nfo):
                 written = await MediaEvent.create(
                     lib=data.shows, src_path=str(nfo), event_type="created"
                 )
                 await asyncio.wait_for(watcher.consume_event(written), timeout=5)
+
             item = await MediaItem.get(path=str(video))
             parent = await MediaItem.get(id=item.parent_id)
             assert (item.title, item.season, item.episode) == (
@@ -1016,8 +1023,10 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
     def handler(upstream):
         body = loads(upstream.content)
         assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
+
         if not body.get("stream"):
             return summary(body, "Build the requested TV scraper.")
+
         streams.append(body)
         step = len(streams)
         if step == 1:
@@ -1089,6 +1098,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                     )
                 ]
             )
+
         return response(
             [
                 chunk(
@@ -1131,6 +1141,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+
             created = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -1145,6 +1156,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
             )
             graph = await FlowGraph.get(id=draft["workflow_id"])
             assert draft["editor_path"].endswith(f"/{graph.id}")
+
             # the designer opened the draft and the user placed a start node
             snapshot = await Sessions.snapshot(
                 conversation["id"],
@@ -1155,6 +1167,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                 owner,
             )
             base.update(workflow_id=graph.id, draft_version=0, snapshot_id=snapshot.id)
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -1179,6 +1192,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
             ]
             assert events[-1].event == "done", events[-1]
             assert len(streams) == 7
+
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
             checks = [
@@ -1191,6 +1205,7 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
             assert all(check["valid"] for check in checks[1:]), checks
             assert checks[2]["value"] == [] and checks[5]["value"] == []
             assert any("0 is written" in note for note in checks[4]["warnings"])
+
             preview = results[-1]["data"]
             assert preview["validation"]["valid"], preview
             proposed = await Sessions.read_snapshot(
@@ -1223,15 +1238,18 @@ def test_authoring(monkeypatch, tmp_path, verbose, decision):
                 recovered = await Proposals.outcome(
                     conversation["id"], record.id, owner
                 )
+
                 await graph.refresh_from_db()
                 assert saved["proposal"] == repeated["proposal"]
                 assert recovered["proposal"]["status"] == "saved"
                 assert graph.draft_version == 1 and graph.definition is None
                 assert {n["id"] for n in graph.draft["nodes"]} >= {"start", "route"}
+
                 issues, _ = await MediaLibService.ingestion_check(
                     shows.id, graph.id, owner
                 )
                 assert "Publish this workflow first" in issues[0]["message"]
+
                 # publishing stays an explicit user action in the designer
                 await FlowGraphService.publish_graph(
                     graph.id, GraphWrite(**graph.draft, draft_version=1), owner
@@ -1266,8 +1284,10 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
     def handler(upstream):
         body = loads(upstream.content)
         assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
+
         if not body.get("stream"):
             return summary(body, "Download one Wayfinder result into Shows")
+
         number, step = stage["number"], stage["step"]
         stage["step"] += 1
         flow, library = fixture["graph_id"], fixture["library_id"]
@@ -1279,6 +1299,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
             "create_download_task",
             {"request_id": identities[0] if identities else "", "confirmed": True},
         )
+
         actions = [
             [("list_workflows", {"category": "indexer"})],
             [
@@ -1301,6 +1322,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
             ],
             [*unlock, create, create],
         ][number]
+
         if step >= len(actions):
             if number == 1:
                 names = {item["function"]["name"] for item in body["tools"]}
@@ -1316,6 +1338,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
                 "background.",
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
+
         name, args = actions[step]
         if name == "validate_download_task":
             # the chosen source is recovered from the original search result
@@ -1323,6 +1346,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
                 fixture["check"]["resource"]["source"]
                 in dumps(body["messages"]).decode()
             )
+
         return response(
             [
                 chunk(
@@ -1359,6 +1383,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+
             results = []
             for number, prompt in enumerate(
                 [
@@ -1414,6 +1439,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
             by_name = {}
             for result in results:
                 by_name.setdefault(result["name"], []).append(result["data"])
+
             first, second = by_name["get_library_ingestion"]
             assert first["supported"] and first["workflows"] == []
             assert [w["workflow_id"] for w in second["workflows"]] == [data.series.id]
@@ -1423,6 +1449,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
             created, replayed = by_name["create_download_task"]
             assert created["created"] and created["ingestion"]["binding"] == "added"
             assert replayed["replayed"] and replayed["task_id"] == created["task_id"]
+
             # the confirmed preview names the torrent's file and its TV location
             transfer = by_name["validate_download_task"][0]["download"]["transfer"]
             assert transfer["basis"] == "known_files"
@@ -1441,6 +1468,7 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
                 *before,
                 (data.series.id, 3, False),
             ]
+
             # submission returns at once; search ran once and nothing was ingested
             assert execute.await_count == 1 and len(driver.added) == 1
             assert not await DownloadPlan.exists()

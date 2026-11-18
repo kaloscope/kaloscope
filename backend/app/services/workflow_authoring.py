@@ -155,6 +155,7 @@ def validate_workflow_template(
     try:
         if response is None:
             response = _sample_response(args.context.get("response"))
+
         rendered = render(
             args.template,
             {**args.context, "response": response}
@@ -177,6 +178,7 @@ def validate_workflow_template(
             )
         if args.mode == "array" and not isinstance(value, list):
             return TemplateResult(valid=False, error="Expected a JSON array.")
+
         business = args.mode in {
             "search",
             "details",
@@ -191,6 +193,7 @@ def validate_workflow_template(
             issues, warnings, outcome = check_auth(value, args.config or "")
         elif business:
             issues, warnings = check_output(args.mode, value, args.context)
+
         result = TemplateResult(
             valid=not issues,
             rendered=None if business or probed else rendered,
@@ -203,6 +206,7 @@ def validate_workflow_template(
             if issues
             else None,
         )
+
         try:
             encoded = orjson.dumps(result.model_dump())
             if (
@@ -230,10 +234,12 @@ def validate_workflow_template(
                 error="Result is not JSON-serializable. Select XPath text/attributes "
                 "or materialize iterators with |list.",
             )
+
         if len(encoded) > MAX_RENDER_BYTES:
             return TemplateResult(
                 valid=False, error="Rendered result exceeds 8000 bytes."
             )
+
         return result
     except Exception as exc:
         message = str(exc)
@@ -301,6 +307,7 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
     """
     if user.role != UserRole.ADMIN:
         raise ForbiddenException
+
     context = args.context
     cookies = ProbeCookieJar()
     auth = session = auth_hosts = None
@@ -308,6 +315,7 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
         graph = await FlowGraphService.get_accessible(args.workflow_id, user)
         if graph.category != GraphCategory.INDEXER:
             return HTTPProbeResult(error="Select an indexer to reuse its login state.")
+
         saved_cookies = getattr(Sanic.get_app().ctx, "cookies", None)
         auth = await FlowGraphService.indexer_auth(graph.id)
         config = (await start_config(graph, "auth"))["auth"] or {}
@@ -320,6 +328,7 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
                 error="Indexer login is missing or expired. "
                 "Log in on its search page, then retry."
             )
+
         if saved_cookies is not None:
             for cookie in saved_cookies:
                 if not cookie.is_expired():
@@ -350,6 +359,7 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
                 collect(item)
 
     collect({key: value for key, value in (auth or {}).items() if key != "name"})
+
     secrets |= (
         {quote(value, safe="") for value in secrets}
         | {
@@ -363,11 +373,13 @@ async def probe_http_request(args: HTTPProbe, user: UserInfo) -> HTTPProbeResult
             for ascii_only in (False, True)
         }
     )
+
     result = _redact_probe_result(result, secrets)
     if result.formatted is not None and result.formatted.valid:
         # keep the extracted object, not three copies of the same observation
         result.text = ""
         result.text_truncated = result.bytes_read > 0
+
     return result
 
 
@@ -458,6 +470,7 @@ def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProb
 
     result.url = redact(result.url)
     result.text = redact(result.text)
+
     if (
         result.formatted is None
         and result.body_complete
@@ -469,8 +482,10 @@ def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProb
     if len(result.text) > MAX_SAMPLE_CHARS:
         result.text = result.text[:MAX_SAMPLE_CHARS]
         result.text_truncated = True
+
     result.headers = {key: value[:512] for key, value in redact(result.headers).items()}
     result.error = redact(result.error)
+
     if result.formatted is not None:
         result.formatted.rendered = redact(result.formatted.rendered)
         result.formatted.value = redact(result.formatted.value)
@@ -481,6 +496,7 @@ def _redact_probe_result(result: HTTPProbeResult, secrets: set[str]) -> HTTPProb
             result.formatted = TemplateResult(
                 valid=False, error="Redacted extraction exceeds 8000 bytes."
             )
+
     return result
 
 
@@ -500,12 +516,14 @@ def _html_sample(text: str, redact: Callable[[Any], Any]) -> dict:
     root = xpath_first(text, "/*")
     if root is None:
         return {"sampled": True}
+
     forms = xpath_all(root, "//form")
     tables = xpath_all(root, "//table[.//tr[td]]")
     links = xpath_all(
         root,
         '//a[@rel="next" or ancestor::*[contains(@class,"pagination")]]',
     )
+
     sample = {
         "forms": [
             {
@@ -521,6 +539,7 @@ def _html_sample(text: str, redact: Callable[[Any], Any]) -> dict:
         ],
         "sampled": True,
     }
+
     if tables:
         table = tables[0]
         rows = xpath_all(table, ".//tr[td]")
@@ -617,6 +636,7 @@ async def _probe_http_request(
     node_data["headers"] = [
         {"key": key, "value": value} for key, value in args.request.headers.items()
     ]
+
     try:
         options = HTTPNode.prepare_request(node_data, context, sandboxed=True)
         if auth_hosts is not None and httpx.URL(options["url"]).host not in auth_hosts:
@@ -631,6 +651,7 @@ async def _probe_http_request(
             context = {key: value for key, value in context.items() if key != AUTH_KEY}
             options = HTTPNode.prepare_request(node_data, context, sandboxed=True)
             auth_hosts = None
+
         # a redirect could carry the borrowed login to another host
         follow = auth_hosts is None
         url = httpx.URL(options["url"])
@@ -638,12 +659,14 @@ async def _probe_http_request(
             return HTTPProbeResult(
                 error="Use an HTTP(S) URL without embedded credentials."
             )
+
         size = len(str(url).encode()) + sum(
             len(key) + len(value) for key, value in options["headers"].raw
         )
         size += _body_size(options, args.request.client)
         if size > 65536:
             return HTTPProbeResult(error="Rendered request exceeds 64 KiB.")
+
         async with asyncio.timeout(args.request.timeout), AsyncExitStack() as stack:
             http_client = curl_client = None
             if args.request.client == "httpx":
@@ -664,9 +687,11 @@ async def _probe_http_request(
                         cookies=cookies,
                     )
                 )
+
             response = await HTTPNode.send_request(
                 options, args.request.client, http_client, curl_client, stream=True
             )
+
             body = bytearray()
             count = 0
             complete = True
@@ -703,6 +728,7 @@ async def _probe_http_request(
             sample.headers = httpx.Headers(response.headers.raw)
             # the formatter can read final headers, including cookies the jar rejected
             cookies.record(sample.headers.get_list("set-cookie"))
+
             result = HTTPProbeResult(
                 status_code=response.status_code,
                 url=str(response.url),
@@ -729,6 +755,7 @@ async def _probe_http_request(
                     result.formatted = validate_workflow_template(
                         validation, response=sample
                     )
+
             return result
     except (TimeoutError, httpx.TimeoutException):
         return HTTPProbeResult(error="Request timed out; no retry was sent.")

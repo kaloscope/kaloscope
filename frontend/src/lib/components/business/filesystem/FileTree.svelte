@@ -219,7 +219,7 @@
     }}
   >
     <fieldset class="fieldset">
-      <ul class="menu max-h-[50vh] w-full flex-nowrap gap-1 overflow-auto rounded-box border">
+      <ul class="menu max-h-[50vh] w-full flex-nowrap gap-1 overflow-auto rounded-card border">
         {@render tree(paths)}
       </ul>
       <label class="mt-2 fieldset-label w-fit">

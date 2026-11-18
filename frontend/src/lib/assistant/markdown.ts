@@ -95,6 +95,7 @@ function toBlocks(tokens: Token[]): MarkdownBlock[] {
         return [{ type: 'code', language: token.lang ?? '', text: token.text }];
       case 'blockquote':
         return [{ type: 'quote', children: toBlocks(token.tokens) }];
+
       case 'list':
         return [
           {
@@ -112,6 +113,7 @@ function toBlocks(tokens: Token[]): MarkdownBlock[] {
             })
           }
         ];
+
       case 'table':
         return [
           {
@@ -121,6 +123,7 @@ function toBlocks(tokens: Token[]): MarkdownBlock[] {
             rows: token.rows.map((row) => row.map((cell) => toInlines(cell.tokens)))
           }
         ];
+
       case 'hr':
         return [{ type: 'rule' }];
       case 'html':

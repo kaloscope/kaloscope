@@ -21,6 +21,7 @@ def changed_paths(before: Any, after: Any) -> tuple[list[str], int]:
     pending = [("", before, after)]
     paths = []
     count = size = 0
+
     while pending:
         path, old, new = pending.pop()
         if isinstance(old, dict) and isinstance(new, dict):
@@ -30,6 +31,7 @@ def changed_paths(before: Any, after: Any) -> tuple[list[str], int]:
                     (f"{path}/{escaped}", old.get(key, missing), new.get(key, missing))
                 )
             continue
+
         if isinstance(old, list) and isinstance(new, list):
             for index in reversed(range(max(len(old), len(new)))):
                 pending.append(
@@ -40,11 +42,14 @@ def changed_paths(before: Any, after: Any) -> tuple[list[str], int]:
                     )
                 )
             continue
+
         if old == new and isinstance(old, bool) == isinstance(new, bool):
             continue
+
         count += 1
         length = len(path.encode())
         if len(paths) < 32 and size + length <= 1024:
             paths.append(path)
             size += length
+
     return paths, count

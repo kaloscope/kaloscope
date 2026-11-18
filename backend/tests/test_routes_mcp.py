@@ -54,6 +54,7 @@ async def client(monkeypatch):
     app.register_middleware(on_response, "response")
     app.error_handler.add(Exception, error_handler)
     app.asgi = True
+
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
@@ -72,6 +73,7 @@ async def client(monkeypatch):
                 last_activity=now,
                 expire_at=now + timedelta(hours=1),
             )
+
         await app._startup()
         await start_mcp(app)
         async with httpx.AsyncClient(
@@ -174,6 +176,7 @@ def test_management(monkeypatch, expired):
                 f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer reader"}
             )
             assert listed.json()["data"] == []
+
             missing = await http.post(
                 f"{MCP_PATH}/token/{issued['id']}/delete",
                 headers={"Authorization": "Bearer reader"},

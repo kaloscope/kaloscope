@@ -63,6 +63,7 @@ async def downloads():
         beta = await Downloader.create(
             name="Beta", config=CONFIG.format(name="Beta"), priority=2
         )
+
         rows = [
             (alpha, "Ubuntu ISO", "downloading", "active", 25.0, None),
             # intermediate phases can report full progress before completion
@@ -91,6 +92,7 @@ async def downloads():
                 magnet_link="magnet:?xt=urn:btih:private-source-token",
                 files=["private-file"],
             )
+
         await OfflineDownloadJob.create(
             download=tasks["Broken tracker"],
             job_uuid="fixture",
@@ -98,6 +100,7 @@ async def downloads():
             remote_dir="/remote/fixture",
             last_error_kind=OfflineDownloadErrorKind.REMOTE_FAILED,
         )
+
         yield SimpleNamespace(alpha=alpha, beta=beta, tasks=tasks)
     finally:
         await Tortoise.close_connections()

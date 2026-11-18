@@ -36,7 +36,8 @@
   let unreadNotifications = $state(0);
 
   // the dynamic class names
-  let navbarClass = $derived(appMode ? 'sticky bg-blur-90' : 'bg-base-200');
+  // outside the app the bar sits on the page's own background
+  let navbarClass = $derived(appMode ? 'sticky bg-blur-90' : 'bg-transparent');
   let shadowClass = $derived(shadow ? 'nav-shadow' : '');
 
   // get the drawer style based on the current page

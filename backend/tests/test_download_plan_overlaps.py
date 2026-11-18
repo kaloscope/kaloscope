@@ -48,6 +48,7 @@ async def overlaps():
     hidden = await MediaLib.create(
         lib_type="movie", dir="/synthetic/hidden", name="Hidden", priority=2
     )
+
     now = timezone.now()
     base = {
         "downloader_id": downloader.id,
@@ -83,6 +84,7 @@ async def overlaps():
         ),
         "draft": await DownloadPlan.create(graph=draft, keyword="lantern", **base),
     }
+
     item = await MediaItem.create(
         lib=movies,
         dir=movies.dir,
@@ -91,6 +93,7 @@ async def overlaps():
         title="Lantern",
         year=2019,
     )
+
     return SimpleNamespace(
         graph=graph,
         other=other,
@@ -360,6 +363,7 @@ def test_overlap_conversation(monkeypatch, verbose):
             ("get_workflow", {"workflow_id": flow}),
             ("get_download_plan_options", {"workflow_id": flow}),
         ]
+
         actions = [
             [("list_workflows", {"category": "indexer"})],
             [
@@ -383,6 +387,7 @@ def test_overlap_conversation(monkeypatch, verbose):
                 * 2,
             ],
         ][number]
+
         if step >= len(actions):
             content = [
                 "Choose the published indexer for Lantern.",
@@ -395,11 +400,13 @@ def test_overlap_conversation(monkeypatch, verbose):
                 "Created one additional plan.",
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
+
         name, args = actions[step]
         if step >= 2 and number:
             names = {item["function"]["name"] for item in body["tools"]}
             assert {"list_download_plans", "list_media_items"} <= names
             assert "preview_workflow_draft" not in names
+
         return response(
             [
                 chunk(
@@ -435,6 +442,7 @@ def test_overlap_conversation(monkeypatch, verbose):
             rules = options["creation_rules"]
             assert "list_download_plans without workflow_id" in rules
             assert "Never reject" in rules and "list_media_items" in rules
+
             fixture.update(
                 graph_id=data.graph.id,
                 plan={
@@ -448,6 +456,7 @@ def test_overlap_conversation(monkeypatch, verbose):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+
             results = []
             for number, prompt in enumerate(
                 [
@@ -495,6 +504,7 @@ def test_overlap_conversation(monkeypatch, verbose):
             assert execute.call_args.args[1]["keyword"] == "Lantern"
             assert len(by_name["search_indexer"]) == 1
             assert len(by_name["list_download_plans"]) == 1
+
             created = by_name["create_download_plan"]
             assert created[0]["created"] and created[1]["replayed"]
             assert created[0]["plan_id"] == created[1]["plan_id"]

@@ -156,6 +156,7 @@ def test_recipe_graph_contract():
             for schema in schemas.values()
             for item in schema["fields"]
         ), field
+
     edges = re.findall(r"(\w+)\.(\w+) -> (\w+)\.(\w+);?", graph.split(": ", 5)[-1])
     edges = [edge for edge in edges if edge[0] != "source"]
     assert len(edges) == 4
@@ -275,16 +276,19 @@ def test_context_example(monkeypatch):
                 context=ctx,
             )
         await SearchEndNode.execute(node_data={"response": response}, context=ctx)
+
         assert ctx["$retval"] == {
             "total": 1,
             "items": [{"id": "a", "title": "Example"}],
         }
         assert "response" not in ctx.storage
         assert str(calls[0].url) == "https://example.test/search?q=cats"
+
         ctx.update({"nested": {"a": 1}, "items": [1]})
         ctx.update({"nested": {"b": 2}, "items": [1, 2]})
         assert ctx["nested"] == {"a": 1, "b": 2}
         assert ctx["items"] == [{"id": "a", "title": "Example"}, 1, 2]
+
         replacement = ctx.copy()
         replacement.replace("items", [])
         ctx.update(replacement)
@@ -336,6 +340,7 @@ def test_reference_budget(monkeypatch, topic):
         reference = await query("get_workflow_reference", {"topic": topic})
         schema = await query("list_node_types", {"node_type": "http"})
         assert reference["data"] == get_workflow_reference(topic).model_dump()
+
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for index, result in enumerate((reference, schema)):
             messages.extend(
@@ -358,10 +363,12 @@ def test_reference_budget(monkeypatch, topic):
                     },
                 ]
             )
+
         compact = history.compact_exchanges(messages, 1, 0)
         retained = [
             loads(m["content"].split("\n", 1)[1])["tools"][0] for m in compact[1:]
         ]
+
         assert [r["data"] for r in retained] == [reference["data"], schema["data"]]
         assert history.context_size(compact, tools.tool_schemas(USER)) <= 32000 - 4096
         execute.assert_not_awaited()
@@ -405,9 +412,11 @@ def test_auth_output(monkeypatch, name):
                 graph_id=1, key="$auth", value={"name": "Previous"}
             )
             ctx = context({})
+
             await AuthEndNode.execute(
                 graph_id=1, node_data={"response": dumps(example).decode()}, context=ctx
             )
+
             cached = await FlowVariable.get(graph_id=1, key="$auth")
             if name:
                 assert (

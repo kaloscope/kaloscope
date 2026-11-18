@@ -15,6 +15,7 @@
   import BatchPlanDialog from '../library/BatchPlanDialog.svelte';
 
   const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
+
   const trialStatus = $derived.by(() => {
     if (tool.name !== 'run_workflow' || tool.status !== 'complete' || !tool.result?.ok) return null;
     const result = tool.result.data;
@@ -27,6 +28,7 @@
     }
     return result.status;
   });
+
   // reviewed schedule, plan, task and media changes share their review and outcome lines
   const changeKind = $derived(
     // batches share the media apply tool but report unit counts, not one target
@@ -47,18 +49,22 @@
           } as Record<string, string>
         )[tool.name]
   );
+
   const batch = $derived(
     changeKind === 'media_batch' && tool.result?.ok ? (tool.result.data as unknown as MediaBatchOutcome) : null
   );
   // the stored plan a review or an outcome refers to
   const batchId = $derived(batch?.batch_id ?? null);
+
   let planDialog: BatchPlanDialog | undefined = $state();
   // a reviewed plan may be confirmed, stopped or finished in its dialog
   let livePlan = $state<MediaBatch | null>(null);
   const reviewedBatch = $derived(tool.name === 'review_media_batch' && batch?.valid ? batchId : null);
+
   $effect(() => {
     const id = reviewedBatch;
     if (id === null) return;
+
     api
       .get(`media/batch/${id}`, { retry: 0 })
       .json<Resp<MediaBatch>>()
@@ -69,9 +75,27 @@
         // an expired plan keeps the review's own status
       });
   });
+
   const livePlanStatus = $derived(
     livePlan && livePlan.state !== 'reviewed' ? (livePlan.state === 'running' ? 'running' : livePlan.outcome) : null
   );
+
+  /**
+   * Translate a change status, using the wording shared by every change kind when the kind has no line of its own.
+   *
+   * @param kind - Change kind, such as `schedule` or `media_batch`.
+   * @param status - Review or apply status.
+   * @param values - Values for the message placeholders, in order.
+   * @returns The translated status line.
+   */
+  function changeMessage(kind: string, status: string, values: (string | number)[] = []): string {
+    const indexed = Object.fromEntries(values.map((value, index) => [index, value]));
+    return $_(`assistant.${kind}.${status}`, {
+      values: indexed,
+      default: $_(`assistant.change.${status}`, { values: indexed })
+    });
+  }
+
   // applied outcomes name themselves; other replies say why nothing changed
   const changeStatus = $derived.by(() => {
     if (!changeKind || !tool.name.startsWith('apply_') || !tool.result?.ok || !tool.result.data) return null;
@@ -83,6 +107,7 @@
     }
     return result.valid === false ? 'invalid' : 'refused';
   });
+
   const statusIcon = $derived.by(() => {
     if (trialStatus === 'running' || trialStatus === 'submitting') return icons.clock;
     if (trialStatus && trialStatus !== 'completed') return icons.warning;
@@ -109,6 +134,7 @@
     if (tool.status === 'error') return icons.warning;
     return icons.subtractCircle;
   });
+
   const detail = $derived(tool.result?.data ? JSON.stringify(tool.result.data, null, 2) : '');
   const error = $derived(
     tool.result?.error
@@ -207,22 +233,27 @@
     ])}
   </p>
 {:else if changeKind && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
-  <p class="ml-8 text-xs leading-5 text-base-content/60">{$_(`assistant.${changeKind}.reviewed`)}</p>
+  <p class="ml-8 text-xs leading-5 text-base-content/60">{changeMessage(changeKind, 'reviewed')}</p>
 {/if}
 {#if batchId !== null}
-  <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={() => planDialog?.showModal(batchId)}>
+  <button
+    type="button"
+    class="btn ml-8 btn-outline btn-sm"
+    onclick={() => planDialog?.showModal(livePlan?.id ?? batchId)}
+  >
     {$_('assistant.media_batch.view_plan')}
   </button>
   <BatchPlanDialog
     bind:this={planDialog}
     onstate={(plan) => {
-      if (reviewedBatch === plan.id) livePlan = plan;
+      // switching between keeping and deleting files moves the review to another plan
+      if (reviewedBatch !== null) livePlan = plan;
     }}
   />
 {/if}
 {#if changeStatus && batch}
   <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
-    {$_(`assistant.media_batch.${changeStatus}`, [
+    {changeMessage('media_batch', changeStatus, [
       Number(batch.done ?? 0),
       Number(batch.skipped ?? 0) + Number(batch.failures ?? 0) + Number(batch.uncertain ?? 0),
       Number(batch.remaining ?? 0)
@@ -230,7 +261,7 @@
   </p>
 {:else if changeStatus}
   <p class="ml-8 text-xs leading-5 text-base-content/60" role="status">
-    {$_(`assistant.${changeKind}.${changeStatus}`, [
+    {changeMessage(changeKind!, changeStatus, [
       Number(
         tool.result?.data?.job_id ??
           tool.result?.data?.plan_id ??

@@ -75,6 +75,7 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
         return None
     if value is None or (isinstance(value, str) and not value.strip()):
         return "required" if complete and field.required else None
+
     if kind in {"text", "textarea", "url", "code"}:
         if not isinstance(value, str):
             return "field_type"
@@ -90,6 +91,7 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
                 ENV.parse(value)
             except TemplateError:
                 return "template_syntax"
+
     elif isinstance(field, NumberField):
         if type(value) is not int and type(value) is not float:
             return "field_type"
@@ -104,15 +106,18 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
             or round(value, field.precision) != value
         ):
             return "field_range"
+
     elif isinstance(field, SelectField):
         if not any(
             type(value) is type(option) and value == option
             for option in field.options.values()
         ):
             return "field_option"
+
     elif kind == "toggle":
         if not isinstance(value, bool):
             return "field_type"
+
     elif kind == "script":
         if not isinstance(value, dict) or value.get("language") not in (
             "python",
@@ -124,6 +129,7 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
             return "field_type"
         if complete and field.required and (not code or not code.strip()):
             return "required"
+
     elif kind == "kvpairs":
         if not isinstance(value, (list, tuple)) or any(
             not isinstance(pair, dict)
@@ -132,6 +138,7 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
             for pair in value
         ):
             return "field_type"
+
     elif kind == "ai_model":
         if not isinstance(value, dict):
             return "field_type"
@@ -145,6 +152,7 @@ def _field_issue(field: Field, value: Any, *, complete: bool) -> str | None:
             not value.get("provider_id") or not (value.get("model_id") or "").strip()
         ):
             return "required"
+
     return None
 
 
@@ -190,6 +198,7 @@ async def validate_document(
     issues: list[GraphIssue] = []
     if complete and not graph["nodes"]:
         issues.append(GraphIssue(code="empty_graph"))
+
     nodes = {}
     groups = {}
     handles = {}
@@ -198,6 +207,7 @@ async def validate_document(
         if node_id in nodes:
             issues.append(GraphIssue(code="duplicate_node", node_id=node_id))
         nodes[node_id] = node
+
         node_type = data.get("$schema")
         schema = schemas.get(node_type) if isinstance(node_type, str) else None
         if schema is None:
@@ -205,9 +215,11 @@ async def validate_document(
             continue
         if schema.categories and category not in schema.categories:
             issues.append(GraphIssue(code="node_category", node_id=node_id))
+
         groups[node_id] = schema.group
         handles[node_id] = {handle.id: handle for handle in schema.handles}
         fields = {field.id: field for field in schema.fields}
+
         for key, value in data.items():
             # editor dividers store no executable value and may change positional IDs
             if value is None and re.fullmatch(r"divider_\d+", key):
@@ -216,6 +228,7 @@ async def validate_document(
                 issues.append(
                     GraphIssue(code="unknown_field", node_id=node_id, field_id=key)
                 )
+
         for field in schema.fields:
             if field.visible_when and any(
                 data.get(key, fields[key].default) != expected
@@ -225,6 +238,7 @@ async def validate_document(
             code = _field_issue(field, field.extract(data), complete=complete)
             if code:
                 issues.append(GraphIssue(code=code, node_id=node_id, field_id=field.id))
+
         if (
             complete
             and node_type == "ai"
@@ -245,6 +259,7 @@ async def validate_document(
     connected = defaultdict(set)
     tags = defaultdict(set)
     loop_bounds = []
+
     for edge in graph["edges"]:
         edge_id = edge["id"]
         source, target = edge["source"], edge["target"]
@@ -253,11 +268,13 @@ async def validate_document(
             issues.append(GraphIssue(code="duplicate_edge", edge_id=edge_id))
         edge_ids.add(edge_id)
         connections.add(connection)
+
         if source == target:
             issues.append(GraphIssue(code="self_connection", edge_id=edge_id))
         if source not in nodes or target not in nodes:
             issues.append(GraphIssue(code="missing_endpoint", edge_id=edge_id))
             continue
+
         source_handle = handles.get(source, {}).get(edge["sourceHandle"])
         target_handle = handles.get(target, {}).get(edge["targetHandle"])
         if (
@@ -268,6 +285,7 @@ async def validate_document(
         ):
             issues.append(GraphIssue(code="invalid_handle", edge_id=edge_id))
             continue
+
         for node_id, handle in ((source, source_handle), (target, target_handle)):
             counts[node_id, handle.id] += 1
             if counts[node_id, handle.id] > handle.maxconn:
@@ -281,12 +299,14 @@ async def validate_document(
                 )
             if handle.tag and handle.tag != LOOP_KEY:
                 tags[node_id].add(handle.tag)
+
         if source_handle.tag == LOOP_KEY:
             loop_bounds.append((target, source))
         if target_handle.tag == LOOP_KEY:
             loop_bounds.append((source, target))
         if source_handle.tag == target_handle.tag == LOOP_KEY:
             issues.append(GraphIssue(code="invalid_loop", edge_id=edge_id))
+
         connected[source].add(target)
         connected[target].add(source)
         execution_paths[source].append(target)
@@ -327,6 +347,7 @@ async def validate_document(
                 continue
             components[current] = node_id
             pending.extend(undirected[current] - components.keys())
+
     owners = defaultdict(set)
     nesting = defaultdict(list)
     for body, owner in loop_bounds:
@@ -339,6 +360,7 @@ async def validate_document(
             issues.append(GraphIssue(code="conflicting_loops", node_id=component))
     if _has_cycle(set(components.values()), nesting):
         issues.append(GraphIssue(code="invalid_loop"))
+
     valid = not any(issue.severity == "error" for issue in issues)
     return GraphValidation(
         valid=valid,
@@ -400,6 +422,7 @@ def _readiness(
             )
         if not starts:
             warnings.append(GraphIssue(code="missing_entry", severity="warning"))
+
         reached = set()
         for start in starts:
             visited = set()
@@ -411,6 +434,7 @@ def _readiness(
                 visited.add(current)
                 pending.extend(adjacency.get(current, []))
             reached.update(visited)
+
             if not visited & outcomes:
                 warnings.append(
                     GraphIssue(
@@ -421,11 +445,13 @@ def _readiness(
                         node_id=start,
                     )
                 )
+
         warnings.extend(
             GraphIssue(code="unreachable_output", severity="warning", node_id=node_id)
             for node_id in sorted(ends - reached)
         )
         status = "incomplete" if warnings else "ready"
+
     return GraphReadiness(
         status=status,
         category=category,

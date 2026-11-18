@@ -45,6 +45,7 @@ async def fetch_models(
     models: set[str] = set()
     cursors: set[str] = set()
     total_bytes = 0
+
     try:
         async with asyncio.timeout(20):
             for _ in range(20):
@@ -66,6 +67,7 @@ async def fetch_models(
                             429: ErrorCode.AI_MODELS_RATE_LIMITED,
                         }.get(response.status_code, ErrorCode.AI_MODELS_FETCH_FAILED)
                         raise KaloscopeException(code, status_code=502, quiet=True)
+
                     body = bytearray()
                     async for chunk in response.aiter_bytes():
                         total_bytes += len(chunk)
@@ -78,6 +80,7 @@ async def fetch_models(
                     payload.get("data"), list
                 ):
                     raise ValueError
+
                 for item in payload["data"]:
                     if not isinstance(item, dict) or not isinstance(
                         item.get("id"), str
@@ -89,15 +92,18 @@ async def fetch_models(
                     ):
                         raise ValueError
                     models.add(model)
+
                 if len(models) > 10000:
                     raise ValueError
                 if not anthropic or not payload.get("has_more"):
                     return sorted(models)
+
                 cursor = payload.get("last_id")
                 if not isinstance(cursor, str) or not cursor or cursor in cursors:
                     raise ValueError
                 cursors.add(cursor)
                 params["after_id"] = cursor
+
             raise ValueError
     except (TimeoutError, httpx.TimeoutException):
         raise KaloscopeException(

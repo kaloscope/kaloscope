@@ -74,6 +74,7 @@ def search_graph(url=URL, template=SEARCH_TEMPLATE, method="GET"):
         ),
         ("end", {"$schema": "search_end", "response": template}),
     ]
+
     return {
         "nodes": [
             {
@@ -136,6 +137,7 @@ def control_graph():
         ("loop", "output", "end", "input"),
         ("start", "output", "probe", "input"),
     ]
+
     return {
         "nodes": [
             {
@@ -742,6 +744,7 @@ def scripted(steps, streams, *, verbose=False):
         assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
         if not body.get("stream"):
             return summary(body, "Run and repair the workflow.")
+
         streams.append(body)
         step = len(streams) - 1
         calls = steps[step](body) if step < len(steps) else None
@@ -749,6 +752,7 @@ def scripted(steps, streams, *, verbose=False):
             return response(
                 [chunk({"role": "assistant", "content": "Reported the run."}, "stop")]
             )
+
         return response(
             [
                 chunk(
@@ -909,6 +913,7 @@ def test_repair_conversation(monkeypatch, engine, verbose, decision, recipe):
                     "Completed tool exchange" in dumps(body["messages"]).decode()
                     for body in streams
                 )
+
             await graph.refresh_from_db()
             assert graph.draft == saved and graph.draft_version == 0
             assert graph.definition is None and graph.state == "draft"
@@ -1241,6 +1246,7 @@ def test_parity(monkeypatch, engine):
             base.update(workflow_id=graph.id, draft_version=3)
             arguments = {"request_id": request_id, **base, **RUN}
             read_only = await call(app, "run_workflow", arguments, token="admin")
+
             write = await MCPAccessTokenService.create(
                 admin.id,
                 MCPAccessTokenCreate(name="run", scope=MCPTokenScope.READ_WRITE),
@@ -1262,6 +1268,7 @@ def test_parity(monkeypatch, engine):
             elsewhere = await call(
                 app, "run_workflow", {**arguments, "workflow_id": other.id}, token=token
             )
+
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), admin
             )
@@ -1280,6 +1287,7 @@ def test_parity(monkeypatch, engine):
             assert elsewhere["structuredContent"]["status"] == "conflict"
             assert stale["isError"]
             assert done.event == "done", done
+
             # both callers share the service, so only identities differ
             for result in (local, assistant):
                 result.pop("run_key")
@@ -1296,6 +1304,7 @@ def test_parity(monkeypatch, engine):
             )
             await FlowGraph.filter(id=graph.id).update(draft_version=4)
             await FlowDraftRevision.filter(graph_id=graph.id).delete()
+
             saved = await call(app, "run_workflow", arguments, token=token)
             outdated = await call(
                 app,
@@ -1322,6 +1331,7 @@ def test_parity(monkeypatch, engine):
                     key="x",
                     user=admin,
                 )
+
             denied = await tools.execute_tool(
                 "read_conversation_history",
                 dumps({"turn_id": turn.id}).decode(),
@@ -1393,6 +1403,7 @@ def test_stale_reference(monkeypatch, engine, designer):
             else:
                 # without a canvas the current saved draft is the reviewed content
                 assert saved["ok"] and saved["data"]["status"] == "completed"
+
             assert not older["ok"] and older["error"]["code"] in {
                 "assistant_canvas_changed",
                 "flow_draft_conflict",

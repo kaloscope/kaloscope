@@ -77,18 +77,26 @@
   });
 </script>
 
-<DataView loading={$loading} data={favorites}>
+<DataView loading={$loading} data={favorites} skeleton={{ ratio: '1/1' }}>
   {#snippet header()}
     <HCell width="100%" text={$_('entity.favorites')} />
     <HCell actions />
   {/snippet}
   {#snippet row(favorite)}
     {@const rsrc = favorite.rsrc}
-    <Cell class="group {favorite.url ? 'cursor-pointer' : ''}" onclick={() => favorite.url && goto(favorite.url)}>
-      <Image transparent src={rsrc.cover} width="3.5rem" />
+    <Cell
+      class="group {favorite.url ? 'cursor-pointer' : ''}"
+      onclick={(event) => {
+        // the title link navigates by itself
+        if (favorite.url && !(event.target instanceof Element && event.target.closest('a'))) goto(favorite.url);
+      }}
+    >
+      <Image transparent src={rsrc.cover} width="3.5rem" class="rounded-md!" />
       <div class="flex w-full flex-col gap-4">
         <div class={favorite.url ? 'transition-colors group-hover:text-primary' : ''}>
-          <span class="text-sm">{rsrc.title}</span>
+          <svelte:element this={favorite.url ? 'a' : 'span'} href={favorite.url ?? undefined} class="text-sm">
+            {rsrc.title}
+          </svelte:element>
           {#if rsrc.misc}
             <span class="italic-text">[{rsrc.misc}]</span>
           {/if}

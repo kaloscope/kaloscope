@@ -257,6 +257,7 @@ def test_sealed_sources(monkeypatch):
             assert all("source" not in item for item in plain["items"])
             assert set(items) == {"r1", "r2", "r3", "r4"}
             assert "source" not in items["r4"]
+
             second = await service.DownloadPlanService.search_indexer(
                 IndexerSearch(
                     workflow_id=graph.id,
@@ -271,6 +272,7 @@ def test_sealed_sources(monkeypatch):
             assert second["has_more"] and second["next_page"] == 3
             assert [item["id"] for item in second["items"]] == list(items)
             assert execute.await_args.args[1]["page_num"] == 2
+
             for item, valid in [
                 (second["items"][1], True),
                 ({**items["r2"], "id": "r1"}, False),
@@ -285,6 +287,7 @@ def test_sealed_sources(monkeypatch):
                 assert check["valid"] is valid, check["issues"]
                 if not valid:
                     assert check["issues"][0]["path"] == "resource.source"
+
             # validation opens the reviewed result instead of searching again
             assert execute.await_count == 3
 
@@ -1158,6 +1161,7 @@ def test_replay_history(monkeypatch, tmp_path, revoked):
             await service.DownloadTaskService.create_once(body, owner)
             replay = await service.DownloadTaskService.create_once(body, owner)
             assert replay["replayed"]
+
             # isolate the replay turn's provenance from any earlier validation history
             monkeypatch.setattr(tools, "create_task", AsyncMock(return_value=replay))
             fixture.update(workflow_id=data.graph.id, request_id=check["request_id"])
@@ -1171,6 +1175,7 @@ def test_replay_history(monkeypatch, tmp_path, revoked):
                 )
             ]
             assert events[-1].event == "done", events[-1]
+
             turn = await AssistantTurn.get(request_id="replay")
             assert {data.graph.id, data.movie.id, f"media_lib:{data.movies.id}"} <= set(
                 turn.resource_ids
@@ -1180,6 +1185,7 @@ def test_replay_history(monkeypatch, tmp_path, revoked):
                 summary_resources=turn.resource_ids,
                 summary_through=turn.id,
             )
+
             owner.role = UserRole.USER
             owner.perms = Permissions(
                 indexer_ids=[
@@ -1202,6 +1208,7 @@ def test_replay_history(monkeypatch, tmp_path, revoked):
             assert denied["error"]["code"] == "permission_denied"
             record = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert record["content"] == "" and record["tools"] == []
+
             current = await Sessions.begin(
                 conversation["id"], request("after-revoke"), owner
             )

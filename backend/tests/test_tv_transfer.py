@@ -356,6 +356,7 @@ def test_bounds(tmp_path):
         *samples[4:6],
     ]
     assert preview["omitted"] == 2
+
     # long known paths and many problems stay within a compact result
     pack = "Wayfinder." + "Extended." * 40 + "S02"
     files = [f"{pack}/Wayfinder.S02E{number:02d}.mkv" for number in range(1, 11)]
@@ -365,6 +366,7 @@ def test_bounds(tmp_path):
     assert len(issues) == 5 and issues[-1]["message"].startswith("6 more files")
     assert all(len(item["from"]) <= 160 for item in preview["items"])
     assert len(dumps(preview)) < 2048 and preview["omitted"] == 4
+
     for invalid in (
         [*samples, "W.S01E09.mkv"],
         ["../W.S01E01.mkv"],
@@ -756,6 +758,7 @@ def test_one_time(monkeypatch, tmp_path):
             assert not plain["valid"]
             assert any("states season 2" in message for message in messages)
             assert any("states season 0" in message for message in messages)
+
             assert check["valid"], check["issues"]
             transfer = check["download"]["transfer"]
             # the torrent's own file list wins over supplied samples
@@ -772,6 +775,7 @@ def test_one_time(monkeypatch, tmp_path):
                 RULE["sub_pattern"],
                 RULE["sub_repl"],
             )
+
             assert unconfirmed["confirmation_required"]
             assert unconfirmed["download"]["transfer"] == transfer
             assert created["created"] and created["download"]["transfer"] == transfer
@@ -780,6 +784,7 @@ def test_one_time(monkeypatch, tmp_path):
             task = await DownloadTask.get(id=created["task_id"])
             assert (task.sub_pattern, task.sub_repl) == tuple(RULE.values())
             assert len(driver.added) == 1
+
             # validation and submission leave the library and its bindings untouched
             assert not (tmp_path / "shows").exists()
             assert not await MediaItem.exists() and not await FlowLog.exists()
@@ -878,6 +883,7 @@ def test_plan(tmp_path):
                 ),
                 owner,
             )
+
             request_id = uuid4()
             unconfirmed = await service.DownloadPlanService.create_once(
                 DownloadPlanCreate(request_id=request_id, plan=plan), owner
@@ -902,6 +908,7 @@ def test_plan(tmp_path):
                 ("Wayfinder (2024)/Season 02/Wayfinder.S02E03.1080p.mkv", 2, 3),
                 ("Wayfinder (2024)/Season 00/Wayfinder.S00E01.mkv", 0, 1),
             ]
+
             # without names the rule is only parsed and the TV layout is explained
             assert unnamed["valid"] and unnamed["transfer"]["basis"] is None
             assert "Supply transfer_samples" in unnamed["transfer"]["notes"][0]
@@ -967,6 +974,7 @@ def test_parity(monkeypatch, tmp_path):
                 conversation_id=1,
                 call_id="plan",
             )
+
             body = {
                 "request_id": mcp["structuredContent"]["request_id"],
                 "info_hash": mcp["structuredContent"]["download"]["info_hash"],
@@ -983,6 +991,7 @@ def test_parity(monkeypatch, tmp_path):
             created = await call(
                 app, "create_download_task", {"creation": body}, token=write["token"]
             )
+
             user = SimpleNamespace(
                 id=admin.id,
                 role=UserRole.USER,
@@ -1007,6 +1016,7 @@ def test_parity(monkeypatch, tmp_path):
             assert mcp_data.pop("request_id") and assistant["data"].pop("request_id")
             assert mcp_data == loads(dumps(assistant["data"]))
             assert mcp_data["download"]["transfer"]["basis"] == "known_files"
+
             planned = mcp_plan["structuredContent"]
             assert planned.pop("request_id") and assistant_plan["data"].pop(
                 "request_id"

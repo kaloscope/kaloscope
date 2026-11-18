@@ -236,6 +236,7 @@ def test_text_and_usage(monkeypatch):
     assert events[-1].data["usage"]["total_tokens"] == 7
     assert upstream.is_closed
     assert len(requests) == 1
+
     request = requests[0]
     assert request.url == "https://example.test/v1/chat/completions"
     assert request.headers["Authorization"] == "Bearer private-key"
@@ -687,6 +688,7 @@ def test_generation_budget(monkeypatch, allowance, preset):
     else:
         assert "max_tokens" not in requests[1]
         assert "max_completion_tokens" not in requests[1]
+
     for request in requests:
         if preset == AIProviderPreset.DEEPSEEK:
             assert request["thinking"] == {"type": "enabled"}
@@ -1071,6 +1073,7 @@ def test_final_answer_at_limit(monkeypatch, limit, value, call_count):
         assert body["messages"][-2]["role"] == "tool"
         assert body["messages"][-1]["role"] == "system"
         assert "remaining unknowns" in body["messages"][-1]["content"]
+
         return response(
             [
                 chunk(
@@ -1157,6 +1160,7 @@ def test_remaining_tool_budget(monkeypatch):
             "batch-1-1",
         ]
         assert "batch-2" not in json.dumps(body["messages"])
+
         return response(
             [chunk({"role": "assistant", "content": "Known facts only"}, "stop")]
         )

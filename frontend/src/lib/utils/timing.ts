@@ -82,3 +82,44 @@ export function throttle<F extends (...args: Parameters<F>) => ReturnType<F>>(
     });
   };
 }
+
+/**
+ * Repeat a callback on an interval while the page is visible.
+ *
+ * Polling pauses while the document is hidden, such as in a background tab, and resumes with an
+ * immediate call when the page becomes visible again, so the data is fresh as soon as it is seen.
+ *
+ * @param callback - Function to call on each tick.
+ * @param interval - Interval in milliseconds.
+ * @returns A function that stops polling and removes the visibility listener.
+ */
+export function pollWhileVisible(callback: () => void, interval: number): () => void {
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const start = () => {
+    timer ??= setInterval(callback, interval);
+  };
+  const stop = () => {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') {
+      stop();
+    } else if (timer === null) {
+      callback();
+      start();
+    }
+  };
+
+  if (document.visibilityState !== 'hidden') {
+    start();
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  return () => {
+    stop();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+  };
+}

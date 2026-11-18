@@ -105,8 +105,9 @@
   uniqueKey="id"
   class="pull-to-refresh"
   gridClass="grid-cols-sparse"
-  itemClass="z-1 rounded-field border shadow-sm hover:shadow-lg"
-  tailClass="rounded-field border-1 border-dashed duration-300 opacity-20 hover:opacity-50 hover:shadow-lg"
+  itemClass="z-1 card-surface card-hover"
+  tailClass="rounded-card border-1 border-dashed duration-300 opacity-30 hover:opacity-60"
+  skeleton={{ ratio: '4/1', lines: 3 }}
   ondragged={(data) => {
     libs = data;
     sort();
@@ -114,7 +115,7 @@
 >
   {#snippet item(lib, index)}
     {@const libType = LibType[lib.lib_type]}
-    <div class="flex justify-between gap-2 rounded-t-field bg-base-200 p-4">
+    <div class="flex justify-between gap-2 rounded-t-card bg-base-200/60 p-4">
       <div class="grid grid-flow-col items-center gap-2">
         <Image transparent icon={libType.icon} width="2rem" class="[&_iconify-icon]:opacity-70!" />
         <div class="truncate text-base">{lib.name}</div>
@@ -189,7 +190,7 @@
         </Dropdown>
       </div>
     </div>
-    <dl class="rounded-b-field bg-base-100 p-4 text-sm">
+    <dl class="rounded-b-card bg-base-100 p-4 text-sm">
       {@render term($_('field.dir'), lib.dir, true)}
       <div class="divider my-0"></div>
       {@render term($_('field.language'), $_(lib.language, { locale: 'languages' }))}

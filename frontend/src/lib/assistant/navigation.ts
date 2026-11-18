@@ -19,8 +19,10 @@ export function assistantDestination(
   result: AssistantToolResult
 ): { path: string; target: AssistantDestination } | null {
   if (!result.ok || !result.data) return null;
+
   let target: AssistantDestination | undefined;
   let path: unknown;
+
   if (result.name === 'navigate') {
     target = result.data.target as AssistantDestination | undefined;
     path = result.data.path;
@@ -50,7 +52,9 @@ export function assistantDestination(
         ? { page: 'media_item', resource_id: result.data.item_id }
         : { page: 'media_library', resource_id: result.data.library_id as number };
   }
+
   if (!target) return null;
+
   const id = target.resource_id;
   if (target.page === 'workflows') {
     return id == null && path === workflowPath ? { path, target } : null;
@@ -65,7 +69,9 @@ export function assistantDestination(
     const expected = downloadPaths[target.page];
     return id == null && path === expected ? { path: expected, target } : null;
   }
+
   if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0 || typeof path !== 'string') return null;
+
   let valid = false;
   if (target.page === 'workflow_designer') {
     valid = path === `${workflowPath}/${id}` || (result.name === 'navigate' && path === `${workflowPath}/r/${id}`);
@@ -75,5 +81,6 @@ export function assistantDestination(
     // the server resolves the item's own library into the path
     valid = new RegExp(`^${mediaPath}/[1-9]\\d*/${id}$`).test(path);
   }
+
   return valid ? { path, target } : null;
 }

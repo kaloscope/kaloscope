@@ -98,6 +98,7 @@ async def libraries(tmp_path, *, published=True):
     shows = await MediaLib.create(
         lib_type=LibType.TV_SHOW, dir=str(tmp_path / "shows"), name="Shows", priority=2
     )
+
     tv = await FlowGraph.create(
         name="TV scraper",
         category="ingest",
@@ -117,6 +118,7 @@ async def libraries(tmp_path, *, published=True):
         if published
         else None
     )
+
     existing = [
         await FlowTrigger.create(
             category="ingest", rel_id=movies.id, graph=tv, priority=1, asynchronous=True
@@ -127,6 +129,7 @@ async def libraries(tmp_path, *, published=True):
     ]
     body.plan.transfer_lib_id = movies.id
     body.plan.transfer_method = TransferMethod.COPY
+
     return SimpleNamespace(
         graph=graph,
         downloader=downloader,
@@ -300,6 +303,7 @@ def test_add_then_reuse(tmp_path):
                 created["plan_id"], owner
             )
             assert recovered["ingestion"]["binding"] == "configured"
+
             second = await reviewed(owner, data, keyword="Lantern extended")
             other = await service.DownloadPlanService.create_once(
                 creation(data, second, request_id=uuid4()).model_copy(
@@ -319,6 +323,7 @@ def test_add_then_reuse(tmp_path):
                 *before,
                 (data.movie.id, 3, False),
             ]
+
             # the library is prepared before the plan can queue its first attempt
             added = await FlowTrigger.get(rel_id=data.movies.id, graph=data.movie)
             plan = await DownloadPlan.get(id=created["plan_id"])
@@ -331,6 +336,7 @@ def test_add_then_reuse(tmp_path):
             assert await DownloadPlan.all().count() == 2
             assert plan.transfer_lib_id == data.movies.id
             assert plan.creation_receipt["first_execution"]["status"] == "queued"
+
             owner.role = UserRole.USER
             owner.perms = Permissions(
                 indexer_ids=[data.graph.id], media_lib_ids=[data.movies.id]
@@ -558,6 +564,7 @@ def test_mcp_scopes_and_parity(tmp_path):
                 conversation_id=1,
                 call_id="reader",
             )
+
             check = {
                 "plan": data.body.plan.model_dump(mode="json"),
                 "ingest_workflow_id": data.movie.id,
@@ -580,6 +587,7 @@ def test_mcp_scopes_and_parity(tmp_path):
             )
             unchanged = await bindings(data.movies.id)
             planned = await DownloadPlan.exists()
+
             write = await MCPAccessTokenService.create(
                 admin.id,
                 MCPAccessTokenCreate(name="plans", scope=MCPTokenScope.READ_WRITE),
@@ -701,6 +709,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
     def handler(upstream):
         body = loads(upstream.content)
         assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
+
         if not body.get("stream"):
             return httpx.Response(
                 200,
@@ -723,6 +732,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
                     ]
                 },
             )
+
         number, step = stage["number"], stage["step"]
         stage["step"] += 1
         flow, library = fixture["graph_id"], fixture["library_id"]
@@ -730,6 +740,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
             ("get_workflow", {"workflow_id": flow}),
             ("get_download_plan_options", {"workflow_id": flow}),
         ]
+
         actions = [
             [("list_workflows", {"category": "indexer"})],
             [
@@ -765,6 +776,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
                 * 2,
             ],
         ][number]
+
         if step >= len(actions):
             if number == 1:
                 names = {item["function"]["name"] for item in body["tools"]}
@@ -779,10 +791,12 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
                 "in the background.",
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
+
         name, args = actions[step]
         if step >= 2 and number:
             names = {item["function"]["name"] for item in body["tools"]}
             assert "get_library_ingestion" in names
+
         return response(
             [
                 chunk(
@@ -831,6 +845,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+
             results = []
             for number, prompt in enumerate(
                 [
@@ -871,13 +886,16 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
             by_name = {}
             for result in results:
                 by_name.setdefault(result["name"], []).append(result["data"])
+
             first, second = by_name["get_library_ingestion"]
             assert first["workflows"] == [] and first["unpublished_count"] == 1
             assert [w["workflow_id"] for w in second["workflows"]] == [
                 fixture["workflow_id"]
             ]
+
             review = by_name["validate_download_plan"][0]["ingestion"]
             assert review["binding"] == "add" and "not only" in review["scope"]
+
             created = by_name["create_download_plan"][0]
             assert created["created"] and created["ingestion"]["binding"] == "added"
             replayed = by_name["create_download_plan"][1]
@@ -887,6 +905,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
                 *before,
                 (fixture["workflow_id"], 3, False),
             ]
+
             # creation returns once queued; no search, download or ingestion ran
             assert execute.await_count == 1
             assert created["first_execution"]["status"] == "queued"

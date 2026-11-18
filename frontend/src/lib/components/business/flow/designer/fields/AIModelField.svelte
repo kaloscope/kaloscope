@@ -10,14 +10,17 @@
   import { getContext, hasContext, untrack } from 'svelte';
 
   let { data = null, ...field }: Field & { nodeId: string; data?: AIModelSelection | null } = $props();
+
   const { updateNodeData } = useSvelteFlow();
   const { label } = nodeFormatter;
+
   let providers = $state<AIProvider[] | null>(null);
   const loading = createLoading();
   let failed = $state(false);
   let controller: AbortController | undefined;
   let providerSelect: HTMLSelectElement;
   let modelSelect: HTMLSelectElement;
+
   const editable = $derived($user?.role === 'admin');
   const provider = $derived(providers?.find((item) => item.id === data?.provider_id));
   const issue = $derived.by(() => {
@@ -38,9 +41,11 @@
    */
   async function refresh() {
     if (!editable || $loading !== null) return;
+
     controller = new AbortController();
     loading.start();
     failed = false;
+
     try {
       const response = await api
         .get('ai/provider/list', { signal: controller.signal, context: { silentErrors: true } })

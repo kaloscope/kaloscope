@@ -195,7 +195,7 @@ async def delete_items(_, body: MediaDel) -> HTTPResponse:
 
 
 class BatchEntryQuery(Pageable):
-    """Page one batch's entries, optionally by status."""
+    """Page one batch's units, optionally by status."""
 
     status: str | None = None
 
@@ -257,17 +257,17 @@ async def get_batch(request: Request, id: int) -> HTTPResponse:
 @authorize(role=UserRole.ADMIN)
 @validate(query=BatchEntryQuery)
 async def list_batch_entries(_, query: BatchEntryQuery, id: int) -> HTTPResponse:
-    """List one page of a batch's entries.
+    """List one page of a batch's units with the files handled alongside them.
 
     Args:
         _: Unused request.
-        query: Page and optional status filter.
+        query: Page and optional unit status filter.
         id: Batch ID.
 
     Returns:
-        Response containing the total and the requested entries.
+        Response containing the unit total and the requested units.
     """
-    return json(await MediaBatchService.entries(id, query, query.status))
+    return json(await MediaBatchService.units(id, query, query.status))
 
 
 @media.post("/batch/<id:int>/cancel")

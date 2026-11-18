@@ -1,7 +1,7 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
-  import { Button, Container, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
+  import { Button, Container, Empty, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -42,8 +42,10 @@
    */
   async function load(): Promise<void> {
     if ($loading !== null || deleting.size > 0) return;
+
     loading.start();
     loadError = false;
+
     try {
       const { data } = await api.get('mcp/token/list', { signal: requests.signal }).json<Resp<MCPAccessToken[]>>();
       tokens = data;
@@ -83,17 +85,21 @@
    */
   async function create(): Promise<void> {
     if ($creating !== null || !name.trim()) return;
+
     const controller = new AbortController();
     createRequest = controller;
     creating.start();
+
     try {
       const payload: MCPAccessTokenCreate = { name: name.trim(), expires_in_days: expiresInDays, scope };
       const { data } = await api
         .post('mcp/token/create', { json: payload, signal: controller.signal, retry: 0 })
         .json<Resp<MCPAccessTokenCreated>>();
       if (createRequest !== controller || !modal.isOpen()) return;
+
       const { token, ...metadata } = data;
       tokens = [metadata, ...tokens];
+
       const previousHeight = modalContent.offsetHeight;
       const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       const fadeOut = modalStage.animate([{ opacity: 1 }, { opacity: 0 }], {
@@ -103,9 +109,11 @@
       animations.push(fadeOut);
       await fadeOut.finished.catch(() => {});
       if (createRequest !== controller || !modal.isOpen()) return;
+
       secret = token;
       await tick();
       if (createRequest !== controller || !modal.isOpen()) return;
+
       if (!reducedMotion) {
         animations.push(
           modalContent.animate(
@@ -114,6 +122,7 @@
           )
         );
       }
+
       fadeOut.cancel();
       animations.push(modalStage.animate([{ opacity: 0 }, { opacity: 1 }], { duration: reducedMotion ? 80 : 180 }));
       secretInput?.focus({ preventScroll: true });
@@ -137,7 +146,9 @@
    */
   async function remove(token: MCPAccessToken): Promise<void> {
     if ($loading !== null || deleting.has(token.id)) return;
+
     deleting.add(token.id);
+
     try {
       await api.post(`mcp/token/${token.id}/delete`, { signal: requests.signal });
       tokens = tokens.filter((item) => item.id !== token.id);
@@ -158,6 +169,7 @@
    */
   async function copy(input: HTMLInputElement | HTMLTextAreaElement | undefined): Promise<void> {
     if (!input) return;
+
     try {
       await navigator.clipboard.writeText(input.value);
       alert({ level: 'success', message: $_('access_token.copied') });
@@ -171,6 +183,7 @@
   onMount(() => {
     load();
   });
+
   onDestroy(() => {
     requests.abort();
     reset();
@@ -201,9 +214,9 @@
         <button class="btn btn-sm" onclick={load}>{$_('action.retry')}</button>
       </div>
     {:else if tokens.length === 0}
-      <p class="py-8 text-center text-sm text-base-content/70">{$_('access_token.empty')}</p>
+      <Empty compact title={$_('access_token.empty')} />
     {:else}
-      <ul class="divide-y divide-border rounded-field border bg-base-100">
+      <ul class="inset-list">
         {#each tokens as token (token.id)}
           <li class="p-4">
             <div class="flex items-center gap-3">

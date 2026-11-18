@@ -35,6 +35,7 @@ DOWNLOAD_PATHS = {
     "active_downloads": "/downloads/downloading",
     "completed_downloads": "/downloads/completed",
 }
+
 type ResourceID = Annotated[int, Field(gt=0, le=2**53 - 1, strict=True)]
 type DownloadOrdering = Literal["", "name", "-name", "downloader_id", "-downloader_id"]
 type DownloadPlanOrdering = Literal[
@@ -488,6 +489,7 @@ class AssistantTurnRequest(ContextModel):
         """
         if not self.prompt.strip() or len(self.prompt.encode()) > MAX_PROMPT_BYTES:
             raise ValueError("Provide a bounded nonblank prompt")
+
         try:
             if (
                 self.context
@@ -497,6 +499,7 @@ class AssistantTurnRequest(ContextModel):
                 raise ValueError("Page context exceeds the context limit")
         except (TypeError, OverflowError) as exc:
             raise ValueError("Unsupported page context values") from exc
+
         return self
 
 

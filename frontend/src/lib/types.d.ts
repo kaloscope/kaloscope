@@ -268,6 +268,12 @@ export type MediaBatch = {
   /** Whether this operation supports undo after finishing. */
   can_revert: boolean;
   deletion: 'trash' | 'permanent' | null;
+  /** Whether a deletion removes files; `false` only removes the items from the library. */
+  delete_files: boolean | null;
+  /** Whether the deletion selects items, which may leave the library without losing their files. */
+  hideable: boolean;
+  /** The reviewed request, sent again to review the other way of deleting. */
+  change: { item_ids?: number[]; delete_files?: boolean } & Record<string, unknown>;
   planned: { units: number; files: number; bytes: number; by_owner: Record<string, number> };
   blocked: { units: number; reasons: Record<string, number> };
   more: boolean;
@@ -291,6 +297,8 @@ export type MediaBatchEntry = {
   size: number | null;
   status: 'planned' | 'blocked' | 'started' | 'done' | 'skipped' | 'failed' | 'uncertain';
   reason: string | null;
+  /** Files handled together with this unit, listed in unit listings only. */
+  children?: MediaBatchEntry[];
 };
 
 /** Outcome of applying a reviewed library batch. */
@@ -300,6 +308,10 @@ export type MediaBatchOutcome = {
   outcome?: 'completed' | 'partial' | 'cancelled' | 'interrupted' | 'running' | 'absent';
   library_id?: number;
   batch_id?: number;
+  /** Units the review left alone, counted by reason. */
+  blocked?: { units: number; reasons: Record<string, number> };
+  /** Located problems that kept the review from producing a plan. */
+  issues?: { path: string; message: string }[];
   can_revert?: boolean;
   done?: number;
   skipped?: number;

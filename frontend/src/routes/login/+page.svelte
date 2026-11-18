@@ -81,41 +81,44 @@
   <title>{$headTitle('app.login')}</title>
 </svelte:head>
 
-<Navbar />
-<main class="hero min-h-(--ks-lvh) bg-base-200">
-  <div class="hero-content mb-20 w-full flex-col gap-6">
-    <div class="flex-center gap-2">
-      <Logo size="2.5rem" />
-      <span class="app-name text-4xl text-shadow-md">{$_('app.name', { locale: 'en-US' })}</span>
+<!-- one background behind the bar and the form, so there is no seam between them -->
+<div class="min-h-dvh bg-aurora">
+  <Navbar />
+  <main class="hero min-h-(--ks-lvh)">
+    <div class="hero-content mb-20 w-full flex-col gap-8">
+      <div class="flex-center gap-2">
+        <Logo size="2.5rem" />
+        <span class="app-name text-4xl text-shadow-md">{$_('app.name', { locale: 'en-US' })}</span>
+      </div>
+      <div class="w-full max-w-96 card-auth">
+        <form
+          method="post"
+          class="p-6 sm:p-7"
+          use:enhance={({ formData, cancel }) => {
+            cancel();
+            login(formData);
+          }}
+        >
+          <fieldset class="fieldset gap-y-2">
+            <Label small>{$_('field.username')}</Label>
+            <label class="input w-full">
+              <iconify-icon icon={icons.user}></iconify-icon>
+              <input class="grow" {...schema.username} bind:value={usernameValue} />
+            </label>
+            <Label small>{$_('field.password')}</Label>
+            <label class="input w-full">
+              <iconify-icon icon={icons.key}></iconify-icon>
+              <input class="grow" {...schema.password} bind:value={passwordValue} />
+            </label>
+            <button type="submit" class="btn mt-6 h-11 rounded-full shadow-sm btn-primary" disabled={$loading !== null}>
+              {$_('app.login')}
+              {#if $loading}
+                <span class="loading loading-xs loading-dots"></span>
+              {/if}
+            </button>
+          </fieldset>
+        </form>
+      </div>
     </div>
-    <div class="card w-full max-w-96 border bg-base-100 shadow-2xl">
-      <form
-        method="post"
-        class="card-body"
-        use:enhance={({ formData, cancel }) => {
-          cancel();
-          login(formData);
-        }}
-      >
-        <fieldset class="fieldset">
-          <Label small>{$_('field.username')}</Label>
-          <label class="input w-full">
-            <iconify-icon icon={icons.user}></iconify-icon>
-            <input class="grow" {...schema.username} bind:value={usernameValue} />
-          </label>
-          <Label small>{$_('field.password')}</Label>
-          <label class="input w-full">
-            <iconify-icon icon={icons.key}></iconify-icon>
-            <input class="grow" {...schema.password} bind:value={passwordValue} />
-          </label>
-          <button type="submit" class="btn mt-6 btn-primary" disabled={$loading !== null}>
-            {$_('app.login')}
-            {#if $loading}
-              <span class="loading loading-xs loading-dots"></span>
-            {/if}
-          </button>
-        </fieldset>
-      </form>
-    </div>
-  </div>
-</main>
+  </main>
+</div>

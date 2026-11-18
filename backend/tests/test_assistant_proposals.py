@@ -102,6 +102,7 @@ async def database(db_url="sqlite://:memory:"):
             ConversationCreate.model_validate({"model": MODEL}),
             cast(UserInfo, SimpleNamespace(id=owner.id, role="admin")),
         )
+
         yield SimpleNamespace(
             owner=cast(UserInfo, SimpleNamespace(id=owner.id, role="admin")),
             other=cast(UserInfo, SimpleNamespace(id=other.id, role="admin")),
@@ -144,6 +145,7 @@ async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):
             env.owner,
         )
         snapshot_id = capture.id
+
     arguments = {
         "workflow_id": env.graph.id,
         "draft_version": version,
@@ -163,6 +165,7 @@ async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):
         name="preview_workflow_draft",
         arguments=dumps(arguments).decode(),
     )
+
     result = await tools.execute_tool(
         "preview_workflow_draft",
         dumps(arguments).decode(),
@@ -181,6 +184,7 @@ async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):
         status="complete",
     )
     await Sessions.finish(turn, status="complete", content="Canvas ready")
+
     assert result["ok"], result
     return result["data"]
 
@@ -388,6 +392,7 @@ def test_incremental_canvas():
                 "snapshot_id": capture.id,
             }
             latest = capture.id
+
             for index, schema in enumerate(("search_start", "search_end"), start=1):
                 result = await tools.execute_tool(
                     "preview_workflow_draft",
@@ -426,6 +431,7 @@ def test_incremental_canvas():
                 assert view["proposal"]["status"] == "pending"
                 assert (await FlowGraph.get(id=env.graph.id)).draft == empty
                 assert await revisions(env) == 0
+
             original = await Sessions.read_snapshot(
                 env.conversation, capture.id, env.owner
             )
@@ -466,6 +472,7 @@ def test_canvas_chained_edits():
             )
             assert first["ok"], first
             latest = first["data"]["proposal_snapshot_id"]
+
             second = await tools.execute_tool(
                 "preview_workflow_draft",
                 json.dumps(

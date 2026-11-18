@@ -6,9 +6,11 @@
     confirm,
     Container,
     DataView,
+    Empty,
     HCell,
     Image,
     SearchHit,
+    Skeleton,
     VideoPlayer,
     ViewSwitcher
   } from '$lib/components';
@@ -105,6 +107,16 @@
   let showSearches = $derived(loadSearches && searches.length > 0);
   let showReads = $derived(loadReads && reads.length > 0);
   let historyCount = $derived([showSearches, showWatches, showReads].filter(Boolean).length);
+
+  // the placeholder cards shown while a board loads
+  const BOARD_SKELETONS = 7;
+  // the number of board workflows run at the same time
+  const BOARD_CONCURRENCY = 3;
+  // the graphs whose boards are being prepared, and whether every board has settled
+  const preparing = new SvelteSet<number>();
+  let settled: boolean = $state(false);
+  // whether a board is still loading before it has a section of its own
+  let pendingBoard = $derived([...preparing].some((id) => !boards[id]));
 
   // the player instance and playing state
   let player: VideoPlayer | null = $state(null);
@@ -321,20 +333,17 @@
   }
 
   /**
-   * Navigate to the search page for the given history entry.
+   * Build the search page link for the given history entry.
    *
    * @param s - Search history entry.
+   * @returns The global or indexer search link, or `undefined` for an entry without a keyword.
    */
-  function gotoSearch(s: SearchHistory) {
-    const keyword = s.keyword;
+  function searchHref(s: SearchHistory): string | undefined {
     if (!s.keyword) {
-      return;
+      return undefined;
     }
-    if (!s.graph) {
-      goto(`/websearch/global?restore=false&keyword=${encodeURIComponent(keyword)}`);
-    } else {
-      goto(`/websearch/${s.rel_id}?restore=false&keyword=${encodeURIComponent(keyword)}`);
-    }
+    const path = s.graph ? `/websearch/${s.rel_id}` : '/websearch/global';
+    return `${path}?restore=false&keyword=${encodeURIComponent(s.keyword)}`;
   }
 
   // load the user histories
@@ -354,52 +363,58 @@
     return () => controller.abort();
   });
 
-  // load the board resources
+  /**
+   * Load the queued boards one at a time, so a few loaders can share the queue.
+   *
+   * @param queue - Graphs whose boards have not started loading.
+   */
+  async function loadQueue(queue: FlowGraph[]) {
+    for (let graph = queue.shift(); graph; graph = queue.shift()) {
+      preparing.add(graph.id);
+      try {
+        await load(graph);
+      } finally {
+        preparing.delete(graph.id);
+      }
+    }
+  }
+
+  // load the board resources a few at a time; boards keep their id order whatever finishes first
   onMount(async () => {
     boards = {};
-    for (const graph of data.graphs) {
-      await load(graph);
-    }
+    const queue = [...data.graphs];
+    const loaders = Math.min(BOARD_CONCURRENCY, queue.length);
+    await Promise.all(Array.from({ length: loaders }, () => loadQueue(queue)));
+    settled = true;
     restorePosition(window);
   });
 </script>
 
-<Container padding="1rem 0" maxWidth="max(150vh,72rem)">
+<Container padding="1.25rem 0.75rem 2rem" rowGap="2.5rem" maxWidth="max(150vh,72rem)">
   <!-- recent histories -->
   {#if historyCount > 0}
     <div
-      class="mb-10 grid gap-4 {historyCount > 1 ? 'lg:grid-cols-2' : ''} {historyCount === 3 ? 'xl:grid-cols-3' : ''}"
+      class="grid gap-x-6 gap-y-8 {historyCount > 1 ? 'lg:grid-cols-2' : ''} {historyCount === 3
+        ? 'xl:grid-cols-3'
+        : ''}"
       transition:fade={{ duration: 200 }}
     >
       <!-- recent searches -->
       {#if showSearches}
         <section class="min-w-0">
-          <div class="flex h-8 items-center justify-between px-2">
-            <span class="text-xl font-bold opacity-80">{$_('preference.dashboard.search')}</span>
-            <Button
-              icon={icons.clear}
-              text={$_('action.clear', $_('preference.dashboard.search'))}
-              iconClass="opacity-80"
-              onclick={() => deleteAllHistories('search')}
-            />
-          </div>
-          <div class="divider mt-0 mb-1"></div>
-          <ul class="history-list">
+          {@render historyHead($_('preference.dashboard.search'), 'search')}
+          <ul class="history-list max-sm:scrollbar-none">
             {#each searches as item (item.id)}
               <li
-                class="group history-list-item p-3 pr-10 transition-colors max-sm:w-[min(20rem,85vw)]"
+                class="group history-list-item card-surface p-3 pr-10 max-sm:w-[min(20rem,85vw)]"
                 animate:flip={{ duration: 200 }}
               >
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <div
-                  tabindex="0"
-                  role="button"
-                  class="min-w-0 cursor-pointer"
-                  onclick={() => gotoSearch(item)}
-                  title={item.keyword}
-                >
+                <a href={searchHref(item)} class="flex min-w-0 cursor-pointer items-center gap-3" title={item.keyword}>
+                  <span class="history-icon flex-center" aria-hidden="true">
+                    <iconify-icon icon={icons.search} width="1.125rem"></iconify-icon>
+                  </span>
                   <div class="flex min-w-0 flex-col gap-1">
-                    <span class="truncate text-sm font-medium group-hover:text-primary">
+                    <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
                       {item.keyword}
                     </span>
                     <div class="flex min-w-0 items-center gap-2 text-xs">
@@ -408,15 +423,8 @@
                       <span class="shrink-0 opacity-40">{$dateTime(item.updated_at)}</span>
                     </div>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  class="history-delete-button"
-                  aria-label={$_('action.delete')}
-                  onclick={() => deleteHistory(item.id, 'search')}
-                >
-                  <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
-                </button>
+                </a>
+                {@render historyDelete(item.id, 'search')}
               </li>
             {/each}
           </ul>
@@ -426,22 +434,13 @@
       <!-- recent watches -->
       {#if showWatches}
         <section class="min-w-0">
-          <div class="flex h-8 items-center justify-between px-2">
-            <span class="text-xl font-bold opacity-80">{$_('preference.dashboard.watch')}</span>
-            <Button
-              icon={icons.clear}
-              text={$_('action.clear', $_('preference.dashboard.watch'))}
-              iconClass="opacity-80"
-              onclick={() => deleteAllHistories('video')}
-            />
-          </div>
-          <div class="divider mt-0 mb-1"></div>
-          <ul class="history-list">
+          {@render historyHead($_('preference.dashboard.watch'), 'video')}
+          <ul class="history-list max-sm:scrollbar-none">
             {#each latestWatches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
               <li
-                class="group history-list-item p-2 pr-10 pb-2.5 transition-colors max-sm:w-[min(20rem,85vw)]"
+                class="group history-list-item card-surface p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,85vw)]"
                 animate:flip={{ duration: 200 }}
               >
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -458,35 +457,25 @@
                     icon={media?.lib ? LibType[media.lib.lib_type].icon : undefined}
                     width="3rem"
                     ratio="2/3"
+                    class="rounded-md!"
                   />
                   <div class="flex min-w-0 flex-col gap-1">
                     {#if parent}
-                      <span class="truncate text-sm font-medium group-hover:text-primary">
+                      <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
                         {parent.title ?? parent.name}
                       </span>
                       <span class="truncate text-xs opacity-70">{mediaTitle(media)}</span>
                       <span class="truncate text-xs opacity-40">{$dateTime(item.updated_at)}</span>
                     {:else}
-                      <span class="truncate text-sm font-medium group-hover:text-primary">
+                      <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
                         {mediaTitle(media)}
                       </span>
                       <span class="text-xs opacity-40">{$dateTime(item.updated_at)}</span>
                     {/if}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  class="history-delete-button"
-                  aria-label={$_('action.delete')}
-                  onclick={() => deleteHistory(item.id, 'video')}
-                >
-                  <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
-                </button>
-                {#if item.percentage !== null}
-                  <div class="absolute bottom-0 left-0 h-0.75 w-full bg-base-200">
-                    <div class="h-full bg-primary/50" style="width: {item.percentage}%"></div>
-                  </div>
-                {/if}
+                {@render historyDelete(item.id, 'video')}
+                {@render historyProgress(item.percentage)}
               </li>
             {/each}
           </ul>
@@ -495,21 +484,12 @@
       <!-- recent reads -->
       {#if showReads}
         <section class="min-w-0">
-          <div class="flex h-8 items-center justify-between px-2">
-            <span class="text-xl font-bold opacity-80">{$_('preference.dashboard.read')}</span>
-            <Button
-              icon={icons.clear}
-              text={$_('action.clear', $_('preference.dashboard.read'))}
-              iconClass="opacity-80"
-              onclick={() => deleteAllHistories('reading')}
-            />
-          </div>
-          <div class="divider mt-0 mb-1"></div>
-          <ul class="history-list">
+          {@render historyHead($_('preference.dashboard.read'), 'reading')}
+          <ul class="history-list max-sm:scrollbar-none">
             {#each reads as item (item.id)}
               {@const media = item.media!}
               <li
-                class="group history-list-item p-2 pr-10 pb-2.5 transition-colors max-sm:w-[min(20rem,85vw)]"
+                class="group history-list-item card-surface p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,85vw)]"
                 animate:flip={{ duration: 200 }}
               >
                 <button
@@ -525,26 +505,18 @@
                     icon={media.lib ? LibType[media.lib.lib_type].icon : undefined}
                     width="3rem"
                     ratio="2/3"
+                    class="rounded-md!"
                   />
                   <div class="flex min-w-0 flex-col gap-1">
-                    <span class="truncate text-sm font-medium group-hover:text-primary">{mediaTitle(media)}</span>
+                    <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
+                      {mediaTitle(media)}
+                    </span>
                     <span class="truncate text-xs opacity-70">{media.lib?.name}</span>
                     <span class="truncate text-xs opacity-40">{$dateTime(item.updated_at)}</span>
                   </div>
                 </button>
-                <button
-                  type="button"
-                  class="history-delete-button"
-                  aria-label={$_('action.delete')}
-                  onclick={() => deleteHistory(item.id, 'reading')}
-                >
-                  <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
-                </button>
-                {#if item.percentage !== null}
-                  <div class="absolute bottom-0 left-0 h-0.75 w-full bg-base-200">
-                    <div class="h-full bg-primary/50" style="width: {item.percentage}%"></div>
-                  </div>
-                {/if}
+                {@render historyDelete(item.id, 'reading')}
+                {@render historyProgress(item.percentage)}
               </li>
             {/each}
           </ul>
@@ -555,87 +527,160 @@
 
   <!-- dashboard panels -->
   {#each Object.values(boards) as board (board.id)}
-    <div class="flex h-8 items-center justify-between px-2" transition:fade={{ duration: 200 }}>
-      <span class="flex-center gap-2 text-xl font-bold opacity-80">
-        {#if board.icon}
-          <Image src={board.icon} width="1.5rem" />
-        {/if}
-        {board.name}
-      </span>
-      {#if board.loading}
-        <span class="loading mx-1.5 loading-sm loading-spinner"></span>
-      {:else if board.resources.length > 0}
-        <ViewSwitcher modes={board.viewModes} bind:mode={board.viewMode} />
-      {/if}
-    </div>
-    <div class="divider my-0"></div>
-    {#if board.resources.length > 0}
-      {@const weekMode = !!board.config.board?.calendar?.week && board.resources.length === 7}
-      <div class="tabs tabs-border mb-10" transition:fade>
-        {#each board.resources as rsrcs, index (index)}
-          {@const week = weekMode ? getWeekMeta(new Date(), index, board.config.board?.calendar?.week_start) : null}
-          <label
-            class="tab {board.resources.length === 1 ? 'hidden' : ''}"
-            class:week-tab={weekMode}
-            style:color={board.activeId === index ? week?.color : undefined}
-          >
-            <input type="radio" checked={board.activeId === index} onclick={() => (board.activeId = index)} />
-            <span
-              class="font-semibold {board.activeId === index ? 'text-shadow-xs' : ''}"
-              class:week-tab-label={weekMode}
-            >
-              {rsrcs.title}
-              {#if week}
-                <small class="week-tab-date">{week.label}</small>
-              {/if}
-            </span>
-          </label>
-          {#if board.activeId === index}
-            <div class="tab-content mt-2" transition:fade>
-              <DataView
-                data={rsrcs.items}
-                mode={board.viewMode}
-                loading={board.loading}
-                class="px-0!"
-                tableClass="[&_thead_tr]:border-0"
-                gridClass="grid-cols-2 {aspectRatio(board.coverRatio) > 1 ? 'grid-cols-sparse' : 'grid-cols-medium'}"
-                itemClass="rounded-sm bg-base-100 shadow-sm lg:hover:shadow-lg lg:mb-4"
-              >
-                <!-- table view -->
-                {#snippet header()}
-                  <HCell width="100%" />
-                  <HCell width="3rem" />
-                {/snippet}
-                {#snippet row(rsrc)}
-                  <SearchHit
-                    mode="table"
-                    {rsrc}
-                    searchButton
-                    indexerId={board.id}
-                    indexerConfig={board.config}
-                    coverRatio={board.coverRatio}
-                  />
-                {/snippet}
-
-                <!-- grid view -->
-                {#snippet item(rsrc)}
-                  <SearchHit
-                    mode="grid"
-                    {rsrc}
-                    searchButton
-                    indexerId={board.id}
-                    indexerConfig={board.config}
-                    coverRatio={board.coverRatio}
-                  />
-                {/snippet}
-              </DataView>
-            </div>
+    {@const gridClass = `grid-cols-2 ${aspectRatio(board.coverRatio) > 1 ? 'grid-cols-sparse' : 'grid-cols-medium'}`}
+    <section class="min-w-0" transition:fade={{ duration: 200 }}>
+      <div class="flex h-8 items-center justify-between gap-2 px-2">
+        <h2 class="section-title">
+          {#if board.icon}
+            <Image transparent src={board.icon} width="1.375rem" />
           {/if}
-        {/each}
+          <span class="truncate">{board.name}</span>
+        </h2>
+        {#if board.loading}
+          <span class="loading mx-1.5 loading-sm loading-spinner opacity-60"></span>
+        {:else if board.resources.length > 0}
+          <ViewSwitcher modes={board.viewModes} bind:mode={board.viewMode} />
+        {/if}
       </div>
-    {/if}
+      {#if board.resources.length > 0}
+        {@const weekMode = !!board.config.board?.calendar?.week && board.resources.length === 7}
+        <div class="board-tabs tabs tabs-border" transition:fade>
+          {#each board.resources as rsrcs, index (index)}
+            {@const week = weekMode ? getWeekMeta(new Date(), index, board.config.board?.calendar?.week_start) : null}
+            <label
+              class="tab {board.resources.length === 1 ? 'hidden' : ''}"
+              class:week-tab={weekMode}
+              style:color={board.activeId === index ? week?.color : undefined}
+            >
+              <input type="radio" checked={board.activeId === index} onclick={() => (board.activeId = index)} />
+              <span
+                class="font-semibold {board.activeId === index ? 'text-shadow-xs' : ''}"
+                class:week-tab-label={weekMode}
+              >
+                {rsrcs.title}
+                {#if week}
+                  <small class="week-tab-date">{week.label}</small>
+                {/if}
+              </span>
+            </label>
+            {#if board.activeId === index}
+              <div class="tab-content" transition:fade>
+                <DataView
+                  data={rsrcs.items}
+                  mode={board.viewMode}
+                  loading={board.loading}
+                  class="px-0!"
+                  tableClass="[&_thead_tr]:border-0"
+                  {gridClass}
+                  itemClass="card-surface card-hover overflow-hidden"
+                  skeleton={{ ratio: board.coverRatio }}
+                >
+                  <!-- table view -->
+                  {#snippet header()}
+                    <HCell width="100%" />
+                    <HCell width="3rem" />
+                  {/snippet}
+                  {#snippet row(rsrc)}
+                    <SearchHit
+                      mode="table"
+                      {rsrc}
+                      searchButton
+                      indexerId={board.id}
+                      indexerConfig={board.config}
+                      coverRatio={board.coverRatio}
+                    />
+                  {/snippet}
+
+                  <!-- grid view -->
+                  {#snippet item(rsrc)}
+                    <SearchHit
+                      mode="grid"
+                      {rsrc}
+                      searchButton
+                      indexerId={board.id}
+                      indexerConfig={board.config}
+                      coverRatio={board.coverRatio}
+                    />
+                  {/snippet}
+                </DataView>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {:else if board.loading !== null}
+        <!-- stay invisible during the short grace period to avoid flashing -->
+        <ul
+          class="grid gap-2 px-2 py-4 transition-opacity duration-300 lg:gap-4 {gridClass} {board.loading
+            ? ''
+            : 'opacity-0'}"
+          aria-busy="true"
+        >
+          <Skeleton count={BOARD_SKELETONS} ratio={board.coverRatio} />
+        </ul>
+      {:else}
+        <Empty compact />
+      {/if}
+    </section>
   {/each}
+
+  <!-- the board being prepared -->
+  {#if pendingBoard}
+    <section class="min-w-0 fade-in-late" aria-busy="true">
+      <span class="sr-only" role="status">{$_('data.loading')}</span>
+      <div class="flex h-8 items-center px-2">
+        <Skeleton type="block" class="h-5 w-40" />
+      </div>
+      <ul class="grid grid-cols-medium grid-cols-2 gap-2 px-2 py-4 lg:gap-4">
+        <Skeleton count={BOARD_SKELETONS} ratio="2/3" />
+      </ul>
+    </section>
+  {/if}
+
+  <!-- nothing to show -->
+  {#if settled && Object.keys(boards).length === 0}
+    <div class="flex-center {historyCount > 0 ? '' : 'min-h-[60vh]'}">
+      <Empty compact={historyCount > 0} title={$_('empty.boards.title')} description={$_('empty.boards.tip')}>
+        {#if $user?.role === 'admin'}
+          <a href="/settings/workflows/templates" class="empty-action">
+            <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>
+            {$_('empty.browse_templates')}
+          </a>
+        {/if}
+      </Empty>
+    </div>
+  {/if}
 </Container>
+
+{#snippet historyHead(title: string, type: HistoryType)}
+  <div class="mb-1 flex h-8 items-center justify-between gap-2 px-2">
+    <h2 class="section-title"><span class="truncate">{title}</span></h2>
+    <Button
+      icon={icons.clear}
+      text={$_('action.clear', title)}
+      iconClass="opacity-70"
+      onclick={() => deleteAllHistories(type)}
+    />
+  </div>
+{/snippet}
+
+{#snippet historyDelete(id: number, type: HistoryType)}
+  <button
+    type="button"
+    class="history-delete-button"
+    aria-label={$_('action.delete')}
+    onclick={() => deleteHistory(id, type)}
+  >
+    <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
+  </button>
+{/snippet}
+
+{#snippet historyProgress(percentage: number | null | undefined)}
+  {#if percentage !== null}
+    <div class="absolute bottom-0 left-0 h-0.75 w-full bg-base-content/8">
+      <div class="h-full rounded-r-full bg-primary/60" style="width: {percentage}%"></div>
+    </div>
+  {/if}
+{/snippet}
 
 <!-- player overlay -->
 {#if playing}
@@ -669,10 +714,15 @@
     opacity: 0.65;
   }
 
+  .board-tabs {
+    --tab-border-color: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+    margin-top: 0.25rem;
+  }
+
   .history-list {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
-    gap: 0.5rem;
+    gap: 0.625rem;
     padding: 0.5rem;
     overflow-y: auto;
     max-height: 19rem;
@@ -683,12 +733,12 @@
     min-width: 0;
     min-height: 4.0625rem;
     overflow: hidden;
-    box-shadow: var(--shadow-sm);
-    border-radius: var(--radius-box);
-    background-color: var(--color-base-100);
+    transition: box-shadow 200ms ease;
 
     &:hover {
-      background-color: var(--color-base-200);
+      box-shadow:
+        0 0 0 1px color-mix(in oklab, var(--color-primary) 30%, transparent),
+        0 6px 16px -8px color-mix(in oklab, var(--color-shade) 19%, transparent);
 
       .history-delete-button {
         opacity: 0.7;
@@ -698,6 +748,15 @@
         }
       }
     }
+  }
+
+  .history-icon {
+    flex-shrink: 0;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: min(var(--radius-field), 0.625rem);
+    background-color: color-mix(in oklab, var(--color-primary) 10%, transparent);
+    color: color-mix(in oklab, var(--color-primary) 70%, var(--color-base-content));
   }
 
   .history-delete-button {
@@ -732,6 +791,7 @@
   @media (width < 40rem) {
     .history-list-item {
       flex-shrink: 0;
+      scroll-snap-align: start;
     }
 
     .history-list {
@@ -740,7 +800,8 @@
       flex-wrap: nowrap;
       overflow-x: auto;
       overflow-y: hidden;
-      padding-bottom: 0.75rem;
+      scroll-snap-type: x proximity;
+      scroll-padding-inline: 0.5rem;
     }
   }
 </style>

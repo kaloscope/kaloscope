@@ -41,6 +41,7 @@
   let modelText = $state('');
   let enabled = $state(true);
   let availableModels: string[] | null = $state(null);
+
   let showApiKey = $derived.by(() => preset?.api_key_required !== false);
   let endpointChanged = $derived.by(() => {
     if (!original?.has_api_key) return false;
@@ -123,6 +124,7 @@
     const keyInput = form.elements.namedItem('api_key') as HTMLInputElement | null;
     const endpoint = baseUrl.trim().replace(/\/+$/, '');
     const key = showApiKey ? apiKey.trim() : '';
+
     let validUrl = false;
     try {
       const url = new URL(endpoint);
@@ -136,9 +138,11 @@
     } catch {
       // let the field explain the invalid URL
     }
+
     urlInput.setCustomValidity(validUrl ? '' : $_('ai.invalid_url'));
     keyInput?.setCustomValidity(/[^\x21-\x7e]/.test(key) ? $_('ai.invalid_key') : '');
     if (!urlInput.reportValidity() || (keyInput && !keyInput.reportValidity())) return null;
+
     return {
       ...(original ? { id: original.id } : {}),
       preset: original?.preset ?? preset?.id ?? null,
@@ -155,12 +159,15 @@
    */
   async function fetchModels(action: 'discover' | 'test'): Promise<void> {
     if (!hasRequiredApiKey || (action === 'test' ? $testLoading : $modelsLoading) !== null) return;
+
     const payload = connection();
     if (!payload) return;
+
     const controller = new AbortController();
     const requestLoading = action === 'test' ? testLoading : modelsLoading;
     connectionRequests[action] = controller;
     requestLoading.start();
+
     try {
       const { data } = await api
         .post('ai/provider/models', {
@@ -170,7 +177,9 @@
           context: { silentErrors: true }
         })
         .json<Resp<string[]>>();
+
       if (connectionRequests[action] !== controller || !modal.isOpen()) return;
+
       if (action === 'test') {
         alert({ level: 'success', message: $_('ai.test_success') });
       } else {
@@ -178,8 +187,10 @@
       }
     } catch (cause) {
       if (connectionRequests[action] !== controller || !modal.isOpen()) return;
+
       const response = isHTTPError(cause) ? (cause.data as BaseResp | undefined) : undefined;
       if (response?.status === 401) return;
+
       alert({
         level: 'error',
         message: response?.message
@@ -202,11 +213,14 @@
    */
   async function save(form: HTMLFormElement): Promise<void> {
     if (!hasRequiredApiKey || $loading !== null) return;
+
     const nameInput = form.elements.namedItem('name') as HTMLInputElement;
     const modelsInput = form.elements.namedItem('model_ids') as HTMLTextAreaElement;
     name = name.trim();
+
     const draft = connection();
     if (!draft) return;
+
     const models = modelText
       .split(/\r?\n/)
       .map((value) => value.trim())
@@ -234,6 +248,7 @@
       enabled
     };
     loading.start();
+
     try {
       const { data } = await api.post('ai/provider/upsert', { json: payload }).json<Resp<AIProvider>>();
       apiKey = '';

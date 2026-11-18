@@ -163,6 +163,7 @@ def indexer_changes(kind, auth=None):
                     },
                 }
             )
+
     return changes
 
 
@@ -231,6 +232,7 @@ class Remote:
         """
         self.requests.append(request)
         path = request.url.path
+
         if path == "/v1/login":
             accepted = loads(request.content) == {
                 "account": USERNAME,
@@ -242,6 +244,7 @@ class Remote:
                 if accepted
                 else {"code": 1001, "message": "Invalid credentials"},
             )
+
         if path == "/account/login":
             accepted = parse_qs(request.content.decode()) == {
                 "user": [USERNAME],
@@ -257,6 +260,7 @@ class Remote:
                 if accepted
                 else {},
             )
+
         if request.url.host == "api.example.test":
             authorized = request.headers.get("authorization") in {
                 f"Bearer {token}" for token in self.tokens
@@ -265,10 +269,12 @@ class Remote:
             authorized = request.headers.get("cookie") == f"sid={SESSION}"
         if not authorized:
             return httpx.Response(401, json={"error": "login required"})
+
         if path.endswith("/search"):
             return httpx.Response(
                 200, json=search_page(int(request.url.params["page"]))
             )
+
         found = path.endswith("/items/1")
         return httpx.Response(
             200,
@@ -686,6 +692,7 @@ def test_runtime_parity(monkeypatch, runtime, kind, max_age):
                 password=PASSWORD,
             )
             assert remote.requests[-1].content == probe_body
+
             expected = {
                 k: v for k, v in observed[PASSWORD].value.items() if k != "expires_in"
             }
@@ -695,6 +702,7 @@ def test_runtime_parity(monkeypatch, runtime, kind, max_age):
                 await FlowGraphService.indexer_auth(graph.id, runtime.ctx.cookies)
                 == expected
             )
+
             cookies = await GlobalCookie.all()
             if kind == "token":
                 assert started + 7200 - 1 <= saved.expires <= time.time() + 7200
@@ -727,11 +735,13 @@ def test_runtime_parity(monkeypatch, runtime, kind, max_age):
                     },
                 )
                 assert check.valid and output == check.value
+
             for item_id, found in (("1", True), ("missing", False)):
                 output = await execute(
                     graph.id, **{"$start": "details_start"}, id=item_id
                 )
                 assert (output is not None) is found
+
             for sent_request in remote.requests[sent:]:
                 if kind == "token":
                     assert sent_request.headers["authorization"] == f"Bearer {TOKEN}"
@@ -759,6 +769,7 @@ def test_runtime_parity(monkeypatch, runtime, kind, max_age):
                 owner,
             )
             assert reused.status_code == 200
+
             other = await authoring.probe_http_request(
                 HTTPProbe(
                     request={"url": "https://other.test/search?page=1"},
@@ -877,6 +888,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     ]
                 },
             )
+
         streams.append(body)
         step = len(streams)
         text = dumps(body["messages"]).decode()
@@ -991,6 +1003,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     )
                 ]
             )
+
         return response(
             [
                 chunk(
@@ -1034,6 +1047,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 value={"name": "Owner", "token": BORROWED},
             )
             base["existing"] = existing.id
+
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -1046,6 +1060,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 )
             ]
             assert created[-1].event == "done", created
+
             graph = await FlowGraph.get(name="Authenticated indexer")
             snapshot = await Sessions.snapshot(
                 conversation["id"],
@@ -1056,6 +1071,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 owner,
             )
             base.update(workflow_id=graph.id, snapshot_id=snapshot.id)
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -1079,14 +1095,17 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                     owner,
                 )
             ]
+
             assert events[-1].event == "done", events[-1]
             assert len(streams) == 7
             results = [event.data for event in events if event.event == "tool_result"]
             assert all(result["ok"] for result in results), results
+
             probe = next(r for r in results if r["name"] == "probe_http_request")
             assert (
                 probe["data"]["status_code"] == 200 and "redacted" not in probe["data"]
             )
+
             checks = [
                 result["data"]
                 for result in results
@@ -1099,6 +1118,7 @@ def test_assistant_build(monkeypatch, runtime, verbose):
                 "authenticated",
                 "unauthenticated",
             ]
+
             preview = results[-1]["data"]
             assert preview["validation"]["valid"], preview
             assert preview["proposal_id"] and preview["canvas_change_count"] > 0
@@ -1173,6 +1193,7 @@ def test_mcp_parity(monkeypatch):
                 reference["structuredContent"]
                 == get_workflow_reference("indexer_auth").model_dump()
             )
+
             bad = TOKEN_AUTH.replace("profile.nickname", "nickname")
             outcomes = []
             for template, body in (
@@ -1226,6 +1247,7 @@ def test_mcp_parity(monkeypatch):
                     app, "probe_http_request", {"probe": probe}, token=account
                 )
                 assert denied["isError"] and "read-only" in str(denied)
+
             reader = await tools.execute_tool(
                 "probe_http_request",
                 dumps(probe).decode(),

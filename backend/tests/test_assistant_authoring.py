@@ -159,6 +159,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     ]
                 },
             )
+
         streams.append(body)
         step = len(streams)
         if step == 1:
@@ -298,6 +299,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     )
                 ]
             )
+
         return response(
             [
                 chunk(
@@ -359,6 +361,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                 owner,
             )
             base.update(workflow_id=graph.id, draft_version=0, snapshot_id=snapshot.id)
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -382,6 +385,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
                     owner,
                 )
             ]
+
             assert events[-1].event == "done", (
                 events[-1],
                 [(len(s["messages"]), s.get("tool_choice")) for s in streams],
@@ -399,6 +403,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
             preview = results[-1]["data"]
             assert preview["validation"]["valid"], preview
             assert preview["proposal_id"] and preview["canvas_change_count"] > 0
+
             proposed = await Sessions.read_snapshot(
                 conversation["id"], preview["proposal_snapshot_id"], owner
             )
@@ -419,6 +424,7 @@ def test_generate_and_repair(monkeypatch, movie, verbose, read_back):
             assert graph.definition is None and graph.draft_version == 0
             assert await FlowLog.all().count() == 0
             assert len(network) == (1 if movie else 2)
+
             # unrelated tools return on the next turn without changing account rights
             followup = [
                 event

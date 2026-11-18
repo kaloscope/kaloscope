@@ -93,6 +93,7 @@ def test_output_modes(mode, native_schema):
     assert str(request.url) == "https://example.com/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer private-key"
     assert request.headers["cache-control"] == "no-cache, no-store"
+
     body = json.loads(request.content)
     assert body["stream"] is False
     assert "max_tokens" not in body and "max_completion_tokens" not in body

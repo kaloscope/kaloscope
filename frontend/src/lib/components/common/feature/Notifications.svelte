@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { Notification, Resp } from '$lib/types';
+  import { pollWhileVisible } from '$lib/utils/timing';
 
   export type NotificationsProps = {
     /** The class names for the wrapper element. */
@@ -23,7 +24,7 @@
 
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Modal } from '$lib/components';
+  import { Empty, Modal } from '$lib/components';
   import { _, dateTime, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import {
@@ -162,9 +163,8 @@
   onMount(() => {
     if ($token) {
       getAll();
-      // refresh the notifications every minute
-      const refreshInterval = setInterval(() => getAll(true), 60 * 1000);
-      return () => clearInterval(refreshInterval);
+      // refresh the notifications every minute while the page is visible
+      return pollWhileVisible(() => getAll(true), 60 * 1000);
     }
   });
 </script>
@@ -201,13 +201,11 @@
     </button>
   </div>
   {#if notifications.length === 0}
-    <div class="rounded-box border border-dashed py-10">
-      <div class="h-6.5 text-center opacity-20">{$_('data.nodata')}</div>
-    </div>
+    <Empty compact icon={icons.alertUrgent} />
   {:else}
     <ul class="flex max-h-[50vh] flex-col gap-3 overflow-y-auto">
       {#each notifications as notification (notification.id)}
-        <li class="flex items-start justify-between gap-1 rounded-box border p-2 shadow-sm">
+        <li class="flex items-start justify-between gap-1 rounded-card bg-base-content/4 p-2">
           <div class="min-w-0 flex-1 space-y-2 pt-1.5 pl-2">
             <div class="flex items-center gap-2">
               {#if !notification.seen}

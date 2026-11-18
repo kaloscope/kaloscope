@@ -280,6 +280,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         """
         _require_admin(user)
         lib = await MediaLibService.get_accessible(change.library_id, user)
+
         issues = []
         if lib.lib_type not in VIDEO_TYPES:
             issues.append(
@@ -288,6 +289,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     "message": "Only movie and TV libraries are scanned here.",
                 }
             )
+
         triggers = (
             await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=lib.id)
             .exclude(graph__state=GraphState.DRAFT)
@@ -299,6 +301,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             for row in triggers
         ]
         scanning = Sanic.get_app().ctx.lib_watcher.is_scanning(lib.dir)
+
         notes = [
             "Finishes any interrupted organization, then compares files on disk "
             "with indexed items.",
@@ -318,6 +321,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             )
         if scanning:
             notes.append("A scan is already running; applying now would be refused.")
+
         revision = _digest(
             [
                 lib.id,
@@ -331,6 +335,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 ],
             ]
         )
+
         result: dict[str, Any] = {
             "valid": not issues,
             "issues": issues,
@@ -347,6 +352,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         }
         if not issues:
             result["request_id"] = str(cls.change_request(user.id, change, revision))
+
         return loads(dumps(result)), lib
 
     @classmethod
@@ -391,6 +397,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             .exclude(id__in=bound)
             .order_by("name")
         ]
+
         return [
             {
                 "workflow_id": graph.id,
@@ -424,6 +431,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         if item is None:
             raise NotFoundException
         lib = await MediaLibService.get_accessible(item.lib_id, user)
+
         issues = []
         base: dict[str, Any] = {
             "action": MediaAction.RESCRAPE,
@@ -451,6 +459,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     "parent_id, whose episodes follow its update.",
                 }
             )
+
         graph = None
         if not issues:
             available = await cls._workflows(lib)
@@ -487,6 +496,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                         for entry in available
                         if entry["workflow_id"] == workflow_id
                     ]
+
         return {**base, "issues": issues}, item, graph
 
     @classmethod
@@ -523,6 +533,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             "page_num": 1,
             "page_size": CANDIDATE_LIMIT,
         }
+
         try:
             results = await Sanic.get_app().ctx.flow_engine.execute(
                 graph_id=graph.id, bootparams=params
@@ -533,6 +544,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         except Exception:
             logger.exception("Failed to search metadata candidates")
             return query, [], "workflow_failed"
+
         candidates = []
         for raw in (results if isinstance(results, list) else [])[:CANDIDATE_LIMIT]:
             if not isinstance(raw, dict):
@@ -561,6 +573,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 if lib.lib_type == LibType.TV_SHOW:
                     compact["season"] = meta.season
             candidates.append((raw, loads(dumps(compact))))
+
         return query, candidates, None
 
     @classmethod
@@ -581,6 +594,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         lib = item.lib
         nfo_path = item.nfo_path or get_nfo_path(item.path)
         issues = []
+
         try:
             after = asdict(await preview_nfo(lib.lib_type, candidate))
         except ContentError:
@@ -588,6 +602,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             issues.append(
                 {"path": "candidate", "message": "This candidate cannot be saved."}
             )
+
         current, _, _ = read_nfo(lib.lib_type, nfo_path)
         before = asdict(current) if current else {}
         if lib.lib_type == LibType.TV_SHOW:
@@ -596,6 +611,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 before["season"] = item.season
             if after is not None and after.get("season") is None:
                 after["season"] = item.season
+
         changes = []
         if after is not None:
             for name in PREVIEW_FIELDS:
@@ -604,6 +620,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     changes.append(
                         {"field": name, "before": _short(old), "after": _short(new)}
                     )
+
         episodes = None
         episode_facts = []
         if lib.lib_type == LibType.TV_SHOW:
@@ -641,6 +658,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "season": season,
                 "unnumbered": sum(child.episode is None for child in children),
             }
+
         organization: dict[str, Any] = {"template": bool(lib.rename_template)}
         if lib.rename_template and after is not None:
             context = {**after, "parent": dict(after)}
@@ -656,6 +674,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             except ValueError as error:
                 organization["expected"] = None
                 organization["issue"] = str(error)[:120]
+
         notes = [
             "The NFO is rewritten from this candidate; fields it lacks are not kept.",
             "Poster and backdrop stay references; no images are downloaded.",
@@ -673,6 +692,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             )
         else:
             notes.append("No naming template is set, so no files are renamed or moved.")
+
         revision = _digest(
             {
                 "item": [
@@ -699,6 +719,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "candidate": _digest(candidate),
             }
         )
+
         return loads(
             dumps(
                 {
@@ -741,6 +762,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         issues = base.pop("issues")
         if graph is None:
             return loads(dumps({"valid": False, "issues": issues, **base}))
+
         query, candidates, error = await cls._search(item, graph, change)
         base["query"] = query
         if error:
@@ -751,6 +773,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             issues.append(
                 {"path": "title", "message": "No candidates; adjust title or year."}
             )
+
         chosen = next(
             (pair for pair in candidates if pair[1]["key"] == change.candidate), None
         )
@@ -775,6 +798,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     }
                 )
             )
+
         raw, compact = chosen
         preview = await cls._preview(item, graph, raw)
         issues = preview.pop("issues")
@@ -782,6 +806,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             issues = issues or [
                 {"path": "candidate", "message": "This candidate cannot be saved."}
             ]
+
         result = {"valid": not issues, "issues": issues, **base, "candidate": compact}
         result.update(preview)
         if not issues:
@@ -797,6 +822,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 candidate=raw,
             )
             result["request_id"] = str(request_id)
+
         return loads(dumps(result))
 
     @classmethod
@@ -850,6 +876,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     "issue": shown(plan["issue"]),
                 }
             )
+
         return {
             "template": template,
             "sampled_works": len(samples),
@@ -881,6 +908,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         """
         _require_admin(user)
         lib = await MediaLibService.get_accessible(change.library_id, user)
+
         issues: list[dict[str, str]] = []
         if lib.lib_type not in VIDEO_TYPES:
             issues.append(
@@ -889,6 +917,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     "message": "Only movie and TV libraries are configured here.",
                 }
             )
+
         rows = (
             await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=lib.id)
             .order_by("priority")
@@ -923,12 +952,14 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 modes[swap.new_workflow_id] = modes[swap.workflow_id]
                 replaced.append((swap.workflow_id, swap.new_workflow_id))
                 new_ids.append((path, swap.new_workflow_id))
+
         for workflow_id in change.remove_workflow_ids:
             if workflow_id in order:
                 order.remove(workflow_id)
                 removed.append(workflow_id)
             else:
                 problem("remove_workflow_ids", f"Workflow {workflow_id} is not bound.")
+
         for workflow_id in change.add_workflow_ids:
             if workflow_id in order:
                 problem("add_workflow_ids", f"Workflow {workflow_id} is already bound.")
@@ -937,6 +968,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 modes[workflow_id] = False
                 added.append(workflow_id)
                 new_ids.append(("add_workflow_ids", workflow_id))
+
         reordered = False
         if change.order_workflow_ids is not None:
             if sorted(change.order_workflow_ids) != sorted(order):
@@ -947,6 +979,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             else:
                 reordered = change.order_workflow_ids != order
                 order = list(change.order_workflow_ids)
+
         new_graphs = []
         for path, workflow_id in new_ids:
             try:
@@ -971,6 +1004,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             settings.append(
                 {"field": "language", "before": lib.language, "after": change.language}
             )
+
         template = lib.rename_template
         if "rename_template" in change.model_fields_set:
             try:
@@ -987,12 +1021,14 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                         "after": template,
                     }
                 )
+
         bindings = None
         if order != [row.graph_id for row in rows]:
             bindings = [
                 GraphRef(graph_id=workflow_id, asynchronous=modes[workflow_id])
                 for workflow_id in order
             ]
+
         if not (writes or bindings is not None or issues):
             problem(
                 "library_id",
@@ -1060,9 +1096,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             notes.append(
                 "Unpublished bindings stay stored and do not run until published."
             )
+
         naming = None
         if preview and template and "rename_template" in writes and not issues:
             naming = await cls._naming_preview(lib, template)
+
         revision = _digest(
             [
                 lib.id,
@@ -1087,6 +1125,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 ],
             ]
         )
+
         result: dict[str, Any] = {
             "valid": not issues,
             "issues": issues[:12],
@@ -1164,6 +1203,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             )
         if not issues:
             result["request_id"] = str(cls.change_request(user.id, change, revision))
+
         return loads(dumps(result)), lib, writes, bindings
 
     @classmethod
@@ -1229,6 +1269,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             "action": MediaAction.CONFIGURE,
             "library_id": change.library_id,
         }
+
         try:
             review, lib, _, _ = await cls._review_config(
                 change, user, preview=not body.confirmed
@@ -1242,10 +1283,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     "message": "The library no longer exists; nothing was saved.",
                 }
             raise
+
         base["library_name"] = lib.name
         refused = await cls._checked(body, review, base)
         if refused is not None:
             return refused
+
         try:
             async with in_transaction():
                 # the library editor may have saved since the check above
@@ -1255,12 +1298,14 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 refused = await cls._checked(body, current, base)
                 if refused is not None:
                     return refused
+
                 if writes:
                     await MediaLib.filter(id=lib.id).update(**writes)
                 if bindings is not None:
                     await FlowTriggerService.bind_triggers(
                         GraphCategory.INGEST, lib.id, bindings
                     )
+
                 result = loads(
                     dumps(
                         {
@@ -1301,6 +1346,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             if receipt is not None:
                 return await cls._replay(receipt, user)
             return cls._failed(base)
+
         return {**result, "replayed": False}
 
     @classmethod
@@ -1339,10 +1385,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "message": "This request_id was reviewed for another change or "
                 "revision; review it again.",
             }
+
         key = cls.request_key(user.id, body.request_id)
         lock = _LOCKS.setdefault(key, asyncio.Lock())
         if lock.locked():
             return await cls._pending(key, user)
+
         task = asyncio.ensure_future(cls._apply_guarded(body, key, user, lock))
         # work keeps running if the caller stops waiting or is cancelled
         _RUNNING.add(task)
@@ -1350,6 +1398,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         done, _ = await asyncio.wait({task}, timeout=APPLY_WAIT)
         if task in done:
             return task.result()
+
         receipt = await MediaChangeReceipt.get_or_none(key=key)
         if isinstance(body.change, MediaBatch):
             from app.services.media_batches import MediaBatchService
@@ -1357,6 +1406,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             return await MediaBatchService.running(
                 receipt if receipt is not None and receipt.claimed else None
             )
+
         target = {}
         if isinstance(body.change, LibraryScan | LibraryConfig):
             target = {
@@ -1369,6 +1419,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "library_id": receipt.lib_id,
                 "path": f"/medialibs/{receipt.lib_id}/{receipt.item_id}",
             }
+
         return {
             "applied": None,
             "outcome": "running",
@@ -1425,18 +1476,22 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     if receipt is not None and receipt.claimed:
                         # holding both locks proves no other call is applying it
                         return await cls._replay(receipt, user, settle=True)
+
                     if isinstance(body.change, MediaBatch):
                         from app.services.media_batches import MediaBatchService
 
                         return await MediaBatchService.apply(
                             body, body.change, key, user, receipt
                         )
+
                     if isinstance(body.change, LibraryScan):
                         return await cls._apply_scan(body, body.change, key, user)
+
                     if isinstance(body.change, LibraryConfig):
                         # different reviews of one library must recheck in sequence
                         with submission_lock(f"media-library:{body.change.library_id}"):
                             return await cls._apply_config(body, body.change, key, user)
+
                     # different reviews of the same item must recheck in sequence
                     with submission_lock(f"media-item:{body.change.item_id}"):
                         return await cls._apply_rescrape(
@@ -1470,8 +1525,10 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             from app.services.media_batches import MediaBatchService
 
             return await MediaBatchService.replay(receipt, user, settle=settle)
+
         with suppress(NotFoundException):
             await MediaLibService.get_accessible(receipt.lib_id, user)
+
         current = None
         if receipt.action == MediaAction.SCAN:
             lib = await MediaLib.get_or_none(id=receipt.lib_id)
@@ -1484,11 +1541,13 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 current = await cls._library_state(lib)
         elif item := await MediaItem.get_or_none(id=receipt.item_id):
             current = {"title": item.title, "year": item.year}
+
         target = (
             {"item_id": receipt.item_id, "library_id": receipt.lib_id}
             if receipt.action == MediaAction.RESCRAPE
             else {"library_id": receipt.lib_id}
         )
+
         return loads(
             dumps(
                 {
@@ -1527,6 +1586,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             "action": MediaAction.SCAN,
             "library_id": change.library_id,
         }
+
         try:
             review, lib = await cls._review_scan(change, user)
         except NotFoundException:
@@ -1538,10 +1598,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     "message": "The library no longer exists; nothing was scanned.",
                 }
             raise
+
         base["library_name"] = lib.name
         stale = await cls._checked(body, review, base)
         if stale is not None:
             return stale
+
         try:
             await MediaChangeReceipt.create(
                 key=key, action=MediaAction.SCAN, lib_id=lib.id, claimed=True
@@ -1549,8 +1611,10 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         except Exception:
             logger.exception("Failed to claim a library scan")
             return cls._failed(base)
+
         watcher = Sanic.get_app().ctx.lib_watcher
         path = f"/medialibs/{lib.id}"
+
         try:
             await watcher.scan_directory(lib, validate_request=True)
         except KaloscopeException as error:
@@ -1594,6 +1658,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 else "Files were compared and changes queued; ingestion and "
                 "organization continue in the background. This is not completion.",
             }
+
         return await cls._record(key, result)
 
     @classmethod
@@ -1628,6 +1693,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 **base,
                 "message": "The item no longer exists; nothing was saved.",
             }
+
         target, item, graph = await cls._target(change, user)
         base.update(library_id=item.lib_id, title=item.title)
         if (
@@ -1644,6 +1710,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "message": "The reviewed candidate or workflow is no longer available; "
                 "review the rescrape again.",
             }
+
         preview = await cls._preview(item, graph, receipt.candidate)
         review = {
             "valid": not (target["issues"] or preview["issues"]),
@@ -1653,15 +1720,18 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         stale = await cls._checked(body, review, base)
         if stale is not None:
             return stale
+
         claimed = await MediaChangeReceipt.filter(key=key, claimed=False).update(
             claimed=True
         )
         if not claimed:
             return await cls._replay(await MediaChangeReceipt.get(key=key), user)
+
         nfo_path = item.nfo_path or get_nfo_path(item.path)
         before = await asyncio.to_thread(_file_digest, nfo_path)
         progress: dict[str, Any] = {}
         path = f"/medialibs/{item.lib_id}/{item.id}"
+
         try:
             written = await MediaItemService.save_video_metadata(
                 item,
@@ -1730,6 +1800,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "path": path,
                 "message": "Saved; organization runs in the background when queued.",
             }
+
         return await cls._record(key, result)
 
     @classmethod
@@ -1754,6 +1825,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "message": "The target, workflow or metadata changed after the "
                 "review; review it again.",
             }
+
         if not review["valid"]:
             return {
                 "applied": False,
@@ -1761,6 +1833,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "valid": False,
                 "issues": review["issues"],
             }
+
         if not body.confirmed:
             return {
                 **review,
@@ -1769,6 +1842,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "applied": False,
                 "confirmation_required": True,
             }
+
         return None
 
     @staticmethod

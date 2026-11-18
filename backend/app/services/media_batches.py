@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Iterable
 from contextlib import suppress
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -181,6 +181,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         """
         by_id = {item.id: item for item in items}
         saved: dict[int, dict[str, Any]] = {}
+
         for item in items:
             parent = by_id.get(item.parent_id or 0)
             numbered = parent is not None and item.episode is not None
@@ -198,6 +199,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             saved[item.id] = {
                 key: value for key, value in facts.items() if value is not None
             }
+
         return saved
 
     @staticmethod
@@ -245,6 +247,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         _require_admin(user)
         lib = await MediaLibService.get_accessible(change.library_id, user)
         index, items = await cls._index(lib)
+
         base: dict[str, Any] = {
             "library_id": lib.id,
             "library_name": lib.name,
@@ -253,6 +256,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         reading = lib.lib_type in (LibType.NOVEL, LibType.COMIC)
         if change.operation is not None:
             base = {"action": MediaAction.BATCH, "operation": change.operation, **base}
+
         issues: list[dict[str, str]] = []
         scan = FileScan()
         entries: list[PlanEntry] = []
@@ -260,6 +264,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         cut = False
         extras: dict[str, Any] = {}
         effective = change.operation
+
         if change.operation == "revert":
             entries, issues, effective = await cls._revert_plan(index, items, change)
         elif change.empty_dirs:
@@ -325,6 +330,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             "pass; choose a narrower directory.",
                         }
                     )
+
             busy_items, busy_paths = await cls._busy(lib)
             if change.operation == "rename":
                 try:
@@ -364,8 +370,16 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     busy_items=busy_items,
                     busy_paths=busy_paths,
                 )
+
         if change.operation is None:
             return cls._selection(base, entries, issues)
+
+        hiding = change.operation == "delete" and not change.delete_files
+        if hiding:
+            # an item leaves the library even when its body file is already gone
+            for entry in entries:
+                if entry.kind == "item" and entry.reason == "missing":
+                    entry.status, entry.reason = "planned", None
 
         planned = [entry for entry in entries if entry.status == "planned"]
         blocked = [entry for entry in entries if entry.status == "blocked"]
@@ -378,16 +392,19 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     continue
                 seen.add(entry.item_id or 0)
             unique.append(entry)
+
         cleanup_notes: list[str] = []
         if change.operation == "delete" and not change.empty_dirs:
             unique, blocked, cleanup_notes = await cls._parent_cleanup(
                 lib, items, unique, blocked
             )
+
         more = cut or len(unique) > BATCH_LIMIT
         planned = unique[:BATCH_LIMIT]
         if reading and change.operation == "rename":
             # a chapter is renamed before the collection that holds it
             planned.sort(key=lambda entry: -len(Path(entry.src).parts))
+
         if not planned and not issues:
             issues.append(
                 {
@@ -399,11 +416,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     else "Nothing matches this selection.",
                 }
             )
+
         deleting = change.operation == "delete"
+        removing = deleting and not hiding
         reverting = change.operation == "revert"
         trash = KaloscopeConfig.get().filesystem_trash_mode
         reasons = _tally(entry.reason for entry in blocked)
         owners = _tally(entry.owner for entry in planned)
+
         notes = []
         if reverting:
             notes.append(
@@ -427,6 +447,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         else "are deleted permanently; this cannot be undone."
                     )
                 )
+        elif hiding:
+            notes.append(
+                "The items only leave the library: their files and folders stay "
+                "on disk untouched, and the app cannot show the items again."
+            )
         elif deleting:
             notes.append(
                 "Files go to the system trash."
@@ -483,6 +508,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "saved metadata say; no metadata is fetched. This organize batch "
                 "cannot be undone; revert supports only finished rename/move batches."
             )
+
         if unchanged:
             notes.append(
                 f"{unchanged} already have the resulting name and are left out."
@@ -492,24 +518,24 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "Planning stopped at its time limit; review again after applying "
                 "for the remaining works."
             )
-        if deleting and owners[FileOwner.INDEXED]:
+        if removing and owners[FileOwner.INDEXED]:
             notes.append(
                 f"{owners[FileOwner.INDEXED]} indexed items are removed from the "
                 "library with their watch or reading history and their own "
                 "metadata, subtitles and artwork."
             )
-        if deleting and owners[FileOwner.COMPANION]:
+        if removing and owners[FileOwner.COMPANION]:
             notes.append(
                 f"{owners[FileOwner.COMPANION]} files are metadata, subtitles or "
                 "artwork of items that stay; those items lose them, and a later "
                 "scan may fetch metadata again."
             )
-        if deleting and owners[FileOwner.PAGE]:
+        if removing and owners[FileOwner.PAGE]:
             notes.append(
                 f"{owners[FileOwner.PAGE]} files are comic pages; their comics are "
                 "indexed again afterwards."
             )
-        if deleting and owners[FileOwner.UNINDEXED]:
+        if removing and owners[FileOwner.UNINDEXED]:
             notes.append(
                 f"{owners[FileOwner.UNINDEXED]} files are content the library "
                 "has not indexed."
@@ -519,16 +545,19 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 f"{reasons['owner_excluded']} matches belong to other file classes "
                 "and are not included; name them in owners to include them."
             )
-        notes.extend(cleanup_notes)
+        if not hiding:
+            # these name the parent files a deletion removes
+            notes.extend(cleanup_notes)
         if len(unique) > BATCH_LIMIT:
             notes.append(
                 f"Only the first {BATCH_LIMIT} of {len(unique)} units are in this "
                 "batch; review the same selection again afterwards for the rest."
             )
+
         revision = _digest(
             [
                 cls._library_facts(lib),
-                ("trash" if trash else "permanent") if deleting else None,
+                ("trash" if trash else "permanent") if removing else None,
                 change.model_dump(mode="json"),
                 [
                     [entry.kind, entry.src, entry.dst, entry.identity]
@@ -536,6 +565,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 ],
             ]
         )
+
         result: dict[str, Any] = {
             "valid": not issues,
             "issues": issues,
@@ -550,7 +580,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "blocked": {"units": len(blocked), "reasons": dict(reasons)},
             "more": more,
             "unchanged": unchanged,
-            "deletion": ("trash" if trash else "permanent") if deleting else None,
+            "deletion": ("trash" if trash else "permanent") if removing else None,
+            "delete_files": not hiding if deleting else None,
             "can_revert": effective in ("rename", "move"),
             "sample": cls._sample(
                 [*planned, *blocked] if cleanup_notes else [*blocked, *planned]
@@ -573,6 +604,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 [*planned, *blocked[:BATCH_LIMIT]],
             )
             result.update(request_id=str(request_id), batch_id=receipt.id)
+
         return loads(dumps(result))
 
     @classmethod
@@ -604,6 +636,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 children.setdefault(item.parent_id, []).append(item)
             if item.id in selected and item.path == item.dir and item.format is None:
                 children.setdefault(item.id, [])
+
         candidates = [
             rows[parent_id]
             for parent_id, members in children.items()
@@ -611,6 +644,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         ]
         if not candidates:
             return planned, blocked, []
+
         busy, paths = await cls._busy(lib)
         notes = []
         root = Path(lib.dir)
@@ -622,6 +656,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 item.lib = lib
                 if item.parent_id is not None:
                     item.parent = rows[item.parent_id]
+
             snapshot = (
                 None
                 if ids & busy
@@ -656,6 +691,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "be confirmed. Only its reviewed children are removed."
                 )
                 continue
+
             planned = [entry for entry in planned if entry.item_id not in ids]
             owned = {path: identity for path, identity in snapshot["owned"]}
             display = sorted(
@@ -678,6 +714,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     files=len(owned),
                 )
             )
+
             bodies = {item.path: item.id for item in members}
             blocked.extend(
                 PlanEntry(
@@ -702,6 +739,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "loose files stay. The entire work is skipped if its files or "
                 "ownership change after this preview."
             )
+
         return planned, blocked, notes
 
     @staticmethod
@@ -728,6 +766,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             if entry.reason:
                 row["blocked"] = entry.reason
             rows.append(row)
+
         return rows
 
     @classmethod
@@ -755,6 +794,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         common = dict(extensions.most_common(10))
         if len(extensions) > 10:
             common["(other)"] = len(scan.matches) - sum(common.values())
+
         sample = []
         for match in scan.matches[:SAMPLE_ROWS]:
             row: dict[str, Any] = {
@@ -765,6 +805,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             if match.item_id is not None:
                 row["item_id"] = match.item_id
             sample.append(row)
+
         return loads(
             dumps(
                 {
@@ -851,6 +892,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             if missing
             else []
         )
+
         chosen = set(change.item_ids) - set(missing)
         children: dict[int, list[MediaItem]] = {}
         for item in items:
@@ -859,10 +901,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         top = [
             rows[item_id] for item_id in chosen if rows[item_id].parent_id not in chosen
         ]
+
         busy_items, _ = await cls._busy(lib)
         entries = await asyncio.to_thread(
             item_entries, index, top, children, busy_items=busy_items
         )
+
         return entries, issues
 
     @classmethod
@@ -905,6 +949,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "correct the metadata and use organize instead.",
                 }
             )
+
         tv = lib.lib_type == LibType.TV_SHOW
         destination = index.root / (change.destination or "")
         depth = len(Path(change.destination or "").parts)
@@ -924,6 +969,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "by_season; other folders are not indexed.",
                 }
             )
+
         rows = {item.id: item for item in items}
         selected: list[MediaItem] = []
         entries: list[PlanEntry] = []
@@ -951,6 +997,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 )
             except (OSError, ValueError):
                 scan = FileScan(truncated=True)
+
             if scan.truncated:
                 issues.append(
                     {
@@ -959,6 +1006,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         "choose a narrower directory.",
                     }
                 )
+
             for match in scan.matches:
                 if (
                     match.owner == FileOwner.INDEXED
@@ -982,6 +1030,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             else "owner_excluded",
                         )
                     )
+
         if issues:
             return [], issues, 0, {}
 
@@ -990,6 +1039,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         for item in items:
             if item.parent_id is not None:
                 children.setdefault(item.parent_id, []).append(item)
+
         busy_items, _ = await cls._busy(lib)
         unchanged = 0
         videos: dict[int, MediaItem] = {}
@@ -1002,16 +1052,19 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 videos.update((row.id, row) for row in children.get(item.id, []))
             else:
                 folders.append(item)
+
         taken: dict[str, dict[tuple[int, int], MediaItem]] = {}
         started: int | None = None
         duplicates: list[dict[str, Any]] = []
         leaving: dict[int, set[int]] = {}
         moved_files: set[str] = set()
+
         async with shared_validation(lib):
             for item in folders:
                 if Path(item.path) == destination:
                     unchanged += 1
                     continue
+
                 rows_below = children.get(item.id, [])
                 sizes = [row.size for row in rows_below if row.size is not None]
                 entry = PlanEntry(
@@ -1024,6 +1077,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     files=len(rows_below) or 1,
                     dst=change.destination,
                 )
+
                 reason = None
                 if occupied:
                     reason = "destination_exists"
@@ -1040,12 +1094,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             if len(Path(entry.src).parts) != depth
                             else "organize_blocked"
                         )
+
                 if reason:
                     entry.status, entry.reason = "blocked", reason
                 else:
                     # a second folder cannot take the same new name
                     occupied = True
                 entries.append(entry)
+
             for item in sorted(videos.values(), key=lambda row: row.path):
                 path = Path(item.path)
                 folder = destination
@@ -1059,13 +1115,16 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         reason = "unknown_season"
                     else:
                         folder = destination / f"Season {item.season:02d}"
+
                 if reason is None and Path(item.dir) == folder:
                     unchanged += 1
                     continue
+
                 try:
                     identity = await asyncio.to_thread(_fingerprint, path)
                 except OSError:
                     identity, reason = None, reason or "missing"
+
                 entry = PlanEntry(
                     "item",
                     FileOwner.INDEXED,
@@ -1075,6 +1134,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     item.id,
                     dst=relative(index.root, folder / path.name),
                 )
+
                 if reason is None and not tv:
                     target = by_path.get(str(folder))
                     if target is None and occupied:
@@ -1119,6 +1179,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             for row in children.get(target.id if target else 0, [])
                             if row.season is not None and row.episode is not None
                         }
+
                     reason = _merge_reason(rows.get(item.parent_id or 0), series)
                     if reason is None and numbers in taken[str(folder)]:
                         reason = "duplicate_episode"
@@ -1151,9 +1212,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             )
                     if reason is None and numbers is not None:
                         taken[str(folder)][numbers] = item
+
                 if reason:
                     entry.status, entry.reason = "blocked", reason
                 entries.append(entry)
+
         vacated = [
             Path(rows[parent_id].path)
             for parent_id, ids in sorted(leaving.items())
@@ -1163,6 +1226,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         leftovers = await asyncio.to_thread(
             cls._leftovers, index.root, vacated, moved_files
         )
+
         return (
             entries,
             [],
@@ -1219,6 +1283,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     stays.append((path, size))
             if stays:
                 found.append((folder, stays))
+
         return MediaBatchService._leftover_report(root, found)
 
     @staticmethod
@@ -1251,6 +1316,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         ]
         if not rows:
             return None
+
         return {
             "folders": len(rows),
             "files": sum(row["files"] for row in rows),
@@ -1303,11 +1369,13 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "choose a narrower directory.",
                 }
             ]
+
         entries = [
             PlanEntry("dir", FileOwner.LOOSE, relative(index.root, path), 0, None)
             for path in folders
         ]
         busy_items, busy_paths = await cls._busy(lib)
+
         if change.leftovers:
             scan = await asyncio.to_thread(
                 scan_files, index, directory=change.directory, whole=True
@@ -1320,6 +1388,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         "choose a narrower directory.",
                     }
                 ]
+
             folders = leftover_directories(index, scan, change.directory, busy_paths)
             entries.extend(
                 PlanEntry(
@@ -1336,6 +1405,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 )
                 for path, count, size in folders
             )
+
             extras["leftovers"] = cls._leftover_report(
                 index.root,
                 [
@@ -1350,6 +1420,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     for path, _, _ in folders
                 ],
             )
+
         scope = index.root / change.directory if change.directory else index.root
         parents = {item.parent_id for item in items if item.parent_id is not None}
         childless = []
@@ -1369,6 +1440,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     for match in scan.matches
                 ):
                     childless.append(item)
+
         entries.extend(
             await asyncio.to_thread(
                 item_entries, index, childless, {}, busy_items=busy_items
@@ -1406,6 +1478,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             message = "Only rename and move batches can be reverted."
         if message or receipt is None:
             return [], [{"path": "batch_id", "message": message or ""}], None
+
         done = await MediaBatchEntry.filter(
             receipt_id=receipt.id, status="done", dst__not_isnull=True
         ).order_by("-seq")
@@ -1445,6 +1518,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 files=record.files,
                 dst=record.src,
             )
+
             # earlier directory units will carry this source to its planned path
             current_source, current_target = observed(source), observed(target)
             item = rows.get(record.item_id or 0)
@@ -1490,9 +1564,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     restored.append((target, current_source))
             except OSError:
                 reason = "missing"
+
             if reason:
                 entry.status, entry.reason = "blocked", reason
             entries.append(entry)
+
         return entries, [], plan.get("operation")
 
     @classmethod
@@ -1531,6 +1607,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "message": "Use a work folder directly below the library root.",
                 }
             )
+
         rows = {item.id: item for item in items}
         selected: list[MediaItem] = []
         entries: list[PlanEntry] = []
@@ -1558,6 +1635,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 )
             except (OSError, ValueError):
                 scan = FileScan(truncated=True)
+
             if scan.truncated:
                 issues.append(
                     {
@@ -1566,6 +1644,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         "choose a narrower directory.",
                     }
                 )
+
             for match in scan.matches:
                 if (
                     match.owner == FileOwner.INDEXED
@@ -1586,6 +1665,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             reason="owner_excluded",
                         )
                     )
+
         if issues:
             return [], issues, 0
 
@@ -1608,6 +1688,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         unchanged = 0
         claimed: set[str] = set()
         seen: set[Path] = set()
+
         for item in sorted(selected, key=lambda row: row.path):
             container = Path(item.dir)
             if container in seen:
@@ -1618,6 +1699,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             if (container.parent if chapter else container) == destination:
                 unchanged += 1
                 continue
+
             entry = PlanEntry(
                 "item",
                 FileOwner.INDEXED,
@@ -1627,6 +1709,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 item.id,
                 dst=relative(root, target),
             )
+
             reason = None
             if chapter and not merging and (collection is not None or taken):
                 # an unindexed folder or another kind of work cannot take chapters
@@ -1643,12 +1726,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 reason = "ingesting"
             elif await asyncio.to_thread(container.is_symlink):
                 reason = "linked"
+
             if reason:
                 entry.status, entry.reason = "blocked", reason
             else:
                 claimed.add(str(target).casefold())
                 taken = taken or not chapter
             entries.append(entry)
+
         return entries, [], unchanged
 
     @classmethod
@@ -1712,16 +1797,19 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         cut = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + PLAN_SECONDS
+
         try:
             async with shared_validation(lib):
                 for work in sorted(works, key=lambda item: item.path):
                     if loop.time() > deadline or len(entries) > 2 * BATCH_LIMIT:
                         cut = True
                         break
+
                     preview = await preview_organization(lib, lib.rename_template, work)
                     if preview["status"] == "unchanged":
                         unchanged += 1
                         continue
+
                     pairs = [
                         [
                             relative(index.root, pair["current"]),
@@ -1745,6 +1833,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     elif pairs:
                         # a video folder is where its first video goes
                         entry.dst = Path(pairs[0][1]).parent.as_posix()
+
                     if preview["status"] != "moves":
                         entry.status = "blocked"
                         entry.reason = f"organize_{preview['status']}"
@@ -1756,6 +1845,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "message": "The library directory could not be read.",
                 }
             )
+
         return entries, issues, unchanged, cut
 
     @classmethod
@@ -1819,6 +1909,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "stop": False,
             },
         )
+
         await MediaBatchEntry.bulk_create(
             [
                 MediaBatchEntry(
@@ -1839,6 +1930,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             ],
             batch_size=500,
         )
+
         return receipt
 
     @classmethod
@@ -1859,6 +1951,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             .values("status", "total")
         )
         found = {row["status"]: row["total"] for row in rows}
+
         return {
             "done": found.get("done", 0),
             "skipped": found.get("skipped", 0),
@@ -1883,6 +1976,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         unfinished = await MediaBatchEntry.filter(
             receipt_id=receipt.id, status__in=("skipped", "failed", "uncertain")
         ).order_by("seq")
+
         return {
             "action": MediaAction.BATCH,
             "operation": plan.get("operation"),
@@ -1890,6 +1984,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             "library_name": plan.get("library_name"),
             "batch_id": receipt.id,
             "can_revert": plan.get("operation") in ("rename", "move"),
+            "delete_files": not cls._hiding(receipt)
+            if plan.get("operation") == "delete"
+            else None,
             **await cls.counts(receipt.id),
             "reasons": dict(_tally(entry.reason for entry in unfinished)),
             "sample": [
@@ -1968,6 +2065,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 **base,
                 "message": "The library no longer exists; nothing was changed.",
             }
+
         await MediaLibService.get_accessible(lib.id, user)
         plan = (receipt.plan if receipt else None) or {}
         if (
@@ -1976,6 +2074,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             or plan.get("library") != cls._library_facts(lib)
             or (
                 change.operation == "delete"
+                and change.delete_files
                 and plan.get("deletion")
                 != (
                     "trash"
@@ -1991,6 +2090,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "message": "The reviewed plan expired or the library changed; "
                 "review it again.",
             }
+
         base.update(library_name=lib.name, batch_id=receipt.id)
         if not body.confirmed:
             return {
@@ -2003,6 +2103,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "applied": False,
                 "confirmation_required": True,
             }
+
         try:
             with submission_lock(f"media-batch:{lib.id}"):
                 claimed = await MediaChangeReceipt.filter(
@@ -2021,12 +2122,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 "message": "Another batch is running on this library; repeat this "
                 "request when it has finished.",
             }
+
         summary = await cls._summary(receipt)
         done, left = summary["done"], summary["remaining"]
         problems = summary["skipped"] + summary["failures"] + summary["uncertain"]
         outcome = (
             "cancelled" if stopped else "partial" if problems or left else "completed"
         )
+
         return await MediaChangeService._record(
             key,
             {
@@ -2072,15 +2175,18 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         entries = await MediaBatchEntry.filter(
             receipt_id=receipt.id, status="planned"
         ).order_by("seq")
+        hiding = cls._hiding(receipt)
         emptied: set[Path] = set()
         changed: set[Path] = set()
         reading = lib.lib_type in (LibType.NOVEL, LibType.COMIC)
         position = 0
         stopped = False
+
         while position < len(entries):
             if await cls._stopped(receipt.id):
                 stopped = True
                 break
+
             if entries[position].kind != "file":
                 chunk = [entries[position]]
             else:
@@ -2089,12 +2195,17 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     if entry.kind != "file":
                         break
                     chunk.append(entry)
+
             position += len(chunk)
             ids = [entry.id for entry in chunk]
             await MediaBatchEntry.filter(id__in=ids).update(status="started")
             operation = (receipt.plan or {}).get("operation")
+
             try:
-                if chunk[0].kind == "dir" and chunk[0].identity:
+                if hiding and chunk[0].kind != "item":
+                    # hiding never touches files, and item selections plan only items
+                    outcomes = dict.fromkeys(ids, "owner_excluded")
+                elif chunk[0].kind == "dir" and chunk[0].identity:
                     outcomes = {chunk[0].id: await cls._remove_leftovers(chunk[0], lib)}
                 elif chunk[0].kind == "dir":
                     async with library_lock(lib.dir):
@@ -2110,6 +2221,8 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             if operation == "rename"
                             else cls._move_item(chunk[0], lib, root)
                             if operation == "move"
+                            else cls._hide_item(chunk[0])
+                            if hiding
                             else cls._delete_item(chunk[0], root)
                         )
                     }
@@ -2120,6 +2233,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             except Exception:
                 logger.exception("Failed to apply a media batch chunk")
                 outcomes = dict.fromkeys(ids, "error")
+
             for outcome in set(outcomes.values()):
                 matching = [key for key, value in outcomes.items() if value == outcome]
                 await MediaBatchEntry.filter(id__in=matching).update(
@@ -2131,6 +2245,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     else "skipped",
                     reason=None if outcome == "done" else outcome,
                 )
+
             if operation == "delete":
                 emptied.update(
                     (root / entry.src).parent
@@ -2147,6 +2262,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     and outcomes.get(entry.id) == "done"
                     and len(Path(entry.src).parts) > 1
                 )
+
         forget_walk(root)
         if changed:
             # the watcher may miss or delay these, so the reconcile is queued here
@@ -2158,6 +2274,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     is_directory=True,
                 )
             notify_media_events(lib.id)
+
         if emptied:
             try:
                 async with library_lock(lib.dir):
@@ -2169,6 +2286,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     await write_in_thread(prune_directories, root, emptied, kept)
             except Exception:
                 logger.exception("Failed to prune directories emptied by a batch")
+
         return stopped
 
     @classmethod
@@ -2189,15 +2307,18 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 lib.lib_type,
             ):
                 return "library_changed"
+
             await recover_organizing(current)
             index, _ = await cls._index(current)
             _, busy_paths = await cls._busy(current)
+
             try:
                 scan = await asyncio.to_thread(
                     scan_files, index, directory=entry.src, whole=True, fresh=True
                 )
             except (OSError, ValueError):
                 return "missing"
+
             found = leftover_directories(index, scan, entry.src, busy_paths)
             # anything new, changed or claimed since the review keeps the folder
             if (
@@ -2211,6 +2332,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 or found[0][0] != index.root / entry.src
             ):
                 return "content_changed"
+
             outcomes = await write_in_thread(
                 delete_files,
                 index.root,
@@ -2223,6 +2345,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 (value for value in outcomes.values() if value != "done"), None
             ):
                 return failed
+
             return (
                 await write_in_thread(
                     remove_directories, index.root, [(entry.id, entry.src)]
@@ -2250,12 +2373,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 lib.lib_type,
             ):
                 return {entry.id: "library_changed" for entry in chunk}
+
             await recover_organizing(current)
             index, _ = await cls._index(current)
             busy_items, busy_paths = await cls._busy(current)
             scope = relative(
                 root, os.path.commonpath([(root / entry.src).parent for entry in chunk])
             )
+
             try:
                 scan = await asyncio.to_thread(
                     scan_files, index, directory=scope, whole=True, fresh=True
@@ -2264,6 +2389,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 return {entry.id: "content_changed" for entry in chunk}
             if scan.truncated:
                 return {entry.id: "content_changed" for entry in chunk}
+
             selected = {entry.src for entry in chunk}
             scan.matches = [
                 match
@@ -2280,6 +2406,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     busy_paths=busy_paths,
                 )
             }
+
             outcomes = {}
             for entry in chunk:
                 guard = guards.get(entry.src)
@@ -2289,6 +2416,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     outcomes[entry.id] = "item_changed"
                 elif guard.reason:
                     outcomes[entry.id] = guard.reason
+
             outcomes.update(
                 await write_in_thread(
                     delete_files,
@@ -2323,6 +2451,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 lib.lib_type,
             ):
                 return {entry.id: "library_changed" for entry in chunk}
+
             await recover_organizing(current)
             # a file that became an item's body since the review is left alone
             indexed = set(
@@ -2330,6 +2459,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     lib_id=lib.id, path__in=[str(root / entry.src) for entry in chunk]
                 ).values_list("path", flat=True)
             )
+
             outcomes = {
                 entry.id: "item_changed"
                 for entry in chunk
@@ -2346,6 +2476,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     ],
                 )
             )
+
             return outcomes
 
     @staticmethod
@@ -2362,6 +2493,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         """
         if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
             return await MediaBatchService._reading_relocate(entry, lib, root)
+
         async with library_lock(lib.dir):
             current = await MediaLib.get_or_none(id=lib.id)
             if current is None or (
@@ -2370,12 +2502,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 current.rename_template,
             ) != (lib.dir, lib.lib_type, lib.rename_template):
                 return "library_changed"
+
             await recover_organizing(current)
             item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
             if item is None:
                 return "missing"
             if item.path != str(root / entry.src):
                 return "item_changed"
+
             try:
                 if await asyncio.to_thread(_fingerprint, Path(item.path)) != (
                     entry.identity or []
@@ -2392,6 +2526,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 return "organize_blocked"
             except OSError:
                 return "io_error"
+
         return "done"
 
     @staticmethod
@@ -2422,10 +2557,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 current.rename_template,
             ) != (lib.dir, lib.lib_type, lib.rename_template):
                 return "library_changed"
+
             await recover_organizing(current)
             item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
             if item is None:
                 return "missing"
+
             try:
                 directory = await asyncio.to_thread(source.is_dir)
                 if directory:
@@ -2437,6 +2574,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     entry.identity or []
                 ):
                     return "content_changed"
+
                 started = (
                     item.parent_id is not None
                     and target.parent != root
@@ -2457,6 +2595,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "directory": directory,
                     "created_parent": started,
                 }
+
                 await MediaEvent.create(
                     lib_id=lib.id,
                     event_type="organize",
@@ -2467,6 +2606,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 )
                 notify_media_events(lib.id)
                 mapping = await recover_organizing(current)
+
                 return (
                     "done"
                     if mapping.get(str(source)) == str(target)
@@ -2497,6 +2637,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         """
         if lib.lib_type in (LibType.NOVEL, LibType.COMIC):
             return await MediaBatchService._reading_relocate(entry, lib, root)
+
         async with library_lock(lib.dir):
             current = await MediaLib.get_or_none(id=lib.id)
             if current is None or (
@@ -2505,12 +2646,14 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 current.rename_template,
             ) != (lib.dir, lib.lib_type, lib.rename_template):
                 return "library_changed"
+
             await recover_organizing(current)
             item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
             if item is None:
                 return "missing"
             if item.path != str(root / entry.src):
                 return "item_changed"
+
             target = root / (entry.dst or "")
             try:
                 if item.path == item.dir:
@@ -2521,10 +2664,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                         return "content_changed"
                     await move_directory(current, item, target)
                     return "done"
+
                 if await asyncio.to_thread(_fingerprint, Path(item.path)) != (
                     entry.identity or []
                 ):
                     return "content_changed"
+
                 folder = target.parent
                 owner = await MediaItem.filter(lib_id=lib.id, path=str(folder)).first()
                 if lib.lib_type == LibType.MOVIE:
@@ -2538,6 +2683,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                             return "unindexable_destination"
                     await move_movie(current, item, folder)
                     return "done"
+
                 series = (
                     owner
                     or await MediaItem.filter(
@@ -2548,6 +2694,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 source = await MediaItem.get_or_none(id=item.parent_id)
                 if reason := _merge_reason(source, series):
                     return reason
+
                 if (
                     owner is not None
                     and item.season is not None
@@ -2559,6 +2706,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     .exists()
                 ):
                     return "duplicate_episode"
+
                 await move_episode(current, item, folder)
             except FileNotFoundError:
                 return "missing"
@@ -2570,6 +2718,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 return "organize_blocked"
             except OSError:
                 return "io_error"
+
         return "done"
 
     @staticmethod
@@ -2593,11 +2742,13 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 != (lib.dir, lib.lib_type, lib.rename_template)
             ):
                 return "library_changed"
+
             try:
                 await recover_organizing(current)
                 item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
                 if item is None:
                     return "missing"
+
                 preview = await preview_organization(
                     current, current.rename_template, item
                 )
@@ -2607,6 +2758,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 ]
                 if preview["status"] != "moves" or pairs != entry.identity:
                     return "content_changed"
+
                 await organize_items(current, [item.id])
                 item = await MediaItem.get_or_none(id=entry.item_id, lib_id=lib.id)
                 if item is not None:
@@ -2621,6 +2773,44 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 return "organize_pending"
             except OSError:
                 return "io_error"
+
+        return "done"
+
+    @staticmethod
+    def _hiding(receipt: MediaChangeReceipt) -> bool:
+        """Tell whether a batch only removes items from the library.
+
+        Args:
+            receipt: Batch header holding the reviewed change.
+
+        Returns:
+            Whether the batch is a deletion that keeps every file. Plans stored
+            before this choice existed always deleted files.
+        """
+        plan = receipt.plan or {}
+        change = plan.get("change") or {}
+        return plan.get("operation") == "delete" and change.get("delete_files") is False
+
+    @staticmethod
+    async def _hide_item(entry: MediaBatchEntry) -> str:
+        """Remove one reviewed item from the library and keep its files.
+
+        Args:
+            entry: Item entry marked as started.
+
+        Returns:
+            `done`, or the reason the item was left alone.
+        """
+        if entry.item_id is None:
+            return "missing"
+        try:
+            await MediaItemService.delete(entry.item_id)
+        except DoesNotExist:
+            return "missing"
+        except ContentError as error:
+            return error.code
+        except OrganizePendingError:
+            return "organize_pending"
         return "done"
 
     @staticmethod
@@ -2674,6 +2864,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
 
         with suppress(NotFoundException):
             await MediaLibService.get_accessible(receipt.lib_id, user)
+
         if receipt.result is None:
             if not settle:
                 return await cls.running(receipt)
@@ -2689,6 +2880,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                 },
             )
             receipt = await MediaChangeReceipt.get(id=receipt.id)
+
         return loads(
             dumps(
                 {
@@ -2709,11 +2901,16 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             receipt: Claimed batch with no runner alive.
         """
         lib = await MediaLib.get_or_none(id=receipt.lib_id)
+        hiding = MediaBatchService._hiding(receipt)
+
         for entry in await MediaBatchEntry.filter(
             receipt_id=receipt.id, status="started"
         ):
             status = "uncertain"
-            if entry.kind == "item" and entry.dst is None:
+            if entry.kind == "item" and hiding:
+                if not await MediaItem.exists(id=entry.item_id, visible=True):
+                    status = "done"
+            elif entry.kind == "item" and entry.dst is None:
                 if not await MediaItem.exists(id=entry.item_id):
                     status = "done"
             elif entry.kind == "item" and lib is not None:
@@ -2729,6 +2926,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     lambda path=path: path.exists() or path.is_symlink()
                 )
                 status = "planned" if present else "done"
+
             await MediaBatchEntry.filter(id=entry.id).update(
                 status=status, reason="interrupted" if status == "uncertain" else None
             )
@@ -2741,9 +2939,11 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             id: Batch identity.
 
         Returns:
-            The reviewed plan header, unit counts, whether it is `reviewed`,
-            `running` or `finished`, its recorded outcome, and whether its
-            operation supports undo (`can_revert`).
+            The reviewed plan header with its `change`, unit counts, whether it
+            is `reviewed`, `running` or `finished`, its recorded outcome, whether
+            its operation supports undo (`can_revert`), whether a deletion
+            removes files (`delete_files`), and whether it selects items that
+            could instead only leave the library (`hideable`).
 
         Raises:
             NotFoundException: If no batch has this identity.
@@ -2751,7 +2951,9 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         receipt = await MediaChangeReceipt.get_or_none(id=id, action=MediaAction.BATCH)
         if receipt is None or receipt.plan is None:
             raise NotFoundException
+
         plan = receipt.plan
+        change = plan.get("change") or {}
         return loads(
             dumps(
                 {
@@ -2762,6 +2964,13 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
                     "reverts": plan.get("reverts"),
                     "can_revert": plan.get("operation") in ("rename", "move"),
                     "deletion": plan.get("deletion"),
+                    "delete_files": not cls._hiding(receipt)
+                    if plan.get("operation") == "delete"
+                    else None,
+                    # only items can leave the library without losing their files
+                    "hideable": plan.get("operation") == "delete"
+                    and bool(change.get("item_ids")),
+                    "change": change,
                     "planned": plan.get("planned"),
                     "blocked": plan.get("blocked"),
                     "more": plan.get("more"),
@@ -2806,6 +3015,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         plan = receipt.plan
         if plan.get("user_id") != user.id:
             raise ForbiddenException
+
         return await MediaChangeService.apply_change(
             MediaChangeApply(
                 # a plan stored before requests were kept can only be reviewed again
@@ -2836,6 +3046,7 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         """
         if not await MediaChangeReceipt.exists(id=id, action=MediaAction.BATCH):
             raise NotFoundException
+
         filters: dict[str, Any] = {"receipt_id": id}
         if status:
             filters["status"] = status
@@ -2845,23 +3056,108 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             ordering="seq",
             **filters,
         )
+
         return {
             "total": page.total,
+            "items": [cls._entry_row(entry) for entry in page.items],
+        }
+
+    @classmethod
+    async def units(
+        cls, id: int, query: Pageable, status: str | None = None
+    ) -> dict[str, Any]:
+        """Page through one batch's units with the files handled alongside them.
+
+        Attach each `follows_item` entry to the unit with the same item, or else to
+        the unit whose folder contains it. Entries without such a unit stay top
+        level. Filter and page units only, so a unit and its files share a page.
+
+        Args:
+            id: Batch identity.
+            query: Page number and size; page `0` returns every unit.
+            status: Only units with this status, if given.
+
+        Returns:
+            The unit total and one page in plan order, each unit listing its
+            attached files under `children`.
+
+        Raises:
+            NotFoundException: If no batch has this identity.
+        """
+        if not await MediaChangeReceipt.exists(id=id, action=MediaAction.BATCH):
+            raise NotFoundException
+
+        rows = await MediaBatchEntry.filter(receipt_id=id).order_by("seq")
+        units = [entry for entry in rows if entry.reason != "follows_item"]
+        by_item: dict[int, MediaBatchEntry] = {}
+        for unit in units:
+            if unit.item_id is not None:
+                by_item.setdefault(unit.item_id, unit)
+        by_src = {unit.src: unit for unit in units}
+
+        children: dict[int, list[MediaBatchEntry]] = {}
+        orphans = []
+        for entry in rows:
+            if entry.reason != "follows_item":
+                continue
+            parent = by_item.get(entry.item_id) if entry.item_id is not None else None
+            if parent is None:
+                parent = next(
+                    (
+                        by_src[folder.as_posix()]
+                        for folder in PurePosixPath(entry.src).parents
+                        if folder.as_posix() in by_src
+                    ),
+                    None,
+                )
+            if parent is None:
+                orphans.append(entry)
+            else:
+                children.setdefault(parent.seq, []).append(entry)
+
+        if orphans:
+            units = sorted([*units, *orphans], key=lambda entry: entry.seq)
+        if status:
+            units = [unit for unit in units if unit.status == status]
+        page = units
+        if query.page_num:
+            start = (query.page_num - 1) * query.page_size
+            page = units[start : start + query.page_size]
+
+        return {
+            "total": len(units),
             "items": [
                 {
-                    "seq": entry.seq,
-                    "kind": entry.kind,
-                    "owner": entry.owner,
-                    "item_id": entry.item_id,
-                    "src": entry.src,
-                    "dst": entry.dst,
-                    "files": entry.files,
-                    "size": entry.size,
-                    "status": entry.status,
-                    "reason": entry.reason,
+                    **cls._entry_row(unit),
+                    "children": [
+                        cls._entry_row(child) for child in children.get(unit.seq, [])
+                    ],
                 }
-                for entry in page.items
+                for unit in page
             ],
+        }
+
+    @staticmethod
+    def _entry_row(entry: MediaBatchEntry) -> dict[str, Any]:
+        """Serialize one stored batch entry for listings.
+
+        Args:
+            entry: Stored batch entry.
+
+        Returns:
+            The entry's public fields.
+        """
+        return {
+            "seq": entry.seq,
+            "kind": entry.kind,
+            "owner": entry.owner,
+            "item_id": entry.item_id,
+            "src": entry.src,
+            "dst": entry.dst,
+            "files": entry.files,
+            "size": entry.size,
+            "status": entry.status,
+            "reason": entry.reason,
         }
 
     @classmethod

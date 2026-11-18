@@ -9,13 +9,16 @@ import type { AssistantStreamEvent } from '$lib/types';
  */
 function parseEvent(event: string, source: string): AssistantStreamEvent | null {
   if (!['start', 'compacting', 'text_delta', 'tool_start', 'tool_result', 'done', 'error'].includes(event)) return null;
+
   let value: unknown;
   try {
     value = JSON.parse(source);
   } catch {
     throw new Error('assistant_stream_invalid');
   }
+
   if (!value || typeof value !== 'object') throw new Error('assistant_stream_invalid');
+
   const data = value as Record<string, unknown>;
   const hasTool = typeof data.id === 'string' && typeof data.name === 'string';
   const valid =
@@ -31,7 +34,9 @@ function parseEvent(event: string, source: string): AssistantStreamEvent | null 
         : !!data.error && typeof (data.error as Record<string, unknown>).code === 'string')) ||
     (event === 'done' && typeof data.tool_calls === 'number') ||
     (event === 'error' && typeof data.code === 'string');
+
   if (!valid) throw new Error('assistant_stream_invalid');
+
   return { event, data } as AssistantStreamEvent;
 }
 
@@ -76,9 +81,11 @@ export async function consumeAssistantStream(
       eventSize = 0;
       return;
     }
+
     eventSize += line.length;
     if (eventSize > 512 * 1024) throw new Error('assistant_stream_invalid');
     if (line.startsWith(':')) return;
+
     const separator = line.indexOf(':');
     const field = separator < 0 ? line : line.slice(0, separator);
     const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
@@ -94,6 +101,7 @@ export async function consumeAssistantStream(
         if (totalBytes > 4 * 1024 * 1024) throw new Error('assistant_stream_invalid');
         activity();
       }
+
       pending += decoder.decode(value, { stream: !done });
       let match: RegExpExecArray | null;
       while (!terminal && (match = /\r\n|\r|\n/.exec(pending))) {
@@ -103,9 +111,11 @@ export async function consumeAssistantStream(
         pending = pending.slice(match.index + match[0].length);
         consumeLine(line);
       }
+
       if (pending.length + eventSize > 512 * 1024) throw new Error('assistant_stream_invalid');
       if (done && !terminal) throw new Error('assistant_stream_interrupted');
     }
+
     return terminal;
   } finally {
     await reader.cancel().catch(() => {});

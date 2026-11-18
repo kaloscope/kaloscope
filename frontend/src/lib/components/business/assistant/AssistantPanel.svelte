@@ -49,13 +49,16 @@
   let viewportHeight: number | undefined = $state();
   let position: { x: number; y: number } | null = $state(null);
   let drag: { x: number; y: number; left: number; top: number } | null = null;
+
   const turns = $derived($assistant.turns);
+
   $effect(() => {
     if (planConversationId !== $assistant.conversation?.id) {
       planPreview = null;
       createdPlan = null;
     }
   });
+
   const input = $derived($assistant.input);
   const lastTurn = $derived(turns.at(-1));
   const isOpen = $derived($assistant.open);
@@ -73,6 +76,7 @@
       !!$assistant.model
   );
   const modelValue = $derived($assistant.model ? JSON.stringify($assistant.model) : null);
+
   const currentPage = $derived.by(() => {
     const pathname = page.url.pathname;
     if (/\/graphs\/(r\/)?\d+\/?$/.test(pathname)) return 'workflow_designer';
@@ -85,8 +89,10 @@
     if (/^\/downloads\/plans\/?$/.test(pathname)) return 'download_plans';
     return 'other';
   });
+
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');
   const retryable = $derived(incomplete || !!lastTurn?.canvasError);
+
   const destinations = $derived.by(() => {
     const items: { path: string; label: string }[] = [];
     const pathname = normalizePathname(page.url.pathname);
@@ -100,6 +106,7 @@
     }
     return items;
   });
+
   // a created draft waiting for its designer belongs to the conversation that created it
   const handoff = $derived(
     $assistantHandoff?.conversationId === $assistant.conversation?.id ? $assistantHandoff : null
@@ -153,6 +160,7 @@
   function panelKeydown(event: KeyboardEvent): void {
     event.stopPropagation();
     const menu = panel?.querySelector<HTMLDetailsElement>('details[open]:has(> .dropdown-content)');
+
     if (event.key === 'Escape' && menu) {
       // close the overflow menu first and keep focus on its trigger
       event.preventDefault();
@@ -263,6 +271,7 @@
    */
   async function reviewPlan(tool: Tool): Promise<void> {
     if (!tool.result?.ok || !tool.result.data?.valid || tool.result.data.ingestion) return;
+
     if (planPreview?.request_id !== tool.result.data.request_id) {
       planPreview = null;
       await tick();
@@ -271,6 +280,7 @@
       createdPlan = null;
       await tick();
     }
+
     try {
       await planEditor?.showModal();
     } catch {
@@ -309,6 +319,7 @@
   function segments(turn: AssistantTurn): ({ key: string; text: string } | { key: string; tools: Tool[] })[] {
     const parts: ({ key: string; text: string } | { key: string; tools: Tool[] })[] = [];
     let offset = 0;
+
     for (const tool of turn.tools) {
       const text = turn.content.slice(offset, tool.offset);
       if (text.trim()) parts.push({ key: `text-${offset}`, text });
@@ -317,6 +328,7 @@
       if (previous && 'tools' in previous) previous.tools.push(tool);
       else parts.push({ key: tool.id, tools: [tool] });
     }
+
     const rest = turn.content.slice(offset);
     if (rest.trim()) parts.push({ key: `text-${offset}`, text: rest });
     return parts;
@@ -353,6 +365,7 @@
   beforeNavigate(() => {
     restoreAfterNavigation = !!panel?.contains(document.activeElement);
   });
+
   afterNavigate(({ from, to }) => {
     if ($assistant.open && restoreAfterNavigation) composer?.focus({ preventScroll: true });
     restoreAfterNavigation = false;
@@ -809,6 +822,7 @@
     height: min(42rem, calc(100dvh - 6rem));
     isolation: isolate;
   }
+
   @media (max-width: 639px) {
     .assistant-panel {
       right: 0.5rem;
@@ -816,10 +830,12 @@
       height: calc(100dvh - 8rem);
     }
   }
+
   .assistant-panel.compact {
     bottom: 0.5rem;
     height: calc(100dvh - 1rem);
   }
+
   .assistant-panel.compact .transcript {
     padding-block: 0.25rem 0.5rem;
   }

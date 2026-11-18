@@ -23,14 +23,14 @@ export const load: LayoutLoad = async () => {
           icon: icons.phoneTablet
         },
         {
-          title: 'nav.settings.personal.tokens',
-          path: '/settings/personal/tokens',
-          icon: icons.key
-        },
-        {
           title: 'nav.settings.personal.preferences',
           path: '/settings/personal/preferences',
           icon: icons.textGrammarSettings
+        },
+        {
+          title: 'nav.settings.personal.tokens',
+          path: '/settings/personal/tokens',
+          icon: icons.key
         }
       ]
     },
@@ -119,14 +119,14 @@ export const load: LayoutLoad = async () => {
         title: 'nav.settings.monitor.title',
         routes: [
           {
-            title: 'nav.settings.monitor.transcodes',
-            path: '/settings/monitor/transcodes',
-            icon: icons.arrowRepeatAll
-          },
-          {
             title: 'nav.settings.monitor.logs',
             path: '/settings/monitor/logs',
             icon: icons.clipboardTextLtr
+          },
+          {
+            title: 'nav.settings.monitor.transcodes',
+            path: '/settings/monitor/transcodes',
+            icon: icons.arrowRepeatAll
           }
         ]
       }

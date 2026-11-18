@@ -170,7 +170,7 @@
   <div
     popover
     id={callyPopoverId}
-    class="dropdown invisible m-1 rounded-box border bg-base-100 shadow-xl transition-none"
+    class="dropdown invisible m-1 popover-surface transition-none"
     style="position-anchor:--{callyId}"
   >
     {#if range}

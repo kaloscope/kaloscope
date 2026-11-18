@@ -138,7 +138,8 @@
   data={tmpls}
   loading={$loading}
   gridClass="w60:grid-cols-2! w84:grid-cols-3! w108:grid-cols-4!"
-  itemClass="mb-2 border overflow-hidden rounded-sm bg-base-100 hover:shadow-lg"
+  itemClass="mb-2 card-surface card-hover overflow-hidden"
+  skeleton={{ ratio: '4/1', lines: 3 }}
 >
   {#snippet filters()}
     <Select

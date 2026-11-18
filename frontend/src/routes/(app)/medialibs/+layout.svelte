@@ -83,32 +83,37 @@
   });
 </script>
 
-<Drawer>
+<!-- without libraries there is no menu, so let the placeholder use the full width -->
+{#if data.libs.length === 0}
   {@render children()}
-  {#snippet side()}
-    <Menu menus={data.menus}>
-      {#snippet action(route)}
-        {@const lib = data.libs.find((lib) => route.path === `/medialibs/${lib.id}`)}
-        {#if lib && $user?.role === 'admin'}
-          {@const busy = scanning.includes(lib.id)}
-          <button
-            type="button"
-            class="flex cursor-pointer transition-opacity {busy
-              ? ''
-              : 'opacity-0 group-hover/menu:opacity-100 focus-visible:opacity-100 group-focus-within/menu:in-[:active-view-transition]:opacity-100'}"
-            aria-label={$_('action.scan', lib.name)}
-            aria-busy={busy}
-            aria-disabled={busy}
-            onclick={() => scan(lib.id)}
-          >
-            {#if busy}
-              <span class="loading size-5 loading-spinner"></span>
-            {:else}
-              <iconify-icon icon={icons.folderSearch} width="1.25rem"></iconify-icon>
-            {/if}
-          </button>
-        {/if}
-      {/snippet}
-    </Menu>
-  {/snippet}
-</Drawer>
+{:else}
+  <Drawer>
+    {@render children()}
+    {#snippet side()}
+      <Menu menus={data.menus}>
+        {#snippet action(route)}
+          {@const lib = data.libs.find((lib) => route.path === `/medialibs/${lib.id}`)}
+          {#if lib && $user?.role === 'admin'}
+            {@const busy = scanning.includes(lib.id)}
+            <button
+              type="button"
+              class="flex cursor-pointer transition-opacity {busy
+                ? ''
+                : 'opacity-0 group-hover/menu:opacity-100 focus-visible:opacity-100 group-focus-within/menu:in-[:active-view-transition]:opacity-100'}"
+              aria-label={$_('action.scan', lib.name)}
+              aria-busy={busy}
+              aria-disabled={busy}
+              onclick={() => scan(lib.id)}
+            >
+              {#if busy}
+                <span class="loading size-5 loading-spinner"></span>
+              {:else}
+                <iconify-icon icon={icons.folderSearch} width="1.25rem"></iconify-icon>
+              {/if}
+            </button>
+          {/if}
+        {/snippet}
+      </Menu>
+    {/snippet}
+  </Drawer>
+{/if}

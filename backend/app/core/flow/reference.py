@@ -44,6 +44,7 @@ def get_workflow_reference(
     }
     path = Path(__file__).parents[3] / "static" / "flow" / filenames[topic]
     result = WorkflowReference(topic=topic, content=path.read_text(encoding="utf-8"))
+
     recipes = {
         "json_indexer": (
             "search_start",
@@ -66,6 +67,7 @@ def get_workflow_reference(
                 schemas.setdefault(group, []).extend(nodes)
         result.nodes = compact_node_schemas(schemas)
         result.context = get_workflow_reference("context").content
+
     return result
 
 
@@ -87,11 +89,13 @@ def compact_node_schemas(schemas: dict) -> dict:
             node.pop("group")
             if node["width"] is None:
                 node.pop("width")
+
             for handle in node["handles"]:
                 handle.pop("style", None)
                 handle.pop("position", None)
                 if handle.get("tag") is None:
                     handle.pop("tag", None)
+
             for field in node["fields"]:
                 for key in (
                     "span",
@@ -109,4 +113,5 @@ def compact_node_schemas(schemas: dict) -> dict:
                 for key, value in list(field.items()):
                     if value is None and key != "default":
                         field.pop(key)
+
     return result

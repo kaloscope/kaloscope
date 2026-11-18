@@ -43,6 +43,7 @@ def download_link_kind(link: Any) -> Literal["hash", "http"] | None:
     """
     if not isinstance(link, str):
         return None
+
     link = link.strip()
     if (
         is_info_hash(link)
@@ -53,6 +54,7 @@ def download_link_kind(link: Any) -> Literal["hash", "http"] | None:
         )
     ):
         return "hash"
+
     try:
         url = urlsplit(link)
     except ValueError:
@@ -329,6 +331,7 @@ def _check_cookie(cookie: Any) -> tuple[list[OutputIssue], list[str], bool]:
     domain, path, name = (cookie.get(key) for key in ("domain", "path", "name"))
     if domain in (None, "") and name in (None, "") and path in (None, "", "/"):
         return [], [], False
+
     issues = []
     if (
         not isinstance(domain, str)
@@ -357,6 +360,7 @@ def _check_cookie(cookie: Any) -> tuple[list[OutputIssue], list[str], bool]:
                 path="config.cookie.name", message="Use the session cookie's name."
             )
         )
+
     warnings = []
     if (
         not issues
@@ -368,6 +372,7 @@ def _check_cookie(cookie: Any) -> tuple[list[OutputIssue], list[str], bool]:
         warnings.append(
             f"HTTPX stores dotless host {host} as {host}.local; curl_cffi keeps {host}."
         )
+
     return issues, warnings, not issues
 
 
@@ -397,6 +402,7 @@ def check_auth(
     config_issue = _config_issue(config)
     settings = {} if config_issue else parse_start_config(config)
     login = settings.get("login")
+
     if config_issue:
         issues.append(config_issue)
     elif not isinstance(login, dict):
@@ -419,6 +425,7 @@ def check_auth(
             issues.append(
                 OutputIssue(path="config.login.required", message="Use true or false.")
             )
+
     cookie_issues, warnings, cookie_login = _check_cookie(settings.get("cookie"))
     issues.extend(cookie_issues)
 
@@ -483,6 +490,7 @@ def check_auth(
             warnings.append(
                 "Validate a failure sample too; HTTP 200 alone is not success."
             )
+
     if issues:
         outcome = None
     if len(issues) > 12:
@@ -508,6 +516,7 @@ def _download_issues(
     number = context.get("page_num")
     ids = [item.id for item in page.items]
     previous = context.get("previous_ids")
+
     if isinstance(previous, list) and type(number) is int and number > 1 and ids:
         repeated = set(ids) & {str(item) for item in previous}
         if repeated == set(ids):
@@ -519,14 +528,17 @@ def _download_issues(
             )
         elif repeated:
             warnings.append("Some IDs repeat the previous page; check pagination.")
+
     offset = (number - 1) * len(ids) if type(number) is int and number > 0 else 0
     if len(ids) > 1 and ids in (
         [str(index + offset) for index in range(len(ids))],
         [str(index + offset + 1) for index in range(len(ids))],
     ):
         warnings.append("IDs look like positions; use the source's own identifiers.")
+
     if context.get("downloads") is not True:
         return issues
+
     for index, item in enumerate(page.items):
         kind = download_link_kind(item.link)
         if kind is None:
@@ -542,6 +554,7 @@ def _download_issues(
                 "HTTP links are unproven: a detail or player page is not a torrent; "
                 "URL shape does not prove torrent content."
             )
+
     return issues
 
 
@@ -605,6 +618,7 @@ def check_output(
     """
     issues = []
     warnings = []
+
     try:
         if mode == "search":
             page = SearchOutput.model_validate(value)
@@ -613,6 +627,7 @@ def check_output(
                 issues.append(
                     OutputIssue(path="items", message="Use unique remote IDs.")
                 )
+
             number, size = context.get("page_num"), context.get("page_size")
             for name, number_value in (("page_num", number), ("page_size", size)):
                 if number_value is not None and (
@@ -623,6 +638,7 @@ def check_output(
                             path=f"context.{name}", message="Use a positive integer."
                         )
                     )
+
             if type(size) is int and size > 0:
                 if page.total is not None and page.totalPages is not None:
                     expected = (page.total + size - 1) // size
@@ -670,6 +686,7 @@ def check_output(
                                 message="Cannot precede a nonempty requested page.",
                             )
                         )
+
             if (
                 type(number) is int
                 and number > 0
@@ -701,6 +718,7 @@ def check_output(
                         message="Cannot be zero for nonempty results.",
                     )
                 )
+
             if page.total is None and not page.totalPages:
                 warnings.append(
                     "Total is unknown; the page uses simple pagination. "
@@ -711,6 +729,7 @@ def check_output(
                     "total equals this full page's count; omit it unless the source "
                     "reports all matches."
                 )
+
             issues.extend(_download_issues(page, context, warnings))
             warnings.append(
                 "One page cannot prove pagination stability or a remote total; "
@@ -721,6 +740,7 @@ def check_output(
                 return [], [
                     "Null means not found; it does not demonstrate usable details."
                 ]
+
             details = DetailsOutput.model_validate(value)
             media = details.media_type or context.get("media_type")
             if media not in ("video", "audio", "image", "text"):
@@ -730,6 +750,7 @@ def check_output(
                         message="Supply media_type in output or fixture defaults.",
                     )
                 )
+
             chapters = details.chapters or []
             images = [item for item in details.images or [] if item.strip()]
             for index, chapter in enumerate(chapters):
@@ -740,6 +761,7 @@ def check_output(
                             message="Provide a remote id or a direct url.",
                         )
                     )
+
             has_content = bool(
                 (media in ("video", "audio") and details.url and details.url.strip())
                 or (media == "image" and images)
@@ -768,6 +790,7 @@ def check_output(
                     "Directory only: also validate a chapter lookup; "
                     "a directory cannot prove playback/reading."
                 )
+
             if media == "audio":
                 warnings.append(
                     "The current resource page has no audio viewer; "
@@ -791,6 +814,7 @@ def check_output(
             )
             if candidates:
                 warnings.extend(_video_warnings(mode, candidates[0], context))
+
             for index, candidate in enumerate(candidates):
                 try:
                     render_nfo(nfo_type, template, value[index])
@@ -808,6 +832,7 @@ def check_output(
                         f"[{index}]: Unknown {mode} fields are not mapped by "
                         f"the NFO template; use the {mode} node example."
                     )
+
             if not candidates:
                 warnings.append(
                     "Empty candidates mean no match; test a matching HTML sample too."
@@ -828,6 +853,7 @@ def check_output(
             warnings.insert(
                 0, "Additional field errors omitted; fix these and recheck."
             )
+
     if len(issues) > 12:
         warnings.insert(0, "Additional field errors omitted; fix these and recheck.")
     return issues[:12], list(dict.fromkeys(warnings))[:4]

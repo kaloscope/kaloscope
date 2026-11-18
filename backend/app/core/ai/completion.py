@@ -27,10 +27,12 @@ def output_validator(config: AICompletionConfig) -> Draft202012Validator | None:
     """
     if config.response_format == "text":
         return None
+
     try:
         schema = orjson.loads(config.output_schema)
         if not isinstance(schema, dict) or schema.get("type") != "object":
             raise ValueError
+
         pending: list[tuple[JSONType, int]] = [(schema, 0)]
         while pending:
             item, depth = pending.pop()
@@ -47,6 +49,7 @@ def output_validator(config: AICompletionConfig) -> Draft202012Validator | None:
                 pending.extend((value, depth + 1) for value in item.values())
             elif isinstance(item, list):
                 pending.extend((value, depth + 1) for value in item)
+
         Draft202012Validator.check_schema(schema)
         return Draft202012Validator(schema)
     except (ValueError, SchemaError, RecursionError):
@@ -89,10 +92,12 @@ async def complete(
             "Do not include markdown or explanations.\n"
             + orjson.dumps(validator.schema).decode()
         )
+
     messages = []
     if system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": config.prompt})
+
     payload: dict[str, Any] = {
         "model": config.model.model_id,
         "messages": messages,
@@ -118,9 +123,11 @@ async def complete(
         }
     elif validator is not None:
         payload["response_format"] = {"type": "json_object"}
+
     headers = {"Accept": "application/json", "Cache-Control": "no-cache, no-store"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+
     try:
         for attempt in range(config.max_retries + 1):
             try:
@@ -155,6 +162,7 @@ async def complete(
                 if attempt == config.max_retries:
                     raise
             await asyncio.sleep(2**attempt)
+
         result = orjson.loads(body)
         choice = result["choices"][0]
         message = choice["message"]
@@ -162,6 +170,7 @@ async def complete(
             raise KaloscopeException(ErrorCode.AI_OUTPUT_TRUNCATED, status_code=502)
         if message.get("refusal") or choice.get("finish_reason") == "content_filter":
             raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED, status_code=502)
+
         content = message.get("content")
         if (
             choice.get("finish_reason") != "stop"
@@ -199,6 +208,7 @@ async def complete(
             raise KaloscopeException(
                 ErrorCode.AI_OUTPUT_INVALID, status_code=502
             ) from None
+
     usage = result.get("usage")
     return {
         "text": content,

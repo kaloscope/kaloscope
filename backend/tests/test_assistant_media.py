@@ -49,6 +49,7 @@ async def media(tmp_path):
         await FlowTrigger.create(
             category=GraphCategory.INGEST, rel_id=movies.id, priority=1, graph=ingest
         )
+
         for index in range(1, 13):
             await MediaItem.create(
                 lib=movies,
@@ -58,6 +59,7 @@ async def media(tmp_path):
                 title=f"Movie {index:02}",
                 year=2000 + index,
             )
+
         nfo = tmp_path / "arrival.nfo"
         nfo.write_text(
             f"<movie><title>Arrival</title><year>2016</year><plot>{PLOT}</plot></movie>"
@@ -92,12 +94,14 @@ async def media(tmp_path):
                 season=1,
                 episode=episode,
             )
+
         reader = cast(
             UserInfo,
             SimpleNamespace(
                 id=2, role=UserRole.USER, perms=Permissions(media_lib_ids=[movies.id])
             ),
         )
+
         yield SimpleNamespace(
             movies=movies,
             shows=shows,
@@ -256,6 +260,7 @@ def test_item_summary(tmp_path):
             assert summary["metadata"]["plot"]["characters"] == len(PLOT.strip())
             assert summary["metadata_field_count"] >= 3
             assert summary["children"] == {"total": 0, "items": [], "omitted": 0}
+
             series = show["data"]
             assert series["metadata_state"] == "missing"
             assert series["children"]["total"] == 12

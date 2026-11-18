@@ -98,6 +98,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
             )
             token = issued["token"]
             topic = "movie_scraper" if movie else "json_indexer"
+
             recipe = await call(
                 app,
                 "get_workflow_reference",
@@ -105,6 +106,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                 token="reader",
             )
             assert recipe["structuredContent"]["topic"] == topic
+
             shared = await tools.execute_tool(
                 "get_workflow_reference",
                 dumps({"topic": topic, "include_nodes": include_nodes}).decode(),
@@ -113,6 +115,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                 call_id="recipe",
             )
             assert shared["ok"] and shared["data"] == recipe["structuredContent"]
+
             node = await call(
                 app,
                 "list_node_types",
@@ -126,6 +129,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                 field.get("readonly")
                 for field in node["structuredContent"]["end"][0]["fields"]
             )
+
             probe = await call(
                 app,
                 "probe_http_request",
@@ -139,6 +143,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
             )
             formatted = probe["structuredContent"]["formatted"]
             assert formatted["valid"]
+
             good = MOVIE_TEMPLATE if movie else SEARCH_TEMPLATE
             bad = (
                 good.replace("xpath_all('.//span", "xpath_first('.//span")
@@ -167,10 +172,12 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                     )
                     assert result["structuredContent"] == assistant["data"]
                     assert result["structuredContent"]["valid"] is valid
+
             assert before == [
                 await model.all().count()
                 for model in (FlowGraph, FlowJob, FlowLog, DownloadTask)
             ]
+
             if not movie:
                 for payload in (
                     {
@@ -194,6 +201,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                         token="reader",
                     )
                     assert checked["structuredContent"]["valid"]
+
             created = await call(
                 app,
                 "create_workflow_draft",
@@ -220,6 +228,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                 token=token,
             )
             assert preview["structuredContent"]["validation"]["valid"], preview
+
             graph = await FlowGraph.get(id=base["workflow_id"])
             assert graph.draft == {"nodes": [], "edges": []}
             assert (

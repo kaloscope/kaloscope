@@ -130,6 +130,7 @@ def test_grants():
         "probe_http_request",
     }
     assert all("save" not in name and "publish" not in name for name in admin_names)
+
     # creation accepts metadata only; generated content goes through canvas edits
     assert set(tools.WorkflowCreate.model_fields) == {"name", "category", "description"}
 
@@ -154,13 +155,16 @@ def test_compact_schemas():
         for key, definition in schemas[name]["properties"].items()
         if key in {"category", "ordering"}
     )
+
     state = schemas["list_workflows"]["properties"]["state"]
     assert state["type"] == ["string", "null"]
     assert state["enum"] == ["draft", "modified", "published", None]
     assert "Not execution status" in state["description"]
+
     workflow_id = schemas["get_workflow"]["properties"]["workflow_id"]
     assert schemas["get_workflow"]["required"] == ["workflow_id"]
     assert workflow_id == {"exclusiveMinimum": 0, "type": "integer"}
+
     edits = schemas["preview_workflow_draft"]["properties"]["changes"]["items"]["oneOf"]
     operations = {edit["properties"]["op"]["const"]: edit for edit in edits}
     assert set(operations) == {
@@ -457,6 +461,7 @@ def test_preview_does_not_write():
                 "nodes": [{"id": "http", "data": {"$schema": "http", "url": ""}}],
                 "edges": [],
             }
+
             validation = await tools.execute_tool(
                 "validate_workflow",
                 json.dumps({"workflow_id": graph.id, "draft_version": 0}),
@@ -503,12 +508,14 @@ def test_preview_does_not_write():
             assert preview["data"]["pre_existing_change_count"] == 0
             assert preview["data"]["change_count"] == 1
             assert "proposal_id" not in preview["data"]
+
             snapshot = await AssistantSnapshot.get(
                 id=preview["data"]["proposal_snapshot_id"]
             )
             assert snapshot.document["nodes"][0]["id"] == "http"
             assert await AssistantProposal.all().count() == 0
             assert conflict["error"]["code"] == ErrorCode.FLOW_DRAFT_CONFLICT
+
             await graph.refresh_from_db()
             assert graph.draft == {"nodes": [], "edges": []}
             assert graph.draft_version == 0
@@ -838,6 +845,7 @@ def test_create_draft():
             assert data["editor_path"] == f"/settings/workflows/graphs/{graph.id}"
             assert data["published"] is data["executed"] is data["replayed"] is False
             assert await FlowJob.all().count() == await FlowLog.all().count() == 0
+
             # the workflow and its successful result are recorded together
             call = await AssistantToolCall.get(call_id="create")
             assert call.status == "complete"

@@ -315,6 +315,98 @@ def test_delete_with_companions(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("last", "unit", "children"),
+    [
+        (False, "Show/Show S01E01.mkv", ["Show/Show S01E01.nfo"]),
+        (
+            True,
+            "Show",
+            ["Show/Show.nfo", "Show/Show S01E01.mkv", "Show/Show S01E01.nfo"],
+        ),
+    ],
+)
+def test_units(tmp_path, last, unit, children):
+    async def run():
+        async with database():
+            lib, _, episodes = await show(tmp_path)
+            if last:
+                Path(episodes[1].path).unlink()
+                await episodes[1].delete()
+                change = deletion(lib, item_ids=[episodes[0].id])
+            else:
+                change = deletion(
+                    lib,
+                    directory="Show",
+                    name="Show S01E01.*",
+                    owners=["indexed", "companion"],
+                )
+            review = await MediaBatchService.review(change, ADMIN)
+            batch_id = review["batch_id"]
+            page = Pageable(page_num=1, page_size=50)
+
+            grouped = await MediaBatchService.units(batch_id, page)
+            blocked = await MediaBatchService.units(batch_id, page, "blocked")
+            # a file whose unit cannot be found stays visible on its own
+            await MediaBatchEntry.filter(receipt_id=batch_id, src=children[0]).update(
+                item_id=None, src="stray.nfo"
+            )
+            orphaned = await MediaBatchService.units(batch_id, page, "blocked")
+
+            assert grouped["total"] == 1
+            assert grouped["items"][0]["src"] == unit
+            assert [row["src"] for row in grouped["items"][0]["children"]] == children
+            assert blocked == {"total": 0, "items": []}
+            assert [row["src"] for row in orphaned["items"]] == ["stray.nfo"]
+            assert orphaned["items"][0]["children"] == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_hide_items(tmp_path, missing):
+    async def run():
+        async with database():
+            lib, parent, episodes = await show(tmp_path)
+            if missing:
+                Path(episodes[0].path).unlink()
+            change = deletion(lib, item_ids=[episodes[0].id], delete_files=False)
+
+            review = await MediaBatchService.review(change, ADMIN)
+            details = await MediaBatchService.details(review["batch_id"])
+            result = await confirm(review, change)
+            hidden = await MediaItem.get(id=episodes[0].id)
+
+            assert review["planned"]["units"] == 1
+            assert review["deletion"] is None
+            assert review["delete_files"] is False
+            assert details["hideable"] is True and details["delete_files"] is False
+            assert result["outcome"] == "completed"
+            assert result["delete_files"] is False
+            assert not hidden.visible
+            assert (await MediaItem.get(id=episodes[1].id)).visible
+            assert (await MediaItem.get(id=parent.id)).visible
+            assert Path(episodes[0].path).exists() is not missing
+            assert Path(episodes[0].path).with_suffix(".nfo").exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"extensions": ["url"]},
+        {"directory": "Show", "empty_dirs": True},
+        {"operation": "rename", "pattern": "a"},
+    ],
+)
+def test_hide_needs_items(fields):
+    fields = {"operation": "delete", "item_ids": [], **fields}
+
+    with pytest.raises(ValueError, match="delete_files"):
+        MediaBatch(library_id=1, delete_files=False, **fields)
+
+
 def test_indexed_by_filter(tmp_path):
     async def run():
         async with database():
@@ -383,6 +475,7 @@ def test_parent_changed(tmp_path, edit, selection):
                 else [item.id for item in episodes],
             )
             review = await MediaBatchService.review(change, ADMIN)
+
             if edit == "unindexed":
                 write(root, "Show/late.mkv")
             elif edit == "body":
@@ -782,6 +875,7 @@ def test_mcp(monkeypatch, tmp_path):
                 }
             }
             read_only = await call(app, "apply_media_change", arguments, token="admin")
+
             write_token = (
                 await MCPAccessTokenService.create(
                     admin.id,
@@ -1668,6 +1762,7 @@ def test_move_movie(monkeypatch, tmp_path):
             assert result["outcome"] == "completed"
             assert video.path == str(root / "Loose (2020)/Loose.2020.mkv")
             assert video.nfo_path == str(root / "Loose (2020)/Loose.2020.nfo")
+
             # the folder takes over what the library knows about the movie
             assert (folder.path, folder.title, folder.year, folder.unique_id) == (
                 str(root / "Loose (2020)"),
@@ -1677,6 +1772,7 @@ def test_move_movie(monkeypatch, tmp_path):
             )
             assert folder.nfo_path == video.nfo_path
             assert crowd["blocked"]["reasons"] == {"identity_mismatch": 1}
+
             assert undone["outcome"] == "completed"
             assert (restored.path, restored.parent_id) == (
                 str(root / "Loose.2020.mkv"),

@@ -13,7 +13,7 @@
 </script>
 
 {#if $needRefresh}
-  <div role="alert" class="fixed right-0 layer-4 m-4 rounded-box border bg-base-100 p-3 shadow-sm {bottomClass}">
+  <div role="alert" class="fixed right-0 layer-4 m-4 popover-surface p-4 {bottomClass}">
     <p>{$_('app.pwa_prompt')}</p>
     <div class="mt-3 flex gap-2">
       <button class="btn btn-sm btn-submit" onclick={() => updateServiceWorker()}>

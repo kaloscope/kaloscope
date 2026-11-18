@@ -15,13 +15,16 @@ export function snapshotAssistantCanvas(document: NonNullable<FlowGraph['draft']
       delete result.selected;
       delete result.measured;
       delete result.dragging;
+
       const schema = result.data.$schema;
       if (schema && typeof schema === 'object') result.data.$schema = (schema as NodeSchema).node_type;
+
       return result;
     }),
     edges: document.edges.map((edge) => {
       const result = { ...edge };
       delete result.selected;
+
       return result;
     })
   };
@@ -35,6 +38,7 @@ export function snapshotAssistantCanvas(document: NonNullable<FlowGraph['draft']
  */
 export function registerAssistantContext(read: () => AssistantPageContext | null): () => void {
   readers.push(read);
+
   return () => {
     const index = readers.indexOf(read);
     if (index >= 0) readers.splice(index, 1);
@@ -50,12 +54,15 @@ export function registerAssistantContext(read: () => AssistantPageContext | null
  */
 export function captureAssistantContext(route: string): AssistantPageContext | null {
   const pathname = route.replace(/\/$/, '');
+
   for (const read of [...readers].reverse()) {
     const context = read();
     if (context?.route !== pathname) continue;
+
     const json = JSON.stringify(context);
     const encoder = new TextEncoder();
     let metadata = json;
+
     if (context.page_type === 'workflow_designer') {
       const { canvas, ...reference } = context;
       if (encoder.encode(JSON.stringify(canvas)).length > 512 * 1024) {
@@ -63,14 +70,18 @@ export function captureAssistantContext(route: string): AssistantPageContext | n
       }
       metadata = JSON.stringify(reference);
     }
+
     if (encoder.encode(metadata).length > 128 * 1024) throw new Error('assistant_context_limit');
+
     return JSON.parse(json) as AssistantPageContext;
   }
+
   if (
     /^\/settings\/workflows\/graphs(?:\/(?:r\/)?[1-9]\d*)?\/?$/.test(route) ||
     /^\/medialibs\/[1-9]\d*(?:\/[1-9]\d*)?\/?$/.test(route)
   ) {
     throw new Error('assistant_context_invalid');
   }
+
   return null;
 }

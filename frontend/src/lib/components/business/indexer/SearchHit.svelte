@@ -80,6 +80,8 @@
   let { indexerId, indexerConfig, mode, rsrc, coverRatio, searchButton }: SearchHitProps = $props();
   let detailsConfig = $derived(indexerConfig.details);
   let hasRanking = $derived(rsrc.ranking !== null && rsrc.ranking !== undefined);
+  // the details page link, or `undefined` when the indexer has no details page
+  let href = $derived(detailsRoute(rsrc.id) ?? undefined);
 
   /**
    * Mark a resource as favorite.
@@ -110,13 +112,12 @@
   }
 
   /**
-   * Navigate to the details page.
+   * Navigate to the details page for a click elsewhere in the table cell.
    *
-   * @param rsrc - Clicked resource.
+   * @param event - Click on the table cell; clicks on the title link navigate by themselves.
    */
-  function gotoDetails(rsrc: Resource) {
-    const url = detailsRoute(rsrc.id);
-    if (url) goto(url);
+  function gotoDetails(event: MouseEvent) {
+    if (href && !(event.target instanceof Element && event.target.closest('a'))) goto(href);
   }
 
   /**
@@ -144,11 +145,11 @@
 
 <!-- table view -->
 {#if mode === 'table'}
-  <Cell class="group {detailsConfig ? 'cursor-pointer' : ''}" onclick={() => gotoDetails(rsrc)}>
+  <Cell class="group {href ? 'cursor-pointer' : ''}" onclick={gotoDetails}>
     {#if rsrc.cover}
       {@const ratio = coverRatio ?? '16/9'}
       <div class="relative shrink-0">
-        <Image transparent src={rsrc.cover} height={coverHeight(ratio)} {ratio} />
+        <Image src={rsrc.cover} height={coverHeight(ratio)} {ratio} class="rounded-md!" />
         <div class="absolute inset-0 flex size-full flex-col">
           {#if hasRanking}
             <Ranking compact rank={rsrc.ranking} class="self-start" />
@@ -171,8 +172,8 @@
       </Badge>
     {/if}
     <div class="flex w-full min-w-0 flex-col gap-3">
-      <div class={detailsConfig ? 'transition-colors group-hover:text-primary' : ''}>
-        <span class="text-sm wrap-break-word">{rsrc.title}</span>
+      <div class={href ? 'transition-colors group-hover:text-primary' : ''}>
+        <svelte:element this={href ? 'a' : 'span'} {href} class="text-sm wrap-break-word">{rsrc.title}</svelte:element>
         {#if rsrc.misc}
           <span class="italic-text">[{rsrc.misc}]</span>
         {/if}
@@ -207,19 +208,26 @@
 
 <!-- grid view -->
 {#if mode === 'grid'}
-  {@const pointerClass = detailsConfig ? 'cursor-pointer transition-colors hover:text-primary' : ''}
+  {@const pointerClass = href ? 'cursor-pointer transition-colors hover:text-primary' : ''}
   {@const transClass = 'transition-opacity duration-300'}
-  {@const btnClass = 'border-0 bg-black/60 text-white hover:bg-base-300 hover:text-base-content'}
+  {@const btnClass = 'border-0 bg-black/55 text-white backdrop-blur-sm hover:bg-base-100 hover:text-base-content'}
   {@const ratio = coverRatio ?? '16/9'}
   <div class="flex h-full flex-col">
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div tabindex="0" role="button" class="group @container relative {pointerClass}" onclick={() => gotoDetails(rsrc)}>
+    <div class="group @container relative overflow-hidden">
       {#if hasRanking}
-        <Ranking rank={rsrc.ranking} class="absolute top-0 left-0 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]" />
+        <Ranking
+          rank={rsrc.ranking}
+          class="pointer-events-none absolute top-0 left-0 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]"
+        />
       {:else}
-        <Rating score={rsrc.rating} class="absolute top-1 left-1 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]" />
+        <Rating
+          score={rsrc.rating}
+          class="pointer-events-none absolute top-1.5 left-1.5 z-1 text-[clamp(0.75rem,7cqw,0.875rem)]"
+        />
       {/if}
-      <div class="absolute top-0 right-0 z-1 flex gap-2 p-1 opacity-0 group-hover:opacity-100 {transClass}">
+      <div
+        class="absolute top-0 right-0 z-1 flex gap-1.5 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 {transClass}"
+      >
         {#if detailsConfig && rsrc.favorite !== undefined}
           <Button
             icon={rsrc.favorite ? icons.starFilled : icons.star}
@@ -251,10 +259,24 @@
           />
         {/if}
       </div>
-      <Image src={rsrc.cover} width="100%" {ratio} class="rounded-b-none group-hover:opacity-80 {transClass}" />
+      <!-- the title link below is the keyboard and screen-reader entry; this one only widens the click target -->
+      <svelte:element
+        this={href ? 'a' : 'div'}
+        {href}
+        tabindex={href ? -1 : undefined}
+        aria-hidden={href ? 'true' : undefined}
+        class="block"
+      >
+        <Image
+          src={rsrc.cover}
+          width="100%"
+          {ratio}
+          class="rounded-none! transition-transform duration-500 ease-out lg:group-hover:scale-105"
+        />
+      </svelte:element>
       {#if rsrc.category || rsrc.misc}
-        <div class="absolute bottom-0 h-8 w-full bg-linear-to-t from-black/50 to-transparent">
-          <div class="flex h-full items-end justify-between gap-2 px-2 pb-1 text-xs text-white">
+        <div class="pointer-events-none absolute bottom-0 h-12 w-full bg-linear-to-t from-black/65 to-transparent">
+          <div class="flex h-full items-end justify-between gap-2 px-2.5 pb-1.5 text-xs font-medium text-white/90">
             <span class="shrink-0 truncate {rsrc.misc ? 'max-w-1/2' : 'max-w-full'}" title={rsrc.category}>
               {rsrc.category}
             </span>
@@ -263,17 +285,15 @@
         </div>
       {/if}
     </div>
-    <div class="@container flex grow flex-col justify-between gap-2 p-2">
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <div
-        tabindex="0"
-        role="button"
-        class="line-clamp-2 text-[clamp(0.75rem,7cqw,0.875rem)] font-medium {pointerClass}"
+    <div class="@container flex grow flex-col justify-between gap-2 p-2.5">
+      <svelte:element
+        this={href ? 'a' : 'div'}
+        {href}
+        class="line-clamp-2 text-[clamp(0.75rem,7cqw,0.875rem)] leading-snug font-medium {pointerClass}"
         title={rsrc.title}
-        onclick={() => gotoDetails(rsrc)}
       >
         {rsrc.title}
-      </div>
+      </svelte:element>
       <Uploader up={rsrc.uploader} at={rsrc.uploaded_at} extra={rsrc.size} />
     </div>
   </div>

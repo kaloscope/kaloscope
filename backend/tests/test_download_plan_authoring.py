@@ -138,6 +138,7 @@ async def fixture_plan(**overrides):
             },
         }
     )
+
     return graph, downloader, body
 
 
@@ -148,6 +149,7 @@ def test_options(monkeypatch):
             await Downloader.create(name="Second", config=CONFIG, priority=2)
             await DownloadDir.create(path="/synthetic/recent", last_used=timezone.now())
             before = await FlowGraph.all().values()
+
             first = await service.DownloadPlanService.authoring_options(
                 graph.id, owner, 1, 1
             )
@@ -157,6 +159,7 @@ def test_options(monkeypatch):
             empty = await service.DownloadPlanService.authoring_options(
                 graph.id, owner, 3, 1
             )
+
             assert first["published"] and first["search"]["keyword"]["required"]
             assert first["downloaders"]["total"] == 2
             assert first["downloaders"]["has_more"]
@@ -167,6 +170,7 @@ def test_options(monkeypatch):
                 "do-not-expose" not in str(first)
                 and "config" not in first["downloaders"]["items"][0]
             )
+
             checked = await service.DownloadPlanService.validate_creation(
                 DownloadPlanCheck(plan=body.plan), owner
             )
@@ -293,12 +297,14 @@ def test_create_recovery(monkeypatch):
             )
             with pytest.raises(RuntimeError):
                 await service.DownloadPlanService.create_once(body, owner)
+
             service.notify_download_changes.side_effect = None
             result = await service.DownloadPlanService.create_once(body, owner)
             assert result["replayed"] and result["created"]
             assert result["first_execution"]["status"] == "waiting"
             assert result["plan"]["interval_start"].hour == 0
             assert result["plan"]["interval_start"].utcoffset().total_seconds() == 0
+
             same = body.model_copy(
                 update={
                     "plan": body.plan.model_copy(
@@ -311,11 +317,13 @@ def test_create_recovery(monkeypatch):
             assert (await service.DownloadPlanService.create_once(same, owner))[
                 "plan_id"
             ] == result["plan_id"]
+
             changed = body.model_copy(
                 update={"plan": body.plan.model_copy(update={"keyword": "Different"})}
             )
             with pytest.raises(BadRequestException):
                 await service.DownloadPlanService.create_once(changed, owner)
+
             recovered = await service.DownloadPlanService.find_creation(
                 body.request_id, owner
             )
@@ -323,6 +331,7 @@ def test_create_recovery(monkeypatch):
             assert await service.DownloadPlanService.find_creation(
                 body.request_id, other
             ) == {"created": False}
+
             graph.state = GraphState.DRAFT
             await graph.save()
             assert (await service.DownloadPlanService.create_once(body, owner))[
@@ -383,6 +392,7 @@ def test_first_attempt(monkeypatch, status):
             if status == "interrupted":
                 execute.side_effect = asyncio.CancelledError
             monkeypatch.setattr(syncer, "execute_download_plan", execute)
+
             if status == "interrupted":
                 with pytest.raises(asyncio.CancelledError):
                     await syncer.check_download_plans(first_only=True)
@@ -393,6 +403,7 @@ def test_first_attempt(monkeypatch, status):
                 )
             await syncer.check_download_plans(first_only=True)
             await syncer.check_download_plans()
+
             replay = await service.DownloadPlanService.create_once(body, owner)
             assert replay["plan_id"] == result["plan_id"]
             assert replay["first_execution"]["status"] == (
@@ -415,8 +426,10 @@ def test_future_attempt(monkeypatch):
                 return_value={"status": "completed", "added": 0, "errors": 0}
             )
             monkeypatch.setattr(syncer, "execute_download_plan", execute)
+
             await syncer.check_download_plans()
             execute.assert_not_awaited()
+
             await DownloadPlan.filter(id=created["plan_id"]).update(
                 interval_start=timezone.now() - timedelta(seconds=1)
             )
@@ -437,6 +450,7 @@ def test_permissions():
                     created["plan_id"], owner
                 )
             )["plan_id"] == created["plan_id"]
+
             for operation in [
                 service.DownloadPlanService.authoring_options(graph.id, owner),
                 service.DownloadPlanService.validate_creation(
@@ -446,6 +460,7 @@ def test_permissions():
             ]:
                 with pytest.raises(ForbiddenException):
                     await operation
+
             owner.perms = Permissions()
             with pytest.raises(ForbiddenException):
                 await service.DownloadPlanService.get_creation(
@@ -468,6 +483,7 @@ def test_mcp():
                     denied["isError"]
                     and "only permits read-only" in denied["content"][0]["text"]
                 )
+
             tokens = {}
             for account in ("reader", "admin"):
                 tokens[account] = (
@@ -482,6 +498,7 @@ def test_mcp():
                 app, "create_download_plan", {"creation": args}, token=tokens["reader"]
             )
             assert denied["isError"]
+
             options = await call(
                 app,
                 "get_download_plan_options",
@@ -489,6 +506,7 @@ def test_mcp():
                 token="admin",
             )
             assert options["structuredContent"]["published"]
+
             checked = await call(
                 app,
                 "validate_download_plan",
@@ -496,6 +514,7 @@ def test_mcp():
                 token="admin",
             )
             assert checked["structuredContent"]["valid"]
+
             made = await call(
                 app, "create_download_plan", {"creation": args}, token=tokens["admin"]
             )
@@ -505,6 +524,7 @@ def test_mcp():
                 app, "create_download_plan", {"creation": args}, token=tokens["admin"]
             )
             assert replay["structuredContent"]["replayed"]
+
             permission = await UserPermission.create(
                 user_id=app.shared_ctx.sessions["reader"].id,
                 rel_type=PermType.INDEXER,
@@ -543,6 +563,7 @@ def test_attempt_outcome(monkeypatch, state):
                 fail=state == "failed", state=state if state != "failed" else None
             )
             result = await syncer.execute_download_plan(plan, driver)
+
             expected = (
                 "failed"
                 if state == "failed"
@@ -553,6 +574,7 @@ def test_attempt_outcome(monkeypatch, state):
             assert result["status"] == expected
             assert result["added"] == (0 if state == "failed" else 1)
             assert result["errors"] == (1 if state == "failed" else 0)
+
             engine.execute.assert_awaited_once_with(
                 graph_id=graph.id,
                 bootparams={
@@ -626,6 +648,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
     def handler(upstream):
         body = loads(upstream.content)
         assert history.context_size(body["messages"], body.get("tools", [])) <= 27904
+
         if not body.get("stream"):
             return httpx.Response(
                 200,
@@ -648,6 +671,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                     ]
                 },
             )
+
         streams.append(body)
         step = len(streams)
         results = []
@@ -656,6 +680,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 results.append(loads(item["content"]))
             elif item.get("content", "").startswith("Completed tool exchange"):
                 results.extend(loads(item["content"].split("\n", 1)[1])["tools"])
+
         if step == 1:
             name, args = "list_workflows", {"category": "indexer"}
         elif step == 2:
@@ -698,6 +723,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
             return response(
                 [chunk({"role": "assistant", "content": "Private plan facts"}, "stop")]
             )
+
         return response(
             [
                 chunk(
@@ -732,6 +758,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+
             events = [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -742,6 +769,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
             ]
             assert events[-1].event == "done", events[-1]
             assert await DownloadPlan.all().count() == 0
+
             events += [
                 event
                 async for event in AssistantService.persistent_stream(
@@ -754,10 +782,12 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 )
             ]
             assert events[-1].event == "done", events[-1]
+
             outcomes = [e.data for e in events if e.event == "tool_result"]
             assert len(outcomes) == 5 and all(item["ok"] for item in outcomes), outcomes
             assert outcomes[3]["data"]["plan_id"] == outcomes[4]["data"]["plan_id"]
             assert outcomes[4]["data"]["replayed"]
+
             turn = await AssistantTurn.get(request_id="request")
             assert set(turn.resource_ids) == {graph.id, f"media_lib:{lib.id}"}
             assert await DownloadPlan.all().count() == 1
@@ -766,6 +796,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 item["function"]["name"] == "validate_download_plan"
                 for item in tools.tool_schemas(owner)
             )
+
             await AssistantConversation.filter(id=conversation["id"]).update(
                 summary={"goals": ["Private plan summary"]},
                 summary_resources=turn.resource_ids,
@@ -778,8 +809,10 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                     media_lib_ids=[] if revoked == "library" else [lib.id],
                 ),
             )
+
             denied = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert denied["content"] == "" and denied["tools"] == []
+
             original = await tools.execute_tool(
                 "read_conversation_history",
                 dumps({"turn_id": turn.id}).decode(),
@@ -788,6 +821,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 call_id="history",
             )
             assert original["error"]["code"] == "permission_denied"
+
             current = await Sessions.begin(conversation["id"], request("next"), owner)
             messages, _, _ = await history.prepare_context(
                 completion_client(AsyncMock()),
@@ -843,6 +877,7 @@ def test_retry_chain():
                 arguments=args,
                 status="running",
             )
+
             created = await tools.execute_tool(
                 "create_download_plan",
                 args,
@@ -851,6 +886,7 @@ def test_retry_chain():
                 call_id="create",
             )
             assert created["ok"]
+
             retry = await AssistantTurn.create(
                 conversation_id=conversation["id"],
                 request_id="retry",
@@ -876,6 +912,7 @@ def test_retry_chain():
                 and recovered["data"]["plan_id"] == created["data"]["plan_id"]
             )
             assert await DownloadPlan.all().count() == 1
+
             another = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -948,6 +985,7 @@ def test_list_permissions(monkeypatch):
                 }
             )
             await service.DownloadPlanService.create_once(other, owner)
+
             route = inspect.unwrap(download_routes.list_plans)
             http = SimpleNamespace(ctx=SimpleNamespace(user=owner))
             owner.role = UserRole.USER
@@ -958,6 +996,7 @@ def test_list_permissions(monkeypatch):
             )
             assert result["total"] == 1
             assert [item["id"] for item in result["items"]] == [plain["plan_id"]]
+
             owner.perms.media_lib_ids = [library.id]
             result = loads(
                 (
@@ -968,6 +1007,7 @@ def test_list_permissions(monkeypatch):
             )
             assert result["total"] == 2
             assert [item["id"] for item in result["items"]] == [transfer["plan_id"]]
+
             owner.perms.indexer_ids = []
             assert loads((await route(http, DownloadPlanQuery())).body)["total"] == 0
             owner.role = UserRole.ADMIN

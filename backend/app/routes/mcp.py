@@ -31,6 +31,7 @@ async def dispatch(request: Request) -> HTTPResponse:
     """
     if not getattr(request.ctx, "mcp_authenticated", False):
         raise UnauthorizedException
+
     if origin := request.headers.get("origin"):
         try:
             parsed = urlsplit(origin)
@@ -44,8 +45,10 @@ async def dispatch(request: Request) -> HTTPResponse:
             or parsed.fragment
         ):
             raise ForbiddenException
+
     if request.method != "POST":
         return raw(b"", status=405, headers={"Allow": "POST"})
+
     return await handle_http(request)
 
 

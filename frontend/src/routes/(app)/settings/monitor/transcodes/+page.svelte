@@ -7,6 +7,7 @@
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { OptionValue, Resp, TranscodeTask } from '$lib/types';
+  import { pollWhileVisible } from '$lib/utils/timing';
   import { onMount, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
 
@@ -151,11 +152,8 @@
   });
 
   onMount(() => {
-    // refresh every second
-    const refreshInterval = setInterval(() => {
-      search(true);
-    }, 1000);
-    return () => clearInterval(refreshInterval);
+    // refresh every second while the page is visible
+    return pollWhileVisible(() => search(true), 1000);
   });
 </script>
 

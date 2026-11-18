@@ -56,9 +56,11 @@
    */
   function removeSelected(): void {
     if (locked || !selected.length || selected.length > 999) return;
+
     const ids = [...selected];
     const ownerId = $user?.id;
     confirming = true;
+
     confirm({
       icon: icons.delete,
       title: $_('assistant.delete_chats_confirm', ids.length),
