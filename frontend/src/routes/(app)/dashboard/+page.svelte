@@ -22,6 +22,7 @@
     FlowGraph,
     IndexerAuth,
     IndexerConfig,
+    MediaItem,
     ReadingHistory,
     Resource,
     Resp,
@@ -350,6 +351,84 @@
     return `${path}?restore=false&keyword=${encodeURIComponent(s.keyword)}`;
   }
 
+  /**
+   * Normalize an optional history progress percentage into the `0..100` range.
+   *
+   * @param percentage - Raw percentage from the history entry.
+   * @returns Clamped integer percentage, or `null` when unavailable.
+   */
+  function clampPercentage(percentage: number | null | undefined): number | null {
+    if (percentage === null || percentage === undefined || Number.isNaN(percentage)) {
+      return null;
+    }
+    return Math.min(100, Math.max(0, Math.round(percentage)));
+  }
+
+  /**
+   * Open a reading history entry and resume the saved position on primary click.
+   *
+   * @param event - Anchor click event.
+   * @param media - Reading media item to open.
+   */
+  function openRead(event: MouseEvent, media: MediaItem) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0 || !media.lib) {
+      return;
+    }
+    event.preventDefault();
+    goto(`/medialibs/${media.lib.id}/${media.id}`, { state: { resumeReading: true } });
+  }
+
+  /**
+   * Toggle scroll-edge fade classes when CSS scroll-driven animations are unavailable.
+   *
+   * @param node - Scrollable list element.
+   * @param count - Reactive item count used to re-observe the edge items.
+   * @returns Svelte action lifecycle hooks.
+   */
+  function scrollFade(node: HTMLElement, count: number) {
+    if (typeof CSS !== 'undefined' && CSS.supports('animation-timeline', 'scroll()')) {
+      return {};
+    }
+    let observer: IntersectionObserver | null = null;
+    const observe = (itemCount: number) => {
+      observer?.disconnect();
+      node.classList.remove('more-start', 'more-end');
+      if (itemCount <= 1) {
+        return;
+      }
+      const first = node.firstElementChild;
+      const last = node.lastElementChild;
+      if (!first || !last || first === last) {
+        return;
+      }
+      // rootMargin keeps sub-pixel edge items from reporting as clipped
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const { target, intersectionRatio } of entries) {
+            if (target === first) {
+              node.classList.toggle('more-start', intersectionRatio < 1);
+            }
+            if (target === last) {
+              node.classList.toggle('more-end', intersectionRatio < 1);
+            }
+          }
+        },
+        { root: node, threshold: 1, rootMargin: '1px' }
+      );
+      observer.observe(first);
+      observer.observe(last);
+    };
+    observe(count);
+    return {
+      update(nextCount: number) {
+        tick().then(() => observe(nextCount));
+      },
+      destroy() {
+        observer?.disconnect();
+      }
+    };
+  }
+
   // load the user histories
   $effect(() => {
     if (loadWatches || loadSearches) {
@@ -414,29 +493,37 @@
       <!-- recent searches -->
       {#if showSearches}
         <section class="min-w-0">
-          {@render historyHead($_('preference.dashboard.search'), 'search')}
-          <ul class="history-list max-sm:scrollbar-none">
+          {@render historyHead($_('preference.dashboard.search'), searches.length, 'search')}
+          <ul class="history-list max-sm:scrollbar-none" use:scrollFade={searches.length}>
             {#each searches as item (item.id)}
-              <li
-                class="group history-list-item card-surface p-3 pr-10 max-sm:w-[min(20rem,85vw)]"
-                animate:flip={{ duration: 200 }}
-              >
-                <a href={searchHref(item)} class="flex min-w-0 cursor-pointer items-center gap-3" title={item.keyword}>
-                  <span class="history-icon flex-center" aria-hidden="true">
-                    <iconify-icon icon={icons.search} width="1.125rem"></iconify-icon>
+              <li class="history-slot" animate:flip={{ duration: 200 }}>
+                <article class="history-card search-card card-surface">
+                  <span
+                    class="search-tile flex-center icon-tile"
+                    style:--tone={item.graph?.icon ? undefined : 'var(--color-primary)'}
+                    aria-hidden="true"
+                  >
+                    {#if item.graph?.icon}
+                      <Image transparent src={item.graph.icon} width="1.375rem" />
+                    {:else}
+                      <iconify-icon icon={icons.search} width="1.125rem" height="1.125rem" class="history-inline-icon"
+                      ></iconify-icon>
+                    {/if}
                   </span>
-                  <div class="flex min-w-0 flex-col gap-1">
-                    <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
-                      {item.keyword}
-                    </span>
-                    <div class="flex min-w-0 items-center gap-2 text-xs">
-                      <span class="truncate opacity-70">{item.graph?.name ?? $_('nav.websearch.global.search')}</span>
-                      <span class="shrink-0 opacity-50">·</span>
-                      <span class="shrink-0 opacity-40">{$dateTime(item.updated_at)}</span>
+                  <div class="history-body">
+                    <h3 class="history-title">
+                      <a href={searchHref(item)} class="card-link" title={item.keyword}>
+                        <span class="block truncate">{item.keyword}</span>
+                      </a>
+                    </h3>
+                    <div class="history-meta">
+                      <span class="history-meta-label">{item.graph?.name ?? $_('nav.websearch.global.search')}</span>
+                      <span class="history-dot" aria-hidden="true">·</span>
+                      <span class="history-time">{$dateTime(item.updated_at)}</span>
                     </div>
                   </div>
-                </a>
-                {@render historyDelete(item.id, 'search')}
+                  {@render historyDelete(item.id, 'search')}
+                </article>
               </li>
             {/each}
           </ul>
@@ -446,89 +533,152 @@
       <!-- recent watches -->
       {#if showWatches}
         <section class="min-w-0">
-          {@render historyHead($_('preference.dashboard.watch'), 'video')}
-          <ul class="history-list max-sm:scrollbar-none">
+          {@render historyHead($_('preference.dashboard.watch'), latestWatches.length, 'video')}
+          <ul class="history-list max-sm:scrollbar-none" use:scrollFade={latestWatches.length}>
             {#each latestWatches as item (item.id)}
               {@const media = item.media}
               {@const parent = media?.parent}
-              <li
-                class="group history-list-item card-surface p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,85vw)]"
-                animate:flip={{ duration: 200 }}
-              >
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <div
-                  tabindex="0"
-                  role="button"
-                  class="flex min-w-0 cursor-pointer items-center gap-3"
-                  onclick={() => playMedia(item)}
-                  title={parent?.title ?? parent?.name ?? mediaTitle(media)}
-                >
-                  <Image
-                    proxy="store"
-                    src={parent?.poster ?? media?.poster}
-                    icon={media?.lib ? LibType[media.lib.lib_type].icon : undefined}
-                    width="3rem"
-                    ratio="2/3"
-                    class="rounded-md!"
-                  />
-                  <div class="flex min-w-0 flex-col gap-1">
-                    {#if parent}
-                      <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
-                        {parent.title ?? parent.name}
-                      </span>
-                      <span class="truncate text-xs opacity-70">{mediaTitle(media)}</span>
-                      <span class="truncate text-xs opacity-40">{$dateTime(item.updated_at)}</span>
+              {@const libType = media?.lib ? LibType[media.lib.lib_type] : null}
+              {@const badgeLabel = media?.lib?.name || (libType ? $_(libType.label) : '')}
+              {@const poster = parent?.poster ?? media?.poster}
+              {@const watchTitle = parent?.title ?? parent?.name ?? mediaTitle(media)}
+              {@const pct = clampPercentage(item.percentage)}
+              <li class="history-slot" animate:flip={{ duration: 200 }}>
+                <article class="history-card media-card card-surface">
+                  <div class="media-cover" aria-hidden="true">
+                    {#if poster}
+                      <Image
+                        proxy="store"
+                        src={poster}
+                        icon={libType?.icon}
+                        width="100%"
+                        ratio="2/3"
+                        class="cover-image size-full! rounded-none!"
+                      />
                     {:else}
-                      <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
-                        {mediaTitle(media)}
-                      </span>
-                      <span class="text-xs opacity-40">{$dateTime(item.updated_at)}</span>
+                      <div class="cover-fallback">
+                        {#if libType?.icon}
+                          <iconify-icon icon={libType.icon} width="1.5rem" height="1.5rem" class="history-inline-icon"
+                          ></iconify-icon>
+                        {/if}
+                      </div>
                     {/if}
                   </div>
-                </div>
-                {@render historyDelete(item.id, 'video')}
-                {@render historyProgress(item.percentage)}
+                  <div class="media-body">
+                    <div class="history-top">
+                      {#if libType || badgeLabel}
+                        <span class="history-badge">
+                          {#if libType?.icon}
+                            <iconify-icon
+                              icon={libType.icon}
+                              width="0.75rem"
+                              height="0.75rem"
+                              class="history-inline-icon"
+                              aria-hidden="true"
+                            ></iconify-icon>
+                          {/if}
+                          {#if badgeLabel}
+                            <span class="history-badge-text trim-cap">{badgeLabel}</span>
+                          {/if}
+                        </span>
+                      {/if}
+                    </div>
+                    <h3 class="history-title media-title">
+                      <button
+                        type="button"
+                        class="card-link"
+                        onclick={() => playMedia(item)}
+                        aria-label="{$_('media.continue_play')} {watchTitle}"
+                        title={watchTitle}
+                      >
+                        <span class="block truncate">{watchTitle}</span>
+                      </button>
+                    </h3>
+                    <div class="history-meta">
+                      {#if parent}
+                        <span class="history-meta-label" title={mediaTitle(media)}>{mediaTitle(media)}</span>
+                        <span class="history-dot" aria-hidden="true">·</span>
+                      {/if}
+                      <span class="history-time">{$dateTime(item.updated_at)}</span>
+                    </div>
+                    {@render historyProgress(pct, $_('media.continue_play'))}
+                  </div>
+                  {@render historyDelete(item.id, 'video')}
+                </article>
               </li>
             {/each}
           </ul>
         </section>
       {/if}
+
       <!-- recent reads -->
       {#if showReads}
-        <section class="min-w-0">
-          {@render historyHead($_('preference.dashboard.read'), 'reading')}
-          <ul class="history-list max-sm:scrollbar-none">
+        <section class="min-w-0 {historyCount === 3 ? 'lg:col-span-2 xl:col-span-1' : ''}">
+          {@render historyHead($_('preference.dashboard.read'), reads.length, 'reading')}
+          <ul class="history-list max-sm:scrollbar-none" use:scrollFade={reads.length}>
             {#each reads as item (item.id)}
               {@const media = item.media!}
-              <li
-                class="group history-list-item card-surface p-2 pr-10 pb-2.5 max-sm:w-[min(20rem,85vw)]"
-                animate:flip={{ duration: 200 }}
-              >
-                <button
-                  type="button"
-                  class="flex w-full min-w-0 cursor-pointer items-center gap-3 text-left"
-                  onclick={() => goto(`/medialibs/${media.lib!.id}/${media.id}`, { state: { resumeReading: true } })}
-                  aria-label="{$_('media.continue_read')} {mediaTitle(media)}"
-                  title={mediaTitle(media)}
-                >
-                  <Image
-                    proxy="store"
-                    src={media.poster}
-                    icon={media.lib ? LibType[media.lib.lib_type].icon : undefined}
-                    width="3rem"
-                    ratio="2/3"
-                    class="rounded-md!"
-                  />
-                  <div class="flex min-w-0 flex-col gap-1">
-                    <span class="truncate text-sm font-medium transition-colors group-hover:text-primary">
-                      {mediaTitle(media)}
-                    </span>
-                    <span class="truncate text-xs opacity-70">{media.lib?.name}</span>
-                    <span class="truncate text-xs opacity-40">{$dateTime(item.updated_at)}</span>
+              {@const libType = media.lib ? LibType[media.lib.lib_type] : null}
+              {@const badgeLabel = media.lib?.name || (libType ? $_(libType.label) : '')}
+              {@const pct = clampPercentage(item.percentage)}
+              <li class="history-slot" animate:flip={{ duration: 200 }}>
+                <article class="history-card media-card card-surface">
+                  <div class="media-cover read-cover" aria-hidden="true">
+                    {#if media.poster}
+                      <Image
+                        proxy="store"
+                        src={media.poster}
+                        icon={libType?.icon}
+                        width="100%"
+                        ratio="2/3"
+                        class="cover-image size-full! rounded-none!"
+                      />
+                    {:else}
+                      <div class="cover-fallback">
+                        {#if libType?.icon}
+                          <iconify-icon icon={libType.icon} width="1.5rem" height="1.5rem" class="history-inline-icon"
+                          ></iconify-icon>
+                        {/if}
+                      </div>
+                    {/if}
                   </div>
-                </button>
-                {@render historyDelete(item.id, 'reading')}
-                {@render historyProgress(item.percentage)}
+                  <div class="media-body">
+                    <div class="history-top">
+                      {#if libType || badgeLabel}
+                        <span class="history-badge">
+                          {#if libType?.icon}
+                            <iconify-icon
+                              icon={libType.icon}
+                              width="0.75rem"
+                              height="0.75rem"
+                              class="history-inline-icon"
+                              aria-hidden="true"
+                            ></iconify-icon>
+                          {/if}
+                          {#if badgeLabel}
+                            <span class="history-badge-text trim-cap">{badgeLabel}</span>
+                          {/if}
+                        </span>
+                      {/if}
+                    </div>
+                    <h3 class="history-title media-title">
+                      <a
+                        href="/medialibs/{media.lib!.id}/{media.id}"
+                        class="card-link"
+                        onclick={(event) => openRead(event, media)}
+                        aria-label="{$_('media.continue_read')} {mediaTitle(media)}"
+                        title={mediaTitle(media)}
+                      >
+                        <span class="block truncate">{mediaTitle(media)}</span>
+                      </a>
+                    </h3>
+                    <div class="history-meta">
+                      <span class="history-time">{$dateTime(item.updated_at)}</span>
+                    </div>
+                    {@render historyProgress(pct, $_('media.continue_read'))}
+                  </div>
+                  {@render historyDelete(item.id, 'reading')}
+                </article>
               </li>
             {/each}
           </ul>
@@ -663,9 +813,12 @@
   {/if}
 </Container>
 
-{#snippet historyHead(title: string, type: HistoryType)}
-  <div class="mb-1 flex h-8 items-center justify-between gap-2 px-2">
-    <h2 class="section-title"><span class="truncate">{title}</span></h2>
+{#snippet historyHead(title: string, count: number, type: HistoryType)}
+  <div class="mb-1.5 flex h-8 items-center justify-between gap-2 px-2">
+    <h2 class="section-title">
+      <span class="truncate">{title}</span>
+      <span class="history-count" aria-hidden="true"><span class="trim-cap">{count}</span></span>
+    </h2>
     <Button
       icon={icons.clear}
       text={$_('action.clear', title)}
@@ -682,14 +835,39 @@
     aria-label={$_('action.delete')}
     onclick={() => deleteHistory(id, type)}
   >
-    <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
+    <iconify-icon icon={icons.dismiss} width="1rem" height="1rem" class="history-inline-icon" aria-hidden="true"
+    ></iconify-icon>
   </button>
 {/snippet}
 
-{#snippet historyProgress(percentage: number | null | undefined)}
+{#snippet historyProgress(percentage: number | null, resumeLabel: string)}
   {#if percentage !== null}
-    <div class="absolute bottom-0 left-0 h-0.75 w-full bg-base-content/8">
-      <div class="h-full rounded-r-full bg-primary/60" style="width: {percentage}%"></div>
+    <div class="history-progress" class:history-progress-zero={percentage === 0}>
+      <div class="history-progress-track" aria-hidden="true">
+        <div class="history-progress-fill" style:width="{percentage}%"></div>
+      </div>
+      <span class="history-progress-value">
+        {#if percentage === 100}
+          <iconify-icon
+            icon={icons.checkmarkCircle}
+            width="0.75rem"
+            height="0.75rem"
+            class="history-inline-icon"
+            aria-hidden="true"
+          ></iconify-icon>
+        {/if}
+        <span class="trim-cap">{percentage}%</span>
+      </span>
+    </div>
+  {:else}
+    <div class="history-resume" aria-hidden="true">
+      <span class="trim-cap">{resumeLabel}</span>
+      <iconify-icon
+        icon={icons.chevronRight}
+        width="0.75rem"
+        height="0.75rem"
+        class="history-inline-icon history-resume-arrow"
+      ></iconify-icon>
     </div>
   {/if}
 {/snippet}
@@ -731,59 +909,409 @@
     margin-top: 0.25rem;
   }
 
-  .history-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
-    gap: 0.625rem;
-    padding: 0.5rem;
-    overflow-y: auto;
-    max-height: 19rem;
+  .history-count {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: 1.375rem;
+    block-size: 1.25rem;
+    padding-inline: 0.4375rem;
+    border-radius: 9999px;
+    background-color: color-mix(in oklab, var(--color-base-content) 7%, transparent);
+    color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+    font-size: 0.75rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
   }
 
-  .history-list-item {
+  .history-list {
+    --fade-size: 1.5rem;
+    --fade-dir: right;
+    --fade-start-pos: 0;
+    --fade-end-pos: 100%;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 17.5rem), 1fr));
+    align-items: stretch;
+    gap: 0.625rem;
+    padding: 0.375rem 0.5rem 0.625rem;
+    max-block-size: 22.5rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scroll-padding-block: var(--fade-size);
+    mask:
+      linear-gradient(black, black) no-clip subtract,
+      linear-gradient(to bottom, black, transparent) 0 0 / 100% var(--ks-fade-start) no-repeat no-clip,
+      linear-gradient(to bottom, transparent, black) 0 100% / 100% var(--ks-fade-end) no-repeat no-clip;
+    transition:
+      --ks-fade-start 200ms ease,
+      --ks-fade-end 200ms ease;
+
+    &:global(.more-start) {
+      --ks-fade-start: var(--fade-size);
+    }
+
+    &:global(.more-end) {
+      --ks-fade-end: var(--fade-size);
+    }
+  }
+
+  @supports (animation-timeline: scroll()) {
+    .history-list {
+      transition: none;
+      animation:
+        reveal-history-fade-start linear both,
+        hide-history-fade-end linear both;
+      animation-timeline: scroll(self block);
+      animation-range:
+        0 var(--fade-size),
+        calc(100% - var(--fade-size)) 100%;
+    }
+  }
+
+  @keyframes reveal-history-fade-start {
+    to {
+      --ks-fade-start: var(--fade-size);
+    }
+  }
+
+  @keyframes hide-history-fade-end {
+    from {
+      --ks-fade-end: var(--fade-size);
+    }
+  }
+
+  .history-slot {
+    min-inline-size: 0;
+    container-type: inline-size;
+  }
+
+  .history-card {
     position: relative;
-    min-width: 0;
-    min-height: 4.0625rem;
-    overflow: hidden;
-    transition: box-shadow 200ms ease;
+    display: flex;
+    inline-size: 100%;
+    block-size: 100%;
+    min-inline-size: 0;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    overflow: clip;
+    transition:
+      box-shadow 200ms ease,
+      translate 200ms ease,
+      scale 150ms ease,
+      background-color 200ms ease;
+
+    &:has(.card-link:focus-visible) {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
 
     &:hover {
       box-shadow:
-        0 0 0 1px color-mix(in oklab, var(--color-base-content) 7%, transparent),
-        0 6px 16px -8px color-mix(in oklab, var(--color-shade) 19%, transparent);
+        0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
+        0 10px 22px -12px color-mix(in oklab, var(--color-shade) 22%, transparent);
+
+      .history-title {
+        color: var(--color-primary);
+      }
+
+      .history-resume {
+        color: var(--color-primary);
+      }
+
+      .history-resume-arrow {
+        translate: 2px 0;
+      }
 
       .history-delete-button {
         opacity: 0.7;
+      }
+    }
 
-        &:is(:hover, :focus-visible) {
-          opacity: 1;
-        }
+    &:focus-within .history-delete-button {
+      opacity: 0.7;
+    }
+  }
+
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .history-card:hover {
+      translate: 0 -1px;
+
+      :global(.cover-image) {
+        transform: scale(1.05);
       }
     }
   }
 
-  .history-icon {
+  @media (prefers-reduced-motion: no-preference) {
+    .history-card:has(.card-link:active) {
+      scale: 0.99;
+    }
+  }
+
+  .search-card {
+    min-block-size: 4.375rem;
+    padding-block: 0.75rem;
+  }
+
+  .media-card {
+    align-items: stretch;
+    gap: 0.875rem;
+    padding: 0.75rem;
+  }
+
+  .search-tile {
     flex-shrink: 0;
-    width: 2.5rem;
-    height: 2.5rem;
-    border-radius: min(var(--radius-field), 0.625rem);
-    background-color: color-mix(in oklab, var(--color-primary) 10%, transparent);
-    color: color-mix(in oklab, var(--color-primary) 70%, var(--color-base-content));
+    inline-size: 2.5rem;
+    block-size: 2.5rem;
+  }
+
+  .media-cover {
+    position: relative;
+    flex-shrink: 0;
+    align-self: center;
+    inline-size: 3.5rem;
+    aspect-ratio: 2 / 3;
+    overflow: clip;
+    border-radius: min(var(--radius-field), 0.5rem);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
+      0 4px 10px -4px color-mix(in oklab, var(--color-shade) 20%, transparent);
+
+    :global(.cover-image) {
+      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+  }
+
+  .read-cover {
+    /* subtle book-spine lighting sheen along the leading edge */
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      background: linear-gradient(
+        90deg,
+        oklch(100% 0 0 / 18%) 0%,
+        oklch(0% 0 0 / 10%) 7%,
+        oklch(100% 0 0 / 6%) 11%,
+        transparent 18%
+      );
+      box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent) inset;
+    }
+  }
+
+  .cover-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: 100%;
+    block-size: 100%;
+    background: linear-gradient(
+      145deg,
+      color-mix(in oklab, var(--color-base-content) 4%, var(--color-base-100)),
+      color-mix(in oklab, var(--color-base-content) 10%, var(--color-base-100))
+    );
+    color: color-mix(in oklab, var(--color-base-content) 38%, transparent);
+  }
+
+  .history-body,
+  .media-body {
+    display: flex;
+    min-inline-size: 0;
+    flex: 1;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+  }
+
+  .media-body {
+    justify-content: space-between;
+    gap: 0.3125rem;
+  }
+
+  .history-top {
+    display: flex;
+    min-inline-size: 0;
+    align-items: center;
+    gap: 0.375rem;
+    padding-inline-end: 1.75rem;
+  }
+
+  .history-badge {
+    display: inline-flex;
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    block-size: 1.25rem;
+    align-items: center;
+    gap: 0.25rem;
+    padding-inline: 0.4375rem;
+    border-radius: 9999px;
+    background-color: color-mix(in oklab, var(--color-base-content) 6%, transparent);
+    color: color-mix(in oklab, var(--color-base-content) 64%, transparent);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1;
+  }
+
+  .history-badge-text {
+    min-inline-size: 0;
+    overflow-x: clip;
+    overflow-y: visible;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .history-title {
+    min-inline-size: 0;
+    padding-inline-end: 1.75rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1.35;
+    transition: color 200ms ease;
+  }
+
+  .media-title {
+    padding-inline-end: 0;
+  }
+
+  .card-link {
+    display: block;
+    inline-size: 100%;
+    max-inline-size: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+    }
+
+    &:focus-visible {
+      outline: none;
+    }
+  }
+
+  .history-meta {
+    display: flex;
+    min-inline-size: 0;
+    align-items: baseline;
+    gap: 0.375rem;
+    color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+
+  .history-meta-label {
+    min-inline-size: 0;
+    overflow: clip;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .history-dot {
+    flex-shrink: 0;
+    color: color-mix(in oklab, var(--color-base-content) 30%, transparent);
+  }
+
+  .history-time {
+    flex-shrink: 0;
+    color: color-mix(in oklab, var(--color-base-content) 43%, transparent);
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .history-progress {
+    display: flex;
+    min-block-size: 0.75rem;
+    align-items: center;
+    gap: 0.5rem;
+    margin-block-start: 0.125rem;
+  }
+
+  .history-progress-track {
+    flex: 1;
+    block-size: 0.25rem;
+    overflow: clip;
+    border-radius: 9999px;
+    background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+  }
+
+  .history-progress-fill {
+    block-size: 100%;
+    border-radius: 9999px;
+    background-color: color-mix(in oklab, var(--color-primary) 62%, transparent);
+    transition: width 300ms ease;
+  }
+
+  .history-progress-value {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.25rem;
+    color: color-mix(in oklab, var(--color-base-content) 54%, transparent);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+
+  .history-inline-icon {
+    display: block;
+    flex-shrink: 0;
+  }
+
+  .trim-cap {
+    text-box: trim-both cap alphabetic;
+  }
+
+  .history-progress-zero .history-progress-value {
+    color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+  }
+
+  .history-resume {
+    display: inline-flex;
+    min-block-size: 0.75rem;
+    align-items: center;
+    gap: 0.1875rem;
+    margin-block-start: 0.125rem;
+    color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1;
+    transition: color 200ms ease;
+  }
+
+  .history-resume-arrow {
+    transition: translate 200ms ease;
   }
 
   .history-delete-button {
     position: absolute;
-    top: 0;
-    right: 0;
+    inset-block-start: 0;
+    inset-inline-end: 0;
+    z-index: 2;
     display: flex;
-    width: 2rem;
-    height: 2rem;
+    inline-size: 2rem;
+    block-size: 2rem;
     align-items: flex-start;
     justify-content: flex-end;
-    border-bottom-left-radius: 9999px;
+    border-end-start-radius: 9999px;
     background-color: color-mix(in oklab, var(--color-base-content) 5%, transparent);
-    padding-top: 0.25rem;
-    padding-right: 0.25rem;
+    padding-block-start: 0.25rem;
+    padding-inline-end: 0.25rem;
     color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
     cursor: pointer;
     opacity: 0;
@@ -792,28 +1320,67 @@
     &:is(:hover, :focus-visible) {
       background-color: color-mix(in oklab, var(--color-error) 15%, transparent);
       color: var(--color-error);
-      opacity: 1;
+      opacity: 1 !important;
     }
 
     &:focus-visible {
-      outline: none;
+      outline: 2px solid var(--color-error);
+      outline-offset: -2px;
+    }
+  }
+
+  @media (hover: none) {
+    .history-delete-button {
+      opacity: 0.58;
+    }
+  }
+
+  @container (inline-size < 16.5rem) {
+    .media-card {
+      gap: 0.6875rem;
+      padding: 0.625rem;
+    }
+
+    .media-cover {
+      inline-size: 3rem;
     }
   }
 
   @media (width < 40rem) {
-    .history-list-item {
-      flex-shrink: 0;
-      scroll-snap-align: start;
-    }
-
     .history-list {
+      --fade-size: 1.75rem;
       display: flex;
-      max-height: none;
+      max-block-size: none;
       flex-wrap: nowrap;
       overflow-x: auto;
       overflow-y: hidden;
-      scroll-snap-type: x proximity;
-      scroll-padding-inline: 0.5rem;
+      overscroll-behavior-x: contain;
+      scroll-snap-type: x mandatory;
+      scroll-padding-inline: var(--fade-size);
+      scrollbar-gutter: auto;
+      mask:
+        linear-gradient(black, black) no-clip subtract,
+        linear-gradient(to var(--fade-dir), black, transparent) var(--fade-start-pos) 0 / var(--ks-fade-start) 100%
+          no-repeat no-clip,
+        linear-gradient(to var(--fade-dir), transparent, black) var(--fade-end-pos) 0 / var(--ks-fade-end) 100%
+          no-repeat no-clip;
+
+      &:dir(rtl) {
+        --fade-dir: left;
+        --fade-start-pos: 100%;
+        --fade-end-pos: 0;
+      }
+    }
+
+    @supports (animation-timeline: scroll()) {
+      .history-list {
+        animation-timeline: scroll(self inline);
+      }
+    }
+
+    .history-slot {
+      flex: 0 0 min(19.5rem, 84vw);
+      scroll-snap-align: start;
     }
   }
 </style>

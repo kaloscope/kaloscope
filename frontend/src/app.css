@@ -415,6 +415,18 @@
   }
 }
 
+/* registered lengths for animated scroll-edge fades */
+@property --ks-fade-start {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+@property --ks-fade-end {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
 /* section heading with a theme-colored accent */
 @utility section-title {
   @apply flex min-w-0 items-center gap-2 text-lg leading-tight font-semibold;
