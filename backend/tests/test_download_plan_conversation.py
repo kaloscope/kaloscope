@@ -287,6 +287,44 @@ def test_bad_search_input(monkeypatch, filters):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("pagination", "has_more"),
+    [({"total": 160}, True), ({"total": 80}, False), ({"totalPages": 2}, True)],
+    ids=["more", "last", "pages"],
+)
+def test_site_page(monkeypatch, pagination, has_more):
+    execute = engine_fixture(
+        monkeypatch,
+        {"items": [{"id": str(i), "title": f"Lantern {i}"} for i in range(80)]}
+        | pagination,
+    )
+
+    async def run():
+        async with database() as (owner, _):
+            graph, _, _ = await fixture_plan()
+            body = IndexerSearch(workflow_id=graph.id, keyword="Lantern", page_size=20)
+
+            result = await service.DownloadPlanService.search_indexer(body, owner)
+
+            assert result["status"] == "ok", result
+            assert result["received_count"] == 80 and result["returned_count"] == 20
+            assert result["omitted_count"] == 60 and result["truncated"]
+            assert result["has_more"] is has_more
+            assert result["next_page"] == (2 if has_more else None)
+            assert "80 items" in result["page_note"]
+
+            execute.return_value = {
+                "items": [{"id": "same", "title": f"Lantern {i}"} for i in range(2)]
+            }
+            duplicated = await service.DownloadPlanService.search_indexer(body, owner)
+            assert duplicated["status"] == "invalid_output"
+            assert {issue["message"] for issue in duplicated["issues"]} == {
+                "Use unique remote IDs."
+            }
+
+    asyncio.run(run())
+
+
 def test_truncation(monkeypatch):
     execute = engine_fixture(
         monkeypatch,

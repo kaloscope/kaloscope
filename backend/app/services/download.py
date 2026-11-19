@@ -2354,7 +2354,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             Bounded metadata, reported pagination and validation issues. This runs
             the indexer, which may make HTTP requests and write workflow logs, but
             does not create a plan or submit downloads. Failed searches are distinct
-            from valid empty results; omitted fields are not validated samples.
+            from valid empty results; omitted fields are not validated samples. A
+            site page longer than `page_size` is cut to it instead of failing, and
+            pagination follows the site's page length.
 
         Raises:
             ForbiddenException: If the account cannot author plans or read the indexer.
@@ -2420,9 +2422,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "status": "failed",
                 "message": "Search failed; inspect workflow logs. No plan was created.",
             }
-        errors, _ = check_output(
-            "search", output, {"page_num": body.page_num, "page_size": body.page_size}
-        )
+        # sites with a fixed page length ignore `page_size`, as the search page allows
+        errors, _ = check_output("search", output, {"page_num": body.page_num})
         if errors:
             return {
                 **result,
@@ -2432,8 +2433,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             }
         items = output["items"]
         total, pages = output.get("total"), output.get("totalPages")
+        page_length = max(len(items), body.page_size)
         has_more = (
-            body.page_num * body.page_size < total
+            body.page_num * page_length < total
             if total is not None
             else body.page_num < pages
             if pages is not None
@@ -2476,6 +2478,11 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         result["returned_count"] = len(result["items"])
         result["omitted_count"] = len(items) - result["returned_count"]
         result["truncated"] |= result["omitted_count"] > 0
+        if len(items) > body.page_size:
+            result["page_note"] = (
+                f"The indexer returned {len(items)} items for this page; next_page "
+                "continues after all of them."
+            )
         return result
 
     @classmethod
