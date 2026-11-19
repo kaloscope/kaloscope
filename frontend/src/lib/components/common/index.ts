@@ -8,6 +8,7 @@ export { default as ViewSwitcher, type ViewSwitcherProps } from './dataview/View
 export { default as Backdrop, type BackdropProps } from './display/Backdrop.svelte';
 export { default as Badge, type BadgeProps } from './display/Badge.svelte';
 export { default as Empty, type EmptyProps } from './display/Empty.svelte';
+export { default as EntityCard, type EntityCardProps } from './display/EntityCard.svelte';
 export { default as Image, type ImageProps } from './display/Image.svelte';
 export { default as Label, type LabelProps } from './display/Label.svelte';
 export { default as Logo, type LogoProps } from './display/Logo.svelte';

@@ -54,22 +54,22 @@ export const LibType = createEnum({
   movie: {
     label: 'enum.lib_type.movie',
     icon: icons.moviesAndTv,
-    iconColor: null
+    iconColor: 'var(--color-primary)'
   },
   tv_show: {
     label: 'enum.lib_type.tv_show',
     icon: icons.deviceTvOld,
-    iconColor: null
+    iconColor: 'var(--color-info)'
   },
   novel: {
     label: 'enum.lib_type.novel',
     icon: icons.bookText,
-    iconColor: null
+    iconColor: 'var(--color-secondary)'
   },
   comic: {
     label: 'enum.lib_type.comic',
     icon: icons.imageMultiple,
-    iconColor: null
+    iconColor: 'var(--color-accent)'
   }
 });
 
