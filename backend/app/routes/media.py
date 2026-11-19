@@ -1,6 +1,8 @@
 import re
+from mimetypes import guess_file_type
 from pathlib import Path
 
+import aiofiles
 import httpx
 from aiofiles import os as async_os
 from sanic import Blueprint, HTTPResponse, Request, empty, json, redirect
@@ -30,7 +32,7 @@ from app.core.transcode import (
     read_m3u8,
     stop_tasks,
 )
-from app.models.base import IDs, Pageable, Range
+from app.models.base import IDs, Pageable
 from app.models.flow import GraphCategory
 from app.models.media import (
     MediaAssetQuery,
@@ -60,6 +62,7 @@ from app.utils.proxy import (
 )
 
 media = Blueprint("media", url_prefix="/media")
+_STREAM_CHUNK_SIZE = 64 * 1024
 
 
 @media.get("/lib/list")
@@ -560,7 +563,7 @@ async def probe_media_metadata(request: Request, query: MediaResource) -> HTTPRe
 async def get_item_stream(
     request: Request, query: TranscodeQuery
 ) -> HTTPResponse | ResponseStream:
-    """Get media item stream with optional real-time ffmpeg transcoding.
+    """Stream a media file or redirect to its transcoded HLS playlist.
 
     `<video>` sources authenticate with the session cookie, so `authorize` still
     sees the signed-in user.
@@ -570,10 +573,13 @@ async def get_item_stream(
         query: Media item path and transcoding options.
 
     Returns:
-        File response or streamed content.
+        A redirect, the whole file, or the requested byte range.
 
     Raises:
         ForbiddenException: If no accessible media item has the path.
+        KaloscopeException: If the file does not exist.
+        InvalidRangeType: If the requested byte range cannot be parsed.
+        RangeNotSatisfiable: If the requested range is outside the file.
     """
     path = query.path
     await MediaItemService.get_by_path(path, request.ctx.user)
@@ -594,35 +600,55 @@ async def get_item_stream(
         return redirect(f"/_api/media/hls/{media_hash}/{profile}/index.m3u8")
 
     # -------------------- Direct file streaming --------------------
-    stat = await async_os.stat(path)
-    total = stat.st_size
     headers = {"Accept-Ranges": "bytes"}
+    range_header = request.headers.get("Range")
+    if not range_header:
+        return await file_stream(path, headers=headers)
 
-    # get the range header from the request
-    range = request.headers.get("Range")
-    if range:
-        # parse the range header
-        match = re.match(r"bytes=(\d*)-(\d*)", range)
-        if not match:
-            raise InvalidRangeType
+    match = re.match(r"bytes=(\d*)-(\d*)", range_header)
+    if not match or not any(match.groups()):
+        raise InvalidRangeType
 
-        start, end = match.groups()
-        start = int(start) if start else 0
-        end = min(int(end), total - 1) if end else total - 1
+    total = (await async_os.stat(path)).st_size
+    first, last = match.groups()
+    if first:
+        start = int(first)
+        end = min(int(last), total - 1) if last else total - 1
+    else:
+        start = max(0, total - int(last))
+        end = total - 1
+    if start > end:
+        raise RangeNotSatisfiable
 
-        # validate range
-        if start >= total or start > end:
-            raise RangeNotSatisfiable
+    size = end - start + 1
+    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    headers["Content-Length"] = str(size)
 
-        # stream the requested range
-        return await file_stream(
-            path,
-            headers=headers,
-            _range=Range(start=start, end=end, size=end - start + 1, total=total),
-        )
+    async def send_range(stream: ResponseStream) -> None:
+        """Write the selected bytes without reading past the inclusive end.
 
-    # if no range header, return the entire file
-    return await file_stream(path, headers=headers)
+        Args:
+            stream: Response receiving the file data.
+
+        Raises:
+            OSError: If the file ends before the selected range is complete.
+        """
+        async with aiofiles.open(path, "rb") as source:
+            await source.seek(start)
+            remaining = size
+            while remaining:
+                chunk = await source.read(min(remaining, _STREAM_CHUNK_SIZE))
+                if not chunk:
+                    raise OSError("Media file ended before the requested range")
+                await stream.write(chunk)
+                remaining -= len(chunk)
+
+    return ResponseStream(
+        send_range,
+        status=206,
+        headers=headers,
+        content_type=guess_file_type(path)[0] or "text/plain",
+    )
 
 
 @media.get("/hls/<hash>/<profile>/<filename:ext=m3u8|ts>")

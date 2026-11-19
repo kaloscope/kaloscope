@@ -217,14 +217,22 @@ def test_library_scan_status(tmp_path, admin):
 
 
 @pytest.mark.parametrize(
-    ("range_header", "start", "end"),
-    [("bytes=0-999", 0, 9), ("bytes=4-999", 4, 9), ("bytes=4-6", 4, 6)],
+    ("range_header", "expected"),
+    [
+        ("bytes=0-999999", slice(None)),
+        ("bytes=4-999999", slice(4, None)),
+        ("bytes=4-6", slice(4, 7)),
+        ("bytes=0-80000", slice(0, 80001)),
+        ("bytes=80001-160001", slice(80001, 160002)),
+        ("bytes=160002-", slice(160002, None)),
+        ("bytes=-5000", slice(-5000, None)),
+    ],
 )
-def test_video_stream_range(tmp_path, range_header, start, end):
+def test_video_stream_range(tmp_path, range_header, expected):
     async def run():
         async with _database(), _client(_user()) as client:
             path = tmp_path / "video.mp4"
-            data = b"0123456789"
+            data = bytes(range(251)) * 1024
             path.write_bytes(data)
             lib = await MediaLib.create(
                 name="Video", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
@@ -237,9 +245,16 @@ def test_video_stream_range(tmp_path, range_header, start, end):
                 params={"path": str(path)},
                 headers={"Range": range_header},
             )
+
+            start, stop, _ = expected.indices(len(data))
             assert response.status_code == 206
-            assert response.content == data[start : end + 1]
-            assert response.headers["Content-Range"] == f"bytes {start}-{end}/10"
+            assert response.content == data[expected]
+            assert response.headers["Content-Range"] == (
+                f"bytes {start}-{stop - 1}/{len(data)}"
+            )
+            assert int(response.headers["Content-Length"]) == stop - start
+            assert response.headers["Accept-Ranges"] == "bytes"
+            assert response.headers["Content-Type"] == "video/mp4"
 
     asyncio.run(run())
 

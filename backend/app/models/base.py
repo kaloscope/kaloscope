@@ -76,32 +76,6 @@ class Pageable(BaseModel):
         }
 
 
-class Range:
-    """A range object for HTTP Range requests."""
-
-    __slots__ = ("start", "end", "size", "total")
-
-    def __init__(
-        self,
-        start: int | None,
-        end: int | None,
-        size: int | None,
-        total: int | None,
-    ):
-        """Store the byte range used by file responses.
-
-        Args:
-            start: First byte offset, or `None` when unspecified.
-            end: Last byte offset, inclusive, or `None` when unspecified.
-            size: Range length in bytes, or `None` when unknown.
-            total: Full file size in bytes, or `None` when unknown.
-        """
-        self.start = start
-        self.end = end
-        self.size = size
-        self.total = total
-
-
 class TortoiseModel(Model):
     """The base class for all Tortoise ORM models."""
 
