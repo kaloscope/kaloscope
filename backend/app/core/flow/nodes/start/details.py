@@ -31,6 +31,8 @@ class DetailsStartNode(Node):
         darkmode=True,
         default=DETAILS_CONFIG,
     )
+    # boot parameters an ordinary account may send to this entry
+    inputs = frozenset({"id", "chapter_id", "dash_supported", "ua", "page"})
 
     class Handles:
         output = OutputHandle(tag="details")

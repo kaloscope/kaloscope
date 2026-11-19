@@ -555,6 +555,104 @@ def test_execution_access(application):
     asyncio.run(run())
 
 
+# values an ordinary account must not inject into an indexer context
+INJECTED = {
+    "base_url": "http://127.0.0.1:8080",
+    AUTH_KEY: {"token": "forged"},
+    "$media_ingest_event": 7,
+    "$manual": True,
+    "ks_version": "0",
+    "api_key": "forged",
+}
+
+
+@pytest.mark.parametrize(
+    ("body", "kept"),
+    [
+        (
+            {
+                "$start": "search_start",
+                "keyword": "lantern",
+                "page_num": 2,
+                "page_size": 20,
+                "mobile": False,
+                "genre": "drama",
+                "$sort": "new",
+                "id": "r1",
+            },
+            {"$start", "keyword", "page_num", "page_size", "mobile", "genre"},
+        ),
+        (
+            {
+                "$start": "details_start",
+                "id": "r1",
+                "chapter_id": None,
+                "dash_supported": True,
+                "ua": {"ua": "Example"},
+                "page": 3,
+                "keyword": "lantern",
+            },
+            {"$start", "id", "chapter_id", "dash_supported", "ua", "page"},
+        ),
+        (
+            {"$start": "auth_start", "username": "reader", "password": "fixture"},
+            {"$start", "username", "password"},
+        ),
+        ({"$start": "board_start", "page_num": 1}, {"$start"}),
+        ({"$start": "ingest_start", "path": "/etc/passwd"}, {"$start"}),
+        ({"page_num": 1}, set()),
+    ],
+)
+def test_bootparams(application, body, kept):
+    engine = SimpleNamespace(execute=AsyncMock(return_value=[]))
+    application.ctx.flow_engine = engine
+
+    async def run():
+        async with database():
+            reader = await User.create(
+                username="reader", password="unused", role=UserRole.USER
+            )
+            admin = await User.create(
+                username="admin", password="unused", role=UserRole.ADMIN
+            )
+            indexer = await FlowGraph.create(
+                name="Indexer",
+                category=GraphCategory.INDEXER,
+                state=GraphState.PUBLISHED,
+                definition={
+                    "nodes": [
+                        {
+                            "id": "search",
+                            "data": {
+                                "$schema": "search_start",
+                                "config": "filters:\n"
+                                "  genre: {type: select, label: Genre}\n"
+                                "  $sort: {type: text, label: Sort}\n",
+                            },
+                        }
+                    ],
+                    "edges": [],
+                },
+            )
+            await UserPermission.create(
+                user=reader, rel_type=PermType.INDEXER, rel_id=indexer.id
+            )
+            path = f"/_api/flow/graph/{indexer.id}/execute"
+            for user in (reader, admin):
+                await call_route(
+                    routes.execute_graph,
+                    request(user, path, {**body, **INJECTED, "asynchronous": True}),
+                    id=indexer.id,
+                )
+
+    asyncio.run(run())
+
+    restricted, trusted = engine.execute.await_args_list
+    assert restricted.kwargs["bootparams"] == {key: body[key] for key in kept}
+    assert restricted.kwargs["asynchronous"] is True
+    assert trusted.kwargs["bootparams"] == {**body, **INJECTED}
+
+
 def test_template_access():
     async def run():
         async with database():

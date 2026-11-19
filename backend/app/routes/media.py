@@ -51,7 +51,13 @@ from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.utils.extractor import extract_title
-from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
+from app.utils.proxy import (
+    PROXY_RESPONSE_HEADERS,
+    RemoteProxy,
+    proxy_policy,
+    proxy_stream,
+    remote_proxy_request,
+)
 
 media = Blueprint("media", url_prefix="/media")
 
@@ -676,11 +682,16 @@ async def proxy_remote_media(
 
     Returns:
         File response or streamed content.
+
+    Raises:
+        ForbiddenException: If the URL is not absolute HTTP(S), or a non-admin
+            account targets or is redirected to a non-public address.
     """
     url, headers = remote_proxy_request(
         query.url, query.referer, query.ua, request.headers
     )
     client: httpx.AsyncClient = request.app.ctx.httpx
+    public = await proxy_policy(request, url)
 
     async def _stream(stream):
         """Forward remote media bytes and selected response headers.
@@ -689,7 +700,7 @@ async def proxy_remote_media(
             stream: Outgoing response stream.
         """
         try:
-            async with client.stream("GET", url, headers=headers) as r:
+            async with proxy_stream(client, url, headers, public) as r:
                 stream.response.status = r.status_code
                 # copy the response headers to the stream response
                 for header in PROXY_RESPONSE_HEADERS:

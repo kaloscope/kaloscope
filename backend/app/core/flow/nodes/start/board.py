@@ -30,6 +30,8 @@ class BoardStartNode(Node):
         darkmode=True,
         default=BOARD_CONFIG,
     )
+    # boot parameters an ordinary account may send to this entry
+    inputs = frozenset[str]()
 
     class Handles:
         output = OutputHandle(tag="board")

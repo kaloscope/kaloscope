@@ -339,6 +339,9 @@ async def retract_graph(_, id: int) -> HTTPResponse:
 async def execute_graph(request: Request, id: int) -> HTTPResponse:
     """Execute the flow graph.
 
+    An ordinary account's boot parameters keep only `$start` and the inputs that
+    entry declares, so they cannot replace variables that the indexer reads.
+
     Args:
         request: Incoming request with session and application context.
         id: Graph ID.
@@ -355,9 +358,10 @@ async def execute_graph(request: Request, id: int) -> HTTPResponse:
     bootparams: dict = request.json or {}
     user: UserInfo = request.ctx.user
     category = await FlowGraph.filter(id=id).values_list("category", flat=True)
+    graph = None
     if GraphCategory.INDEXER in category:
         # indexer entries, including login, share the indexer read permissions
-        await FlowGraphService.get_accessible(id, user)
+        graph = await FlowGraphService.get_accessible(id, user)
     elif user.role != UserRole.ADMIN:
         raise ForbiddenException
     if user.role != UserRole.ADMIN and bootparams.get("recovery_id") is not None:
@@ -374,6 +378,9 @@ async def execute_graph(request: Request, id: int) -> HTTPResponse:
         "recovery_id": bootparams.pop("recovery_id", None),
         "asynchronous": bootparams.pop("asynchronous", False),
     }
+    if graph is not None and user.role != UserRole.ADMIN:
+        # ordinary accounts never replace variables, `$auth` or reserved keys
+        kwargs["bootparams"] = await FlowGraphService.caller_params(graph, bootparams)
     return json(await engine.execute(**kwargs))
 
 

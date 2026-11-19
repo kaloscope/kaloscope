@@ -342,7 +342,9 @@ def test_ingest_execution_mode(role, category):
             else:
                 assert response.status_code == 200 and response.json() == []
                 assert engine.execute.await_args is not None
-                assert engine.execute.await_args.kwargs["bootparams"][MANUAL_KEY] is (
+                # ordinary indexer callers cannot send reserved `$` keys
+                bootparams = engine.execute.await_args.kwargs["bootparams"]
+                assert bootparams.get(MANUAL_KEY, False) is (
                     category == GraphCategory.INGEST
                 )
 
