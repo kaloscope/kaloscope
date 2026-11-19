@@ -48,6 +48,7 @@ async def count(_) -> HTTPResponse:
 
 
 @user.get("/list")
+@authorize(role=UserRole.ADMIN)
 @validate(query=UserQuery)
 async def list_users(_, query: UserQuery) -> HTTPResponse:
     """List the users.
@@ -255,6 +256,7 @@ async def delete_histories(request: Request, body: IDs) -> HTTPResponse:
 
 
 @user.get("/<user_id:int>/permissions")
+@authorize(role=UserRole.ADMIN)
 async def get_permissions(_, user_id: int) -> HTTPResponse:
     """Get user's permissions.
 

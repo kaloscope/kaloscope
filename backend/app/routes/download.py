@@ -62,11 +62,12 @@ def _publish_task_action(
 
 
 @download.get("/manager/list")
-async def list_downloaders(request: Request) -> HTTPResponse:
-    """List the download clients.
+@authorize(role=UserRole.ADMIN)
+async def list_downloaders(_) -> HTTPResponse:
+    """List the download clients with their configurations and status.
 
     Args:
-        request: Incoming request with session and application context.
+        _: Unused request.
 
     Returns:
         Response containing the requested data.
@@ -75,8 +76,6 @@ async def list_downloaders(request: Request) -> HTTPResponse:
     for downloader in downloaders:
         # check if the downloader is up or down
         driver = load_driver(downloader["config"])
-        if request.ctx.user.role is not UserRole.ADMIN:
-            downloader.pop("config", None)
         if not driver.supports_version:
             continue
         try:
@@ -92,6 +91,7 @@ async def list_downloaders(request: Request) -> HTTPResponse:
 
 
 @download.post("/manager/sort")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def sort_downloaders(_, body: IDs) -> HTTPResponse:
     """Sort the download clients.
@@ -108,6 +108,7 @@ async def sort_downloaders(_, body: IDs) -> HTTPResponse:
 
 
 @download.get("/manager/presets")
+@authorize(role=UserRole.ADMIN)
 async def get_downloader_presets(_) -> HTTPResponse:
     """Get downloader presets.
 
@@ -289,6 +290,7 @@ async def delete_plans(_, body: IDs) -> HTTPResponse:
 
 
 @download.get("/dir/list")
+@authorize(role=UserRole.ADMIN)
 async def list_directories(_) -> HTTPResponse:
     """List the download directories.
 
@@ -313,6 +315,7 @@ async def list_directories(_) -> HTTPResponse:
 
 
 @download.get("/list")
+@authorize(role=UserRole.ADMIN)
 @validate(query=DownloadQuery)
 async def list_tasks(_, query: DownloadQuery) -> HTTPResponse:
     """List the download tasks.
@@ -328,6 +331,7 @@ async def list_tasks(_, query: DownloadQuery) -> HTTPResponse:
 
 
 @download.post("/validate")
+@authorize(role=UserRole.ADMIN)
 async def valid_magnet_link(request: Request) -> HTTPResponse:
     """Validate a download source.
 
@@ -368,6 +372,7 @@ async def add_task(_, body: DownloadAdd) -> HTTPResponse:
 
 
 @download.post("/pause")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def pause_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Pause the download tasks.
@@ -392,6 +397,7 @@ async def pause_tasks(request: Request, body: IDs) -> HTTPResponse:
 
 
 @download.post("/start")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def start_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Start the download tasks.
@@ -416,6 +422,7 @@ async def start_tasks(request: Request, body: IDs) -> HTTPResponse:
 
 
 @download.post("/retry")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def retry_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Retry the download tasks.
@@ -465,6 +472,7 @@ async def delete_tasks(request: Request, body: DownloadDel) -> HTTPResponse:
 
 
 @download.get("/stats")
+@authorize(role=UserRole.ADMIN)
 async def get_stats(request: Request):
     """Get download statistics.
 

@@ -493,36 +493,44 @@ async def generate_nfo(_, body: MediaMetadata, id: int) -> HTTPResponse:
 
 
 @media.get("/title")
+@authorize()
 @validate(query=MediaResource)
-async def get_item_title(_, query: MediaResource) -> HTTPResponse:
-    """Extract a scrape title from the media resource path.
+async def get_item_title(request: Request, query: MediaResource) -> HTTPResponse:
+    """Extract a scrape title from an accessible media item path.
 
     Args:
-        _: Unused request.
-        query: Query filters and options.
+        request: Authenticated request with loaded library permissions.
+        query: Media item path.
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        ForbiddenException: If no accessible media item has the path.
     """
+    await MediaItemService.get_by_path(query.path, request.ctx.user)
     path = Path(query.path)
     return json({"title": extract_title(path.name if path.is_dir() else path.stem)})
 
 
 @media.get("/probe")
+@authorize()
 @validate(query=MediaResource)
-async def probe_media_metadata(_, query: MediaResource) -> HTTPResponse:
+async def probe_media_metadata(request: Request, query: MediaResource) -> HTTPResponse:
     """Probe media duration and embedded chapters via ffprobe.
 
     Args:
-        _: Unused request.
-        query: Query filters and options.
+        request: Authenticated request with loaded library permissions.
+        query: Media item path.
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        ForbiddenException: If no accessible media item has the path.
     """
     path = query.path
-    if not await MediaItem.filter(path=path).exists():
-        raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+    await MediaItemService.get_by_path(path, request.ctx.user)
     metadata = await probe_media(path)
     return json(
         {
@@ -541,22 +549,28 @@ async def probe_media_metadata(_, query: MediaResource) -> HTTPResponse:
 
 
 @media.get("/stream")
+@authorize()
 @validate(query=TranscodeQuery)
 async def get_item_stream(
     request: Request, query: TranscodeQuery
 ) -> HTTPResponse | ResponseStream:
     """Get media item stream with optional real-time ffmpeg transcoding.
 
+    `<video>` sources authenticate with the session cookie, so `authorize` still
+    sees the signed-in user.
+
     Args:
-        request: Incoming request with session and application context.
-        query: Query filters and options.
+        request: Authenticated request with loaded library permissions.
+        query: Media item path and transcoding options.
 
     Returns:
         File response or streamed content.
+
+    Raises:
+        ForbiddenException: If no accessible media item has the path.
     """
     path = query.path
-    if not await MediaItem.filter(path=path).exists():
-        raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+    await MediaItemService.get_by_path(path, request.ctx.user)
     if not await async_os.path.exists(path):
         raise KaloscopeException(ErrorCode.FILE_NOT_EXISTS)
 
@@ -696,6 +710,7 @@ async def proxy_remote_media(
 
 
 @media.get("/transcode/list")
+@authorize(role=UserRole.ADMIN)
 @validate(query=TranscodeTaskQuery)
 async def list_transcodes(_, query: TranscodeTaskQuery) -> HTTPResponse:
     """List in-memory and finished transcode tasks.

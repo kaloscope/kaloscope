@@ -8,7 +8,9 @@ from pydantic import BaseModel
 from sanic import Blueprint, HTTPResponse, json
 from sanic_ext import validate
 
+from app.core.decorators import authorize
 from app.core.exceptions import BadRequestException, ErrorCode, ForbiddenException
+from app.models.user import UserRole
 from app.utils.disk import disk_usage, format_bytes
 
 # the concatenation of the drive and root
@@ -26,6 +28,7 @@ class ListRequest(BaseModel):
 
 
 @filesystem.get("/list")
+@authorize(role=UserRole.ADMIN)
 @validate(query=ListRequest)
 async def list_files(_, query: ListRequest) -> HTTPResponse:
     """List the files in the given directory.
@@ -162,6 +165,7 @@ class StatsRequest(BaseModel):
 
 
 @filesystem.get("/stats")
+@authorize(role=UserRole.ADMIN)
 @validate(query=StatsRequest)
 async def get_stats(_, query: StatsRequest) -> HTTPResponse:
     """Get statistics of the given path.
@@ -202,6 +206,7 @@ class CreateDirRequest(BaseModel):
 
 
 @filesystem.post("/mkdir")
+@authorize(role=UserRole.ADMIN)
 @validate(json=CreateDirRequest)
 async def create_dir(_, body: CreateDirRequest) -> HTTPResponse:
     """Create a child directory in the given parent directory.
@@ -247,6 +252,7 @@ class DeleteDirRequest(BaseModel):
 
 
 @filesystem.post("/rmdir")
+@authorize(role=UserRole.ADMIN)
 @validate(json=DeleteDirRequest)
 async def delete_dir(_, body: DeleteDirRequest) -> HTTPResponse:
     """Delete an empty directory and return its parent directory.

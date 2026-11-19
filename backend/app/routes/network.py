@@ -43,6 +43,7 @@ async def list_rules(_, query: URLRuleQuery) -> HTTPResponse:
 
 
 @network.post("/rule/sort")
+@authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def sort_rules(_, body: IDs) -> HTTPResponse:
     """Sort the URL rules.

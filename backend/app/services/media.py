@@ -3847,6 +3847,40 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         return item
 
     @classmethod
+    def path_filter(cls, user: UserInfo) -> Q:
+        """Build the library filter for path-based media item lookups.
+
+        Args:
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            An empty filter for administrators, otherwise a filter on granted libraries.
+        """
+        if user.role == UserRole.ADMIN:
+            return Q()
+        return Q(lib_id__in=user.perms.media_lib_ids if user.perms else [])
+
+    @classmethod
+    async def get_by_path(cls, path: str, user: UserInfo) -> MediaItem:
+        """Get a media item by its stored path after checking library access.
+
+        Args:
+            path: Media item path supplied by the client.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Returns:
+            The first item with the path in a library the user can access.
+
+        Raises:
+            ForbiddenException: If no accessible item has the path, so that the
+                response does not reveal items in other libraries.
+        """
+        item = await MediaItem.filter(cls.path_filter(user), path=path).first()
+        if item is None:
+            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        return item
+
+    @classmethod
     async def _get_metadata(
         cls, item: MediaItem, user: UserInfo, *, with_cover: bool
     ) -> tuple[MediaItem, MetadataRead, CoverImage | None, str | None]:
