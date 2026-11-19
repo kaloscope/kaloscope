@@ -604,6 +604,36 @@ def test_explicit_workflow_beyond_list(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_incompatible_workflow(monkeypatch, tmp_path, explicit):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            # the show scraper also answers episode requests
+            await FlowGraph.filter(id=env.tv_graph.id).update(
+                definition=tv_scraper(
+                    edges=[
+                        ("start", "output", "show_http"),
+                        ("show_http", "output", "show"),
+                        ("show_http", "output", "episode"),
+                    ]
+                )
+            )
+            change = {"workflow_id": env.tv_graph.id} if explicit else {}
+
+            reviewed = await rescrape_review(env.owner, item_id=env.show.id, **change)
+
+            assert not reviewed["valid"] and reviewed["workflows"] == []
+            (issue,) = reviewed["issues"]
+            assert issue["path"] == "workflow_id"
+            assert issue["message"].startswith(
+                f"Workflow {env.tv_graph.id} cannot write this library's metadata: "
+            )
+            assert "may also reach episode" in issue["message"]
+            assert not env.engine.calls
+
+    asyncio.run(run())
+
+
 def test_candidates(monkeypatch, tmp_path):
     async def run():
         async with media(monkeypatch, tmp_path) as env:

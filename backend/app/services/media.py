@@ -24,6 +24,8 @@ from uuid import uuid4
 import aiofiles
 from filelock import AsyncFileLock, FileLock, Timeout
 from jinja2 import nodes as jinja_nodes
+from jinja2.nodes import EvalContext
+from jinja2.visitor import NodeTransformer
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.log import logger
@@ -1567,6 +1569,85 @@ _ROUTE_EXPRESSIONS = (
 )
 
 
+class _RequestKind(NodeTransformer):
+    """Replace `nfo_type` names with the request kind being routed."""
+
+    def __init__(self, nfo_type: str):
+        """Keep the request kind used for every replaced name.
+
+        Args:
+            nfo_type: Original show or episode request kind.
+        """
+        self.nfo_type = nfo_type
+
+    def visit_Name(self, node: jinja_nodes.Name) -> jinja_nodes.Const:
+        """Turn one `nfo_type` reference into a constant.
+
+        Args:
+            node: Name already checked to be `nfo_type`.
+
+        Returns:
+            Constant holding the request kind.
+        """
+        return jinja_nodes.Const(self.nfo_type, lineno=node.lineno)
+
+
+def _supported(node: jinja_nodes.Node) -> bool:
+    """Check whether an expression depends only on constants and `nfo_type`.
+
+    Args:
+        node: Parsed template or expression.
+
+    Returns:
+        Whether every node is a supported comparison, boolean or literal and every
+        name is `nfo_type`.
+    """
+    return all(
+        isinstance(item, _ROUTE_EXPRESSIONS)
+        and (not isinstance(item, jinja_nodes.Name) or item.name == "nfo_type")
+        for item in (node, *node.find_all(jinja_nodes.Node))
+    )
+
+
+def _operand_value(node: jinja_nodes.Node, nfo_type: str) -> bool | None:
+    """Decide one boolean operand from the request's `nfo_type` alone.
+
+    A known operand can decide `and`/`or` while the other one depends on request
+    values such as `season`, as in `{{ nfo_type == 'episode' and season }}`.
+
+    Args:
+        node: Parsed expression or operand.
+        nfo_type: Original show or episode request kind.
+
+    Returns:
+        The operand's truth, or `None` when it depends on anything else. `or` with
+        an unknown left operand stays unknown, since that operand would be the
+        rendered result.
+    """
+    if isinstance(node, jinja_nodes.Not):
+        value = _operand_value(node.node, nfo_type)
+        return None if value is None else not value
+    if isinstance(node, jinja_nodes.And):
+        left = _operand_value(node.left, nfo_type)
+        right = _operand_value(node.right, nfo_type)
+        if left is False or right is False:
+            return False
+        return True if left is True and right is True else None
+    if isinstance(node, jinja_nodes.Or):
+        left = _operand_value(node.left, nfo_type)
+        if left is None:
+            return None
+        return True if left else _operand_value(node.right, nfo_type)
+    if not _supported(node):
+        return None
+    try:
+        value = _RequestKind(nfo_type).visit(node).as_const(EvalContext(SANDBOX_ENV))
+    except Exception:
+        return None
+    # non-boolean literals render differently from their truth
+    return value if isinstance(value, bool) else None
+
+
 def _condition_branch(expression: Any, nfo_type: str) -> bool | None:
     """Evaluate simple comparisons over the unchanged request's `nfo_type`.
 
@@ -1576,20 +1657,26 @@ def _condition_branch(expression: Any, nfo_type: str) -> bool | None:
 
     Returns:
         Whether `is_true` is taken, or `None` for other inputs, function/filter
-        calls or unsupported expressions. No sample titles or numbers are assumed.
+        calls or unsupported expressions. No sample titles or numbers are assumed,
+        but an `nfo_type` operand can still decide `and`, `or` and `not`.
     """
     if not isinstance(expression, str):
         return None
     try:
         tree = SANDBOX_ENV.parse(expression)
-        for node in tree.find_all(jinja_nodes.Node):
-            if not isinstance(node, _ROUTE_EXPRESSIONS) or (
-                isinstance(node, jinja_nodes.Name) and node.name != "nfo_type"
-            ):
-                return None
-        return condition_value(
-            render(expression, {"nfo_type": nfo_type}, raw=True, sandboxed=True)
-        )
+        if all(_supported(node) for node in tree.body):
+            return condition_value(
+                render(expression, {"nfo_type": nfo_type}, raw=True, sandboxed=True)
+            )
+        body = tree.body
+        # surrounding text would change how the rendered value is read
+        if (
+            len(body) == 1
+            and isinstance(body[0], jinja_nodes.Output)
+            and len(body[0].nodes) == 1
+        ):
+            return _operand_value(body[0].nodes[0], nfo_type)
+        return None
     except Exception:
         return None
 
