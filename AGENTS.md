@@ -16,30 +16,33 @@ shown. Read any more specific `AGENTS.md` before editing a subtree.
 
 ## Architecture and entry points
 
-Kaloscope manages a local media library through visual workflows. The frontend uses Svelte 5, SvelteKit 2, TypeScript,
-Tailwind CSS 4, and DaisyUI 5. The backend uses Sanic, Pydantic 2, Tortoise ORM, and SQLite.
+Kaloscope manages a local media library through visual workflows, with an AI assistant and an MCP server built on the
+same permission-checked tools. The frontend uses Svelte 5, SvelteKit 3, Vite 8, TypeScript 6, Tailwind CSS 4, and
+DaisyUI 5. The backend uses Sanic, Pydantic 2, Tortoise ORM, and SQLite.
 
-The frontend is an SPA: `frontend/src/routes/+layout.ts` disables SSR, and `frontend/svelte.config.js` enables runes and
-static output in `frontend/build` with a `404.html` fallback. Production serves these assets and `/_api` through
+The frontend is an SPA: `frontend/src/routes/+layout.ts` disables SSR. There is no `svelte.config.js`; the SvelteKit
+options (static adapter output in `frontend/build` with a `404.html` fallback, runes, and the PWA service worker) are
+passed to `withPwa(...)` in `frontend/vite.config.ts`. Production serves these assets and `/_api` through
 `backend/app/main.py`. Keep server-side business logic in the Python backend.
 
-| Location                                                                       | Responsibility                                                                                                                   |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `frontend/src/routes`                                                          | Login, setup, and the dashboard, search, library, download, and settings pages under `(app)`                                     |
-| `frontend/src/lib/components`                                                  | Reusable UI in `common`; domain components in `business`                                                                         |
-| `frontend/src/lib/helpers.ts`                                                  | Shared form constraints, loading state, and sort helpers                                                                         |
-| `frontend/src/lib/utils`                                                       | Shared browser, media, text, date, URL, and other focused utilities                                                              |
-| `frontend/src/lib`                                                             | API client in `api.ts`; API types in `types.d.ts`; display enums in `enums.ts`; shared state in `stores.svelte.ts`               |
-| `frontend/src/lib/i18n.ts`, `frontend/src/lib/locales`                         | Translation helpers and the `en-US.json` / `zh-CN.json` catalogs                                                                 |
-| `backend/app/routes`, `backend/app/services`, `backend/app/models`             | HTTP endpoints, reusable domain logic, ORM models, and Pydantic request models                                                   |
-| `backend/app/utils`                                                            | Shared parsing, serialization, filesystem, async, and other utility functions                                                    |
-| `backend/app/main.py`, `backend/app/core/config.py`, `backend/app/config.toml` | Lifecycle, process-shared state, configuration, and workspace paths                                                              |
-| `backend/app/core/flow`, `backend/app/core/renderer.py`                        | Workflow engine, context, nodes, fields, edges, and template rendering                                                           |
-| `backend/app/core/dl`                                                          | Downloader contracts, configuration, synchronization, and the `rpc` / `openlist` drivers                                         |
-| `backend/app/core/media`, `backend/app/core/transcode`                         | Library monitoring, ingestion, metadata, FFmpeg transcoding, and hardware acceleration                                           |
-| `frontend/src/lib/components/common/media`                                     | Video, image, and text viewers                                                                                                   |
-| `backend/static/flow`, `backend/static`                                        | Shared node examples/references; NFO templates in `backend/static/templates`; downloader presets in `backend/static/downloaders` |
-| `backend/app/migrations`, `backend/tests`, `scripts`                           | Database migrations, Pytest tests, and maintenance scripts                                                                       |
+| Location                                                                          | Responsibility                                                                                                                                                           |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `frontend/src/routes`                                                             | `login` and `setup`; `dashboard`, `websearch`, `medialibs`, `downloads` (admin only), and `settings` under `(app)`                                                       |
+| `frontend/src/lib/components`                                                     | Reusable UI in `common` (media viewers in `common/media`); domain components in `business`                                                                               |
+| `frontend/src/lib`                                                                | API client in `api.ts`; API types in `types.d.ts`; display enums in `enums.ts`; shared rune state in `stores.svelte.ts`; form, loading, and sort helpers in `helpers.ts` |
+| `frontend/src/lib/utils`                                                          | Focused browser, media, text, date, number, URL, YAML, and timing utilities                                                                                              |
+| `frontend/src/lib/i18n.ts`, `frontend/src/lib/locales`                            | Translation helpers and the `en-US.json` / `zh-CN.json` catalogs                                                                                                         |
+| `frontend/src/lib/assistant`, `frontend/src/pwa`                                  | Assistant session, streaming, and canvas state; the PWA service worker with its own `tsconfig.json`                                                                      |
+| `backend/app/routes`, `backend/app/services`, `backend/app/models`                | HTTP endpoints, reusable domain logic, ORM models, and Pydantic request models                                                                                           |
+| `backend/app/utils`                                                               | Shared parsing, serialization, filesystem, proxy, async, and other utility functions                                                                                     |
+| `backend/app/main.py`, `backend/app/core/config.py`, `backend/app/config.toml`    | Lifecycle, process-shared state, configuration, assistant budgets, and workspace paths                                                                                   |
+| `backend/app/core/middleware.py`, `backend/app/core/decorators.py`                | Login sessions, MCP token authentication, response wrapping, and the `@authorize` role check                                                                             |
+| `backend/app/core/flow`, `backend/app/core/renderer.py`                           | Workflow engine, context, nodes, fields, edges, validation, and Jinja template rendering                                                                                 |
+| `backend/app/core/ai`, `backend/app/services/assistant*.py`, `backend/app/mcp.py` | AI providers, assistant tools, context history, proposals, and the MCP server at `/_api/mcp`                                                                             |
+| `backend/app/core/dl`                                                             | Downloader contracts, configuration, synchronization, and the `rpc` / `openlist` drivers                                                                                 |
+| `backend/app/core/media`, `backend/app/core/transcode`                            | Library monitoring, ingestion, organization, batches, metadata, FFmpeg transcoding, and hardware acceleration                                                            |
+| `backend/static`                                                                  | Workflow authoring references read by `backend/app/core/flow/reference.py` in `flow`; NFO templates in `templates`; downloader presets in `downloaders`                  |
+| `backend/app/migrations`, `backend/tests`, `scripts`                              | Database migrations, Pytest tests, and maintenance scripts                                                                                                               |
 
 Runtime data lives in the root `workspace` directory locally and `/workspace` in containers. It includes the database,
 secret key, caches, transcoded media, and workflow repositories. Keep runtime data out of source changes and use temporary
@@ -47,9 +50,10 @@ files and databases for tests.
 
 ## Environment and commands
 
-Use Git, Python `>=3.13,<4.0`, Node.js 24+, Poetry 2.4+, and pnpm 11. Check `backend/pyproject.toml`,
-`frontend/package.json`, `frontend/pnpm-workspace.yaml`, `Dockerfile`, and `.pre-commit-config.yaml` for the current
-dependency and tooling configuration. `backend/poetry.toml` keeps the Python environment in `backend/.venv`.
+Use Git, Python `>=3.13,<4.0`, Node.js 24+, Poetry 2.5+, and pnpm 11 (the `Dockerfile` installs `pnpm@latest-11`).
+Check `backend/pyproject.toml`, `frontend/package.json`, `frontend/pnpm-workspace.yaml`, `Dockerfile`, and
+`.pre-commit-config.yaml` for the current dependency and tooling configuration. `backend/poetry.toml` keeps the Python
+environment in `backend/.venv`. Confirm `node --version` first; an older default Node breaks the frontend tooling.
 
 | Directory       | Command                                                 | Purpose                                                    |
 | --------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
@@ -61,7 +65,7 @@ dependency and tooling configuration. `backend/poetry.toml` keeps the Python env
 | `frontend`      | `pnpm run lint`                                         | Check Prettier formatting and ESLint rules                 |
 | `frontend`      | `pnpm run build`                                        | Verify the static frontend and PWA build                   |
 | `backend`       | `poetry run pytest tests/test_core_renderer.py -q`      | Run focused tests; substitute the affected test files      |
-| `backend`       | `poetry run pytest -v`                                  | Run the full backend test suite                            |
+| `backend`       | `poetry run pytest -q`                                  | Run the full backend suite (about 10 minutes)              |
 | `backend`       | `poetry run ruff check .`                               | Check Python lint rules                                    |
 | `backend`       | `poetry run ruff format --check .`                      | Check Python formatting without rewriting files            |
 | Repository root | `git diff --check`                                      | Check the patch for whitespace errors and conflict markers |
@@ -71,7 +75,11 @@ dependency and tooling configuration. `backend/poetry.toml` keeps the Python env
 - Transcoding and embedded subtitles require `ffmpeg` and `ffprobe`. Executable lookup is implemented in
   `backend/app/core/transcode/transcoder.py` and `backend/app/services/subtitle.py`.
 - Update dependency manifests and their matching `frontend/pnpm-lock.yaml` or `backend/poetry.lock` together. Use pnpm or
-  Poetry to regenerate locks; preserve the policies and overrides in `frontend/pnpm-workspace.yaml`.
+  Poetry to regenerate locks; preserve the policies and overrides in `frontend/pnpm-workspace.yaml`. Its
+  `minimumReleaseAge: 1440` rejects package versions published less than 24 hours ago; wait instead of bypassing it.
+- `pnpm run <script>` can install dependencies first when `frontend/node_modules` differs from the lockfile. When only
+  checking code in that state, run the script's binaries from `frontend/node_modules/.bin` directly. Never run pnpm in a
+  copied tree that links to the real `node_modules`.
 - For targeted formatting, run `pnpm exec prettier --write <path>` from `frontend` or
   `poetry run ruff format <path>` from `backend`. Quote shell paths containing `(app)`, `[lib_id]`, or similar characters.
 
@@ -91,10 +99,32 @@ dependency and tooling configuration. `backend/poetry.toml` keeps the Python env
 - Translate user-visible text through `$lib/i18n` and update both locale catalogs. New backend `ErrorCode` values also
   require matching messages in both languages.
 - Add endpoints using Sanic `Blueprint` and `@validate` request models, delegating reusable logic to domain services.
-  `backend/app/utils/importer.py` discovers blueprints. `BaseService` uses class methods and must not be instantiated.
-- Preserve backend authorization: `on_request` handles login, while `@authorize` and domain filters handle roles and
-  resources. Hiding a frontend control is not an authorization check. Authentication exclusions are configured through
-  `auth_exclude_paths` in `backend/app/config.toml`.
+  `backend/app/utils/importer.py` discovers blueprints under `/_api`. `BaseService` uses class methods and must not be
+  instantiated.
+
+### Authorization and untrusted input
+
+- `on_request` in `backend/app/core/middleware.py` requires a login session for every `/_api` path except
+  `auth_exclude_paths` in `backend/app/config.toml`; `/_api/mcp` accepts only MCP access tokens. A route without
+  `@authorize` is therefore open to every signed-in user, including the `user` role.
+- Put `@authorize(role=UserRole.ADMIN)` above `@validate` on any route that changes shared state, executes code or
+  templates, or exposes the server filesystem. Plain `@authorize()` loads `user.perms` for non-admin users; filter indexer
+  and media-library data with it. Hiding a frontend control is not an authorization check.
+- The session cookie also authenticates GET requests, including `<img>` and `<video>` sources and cross-site top-level
+  navigations. Use POST for new state-changing endpoints, and never let GET parameters choose where files are written.
+- Resolve user-supplied paths and require them to stay inside their intended root with `Path.is_relative_to`, as
+  `backend/app/routes/image.py` and `serve_hls_file` in `backend/app/routes/media.py` do. Joining an absolute path or `..`
+  segments onto a root escapes it.
+- The default `render(...)` environment exposes Python internals for workflow execution. Render templates from assistant,
+  MCP, or other non-admin input with `sandboxed=True`.
+- Fetch remote URLs supplied by non-admin callers through `proxy_policy` and `proxy_stream` in
+  `backend/app/utils/proxy.py`, which restrict every hop to public addresses. Boot parameters override workflow variables,
+  so non-admin indexer runs keep only the `inputs` each start node declares (`FlowGraphService.caller_params`); declare
+  new caller inputs there.
+- Treat scraped results, NFO metadata, and media-file tags (titles, uploaders, chapters, track names) as hostile; the
+  login token lives in `localStorage`, so any script injection takes over the session. Svelte text bindings escape them,
+  but xgplayer plugin `render()` templates and option-list `showText`/`text` values are inserted as HTML: wrap such
+  values with `escapeHTML` from `$lib/utils/text`. Avoid new `{@html}` and `innerHTML` uses.
 
 ### Workflows, downloads, and background tasks
 
@@ -112,6 +142,11 @@ dependency and tooling configuration. `backend/poetry.toml` keeps the Python env
   Preserve task cancellation and resource cleanup. Delayed download actions follow the `DLSyncer.publish` path.
 - Reuse application HTTP clients and `backend/app/core/network.py` for ordinary external requests to retain proxy, DNS,
   cookie, and cache behavior. Keep specialized clients within their existing lifecycle management.
+- Assistant tools in `backend/app/core/ai/tools.py` and MCP tools in `backend/app/mcp.py` bypass route decorators. Mark
+  admin-only assistant tools with `admin=True`, check roles inside MCP tools (for example with `_require_admin`), and apply
+  the caller's resource permissions in both. The system prompt and tool schemas consume a fixed context budget:
+  `test_floor_catalog` in `backend/tests/test_core_ai_tools.py` caps fixed text at 24,796 bytes per catalog state.
+  Measure growth with `fixed_size(...)` and offset it instead of loosening assertions.
 
 ### Models and migrations
 
@@ -167,18 +202,24 @@ the task; test functions follow the separate rules below.
   details. Do not add a test framework or require TDD by default.
 - Follow the existing async test pattern: a synchronous test calls `asyncio.run()`. Use `tmp_path`, `monkeypatch`,
   `AsyncMock`, and `httpx.MockTransport` to isolate files and external services. ORM tests use in-memory or temporary SQLite
-  and close connections after use.
+  and close connections after use. Patch `KaloscopeConfig.get_workspace` so tests never touch the real `workspace`.
+- `sanic-testing` is not installed. Route tests build a real `sanic.Request` for a test `Sanic` app registered in a
+  fixture and call the decorated handler directly; see `backend/tests/test_routes_ai.py`. Cover anonymous and `user`
+  roles for authorized routes, and unregister the app afterwards.
+- Earlier test modules can leave Sanic apps registered, so `Sanic.get_app()` without a name may fail only in the full
+  suite. Pass the app name, or patch `Sanic.get_app` in tests whose code path reaches it.
 
 ## Generated files and maintenance
 
 Update generated files through their sources and scripts, not by editing output directly.
 
-| Source or task                                       | Update procedure                                                                                                                                          |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `frontend/src/lib/icons/icons.ts`                    | From `frontend`, run `pnpm run build:icons` to update `frontend/src/lib/icons/$icons.ts`; new icons may require Iconify API access                        |
-| `frontend/src/lib/grammars/jsonc.grammar`            | From `frontend`, run `pnpm run build:jsonc` to regenerate `jsonc-parser.js` and `jsonc-parser.terms.js` in the same directory                             |
-| Frontend source, static assets, or PWA configuration | Use `pnpm run build` when required by the validation matrix; do not maintain `frontend/build` or `frontend/.svelte-kit` as source                         |
-| Release versions                                     | From the repository root, run `python3 scripts/bump_version.py patch` (or `minor` / `major`) to update both project manifests when a release is requested |
+| Source or task                                       | Update procedure                                                                                                                                             |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `frontend/src/lib/icons/icons.ts`                    | From `frontend`, run `pnpm run build:icons` to update `frontend/src/lib/icons/$icons.ts`; new icons may require Iconify API access                           |
+| `frontend/src/lib/grammars/jsonc.grammar`            | From `frontend`, run `pnpm run build:jsonc` to regenerate `jsonc-parser.js` and `jsonc-parser.terms.js` in the same directory                                |
+| Frontend source, static assets, or PWA configuration | Use `pnpm run build` when required by the validation matrix; do not maintain `frontend/build` or `frontend/.svelte-kit` as source                            |
+| Release versions                                     | From the repository root, run `python3 scripts/bump_version.py patch` (or `minor` / `major`) to update both project manifests when a release is requested    |
+| `LICENSES.md` and the README license sections        | From the repository root, run `python3 scripts/scan_packages.py` after dependency changes; it calls `pnpm dlx license-checker` and `poetry run pip-licenses` |
 
 ## Validation and delivery
 
@@ -189,6 +230,7 @@ when new changes, failures, or unresolved concerns justify it.
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | Documentation only                                                  | Verify referenced paths, commands, Markdown formatting, and `git diff --check`; application tests and builds are unnecessary |
 | Backend behavior                                                    | Run focused Pytest tests and both Ruff checks from the command table                                                         |
+| Authorization, file paths, or template rendering                    | Also add regression tests for the rejected roles and escaping inputs, and confirm they fail without the fix                  |
 | Shared backend infrastructure, models, or behavior spanning domains | Also run the full backend test suite                                                                                         |
 | Persistent schema                                                   | Review migration operations and data compatibility; verify affected model and service behavior                               |
 | Frontend code                                                       | Run `pnpm run check` and `pnpm run lint`                                                                                     |

@@ -1,5 +1,6 @@
 import { icons, iconToSVG } from '$lib/icons';
 import { historyBack } from '$lib/stores.svelte';
+import { escapeHTML } from '$lib/utils/text';
 import { Events, Plugin } from 'xgplayer';
 
 const { POSITIONS } = Plugin;
@@ -47,6 +48,19 @@ export default class TopBar extends Plugin {
   get uploader(): string {
     const { uploader, uploadedAt } = this.config;
     return `${uploader ? `UP: ${uploader}` : ''}${uploader && uploadedAt ? ' ・ ' : ''}${uploadedAt}`;
+  }
+
+  /**
+   * Title markup with the marquee copy, escaped because titles come from scraped sites and media files.
+   *
+   * @returns HTML for the title element's children.
+   */
+  private titleHTML(): string {
+    const title = escapeHTML(String(this.title));
+    return `
+            <span class="pr-8!">${title}</span>
+            <span class="pr-8! hidden">${title}</span>
+          `;
   }
 
   /**
@@ -136,10 +150,7 @@ export default class TopBar extends Plugin {
         this.config.title = newTitle;
         const titleEl = this.root?.querySelector('.font-title');
         if (titleEl) {
-          titleEl.innerHTML = `
-            <span class="pr-8!">${this.title}</span>
-            <span class="pr-8! hidden">${this.title}</span>
-          `;
+          titleEl.innerHTML = this.titleHTML();
           this.toggleMarquee();
         }
       }
@@ -165,12 +176,9 @@ export default class TopBar extends Plugin {
       </div>
       <div class="pt-2! flex flex-col truncate">
         <div>
-          <div class="font-title font-medium text-lg text-white/80 w-max">
-            <span class="pr-8!">${this.title}</span>
-            <span class="pr-8! hidden">${this.title}</span>
-          </div>
+          <div class="font-title font-medium text-lg text-white/80 w-max">${this.titleHTML()}</div>
         </div>
-        <div class="text-xs text-white/60">${this.uploader}</div>
+        <div class="text-xs text-white/60">${escapeHTML(this.uploader)}</div>
       </div>
       <div class="pt-2.5! ml-auto! cursor-pointer settings-icon">
         ${iconToSVG(icons.moreVertical, 'size-6 text-white/80')}
