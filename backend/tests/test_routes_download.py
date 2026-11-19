@@ -73,7 +73,7 @@ def test_validate_downloader(monkeypatch):
         args={"downloader_id": "2"},
     )
 
-    handler = cast(Any, download_routes.valid_magnet_link)
+    handler = inspect.unwrap(cast(Any, download_routes.valid_magnet_link))
     response = asyncio.run(handler(request))
 
     assert json.loads(response.body) is True
@@ -85,7 +85,7 @@ def test_validate_magnet(monkeypatch):
     monkeypatch.setattr(download_routes, "standardize_magnet", magnet_probe)
     request = SimpleNamespace(body=b"legacy-magnet", args={})
 
-    handler = cast(Any, download_routes.valid_magnet_link)
+    handler = inspect.unwrap(cast(Any, download_routes.valid_magnet_link))
     response = asyncio.run(handler(request))
 
     assert json.loads(response.body) is True

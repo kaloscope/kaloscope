@@ -1,8 +1,10 @@
-from sanic import Blueprint, HTTPResponse, json
+from sanic import Blueprint, HTTPResponse, Request, json
 from sanic_ext import validate
 
+from app.core.decorators import authorize
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.models.media import MediaResource
+from app.services.media import MediaItemService
 from app.services.subtitle import SubtitleService
 
 subtitle = Blueprint("subtitle", url_prefix="/subtitle")
@@ -16,33 +18,44 @@ class SubtitleContentQuery(MediaResource):
 
 
 @subtitle.post("/tracks")
+@authorize()
 @validate(json=MediaResource)
-async def list_tracks(_, body: MediaResource) -> HTTPResponse:
-    """List subtitle tracks for the given media resource.
+async def list_tracks(request: Request, body: MediaResource) -> HTTPResponse:
+    """List subtitle tracks for an accessible media item.
 
     Args:
-        _: Unused request.
-        body: Media source path.
+        request: Authenticated request with loaded library permissions.
+        body: Media item path.
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        ForbiddenException: If no accessible media item has the path.
     """
+    await MediaItemService.get_by_path(body.path, request.ctx.user)
     subtitles = await SubtitleService.list_tracks(body.path)
     return json([s.model_dump() for s in subtitles])
 
 
 @subtitle.get("/content")
+@authorize()
 @validate(query=SubtitleContentQuery)
-async def load_content(_, query: SubtitleContentQuery) -> HTTPResponse:
-    """Load local subtitle content.
+async def load_content(request: Request, query: SubtitleContentQuery) -> HTTPResponse:
+    """Load subtitle content that belongs to an accessible media item.
 
     Args:
-        _: Unused request.
-        query: Query filters and options.
+        request: Authenticated request with loaded library permissions.
+        query: Subtitle or video path and optional embedded stream index.
 
     Returns:
         Response containing the requested data.
+
+    Raises:
+        ForbiddenException: If no accessible media item owns the subtitle.
+        KaloscopeException: If the subtitle cannot be loaded.
     """
+    await SubtitleService.check_access(query.path, query.stream, request.ctx.user)
     result = await SubtitleService.load_content(query.path, query.stream)
     if not result:
         raise KaloscopeException(ErrorCode.FILE_NOT_EXISTS)

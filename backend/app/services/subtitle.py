@@ -13,8 +13,11 @@ from pydantic import BaseModel
 from sanic.log import logger
 
 from app.core.constants import ENCODING, URL_PREFIX
+from app.core.exceptions import ErrorCode, ForbiddenException
 from app.models.general import GlobalConfig
 from app.models.media import MediaItem
+from app.models.user import UserInfo
+from app.services.media import MediaItemService
 from app.utils.subtitle import ass_to_vtt, srt_to_vtt
 
 
@@ -78,6 +81,44 @@ class SubtitleService:
             media.path,
         )
         return subtitles
+
+    @classmethod
+    async def check_access(
+        cls, subtitle_path: str, stream_index: int | None, user: UserInfo
+    ) -> None:
+        """Require subtitle content to belong to a media item the user can access.
+
+        Embedded tracks name the video itself. External tracks must sit next to an
+        accessible video and share its file stem, matching the tracks returned by
+        `discover_external_tracks`.
+
+        Args:
+            subtitle_path: External subtitle file path or source video file path.
+            stream_index: Embedded subtitle stream index. `None` checks an external
+                subtitle file.
+            user: Authenticated user with permissions loaded by `authorize`.
+
+        Raises:
+            ForbiddenException: If no accessible media item owns the subtitle.
+        """
+        if stream_index is not None:
+            await MediaItemService.get_by_path(subtitle_path, user)
+            return
+
+        # compare paths lexically so that `..` segments never match a library video
+        subtitle = Path(subtitle_path)
+        prefix = str(subtitle.parent / subtitle.name.split(".", 1)[0])
+        candidates = await MediaItem.filter(
+            MediaItemService.path_filter(user), path__startswith=prefix
+        ).values_list("path", flat=True)
+        for candidate in candidates:
+            video = Path(str(candidate))
+            stem = video.stem
+            if video.parent == subtitle.parent and (
+                subtitle.stem == stem or subtitle.stem.startswith(f"{stem}.")
+            ):
+                return
+        raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
 
     @classmethod
     async def load_content(
