@@ -1,6 +1,7 @@
 import { icons, iconToSVG } from '$lib/icons';
 import type { Definition } from '$lib/types';
 import { isTranscodedStream } from '$lib/utils/media';
+import { escapeHTML } from '$lib/utils/text';
 import OptionsIcon from 'xgplayer/es/plugins/common/optionsIcon';
 import './index.css';
 
@@ -118,7 +119,8 @@ export default class Definitions extends OptionsIcon {
     const items = ((this.config.list as Definition[] | undefined) ?? []).map((item, index) => {
       const definitionItem = {
         url: item.url,
-        showText: String(item.definition),
+        // xgplayer inserts `showText` as HTML, and labels come from scraped sites
+        showText: escapeHTML(String(item.definition)),
         selected: item.url === url
       };
       if (definitionItem.selected) {

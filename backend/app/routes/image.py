@@ -21,6 +21,21 @@ from app.utils.proxy import (
 image = Blueprint("image")
 
 
+def _image_path(relative: str) -> Path | None:
+    """Resolve a cached image path inside the workspace `images` directory.
+
+    Args:
+        relative: Path relative to the `images` directory, such as `icons/a.webp`.
+
+    Returns:
+        Resolved image path, or `None` if an absolute path or `..` segments would
+        leave the `images` directory.
+    """
+    root = Path(KaloscopeConfig.get_workspace("images")).resolve()
+    path = (root / relative).resolve()
+    return path if path != root and path.is_relative_to(root) else None
+
+
 @image.get("/<dir>/<filename:ext=jpg|jpeg|png|gif|webp>")
 async def get_image(_, dir: str, filename: str, ext: str) -> HTTPResponse:
     """Get an image from the given path.
@@ -34,9 +49,8 @@ async def get_image(_, dir: str, filename: str, ext: str) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    image_dir = Path(KaloscopeConfig.get_workspace("images")) / dir
-    image_path = image_dir / f"{filename}.{ext}"
-    if not image_path.exists():
+    image_path = _image_path(f"{dir}/{filename}.{ext}")
+    if image_path is None or not image_path.is_file():
         return empty(status=404)
     # set the content type based on the file extension
     mime_type, _ = mimetypes.guess_file_type(image_path)
@@ -69,16 +83,18 @@ async def proxy_remote_image(
             account targets or is redirected to a non-public address.
     """
     url = query.url
-    store = query.store
 
     # check if the URL starts with http:// or https://
     http = url.lower().startswith("http://")
     https = url.lower().startswith("https://")
 
-    # try to load the image from the local workspace
-    local_path = Path(KaloscopeConfig.get_workspace("images"))
-    local_path = local_path / (url[7:] if http else url[8:] if https else url)
-    if local_path.exists() and local_path.is_file() and local_path.stat().st_size > 0:
+    # try to load the image from the local workspace, never from outside it
+    local_path = _image_path(url[7:] if http else url[8:] if https else url)
+    if (
+        local_path is not None
+        and local_path.is_file()
+        and local_path.stat().st_size > 0
+    ):
         # guess the MIME type based on the file extension
         mime_type, _ = mimetypes.guess_file_type(local_path)
         content_type = mime_type or "application/octet-stream"
@@ -96,6 +112,8 @@ async def proxy_remote_image(
     url, headers = remote_proxy_request(url, query.referer, query.ua, request.headers)
     public = await proxy_policy(request, url)
     client: httpx.AsyncClient = request.app.ctx.httpx
+    # an escaping cache path still proxies the image, but never writes it
+    store_path = local_path if query.store else None
 
     async def _stream(stream):
         """Forward remote image bytes and optionally save a local copy.
@@ -108,14 +126,14 @@ async def proxy_remote_image(
                 stream.response.status = r.status_code
                 # copy the response headers to the stream response
                 for header in PROXY_RESPONSE_HEADERS:
-                    if store and header == "content-encoding":
+                    if store_path is not None and header == "content-encoding":
                         continue
                     if value := r.headers.get(header):
                         stream.response.headers[header.title()] = value
                 # iterate over the response content and write it to the stream
-                if store:
-                    local_path.parent.mkdir(parents=True, exist_ok=True)
-                    async with aiofiles.open(local_path, "wb") as f:
+                if store_path is not None:
+                    store_path.parent.mkdir(parents=True, exist_ok=True)
+                    async with aiofiles.open(store_path, "wb") as f:
                         async for chunk in r.aiter_bytes():
                             await stream.write(chunk)
                             await f.write(chunk)

@@ -2,6 +2,7 @@
   import { persisted } from '$lib/stores.svelte';
   import type { Danmaku, DanmakuAnime, Definition, MediaProbe, Resp, Subtitle } from '$lib/types';
   import { isWhite } from '$lib/utils/color';
+  import { escapeHTML } from '$lib/utils/text';
   import type { IconifyIcon } from 'iconify-icon';
   import { v4 as uuidv4 } from 'uuid';
   import type Player from 'xgplayer';
@@ -151,6 +152,8 @@
           _language: subtitle.language,
           // language: subtitle.language,
           label: subtitle.label,
+          // xgplayer inserts `text` (defaulting to `label`) as HTML, and embedded track titles come from media files
+          text: escapeHTML(subtitle.label),
           url: subtitle.url as string,
           isDefault: false
         };

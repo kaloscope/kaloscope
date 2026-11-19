@@ -5,7 +5,9 @@ from pydantic import BaseModel, Field
 from sanic import Blueprint, HTTPResponse, text
 from sanic_ext import validate
 
+from app.core.decorators import authorize
 from app.core.renderer import render
+from app.models.user import UserRole
 from app.utils import json
 
 code = Blueprint("code", url_prefix="/code")
@@ -51,9 +53,13 @@ class EvalRequest(BaseModel):
 
 
 @code.post("/evaluate")
+@authorize(role=UserRole.ADMIN)
 @validate(json=EvalRequest)
 async def evaluate(_, body: EvalRequest) -> HTTPResponse:
     """Evaluate the given Jinja2 template with the provided document.
+
+    The preview uses the unsandboxed workflow environment, so only administrators,
+    who can already author workflow scripts, may call it.
 
     Args:
         _: Unused request.

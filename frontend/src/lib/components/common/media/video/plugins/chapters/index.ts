@@ -1,6 +1,7 @@
 import { icons, iconToSVG } from '$lib/icons';
 import type { Chapter } from '$lib/types';
 import { isTranscodedStream } from '$lib/utils/media';
+import { escapeHTML } from '$lib/utils/text';
 import OptionList from 'xgplayer/es/plugins/common/optionList';
 import OptionsIcon from 'xgplayer/es/plugins/common/optionsIcon';
 import './index.css';
@@ -86,16 +87,17 @@ export default class Chapters extends OptionsIcon {
       url = resolvedUrl;
     }
 
-    const { id, showText } = data.to;
+    // the raw title, since `showText` holds the escaped markup
+    const { id, 'data-title': title } = data.to;
     if (typeof this.config.chapterChange === 'function') {
       // let callers own navigation when a chapter callback is configured
       this.config.chapterChange({
         id: id,
         url: url,
-        title: showText
+        title: title
       });
     } else if (typeof url === 'string') {
-      this.playNext(url, showText);
+      this.playNext(url, title);
     }
   };
 
@@ -147,7 +149,9 @@ export default class Chapters extends OptionsIcon {
       const chapterItem = {
         id: item.id || '',
         url: item.url || '',
-        showText: item.title,
+        // xgplayer inserts `showText` as HTML, and titles come from scraped sites or media files
+        showText: escapeHTML(String(item.title)),
+        'data-title': item.title,
         selected: (item.id || item.url) === (config.chapterId || url || '')
       };
       if (chapterItem.selected) {
