@@ -409,6 +409,44 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             and output_issue(lib.lib_type, graph.definition) is None
         ]
 
+    @staticmethod
+    async def _workflow_issue(lib: MediaLib, workflow_id: int | None) -> str:
+        """Explain why a rescrape has no usable workflow.
+
+        Args:
+            lib: Movie or TV library of the item.
+            workflow_id: Requested workflow, or `None` when no bound workflow is
+                usable; the first bound one is then explained.
+
+        Returns:
+            Guidance naming the workflow and what its published routes lack, when
+            known.
+        """
+        if workflow_id is None:
+            row = (
+                await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=lib.id)
+                .order_by("priority")
+                .select_related("graph")
+                .first()
+            )
+            if row is None:
+                return "No bound workflow; ask the user to choose one of workflows."
+            graph = row.graph
+        else:
+            graph = await FlowGraph.get_or_none(id=workflow_id)
+        if graph is None or graph.category != GraphCategory.INGEST:
+            return (
+                "Choose a published ingest workflow that writes this library's "
+                "metadata."
+            )
+        if graph.state == GraphState.DRAFT:
+            return (
+                f"Workflow {graph.id} is unpublished; publish it or choose one of "
+                "workflows."
+            )
+        issue = output_issue(lib.lib_type, graph.definition)
+        return f"Workflow {graph.id} cannot write this library's metadata: {issue}"
+
     @classmethod
     async def _target(
         cls, change: MediaRescrape, user: UserInfo
@@ -469,20 +507,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 (entry["workflow_id"] for entry in available if entry["bound"]),
                 None,
             )
-            if workflow_id is None:
+            if workflow_id is None or workflow_id not in usable:
                 issues.append(
                     {
                         "path": "workflow_id",
-                        "message": "No bound workflow; ask the user to choose one of "
-                        "workflows.",
-                    }
-                )
-            elif workflow_id not in usable:
-                issues.append(
-                    {
-                        "path": "workflow_id",
-                        "message": "Choose a published ingest workflow that writes "
-                        "this library's metadata.",
+                        "message": await cls._workflow_issue(lib, workflow_id),
                     }
                 )
             else:

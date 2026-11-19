@@ -43,6 +43,7 @@ from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import Permissions, UserRole
 from app.models.workflow_authoring import TemplateValidation
 from app.services import download as service
+from app.services import media as media_service
 from app.services import workflow_authoring as authoring
 from app.services.assistant import AssistantService
 from app.services.assistant_proposals import AssistantProposalService as Proposals
@@ -253,6 +254,61 @@ def test_routes(expression, edges, issue):
         assert result is None
     else:
         assert issue in result, result
+
+
+@pytest.mark.parametrize(
+    ("show_condition", "issue"),
+    [
+        ("{{ nfo_type == 'tvshow' and season is integer }}", None),
+        ("{{ season is integer and not nfo_type == 'episode' }}", None),
+        (
+            "{{ nfo_type == 'tvshow' or season is integer }}",
+            "nfo_type=episode requests may also reach tv_show",
+        ),
+    ],
+    ids=["guarded", "reversed", "either"],
+)
+def test_guarded_routes(show_condition, issue):
+    definition = tv_scraper(
+        "{{ nfo_type == 'episode' and season is integer and episode is integer }}",
+        [
+            ("start", "output", "show_route"),
+            ("start", "output", "route"),
+            ("show_route", "is_true", "show_http"),
+            ("route", "is_true", "episode_http"),
+            ("show_http", "output", "show"),
+            ("episode_http", "output", "episode"),
+        ],
+    )
+    values = {"$schema": "condition", "expression": show_condition}
+    definition["nodes"].append({"id": "show_route", "type": "node", "data": values})
+
+    result = tv_route_issue(definition)
+
+    if issue is None:
+        assert result is None
+    else:
+        assert issue in result, result
+
+
+@pytest.mark.parametrize(
+    ("expression", "branches"),
+    [
+        ("{{ nfo_type }}", (True, True)),
+        ("x{{ nfo_type == 'episode' }}", (True, True)),
+        ("{{ nfo_type == 'episode' and season }}", (False, None)),
+        ("{{ season and nfo_type == 'episode' }}", (False, None)),
+        ("{{ nfo_type == 'episode' or season }}", (None, True)),
+        ("{{ season or nfo_type == 'episode' }}", (None, None)),
+        ("{{ not (nfo_type == 'tvshow' and season) }}", (None, True)),
+        (" {{ nfo_type == 'episode' and season }}", (None, None)),
+    ],
+)
+def test_condition_branch(expression, branches):
+    assert (
+        media_service._condition_branch(expression, "tvshow"),
+        media_service._condition_branch(expression, "episode"),
+    ) == branches
 
 
 @pytest.mark.parametrize(
