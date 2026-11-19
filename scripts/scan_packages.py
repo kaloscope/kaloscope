@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
@@ -141,7 +141,7 @@ def generate_licenses(frontend_data: list[Package], backend_data: list[Package])
         frontend_data: Frontend dependency records.
         backend_data: Backend dependency records.
     """
-    now = datetime.now(timezone.utc).strftime("%B %d, %Y, %I:%M %p %Z")
+    now = datetime.now(UTC).strftime("%B %d, %Y, %I:%M %p %Z")
     lines: list[str] = [
         "# Third-Party License Notices\n",
         f"> This document was automatically generated on {now}\n",

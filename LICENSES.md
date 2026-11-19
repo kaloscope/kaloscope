@@ -1,6 +1,6 @@
 # Third-Party License Notices
 
-> This document was automatically generated on November 18, 2026, 01:03 PM UTC
+> This document was automatically generated on November 19, 2026, 02:59 AM UTC
 
 ## Frontend Dependencies
 
@@ -46,7 +46,7 @@
 | [@vite-pwa/sveltekit](https://github.com/vite-pwa/sveltekit)                               | 2.0.2   | MIT               | Zero-config PWA for SvelteKit                                                                                                      |
 | [@vite-pwa/workbox-swkit](https://github.com/vite-pwa/workbox)                             | 8.0.15  | MIT               | This library contains all the packages from workbox packages for the service worker.                                               |
 | [@vite-pwa/workbox-window](https://github.com/vite-pwa/workbox)                            | 8.0.15  | MIT               | Simplifies communications with Workbox packages running in the service worker                                                      |
-| [@xyflow/svelte](https://github.com/xyflow/xyflow)                                         | 2.0.1   | MIT               | Svelte Flow - A highly customizable Svelte library for building node-based editors, workflow systems, diagrams and more.           |
+| [@xyflow/svelte](https://github.com/xyflow/xyflow)                                         | 2.0.2   | MIT               | Svelte Flow - A highly customizable Svelte library for building node-based editors, workflow systems, diagrams and more.           |
 | [cally](https://github.com/WickyNilliams/cally)                                            | 0.9.2   | MIT               | small, feature-rich calendar components                                                                                            |
 | [codemirror](https://github.com/codemirror/basic-setup)                                    | 6.0.2   | MIT               | Basic configuration for the CodeMirror code editor                                                                                 |
 | [cropperjs](https://github.com/fengyuanchen/cropperjs)                                     | 2.3.1   | MIT               | JavaScript image cropper.                                                                                                          |

@@ -10,7 +10,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/kaloscope/kaloscope?label=Release&color=green&style=flat-square)](https://github.com/kaloscope/kaloscope/releases)
 [![GitHub Stars](https://img.shields.io/github/stars/kaloscope/kaloscope?logo=github&label=Stars&color=yellow&style=flat-square)](https://github.com/kaloscope/kaloscope/stargazers)
 [![Docker Pulls](https://img.shields.io/docker/pulls/kaloscope/kaloscope?logo=docker&label=Docker%20Pulls&color=2496ED&style=flat-square)](https://hub.docker.com/r/kaloscope/kaloscope)
-[![xyflow Version](https://img.shields.io/badge/xyflow-v2.0.1-1A192B?logo=xyflow&style=flat-square)](https://xyflow.com/)
+[![xyflow Version](https://img.shields.io/badge/xyflow-v2.0.2-1A192B?logo=xyflow&style=flat-square)](https://xyflow.com/)
 [![Svelte Version](https://img.shields.io/badge/Svelte-v5.57.3-FF3E00?logo=svelte&style=flat-square)](https://svelte.dev/)
 [![Sanic Version](https://img.shields.io/badge/Sanic-v25.12.1-FF0D68?logo=sanic&style=flat-square)](https://sanic.dev/)
 [![Python Version](https://img.shields.io/badge/Python-3.13+-3776AB?logo=python&style=flat-square)](https://www.python.org/)
