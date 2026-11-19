@@ -23,13 +23,12 @@
   import { createLoading } from '$lib/helpers';
   import { _, locale, number } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores';
+  import { captureScrollPosition, restorePosition, subroutes, user } from '$lib/stores.svelte';
   import type { MediaItem, Page, Resp } from '$lib/types';
   import { describeEmptyReview, reviewItemDeletion } from '$lib/utils/media-batches';
   import { compactRecord } from '$lib/utils/object';
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import { get } from 'svelte/store';
   import { queryParameters, ssp } from 'sveltekit-search-params';
   import type { PageData } from './$types';
 
@@ -209,9 +208,9 @@
           const route = data.menus[0]?.routes[0]?.path;
           if (!route) {
             setTimeout(() => {
-              const _subroutes = { ...(get(subroutes) ?? {}) };
+              const _subroutes = { ...(subroutes.current ?? {}) };
               delete _subroutes['/medialibs'];
-              subroutes.set(compactRecord(_subroutes));
+              subroutes.current = compactRecord(_subroutes);
             });
           } else {
             goto(route, { replaceState: true });
@@ -270,7 +269,7 @@
           maxWidth="36rem"
           class="sm:col-start-2 sm:w-full"
         />
-        {#if $user?.role === 'admin'}
+        {#if user.current?.role === 'admin'}
           <!-- the batch controls sit at the far right on wider screens: count, delete, then cancel -->
           <div class="contents sm:col-start-3 sm:flex sm:items-center sm:gap-2 sm:justify-self-end">
             {#if selecting}
@@ -333,7 +332,7 @@
             />
           {/if}
           <div
-            class:hidden={$user?.role !== 'admin' || selecting}
+            class:hidden={user.current?.role !== 'admin' || selecting}
             class="absolute right-0 bottom-0 z-1 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 {transClass}"
           >
             <MediaActions

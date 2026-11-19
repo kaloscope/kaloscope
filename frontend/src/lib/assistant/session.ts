@@ -3,7 +3,7 @@ import { page } from '$app/state';
 import { api } from '$lib/api';
 import { createLoading } from '$lib/helpers';
 import { _ } from '$lib/i18n';
-import { persisted, token, user } from '$lib/stores';
+import { persisted, token, user, watch } from '$lib/stores.svelte';
 import { normalizePathname } from '$lib/utils/url';
 import type {
   AIModelSelection,
@@ -17,6 +17,7 @@ import type {
   Resp
 } from '$lib/types';
 import { resetMediaBatchWatchers, watchMediaBatch } from '$lib/utils/media-batches';
+import { untrack } from 'svelte';
 import { derived, get, writable } from 'svelte/store';
 import { v4 as uuidv4 } from 'uuid';
 import { captureAssistantContext } from './context';
@@ -242,20 +243,29 @@ function recoverStoppedConversation(conversationId: number, requestId: string): 
   stopTimer = setTimeout(() => void check(), 500);
 }
 
-let accountId = get(user)?.id;
+let sessionToken = token.current;
+let sessionUser = user.current;
+let accountId = sessionUser?.id;
 
-token.subscribe(() => {
-  accountId = undefined;
-  resetSession();
-});
-
-user.subscribe((value) => {
-  // the token already clears a new login; its first profile must not close a just-opened panel
-  if (value) {
-    if (accountId !== undefined && accountId !== value.id) resetSession();
-    accountId = value.id;
+// handle a token change before the user change of the same login
+watch(
+  () => [token.current, user.current] as const,
+  ([currentToken, currentUser]) => {
+    if (currentToken !== sessionToken) {
+      sessionToken = currentToken;
+      accountId = undefined;
+      resetSession();
+    }
+    if (currentUser !== sessionUser) {
+      sessionUser = currentUser;
+      // the token already clears a new login; its first profile must not close a just-opened panel
+      if (currentUser) {
+        if (accountId !== undefined && accountId !== currentUser.id) resetSession();
+        accountId = currentUser.id;
+      }
+    }
   }
-});
+);
 
 /**
  * Show the durable outcome of a canvas edit on its tool call.
@@ -423,7 +433,7 @@ assistant.subscribe(() => {
 function rememberConversation(id: number | null): void {
   const ownerId = accountId;
   if (ownerId === undefined) return;
-  selectedConversations.update((value) => ({ ...value, [ownerId]: id }));
+  selectedConversations.current = untrack(() => ({ ...selectedConversations.current, [ownerId]: id }));
 }
 
 /**
@@ -596,7 +606,7 @@ export async function loadAssistantConversations(older = false, restore = false)
     }));
 
     if (restore && revision === conversationRevision && !get(assistant).conversation && !get(assistant).turns.length) {
-      const selected = accountId === undefined ? undefined : get(selectedConversations)?.[accountId];
+      const selected = accountId === undefined ? undefined : selectedConversations.current?.[accountId];
       const id =
         typeof selected === 'number' && Number.isSafeInteger(selected) && selected > 0 ? selected : data.items[0]?.id;
       if (selected !== null && id !== undefined) await loadAssistantConversation(id);

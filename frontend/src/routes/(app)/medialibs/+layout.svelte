@@ -4,7 +4,7 @@
   import { Drawer, Menu } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import type { MediaLib, Resp } from '$lib/types';
   import { notifyMediaItemsChanged } from '$lib/utils/media-batches';
   import { onMount, type Snippet } from 'svelte';
@@ -93,7 +93,7 @@
       <Menu menus={data.menus}>
         {#snippet action(route)}
           {@const lib = data.libs.find((lib) => route.path === `/medialibs/${lib.id}`)}
-          {#if lib && $user?.role === 'admin'}
+          {#if lib && user.current?.role === 'admin'}
             {@const busy = scanning.includes(lib.id)}
             <button
               type="button"

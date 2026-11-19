@@ -63,13 +63,13 @@
 <script lang="ts">
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { menuIcon, navIcon } from '$lib/stores';
+  import { menuIcon, navIcon } from '$lib/stores.svelte';
   import { fade } from 'svelte/transition';
 
   let { icon, title, description, compact = false, class: _class, children }: EmptyProps = $props();
 
   // an explicit icon, else the page's menu route, else its section
-  let shownIcon = $derived(icon ?? $menuIcon ?? $navIcon ?? icons.collectionsEmpty);
+  let shownIcon = $derived(icon ?? menuIcon.current ?? navIcon.current ?? icons.collectionsEmpty);
 </script>
 
 <div

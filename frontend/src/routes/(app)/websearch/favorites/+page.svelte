@@ -6,7 +6,7 @@
   import { createLoading } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { restorePosition } from '$lib/stores';
+  import { restorePosition } from '$lib/stores.svelte';
   import type { Favorite, Page, Resp } from '$lib/types';
   import { onMount } from 'svelte';
   import { queryParameters, ssp } from 'sveltekit-search-params';

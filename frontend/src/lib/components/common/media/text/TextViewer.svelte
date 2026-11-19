@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import { persisted } from '$lib/stores';
+  import { persisted } from '$lib/stores.svelte';
   import type { Chapter, ContentBlock, ContentRun } from '$lib/types';
   import { groupChapters, matchChapterId } from '$lib/utils/chapter';
 
@@ -136,7 +136,7 @@
 <script lang="ts">
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { freeze, historyBack } from '$lib/stores';
+  import { freeze, historyBack } from '$lib/stores.svelte';
   import { onMount, tick } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
@@ -181,7 +181,7 @@
   // display title, resource title or current chapter title
   let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
   // whether the chapter list is displayed in descending order
-  let sortDesc = $derived($settings?.sortDesc ?? false);
+  let sortDesc = $derived(settings.current?.sortDesc ?? false);
 
   // whether the settings panel is open
   let settingsOpen = $state(false);
@@ -191,7 +191,7 @@
   let controlsVisible = $state(true);
 
   // current theme colors
-  let colors = $derived(THEMES[$settings?.theme ?? 'white']);
+  let colors = $derived(THEMES[settings.current?.theme ?? 'white']);
 
   /**
    * Mount the text viewer with plain text or structured blocks.
@@ -298,8 +298,8 @@
    * Toggle the persisted chapter list display order.
    */
   function toggleSort() {
-    if ($settings !== null) {
-      $settings.sortDesc = !($settings.sortDesc ?? false);
+    if (settings.current !== null) {
+      settings.current.sortDesc = !(settings.current.sortDesc ?? false);
     }
   }
 
@@ -310,12 +310,12 @@
    * @param delta - Amount to add to the current value.
    */
   function clamp(key: keyof typeof SLIDER_CONFIGS, delta: number) {
-    if ($settings === null) {
+    if (settings.current === null) {
       return;
     }
     const { min, max, step } = SLIDER_CONFIGS[key];
-    const value = $settings[key] + delta;
-    $settings[key] = Math.max(min, Math.min(max, Math.round(value / step) * step));
+    const value = settings.current[key] + delta;
+    settings.current[key] = Math.max(min, Math.min(max, Math.round(value / step) * step));
   }
 
   // auto-hide timer for controls
@@ -331,13 +331,13 @@
   }
 
   onMount(() => {
-    freeze.set(true);
+    freeze.current = true;
     showControls();
     return () => {
       mountId++;
       cancelAnimationFrame(progressFrame);
       cancelAnimationFrame(restoreFrame);
-      freeze.set(false);
+      freeze.current = false;
       clearTimeout(hideTimer);
     };
   });
@@ -434,11 +434,11 @@
   {/if}
 
   <!-- reading area -->
-  {#if $settings !== null}
+  {#if settings.current !== null}
     <article
       bind:this={scrollEl}
       class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none transition-colors duration-300 [overflow-anchor:none]"
-      style:padding="2.5rem {$settings.paddingX}rem"
+      style:padding="2.5rem {settings.current.paddingX}rem"
       onscroll={reportProgress}
     >
       {#key mountId}
@@ -446,9 +446,9 @@
           <div
             bind:this={contentEl}
             class="mx-auto max-w-3xl min-w-0 wrap-break-word [word-break:normal] transition-colors duration-300"
-            style:font-family={FONTS[$settings.font]}
-            style:font-size="{$settings.fontSize}px"
-            style:line-height={$settings.lineHeight}
+            style:font-family={FONTS[settings.current.font]}
+            style:font-size="{settings.current.fontSize}px"
+            style:line-height={settings.current.lineHeight}
             style:color={colors.text}
           >
             {#if blocks.length}
@@ -457,7 +457,7 @@
                   <p
                     bind:this={blockEls[index]}
                     class="whitespace-pre-line"
-                    style:margin-bottom="{$settings.paraSpacing}em"
+                    style:margin-bottom="{settings.current.paraSpacing}em"
                   >
                     {@render textRuns(block.runs)}
                   </p>
@@ -467,7 +467,7 @@
                     bind:this={blockEls[index]}
                     class="font-bold whitespace-pre-line"
                     style:font-size={block.level === 1 ? '1.5em' : block.level === 2 ? '1.25em' : '1.125em'}
-                    style:margin-bottom="{$settings.paraSpacing}em"
+                    style:margin-bottom="{settings.current.paraSpacing}em"
                   >
                     {@render textRuns(block.runs)}
                   </svelte:element>
@@ -475,7 +475,7 @@
                   <blockquote
                     bind:this={blockEls[index]}
                     class="border-s-2 border-current/30 ps-4 whitespace-pre-line"
-                    style:margin-bottom="{$settings.paraSpacing}em"
+                    style:margin-bottom="{settings.current.paraSpacing}em"
                   >
                     {@render textRuns(block.runs)}
                   </blockquote>
@@ -485,14 +485,14 @@
                     bind:this={blockEls[index]}
                     start={block.ordered ? (block.start ?? 1) : undefined}
                     class="space-y-1 ps-8 {block.ordered ? 'list-decimal' : 'list-disc'}"
-                    style:margin-bottom="{$settings.paraSpacing}em"
+                    style:margin-bottom="{settings.current.paraSpacing}em"
                   >
                     {#each block.items as runs, i (i)}
                       <li class="whitespace-pre-line">{@render textRuns(runs)}</li>
                     {/each}
                   </svelte:element>
                 {:else if block.type === 'image'}
-                  <figure bind:this={blockEls[index]} style:margin-bottom="{$settings.paraSpacing}em">
+                  <figure bind:this={blockEls[index]} style:margin-bottom="{settings.current.paraSpacing}em">
                     {#if !block.url || failedImages[block.id]}
                       <div
                         role="status"
@@ -534,7 +534,7 @@
                 <p
                   bind:this={blockEls[i]}
                   class="indent-2 whitespace-pre-line"
-                  style:margin-bottom="{$settings.paraSpacing}em"
+                  style:margin-bottom="{settings.current.paraSpacing}em"
                 >
                   {#if para}
                     {para}
@@ -576,16 +576,16 @@
         </button>
       </div>
       <div class="flex-1 space-y-5 p-4">
-        {#if $settings !== null}
+        {#if settings.current !== null}
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.theme')}</span>
             <div class="grid grid-cols-4 gap-2">
               {#each Object.entries(THEMES) as [key, t] (key)}
                 <label
                   class="flex cursor-pointer flex-col items-center gap-1.5 rounded-field py-2 text-xs transition-all
-                  {$settings.theme === key ? 'ring-2 ring-primary' : 'opacity-60 hover:opacity-100'}"
+                  {settings.current.theme === key ? 'ring-2 ring-primary' : 'opacity-60 hover:opacity-100'}"
                 >
-                  <input type="radio" class="hidden" value={key} bind:group={$settings.theme} />
+                  <input type="radio" class="hidden" value={key} bind:group={settings.current.theme} />
                   <span
                     class="size-5 rounded-full border shadow-sm"
                     style:background-color={t.bg}
@@ -602,9 +602,9 @@
               {#each Object.entries(FONTS) as [key] (key)}
                 <label
                   class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
-                  {$settings.font === key ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
+                  {settings.current.font === key ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
                 >
-                  <input type="radio" class="hidden" value={key} bind:group={$settings.font} />
+                  <input type="radio" class="hidden" value={key} bind:group={settings.current.font} />
                   {$_(`media.text.font_options.${key}`)}
                 </label>
               {/each}
@@ -701,14 +701,14 @@
   <div>
     <span class="mb-1.5 flex items-center justify-between text-sm font-semibold opacity-60">
       <span>{$_(SLIDER_CONFIGS[key].i18n)}</span>
-      <span class="tabular-nums">{$settings?.[key]}{unit}</span>
+      <span class="tabular-nums">{settings.current?.[key]}{unit}</span>
     </span>
     <div class="flex items-center gap-2">
       <button class="btn border! font-mono text-sm opacity-50 shadow-none btn-xs" onclick={() => clamp(key, -step)}>
         -
       </button>
-      {#if $settings !== null}
-        <input type="range" class="range flex-1 range-xs" {min} {max} {step} bind:value={$settings[key]} />
+      {#if settings.current !== null}
+        <input type="range" class="range flex-1 range-xs" {min} {max} {step} bind:value={settings.current[key]} />
       {/if}
       <button class="btn border! font-mono text-sm opacity-50 shadow-none btn-xs" onclick={() => clamp(key, step)}>
         +

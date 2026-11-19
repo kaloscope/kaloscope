@@ -2,7 +2,7 @@
   import { pushState } from '$app/navigation';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { freeze } from '$lib/stores';
+  import { freeze } from '$lib/stores.svelte';
   import { sniffer } from '$lib/utils/browser';
   import { italic } from '$lib/utils/text';
   import type { IconifyIcon } from 'iconify-icon';
@@ -77,7 +77,7 @@
     const id = `msg-${uuidv4()}`;
     msg.explicit = false;
     messages.set(id, msg);
-    sniffer.isMobileSafari() && freeze.set(true);
+    if (sniffer.isMobileSafari()) freeze.current = true;
     // wait for the dialog to be added to the DOM
     await tick();
     (document.getElementById(id) as HTMLDialogElement | null)?.showModal();
@@ -103,7 +103,7 @@
         history.back();
       } else {
         messages.delete(id);
-        freeze.set(false);
+        freeze.current = false;
       }
       // call the callback function if provided
       callback?.();
@@ -122,7 +122,7 @@
           msg.oncancel?.();
         }
         messages.delete(id);
-        freeze.set(false);
+        freeze.current = false;
       }
     }
   }}

@@ -14,13 +14,12 @@
   import { GraphState } from '$lib/enums';
   import { _, time } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { mediaQuery } from '$lib/stores';
   import type { AssistantPageContext, FlowGraph, FlowGraphContext, Resp } from '$lib/types';
   import { debounce } from '$lib/utils/timing';
   import { MiniMap, useSvelteFlowStore, type Edge, type Node } from '@xyflow/svelte';
   import { isHTTPError } from 'ky';
   import { getContext, hasContext, onMount, untrack } from 'svelte';
-  import { SvelteMap } from 'svelte/reactivity';
+  import { MediaQuery, SvelteMap } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import { v4 as uuidv4 } from 'uuid';
   import { trackGraphWrite } from '../graphWrites';
@@ -42,7 +41,9 @@
   } = $props();
 
   let graphEditor: GraphEditor | null = $state(null);
-  const minimap = mediaQuery('(min-width: 40rem)');
+  // the minimap follows the screen width until it is toggled
+  const wideScreen = new MediaQuery('(min-width: 40rem)');
+  let minimap = $derived(wideScreen.current);
   const store = useSvelteFlowStore();
   const canvasLocked = $derived(!!graph && $assistantCanvas?.workflowId === graph.id);
 
@@ -68,7 +69,7 @@
    * @param value - Specific value to set, or toggle if not provided.
    */
   function toggleMinimap(value?: boolean) {
-    $minimap = value ?? !$minimap;
+    minimap = value ?? !minimap;
   }
 
   type History = { nodes: Node[]; edges: Edge[] };
@@ -541,7 +542,7 @@
       />
       <Button
         size="xs"
-        icon={$minimap ? icons.map : icons.mapOff}
+        icon={minimap ? icons.map : icons.mapOff}
         text={$_('flow.minimap')}
         onclick={() => toggleMinimap()}
       />
@@ -642,7 +643,7 @@
     </div>
   </div>
 
-  {#if $minimap}
+  {#if minimap}
     <div transition:fade={{ duration: 200 }}>
       <MiniMap pannable={true} zoomable={true} class="overflow-hidden rounded-box border bg-blur-70! shadow-md" />
     </div>

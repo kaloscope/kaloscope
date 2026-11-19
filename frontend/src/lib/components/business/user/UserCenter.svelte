@@ -37,7 +37,7 @@
   import { Dropdown, Image, Modal, confirm } from '$lib/components';
   import { _, duration } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { token, user } from '$lib/stores';
+  import { token, user } from '$lib/stores.svelte';
   import { fullscreen } from '$lib/utils/browser';
   import { onMount, tick } from 'svelte';
 
@@ -52,7 +52,7 @@
   }: UserCenterProps = $props();
 
   // the duration of the user's login time
-  let loginDuration: string = $state($duration($user?.login_at));
+  let loginDuration: string = $state($duration(user.current?.login_at));
 
   // the current application version
   let version: string = $state('');
@@ -98,7 +98,7 @@
    */
   function logout() {
     api.post('auth/logout').then(() => {
-      token.set(null);
+      token.current = null;
       goto('/login');
     });
   }
@@ -151,7 +151,7 @@
   {triggerClass}
   {contentClass}
   onclick={() => {
-    loginDuration = $duration($user?.login_at);
+    loginDuration = $duration(user.current?.login_at);
   }}
 >
   {#snippet trigger()}
@@ -159,17 +159,17 @@
       circle
       shadow
       sluggish
-      src={$user?.avatar}
-      text={$user?.username}
+      src={user.current?.avatar}
+      text={user.current?.username}
       icon={icons.user}
       class="pointer-events-none mx-2"
     />
   {/snippet}
 
   <ul class="menu gap-1">
-    {#if $user}
+    {#if user.current}
       <div class="text-center text-lg font-bold text-surface">
-        {$user.username}
+        {user.current.username}
       </div>
     {/if}
     {#if loginDuration}

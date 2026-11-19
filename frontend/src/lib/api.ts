@@ -1,11 +1,11 @@
 import { goto } from '$app/navigation';
 import { alert } from '$lib/components/common/notice/Alerts.svelte';
 import { UserRole } from '$lib/enums';
-import { token, user } from '$lib/stores';
+import { token, user } from '$lib/stores.svelte';
 import type { BaseResp, Resp, User } from '$lib/types';
 import { sniffer } from '$lib/utils/browser';
 import ky, { isHTTPError } from 'ky';
-import { get } from 'svelte/store';
+import { untrack } from 'svelte';
 
 /**
  * The API client for the application.
@@ -21,7 +21,7 @@ export const api = ky.create({
   hooks: {
     beforeRequest: [
       ({ request }) => {
-        const _token = get(token);
+        const _token = token.current;
         if (_token) {
           // authorization tokens in the form `Token <token>` or `Bearer <token>` are supported
           // see https://sanic.dev/en/guide/basics/headers.html for more details
@@ -52,7 +52,7 @@ export const api = ky.create({
 
           // goto login page if unauthorized
           if (unauthorized) {
-            token.set(null);
+            token.current = null;
             goto('/login');
           }
 
@@ -134,18 +134,18 @@ export function proxyImage(url: string | null, policy: boolean | 'auto' | 'store
 }
 
 /**
- * Get current user's role, retaining fetched details in the shared store.
+ * Get current user's role, retaining fetched details in the shared state.
  *
  * @returns The current user's role.
  */
 export async function getCurrentRole(): Promise<keyof typeof UserRole | null> {
-  const role = get(user)?.role;
+  const role = untrack(() => user.current?.role);
   if (role) {
     return role;
   }
   try {
     const resp = await api.get('auth/current').json<Resp<User>>();
-    user.set(resp.data);
+    user.current = resp.data;
     return resp.data.role ?? null;
   } catch {
     return null;

@@ -7,7 +7,7 @@
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _, headTitle } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { token, user } from '$lib/stores';
+  import { token, user } from '$lib/stores.svelte';
   import type { Resp, Token } from '$lib/types';
   import { onMount } from 'svelte';
 
@@ -33,8 +33,8 @@
       .post('auth/login', { body: data })
       .json<Resp<Token>>()
       .then(({ data }) => {
-        token.set(data.token);
-        user.set(data.user);
+        token.current = data.token;
+        user.current = data.user;
         goto('/');
       })
       .finally(() => {
@@ -44,7 +44,7 @@
 
   onMount(() => {
     // redirect to home page if user is already logged in
-    if ($token) {
+    if (token.current) {
       goto('/');
       return;
     }

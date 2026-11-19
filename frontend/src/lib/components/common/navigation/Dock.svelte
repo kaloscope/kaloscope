@@ -13,7 +13,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { _ } from '$lib/i18n';
-  import { subroutes } from '$lib/stores';
+  import { subroutes } from '$lib/stores.svelte';
 
   let { navs, shadow = true }: DockProps = $props();
   // box shadow class
@@ -32,7 +32,7 @@
           return;
         }
         // navigate to subroute if exists
-        const subroute = $subroutes?.[nav.path];
+        const subroute = subroutes.current?.[nav.path];
         if (subroute) {
           event.preventDefault();
           goto(subroute, { replaceState: true });

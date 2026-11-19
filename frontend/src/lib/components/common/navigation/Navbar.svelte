@@ -24,7 +24,7 @@
   import { Languages, Logo, Notifications, PageHeader, Signposts, Themes, UserCenter } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { historyBack, subroutes } from '$lib/stores';
+  import { historyBack, subroutes } from '$lib/stores.svelte';
 
   let { navs = [], back = false, shadow = false, hidden = false, appMode = false }: NavbarProps = $props();
   let themeSwitcher: Themes;
@@ -111,7 +111,7 @@
                     return;
                   }
                   // navigate to subroute if exists
-                  const subroute = $subroutes?.[nav.path];
+                  const subroute = subroutes.current?.[nav.path];
                   if (subroute) {
                     event.preventDefault();
                     goto(subroute, { replaceState: true });

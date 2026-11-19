@@ -13,7 +13,7 @@
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import type { AssistantConversation } from '$lib/types';
 
   let historyOpen = $state(false);
@@ -58,7 +58,7 @@
     if (locked || !selected.length || selected.length > 999) return;
 
     const ids = [...selected];
-    const ownerId = $user?.id;
+    const ownerId = user.current?.id;
     confirming = true;
 
     confirm({
@@ -70,7 +70,7 @@
         setTimeout(() => (confirming = false), 0);
       },
       onconfirm: async () => {
-        if ($user?.id !== ownerId) {
+        if (user.current?.id !== ownerId) {
           confirming = false;
           return;
         }

@@ -7,7 +7,6 @@
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { mediaQuery } from '$lib/stores';
   import type { FlowGraph, NodeSchema, Resp } from '$lib/types';
   import {
     Background,
@@ -21,7 +20,7 @@
     type Node
   } from '@xyflow/svelte';
   import { onMount, setContext } from 'svelte';
-  import { writable } from 'svelte/store';
+  import { MediaQuery } from 'svelte/reactivity';
   import { fly } from 'svelte/transition';
   import { hideAll } from 'tippy.js';
   import { v7 as uuidv7 } from 'uuid';
@@ -33,7 +32,9 @@
 
   const { id: graphId, readonly }: { id: string; readonly: boolean } = $props();
   const { screenToFlowPosition } = useSvelteFlow();
-  const sidebar = $derived(readonly ? writable<boolean | null>(false) : mediaQuery('(min-width: 40rem)'));
+  // the sidebar follows the screen width until it is toggled, and starts closed in readonly mode
+  const wideScreen = new MediaQuery('(min-width: 40rem)');
+  let sidebar = $derived(readonly ? false : wideScreen.current);
   const loading = createLoading();
   const store = $derived(useSvelteFlowStore());
 
@@ -397,11 +398,11 @@
     <div class="rounded-field {btnClass}" use:tooltip={{ content: $_('flow.readonly'), followCursor: true }}>
       <iconify-icon icon={icons.eye} width="1.5rem"></iconify-icon>
     </div>
-  {:else if !$sidebar && graph}
+  {:else if !sidebar && graph}
     <button
       aria-label={$_('action.open', $_('flow.sidebar'))}
       class="ml-0! cursor-pointer rounded-r-field border-l-0 {btnClass}"
-      onclick={() => ($sidebar = true)}
+      onclick={() => (sidebar = true)}
       use:tooltip={{ content: $_('action.open', $_('flow.sidebar')), followCursor: true }}
       in:fly={{ x: -50 }}
     >
@@ -410,9 +411,9 @@
   {/if}
 {/snippet}
 
-<div class="history-back navbar-shadow drawer bg-base-200 {$sidebar ? 'drawer-open' : ''}">
+<div class="history-back navbar-shadow drawer bg-base-200 {sidebar ? 'drawer-open' : ''}">
   <Overlay loading={$loading} />
-  <input id="drawer" type="checkbox" class="drawer-toggle" bind:checked={$sidebar} />
+  <input id="drawer" type="checkbox" class="drawer-toggle" bind:checked={sidebar} />
   <!--
   By default, the Svelte Flow container has a height of 100%.
   This means that the parent container needs a height to render the flow.
@@ -447,7 +448,7 @@
       <Background gap={10} variant={BackgroundVariant.Dots} patternColor="rgba(128,128,128,0.4)" />
     </SvelteFlow>
   </div>
-  <NodeSchemas bind:nodes {graph} {sidebar} interactive={interactive && !canvasLocked} />
+  <NodeSchemas bind:nodes {graph} bind:sidebar interactive={interactive && !canvasLocked} />
 </div>
 
 <style>

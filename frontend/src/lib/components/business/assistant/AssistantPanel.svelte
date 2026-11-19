@@ -21,7 +21,7 @@
   import { closeDropdowns } from '$lib/components/common/interaction/Dropdown.svelte';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import type { DownloadPlanCreation, DownloadPlanPreview } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { normalizePathname } from '$lib/utils/url';
@@ -535,7 +535,10 @@
                       <AssistantTool
                         {tool}
                         unsaved={turn.context?.page_type === 'workflow_designer' && turn.context.unsaved}
-                        onplan={$user?.role === 'admin' && !$assistant.busy && !$assistantCanvas && !$assistantRestoring
+                        onplan={user.current?.role === 'admin' &&
+                        !$assistant.busy &&
+                        !$assistantCanvas &&
+                        !$assistantRestoring
                           ? () => reviewPlan(tool)
                           : undefined}
                       />
@@ -792,7 +795,7 @@
   </div>
 {/if}
 
-{#if planPreview && $user?.role === 'admin'}
+{#if planPreview && user.current?.role === 'admin'}
   <PlanEditor
     bind:this={planEditor}
     {...planPreview.plan}

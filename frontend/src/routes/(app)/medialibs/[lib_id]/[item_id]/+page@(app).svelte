@@ -28,7 +28,7 @@
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { historyBack, user } from '$lib/stores';
+  import { historyBack, user } from '$lib/stores.svelte';
   import type {
     BaseResp,
     Chapter,
@@ -48,7 +48,6 @@
   import { buildStreamUrl, mediaTitle } from '$lib/utils/media';
   import { isHTTPError } from 'ky';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
-  import { get } from 'svelte/store';
 
   // the loading state
   const loading = createLoading();
@@ -120,7 +119,7 @@
     const key = JSON.stringify(entry);
     lastQueuedProgress = key;
     historyWrite = historyWrite.then(async () => {
-      const current = get(user);
+      const current = user.current;
       if (!owner || current?.id !== owner || current.preferences?.read_records === 0) return;
       try {
         await api.post('user/history/record', {
@@ -134,7 +133,7 @@
         }
       } catch {
         if (lastQueuedProgress === key) lastQueuedProgress = '';
-        if (get(user)?.id !== owner) return;
+        if (user.current?.id !== owner) return;
         alert({ level: 'warning', message: 'reading_progress_save_failed', unique: true });
       }
     });
@@ -148,7 +147,7 @@
    * @returns The current account's work history, or null without a saved record.
    */
   async function getReadingHistory(id: number, signal: AbortSignal): Promise<ReadingHistory | null> {
-    if (!$user || $user.preferences?.read_records === 0 || mediaType === 'video') return null;
+    if (!user.current || user.current.preferences?.read_records === 0 || mediaType === 'video') return null;
     const { data } = await api
       .get('user/history/list', {
         searchParams: { rel_type: mediaType, rel_id: id },
@@ -168,8 +167,8 @@
   async function loadWatchHistory(): Promise<WatchHistory | null> {
     watchController?.abort();
     const item = media;
-    const owner = get(user)?.id;
-    if (!active || !item || mediaType !== 'video' || !owner || get(user)?.preferences?.watch_records === 0) {
+    const owner = user.current?.id;
+    if (!active || !item || mediaType !== 'video' || !owner || user.current?.preferences?.watch_records === 0) {
       watchHistory = null;
       watchLoading = false;
       return null;
@@ -190,7 +189,7 @@
           retry: 0
         })
         .json<Resp<Page<WatchHistory>>>();
-      if (controller.signal.aborted || !active || get(user)?.id !== owner) return null;
+      if (controller.signal.aborted || !active || user.current?.id !== owner) return null;
       watchHistory = data.items[0] ?? null;
       return watchHistory;
     } catch (error) {
@@ -318,7 +317,7 @@
     { refresh = true, resume = false }: { refresh?: boolean; resume?: boolean } = {}
   ): Promise<void> {
     const item = media;
-    const readerUserId = get(user)?.id;
+    const readerUserId = user.current?.id;
     if (!reading || !item) return;
     saveProgress();
     captureProgress = undefined;
@@ -444,7 +443,7 @@
        * @param entry - Current reading position and content version.
        */
       const queueProgress = (entry: ReadingEntry) => {
-        const current = get(user);
+        const current = user.current;
         if (signal.aborted || !reading || current?.id !== readerUserId || current?.preferences?.read_records === 0)
           return;
         pendingProgress = JSON.stringify(entry) === lastQueuedProgress ? undefined : entry;
@@ -858,7 +857,7 @@
     {@const readingMeta = mediaType === 'video' ? null : _media ? _meta : meta}
     {@const playable = !parts.length && !hasTextChapters}
     {@const resumable = mediaType === 'video' ? !!watchHistory?.media : hasReadingHistory}
-    {@const manageable = $user?.role === 'admin' && (mediaType !== 'video' || !media.parent)}
+    {@const manageable = user.current?.role === 'admin' && (mediaType !== 'video' || !media.parent)}
 
     <!-- backdrop band behind the header; a poster stands in only as a color wash -->
     <Backdrop
@@ -1156,7 +1155,7 @@
                 >
                   <iconify-icon icon={icons.play} width="1.25rem"></iconify-icon>
                 </div>
-                {#if $user?.role === 'admin'}
+                {#if user.current?.role === 'admin'}
                   <MediaActions
                     item={part}
                     libraryId={Number(page.params.lib_id)}

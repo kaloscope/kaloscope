@@ -7,18 +7,17 @@
   import { icons } from '$lib/icons';
   import type { FlowGraph, NodeSchema, Resp } from '$lib/types';
   import { useSvelteFlow, type Node } from '@xyflow/svelte';
-  import type { Writable } from 'svelte/store';
   import { v7 as uuidv7 } from 'uuid';
 
   let {
     nodes = $bindable(),
     graph,
-    sidebar,
+    sidebar = $bindable(),
     interactive
   }: {
     nodes: Node[];
     graph: FlowGraph | null;
-    sidebar: Writable<boolean | null>;
+    sidebar: boolean;
     interactive: boolean;
   } = $props();
 
@@ -143,7 +142,7 @@
           class="bg-base-content/5 shadow-sm"
           icon={icons.goStart}
           text={$_('action.close', $_('flow.sidebar'))}
-          onclick={() => ($sidebar = false)}
+          onclick={() => (sidebar = false)}
         />
       </div>
       <div class="menu w-full gap-2 pb-10 select-none">
