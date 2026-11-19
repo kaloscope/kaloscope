@@ -38,6 +38,8 @@ class AuthStartNode(Node):
         darkmode=True,
         default=AUTH_CONFIG,
     )
+    # boot parameters an ordinary account may send to this entry
+    inputs = frozenset({"username", "password"})
 
     class Handles:
         output = OutputHandle(tag="auth")

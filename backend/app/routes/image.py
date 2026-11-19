@@ -10,7 +10,13 @@ from sanic_ext import validate
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import ErrorCode, KaloscopeException
-from app.utils.proxy import PROXY_RESPONSE_HEADERS, RemoteProxy, remote_proxy_request
+from app.utils.proxy import (
+    PROXY_RESPONSE_HEADERS,
+    RemoteProxy,
+    proxy_policy,
+    proxy_stream,
+    remote_proxy_request,
+)
 
 image = Blueprint("image")
 
@@ -57,6 +63,10 @@ async def proxy_remote_image(
 
     Returns:
         File response or streamed content.
+
+    Raises:
+        ForbiddenException: If the URL is not absolute HTTP(S), or a non-admin
+            account targets or is redirected to a non-public address.
     """
     url = query.url
     store = query.store
@@ -84,6 +94,7 @@ async def proxy_remote_image(
         return empty(status=404)
 
     url, headers = remote_proxy_request(url, query.referer, query.ua, request.headers)
+    public = await proxy_policy(request, url)
     client: httpx.AsyncClient = request.app.ctx.httpx
 
     async def _stream(stream):
@@ -93,7 +104,7 @@ async def proxy_remote_image(
             stream: Outgoing response stream.
         """
         try:
-            async with client.stream("GET", url, headers=headers) as r:
+            async with proxy_stream(client, url, headers, public) as r:
                 stream.response.status = r.status_code
                 # copy the response headers to the stream response
                 for header in PROXY_RESPONSE_HEADERS:

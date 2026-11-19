@@ -43,6 +43,9 @@ class SearchStartNode(Node):
         darkmode=True,
         default=SEARCH_CONFIG,
     )
+    # boot parameters an ordinary account may send to this entry; declared filter IDs
+    # are also accepted
+    inputs = frozenset({"page_num", "page_size", "keyword", "mobile"})
 
     class Handles:
         output = OutputHandle(tag="search")

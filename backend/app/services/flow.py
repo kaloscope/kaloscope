@@ -41,6 +41,10 @@ from app.core.flow.diff import changed_paths
 from app.core.flow.engine import EventWrapper, job_expired, job_trigger
 from app.core.flow.fetcher import fetch_origin, save_icon
 from app.core.flow.nodes.base import Node, NodeGroup, NodeSchema, start_config
+from app.core.flow.nodes.start.auth import AuthStartNode
+from app.core.flow.nodes.start.board import BoardStartNode
+from app.core.flow.nodes.start.details import DetailsStartNode
+from app.core.flow.nodes.start.search import SearchStartNode
 from app.core.flow.validation import (
     comparison_document,
     compress_document,
@@ -91,6 +95,12 @@ from app.models.user import (
 from app.services.base import BaseService
 from app.utils import json
 from app.utils.disk import delete_path
+
+# boot parameters that ordinary accounts may send to each indexer entry
+_ENTRY_INPUTS = {
+    NodeSchema.get_type(node.__name__): node.inputs
+    for node in (AuthStartNode, BoardStartNode, SearchStartNode, DetailsStartNode)
+}
 
 
 class FlowRepositoryService(BaseService[FlowRepository], model=FlowRepository):
@@ -357,6 +367,43 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
         ):
             raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
         return graph
+
+    @classmethod
+    async def caller_params(
+        cls, graph: FlowGraph, bootparams: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Keep an ordinary account's indexer entry and the inputs it declares.
+
+        Boot parameters take precedence over global variables, workflow-local
+        variables such as the saved `$auth` login state, and reserved `$` keys in
+        the context that administrator templates read. Dropping every undeclared
+        key keeps an ordinary account from replacing those values, for example a
+        site base URL that a template combines with stored credentials.
+
+        Args:
+            graph: Permission-checked indexer to execute.
+            bootparams: Caller boot parameters without execution options.
+
+        Returns:
+            `$start` with only the inputs that entry declares; search also accepts
+            the filter IDs in its published configuration. Without a string
+            `$start`, no parameters are kept.
+        """
+        entry = bootparams.get(START_KEY)
+        if not isinstance(entry, str):
+            return {}
+        allowed = set(_ENTRY_INPUTS.get(entry, ()))
+        if entry == "search_start":
+            search = (await start_config(graph, "search"))["search"] or {}
+            filters = search.get("filters") if isinstance(search, dict) else None
+            if isinstance(filters, dict):
+                allowed.update(
+                    key
+                    for key in filters
+                    if isinstance(key, str) and not key.startswith("$")
+                )
+        kept = {key: value for key, value in bootparams.items() if key in allowed}
+        return {START_KEY: entry, **kept}
 
     @classmethod
     async def get_details(cls, id: int, user: UserInfo) -> dict[str, Any]:
