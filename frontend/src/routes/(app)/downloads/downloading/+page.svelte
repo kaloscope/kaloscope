@@ -10,7 +10,7 @@
     Cell,
     Checkbox,
     DataView,
-    DownloadDelConfirm,
+    DownloadRemove,
     DownloaderEmpty,
     downloadPrompt,
     Empty,
@@ -42,7 +42,7 @@
   let downloaders: Downloader[] = $state([]);
   // whether the downloader list has loaded without any entry
   let noDownloader: boolean = $state(false);
-  let deleteConfirm: DownloadDelConfirm;
+  let removeConfirm: DownloadRemove;
   let headerCheckbox: Checkbox;
   let navigatorClipboard = $state(false);
 
@@ -131,7 +131,7 @@
       alert({ message: 'select_delete_items' });
       return;
     }
-    deleteConfirm.showModal(ids);
+    removeConfirm.showModal(ids);
   }
 
   /**
@@ -346,7 +346,7 @@
           condition: task.capabilities.includes('delete'),
           icon: icons.delete,
           text: $_('action.delete', $_('entity.task')),
-          onclick: () => deleteConfirm.showModal(task.id)
+          onclick: () => removeConfirm.showModal(task.id)
         }
       ]}
     />
@@ -356,4 +356,4 @@
   {/snippet}
 </DataView>
 
-<DownloadDelConfirm bind:this={deleteConfirm} onconfirm={() => search(pagination.current)} />
+<DownloadRemove bind:this={removeConfirm} onconfirm={() => search(pagination.current)} />

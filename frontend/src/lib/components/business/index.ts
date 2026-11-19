@@ -3,10 +3,10 @@ export { default as ProviderIcon } from './ai/ProviderIcon.svelte';
 
 export { default as AssistantPanel } from './assistant/AssistantPanel.svelte';
 
-export { default as DownloadDelConfirm } from './download/DownloadDelConfirm.svelte';
 export { default as DownloaderEditor } from './download/DownloaderEditor.svelte';
 export { default as DownloaderEmpty } from './download/DownloaderEmpty.svelte';
 export { downloadPrompt, default as DownloadPrompt } from './download/DownloadPrompt.svelte';
+export { default as DownloadRemove } from './download/DownloadRemove.svelte';
 export { default as PlanEditor } from './download/PlanEditor.svelte';
 
 export { default as FileTree } from './filesystem/FileTree.svelte';
