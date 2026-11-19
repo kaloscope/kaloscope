@@ -27,6 +27,7 @@
   import type { MediaItem, Page, Resp } from '$lib/types';
   import { describeEmptyReview, reviewItemDeletion } from '$lib/utils/media-batches';
   import { compactRecord } from '$lib/utils/object';
+  import { debounce } from '$lib/utils/timing';
   import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { queryParameters, ssp } from 'sveltekit-search-params';
@@ -56,6 +57,8 @@
   // the items to display
   let items: MediaItem[] = $state([]);
   let backdrop: string | null = $derived(items.length > 0 ? (items[0].backdrop ?? items[0].poster) : null);
+  // wait for the pointer to settle so sweeping across posters only switches to the last one hovered
+  const hoverBackdrop = debounce((item: MediaItem) => (backdrop = item.backdrop ?? item.poster ?? backdrop), 150);
   let pagination: Omit<PaginatorProps, 'current' | 'size'> = $state({ onchange: () => search(true) });
 
   // the loading states
@@ -313,11 +316,7 @@
         <!-- items open as links, or toggle their selection while items are being selected -->
         {@const href = selecting ? undefined : `${page.url.pathname}/${item.id}`}
         {@const picked = selected.includes(item.id)}
-        <div
-          role="presentation"
-          class="lib-cover group @container relative"
-          onmouseenter={() => (backdrop = item.backdrop ?? item.poster ?? backdrop)}
-        >
+        <div role="presentation" class="lib-cover group @container relative" onmouseenter={() => hoverBackdrop(item)}>
           <Rating
             score={item.rating}
             class="pointer-events-none absolute top-1.5 left-1.5 z-1 text-[clamp(0.875rem,8cqw,1rem)]"
