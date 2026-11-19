@@ -1,4 +1,4 @@
-import { token } from '$lib/stores';
+import { token, watch } from '$lib/stores.svelte';
 import type { FlowGraph } from '$lib/types';
 
 export type GraphUpdate = Partial<FlowGraph> & Pick<FlowGraph, 'id'>;
@@ -6,12 +6,18 @@ export type GraphUpdate = Partial<FlowGraph> & Pick<FlowGraph, 'id'>;
 const pendingWrites = new Map<number, Promise<void>>();
 let updateList: ((updated: GraphUpdate) => void) | undefined;
 let session = new AbortController();
+let sessionToken = token.current;
 
-token.subscribe(() => {
-  session.abort();
-  session = new AbortController();
-  pendingWrites.clear();
-});
+watch(
+  () => token.current,
+  (value) => {
+    if (value === sessionToken) return;
+    sessionToken = value;
+    session.abort();
+    session = new AbortController();
+    pendingWrites.clear();
+  }
+);
 
 /**
  * Connect graph writes to the current list and its retained navigation state.

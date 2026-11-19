@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onNavigate } from '$app/navigation';
   import { Alerts, DownloadPrompt, Messages } from '$lib/components';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import { sniffer } from '$lib/utils/browser';
   import { throttle } from '$lib/utils/timing';
   import type { Snippet } from 'svelte';
@@ -34,7 +34,7 @@
 
   onNavigate((navigation) => {
     // vibrate if user preference is enabled
-    $user?.preferences?.vibration && vibrate();
+    user.current?.preferences?.vibration && vibrate();
     // start view transition if supported, not on Safari, and the page is being shown
     if (!document.startViewTransition || sniffer.isSafari() || document.visibilityState !== 'visible') {
       return;

@@ -4,7 +4,7 @@
   import { api } from '$lib/api';
   import { AssistantPanel, Dock, Navbar } from '$lib/components';
   import { headTitle } from '$lib/i18n';
-  import { freeze, histories, navIcon, positions, subroutes, urlparams, user } from '$lib/stores';
+  import { freeze, histories, navIcon, positions, subroutes, urlparams, user } from '$lib/stores.svelte';
   import type { Resp, User } from '$lib/types';
   import { compactRecord } from '$lib/utils/object';
   import { normalizePathname } from '$lib/utils/url';
@@ -21,7 +21,7 @@
   // the section icon for empty placeholders on pages without a menu route of their own
   $effect(() => {
     const icon = mainRoute?.icon;
-    navIcon.set(icon && typeof icon !== 'string' ? icon : null);
+    navIcon.current = icon && typeof icon !== 'string' ? icon : null;
   });
 
   // the back button to go back to the previous page
@@ -85,9 +85,9 @@
     }
     // capture the scroll position
     const position = { left: window.scrollX, top: window.scrollY };
-    positions.set({ ...$positions, [fromPath]: position });
+    positions.current = { ...positions.current, [fromPath]: position };
     // capture the URL parameters
-    const _urlparams = { ...($urlparams ?? {}) };
+    const _urlparams = { ...(urlparams.current ?? {}) };
     if (fromUrl.search) {
       _urlparams[fromPath] = fromUrl.search;
     } else {
@@ -110,7 +110,7 @@
         }
       }
     }
-    urlparams.set(compactRecord(_urlparams));
+    urlparams.current = compactRecord(_urlparams);
   });
 
   afterNavigate(({ from }) => {
@@ -124,30 +124,32 @@
     const pageUrl = page.url;
     const pagePath = normalizePathname(pageUrl.pathname);
     if (!historyBack && mainPath && mainPath !== pagePath) {
-      subroutes.set({ ...($subroutes ?? {}), [mainPath]: pagePath + pageUrl.search });
+      subroutes.current = { ...(subroutes.current ?? {}), [mainPath]: pagePath + pageUrl.search };
     }
     // update the histories store after navigation
     const fromUrl = from?.url;
     const fromPath = fromUrl?.pathname && normalizePathname(fromUrl.pathname);
     if (historyBack && fromPath && fromPath !== pagePath) {
-      histories.set({ ...($histories ?? {}), [pagePath]: fromPath + fromUrl.search });
+      histories.current = { ...(histories.current ?? {}), [pagePath]: fromPath + fromUrl.search };
     }
   });
 
   // refresh the current user data if it's not available
   $effect(() => {
-    if (!$user) {
+    if (!user.current) {
       api
         .get('auth/current')
         .json<Resp<User>>()
-        .then(({ data }) => user.set(data));
+        .then(({ data }) => {
+          user.current = data;
+        });
     }
   });
 
-  // freeze the body scrolling when the $freeze store is true
+  // freeze the body scrolling when the freeze.current store is true
   let frozenScrollY: number = $state(0);
   $effect(() => {
-    const _freeze = $freeze;
+    const _freeze = freeze.current;
     untrack(() => {
       if (_freeze) {
         // disable body scrolling
@@ -202,7 +204,7 @@
       pullStartY = event.touches[0].pageY;
     }}
     ontouchmove={(event) => {
-      if (pullToRefresh && !refreshing && !$freeze) {
+      if (pullToRefresh && !refreshing && !freeze.current) {
         const diff = event.touches[0].pageY - pullStartY;
         diff > 0 ? pullDown(diff) : pullUp(-diff);
       }

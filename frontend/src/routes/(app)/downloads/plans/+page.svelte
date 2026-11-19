@@ -18,7 +18,7 @@
   import { createLoading, createSortField } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import type { AssistantPageContext, DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { onMount, tick, untrack } from 'svelte';
@@ -154,7 +154,7 @@
     <Search label={$_('field.keyword')} bind:value={keyword} onsearch={() => search()} />
   {/snippet}
   {#snippet actions()}
-    {#if $user?.role === 'admin'}
+    {#if user.current?.role === 'admin'}
       <Button
         size="md"
         icon={icons.addCircle}
@@ -170,7 +170,7 @@
     <HCell width={['20%', null]} text={$_('field.last_exec')} sort={ordering.bind('last_exec')} />
     <HCell width={['15%', null]} text={$_('field.total_count')} />
     <HCell width={['10%', '4rem']} text={$_('field.status')} />
-    {#if $user?.role === 'admin'}<HCell actions />{/if}
+    {#if user.current?.role === 'admin'}<HCell actions />{/if}
   {/snippet}
   {#snippet row(plan)}
     <Cell>
@@ -193,7 +193,7 @@
     <Cell>
       <Status rate={plan.running ? 1 : null} class="px-2" />
     </Cell>
-    {#if $user?.role === 'admin'}<Cell
+    {#if user.current?.role === 'admin'}<Cell
         actions={[
           {
             icon: icons.edit,
@@ -222,7 +222,7 @@
   {/snippet}
 </DataView>
 
-{#if $user?.role === 'admin'}
+{#if user.current?.role === 'admin'}
   <PlanEditor bind:this={creator} onsave={() => search()} />
 
   {#if selected}

@@ -4,7 +4,7 @@
   import { Container, DataView, Empty, HCell, Paginator, Search, SearchHit, markFavorites } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { restorePosition, user } from '$lib/stores';
+  import { restorePosition, user } from '$lib/stores.svelte';
   import type { IndexerAuth, IndexerConfig, Page, Resource, Resp } from '$lib/types';
   import { onMount } from 'svelte';
   import { fade, fly } from 'svelte/transition';
@@ -213,7 +213,7 @@
   </div>
   {#if isEmpty && !data.menus[1]?.routes.length}
     <Empty compact class="mt-6" title={$_('empty.indexers.title')} description={$_('empty.indexers.tip')}>
-      {#if $user?.role === 'admin'}
+      {#if user.current?.role === 'admin'}
         <a href="/settings/workflows/templates" class="empty-action">
           <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>
           {$_('empty.browse_templates')}

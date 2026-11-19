@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
 
-  goto($user?.preferences?.homepage ?? '/dashboard');
+  goto(user.current?.preferences?.homepage ?? '/dashboard');
 </script>

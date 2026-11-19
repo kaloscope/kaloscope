@@ -34,7 +34,7 @@
     requestWebNotificationPermission,
     withConditionalFlags
   } from '$lib/notifications';
-  import { token } from '$lib/stores';
+  import { token } from '$lib/stores.svelte';
   import { onMount } from 'svelte';
 
   let { class: _class, triggerClass, onrefresh }: NotificationsProps = $props();
@@ -161,7 +161,7 @@
   }
 
   onMount(() => {
-    if ($token) {
+    if (token.current) {
       getAll();
       // refresh the notifications every minute while the page is visible
       return pollWhileVisible(() => getAll(true), 60 * 1000);

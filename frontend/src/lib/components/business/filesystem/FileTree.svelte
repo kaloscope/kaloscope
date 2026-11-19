@@ -15,7 +15,7 @@
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { token } from '$lib/stores';
+  import { token } from '$lib/stores.svelte';
   import { onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
 
@@ -199,7 +199,7 @@
   }
 
   onMount(async () => {
-    if ($token) {
+    if (token.current) {
       paths = await list(rootPath);
     }
   });

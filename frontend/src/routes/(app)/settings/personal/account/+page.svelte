@@ -7,14 +7,14 @@
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { token, user } from '$lib/stores';
+  import { token, user } from '$lib/stores.svelte';
   import { loadFile } from '$lib/utils/browser';
 
   let cropSrc: string | null = $state(null);
   let cropImg: Promise<Blob | null> | null = null;
   let avatarDialog: Modal;
   let avatarInput: HTMLInputElement;
-  let avatarSrc: string = $derived($user?.avatar ?? '');
+  let avatarSrc: string = $derived(user.current?.avatar ?? '');
   const avatarChanging = createLoading();
 
   /**
@@ -33,7 +33,7 @@
       .post('user/change_avatar', { body: formData })
       .then(() => {
         // trigger refresh of user info
-        user.set(null);
+        user.current = null;
         cropSrc = null;
         avatarInput.value = '';
         avatarDialog.close();
@@ -64,7 +64,7 @@
     api
       .post('user/change_pwd', { body: data })
       .then(() => {
-        token.set(null);
+        token.current = null;
         alert({ level: 'success', message: 'password_changed' });
         goto('/login');
       })
@@ -80,7 +80,7 @@
       circle
       shadow
       transparent
-      src={$user?.avatar}
+      src={user.current?.avatar}
       icon={icons.user}
       width="8rem"
       class="hover:[&+button]:opacity-70"
@@ -105,7 +105,7 @@
       <fieldset class="fieldset">
         <label class="input w-full">
           <iconify-icon icon={icons.userFill}></iconify-icon>
-          <input type="text" class="grow" value={$user?.username ?? ''} disabled />
+          <input type="text" class="grow" value={user.current?.username ?? ''} disabled />
         </label>
         <label class="input w-full">
           <iconify-icon icon={icons.key}></iconify-icon>

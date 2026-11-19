@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import { persisted } from '$lib/stores';
+  import { persisted } from '$lib/stores.svelte';
   import type { Chapter } from '$lib/types';
   import { groupChapters, matchChapterId } from '$lib/utils/chapter';
 
@@ -82,7 +82,7 @@
   import { proxyImage } from '$lib/api';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { freeze, historyBack } from '$lib/stores';
+  import { freeze, historyBack } from '$lib/stores.svelte';
   import { onMount, tick } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
@@ -111,7 +111,7 @@
   // display title, resource title or current chapter title
   let currentTitle = $derived(title || (chapterIndex >= 0 ? chapters[chapterIndex] : null)?.title);
   // whether the chapter list is displayed in descending order
-  let sortDesc = $derived($settings?.sortDesc ?? false);
+  let sortDesc = $derived(settings.current?.sortDesc ?? false);
 
   // whether the settings panel is open
   let settingsOpen = $state(false);
@@ -159,12 +159,12 @@
   let imageLoading = $state(false);
 
   // css class for the current zoom mode
-  let zoomClass = $derived(ZOOM_MODES[$settings?.zoomMode ?? 'width'].class);
+  let zoomClass = $derived(ZOOM_MODES[settings.current?.zoomMode ?? 'width'].class);
   // direction of the page turn animation, forward or backward
   let animForward = $state(true);
   // fly transition parameters for the current page direction
   let flyParams = $derived.by(() => {
-    const direction = $settings?.pageDirection ?? 'right';
+    const direction = settings.current?.pageDirection ?? 'right';
     if (direction === 'bottom') {
       return { y: animForward ? 200 : -200, duration: 200 };
     }
@@ -227,7 +227,7 @@
    */
   export function getPosition(): ImagePosition | null {
     if (!scrollEl?.clientHeight || restoring || readSignal?.aborted) return null;
-    const paged = $settings?.readMode === 'paged';
+    const paged = settings.current?.readMode === 'paged';
     if (paged && imageLoading) return null;
     if (!paged) updateImageIndex();
     const image = paged ? pagedImage : imageEls[imageIndex - startOffset];
@@ -242,7 +242,7 @@
 
   /** Preserve the current page when images load, the viewport resizes or modes change. */
   function restorePosition() {
-    const image = $settings?.readMode === 'paged' ? pagedImage : anchor && imageEls[anchor.index - startOffset];
+    const image = settings.current?.readMode === 'paged' ? pagedImage : anchor && imageEls[anchor.index - startOffset];
     if (!scrollEl || !image || !anchor) return;
     restoring = true;
     cancelAnimationFrame(progressFrame);
@@ -295,8 +295,8 @@
    * Toggle the persisted chapter list display order.
    */
   function toggleSort() {
-    if ($settings !== null) {
-      $settings.sortDesc = !($settings.sortDesc ?? false);
+    if (settings.current !== null) {
+      settings.current.sortDesc = !(settings.current.sortDesc ?? false);
     }
   }
 
@@ -406,7 +406,7 @@
    */
   function updateImageIndex() {
     const el = scrollEl;
-    if (!el || !$settings || $settings.readMode !== 'scroll') {
+    if (!el || !settings.current || settings.current.readMode !== 'scroll') {
       return;
     }
     for (let i = 0; i < imageEls.length; i++) {
@@ -464,7 +464,7 @@
     updateImageIndex();
     reportProgress();
     const el = scrollEl;
-    if ($settings?.readMode !== 'scroll' || !el || loading || loadFailed) {
+    if (settings.current?.readMode !== 'scroll' || !el || loading || loadFailed) {
       return;
     }
     if (hasPrevious && el.scrollTop < SCROLL_LOAD_THRESHOLD) {
@@ -480,7 +480,7 @@
    * @param e - Keyboard event.
    */
   function handleKeyDown(e: KeyboardEvent) {
-    if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') {
+    if (settingsOpen || chaptersOpen || settings.current?.readMode !== 'paged') {
       return;
     }
     if (e.key === 'ArrowUp' || e.key === 'PageUp') {
@@ -499,13 +499,13 @@
    * @param e - Click event.
    */
   function handleClick(e: MouseEvent) {
-    if (settingsOpen || chaptersOpen || $settings?.readMode !== 'paged') {
+    if (settingsOpen || chaptersOpen || settings.current?.readMode !== 'paged') {
       return;
     }
     if (e.target instanceof Element && e.target.closest('button, input, label')) {
       return;
     }
-    const direction = $settings.pageDirection;
+    const direction = settings.current.pageDirection;
     if (direction === 'bottom') {
       const y = e.clientY / window.innerHeight;
       if (y < CLICK_ZONE_THRESHOLD) {
@@ -541,14 +541,14 @@
   }
 
   onMount(() => {
-    freeze.set(true);
+    freeze.current = true;
     showControls();
     return () => {
       readController?.abort();
       mountId++;
       cancelAnimationFrame(progressFrame);
       cancelAnimationFrame(restoreFrame);
-      freeze.set(false);
+      freeze.current = false;
       clearTimeout(hideTimer);
     };
   });
@@ -647,7 +647,7 @@
   {/if}
 
   <!-- reading area -->
-  {#if $settings?.readMode === 'scroll'}
+  {#if settings.current?.readMode === 'scroll'}
     <div
       bind:this={scrollEl}
       class="relative min-w-0 flex-1 overflow-x-auto overflow-y-auto overscroll-none [overflow-anchor:none]"
@@ -742,7 +742,7 @@
         </button>
       </div>
       <div class="flex-1 space-y-5 p-4">
-        {#if $settings !== null}
+        {#if settings.current !== null}
           <div>
             <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.read_mode')}</span>
             <div class="grid grid-cols-2 gap-2">
@@ -833,10 +833,10 @@
 {#snippet readModeBtn(mode: ReadMode)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
-    {$settings?.readMode === mode ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
+    {settings.current?.readMode === mode ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
   >
-    {#if $settings !== null}
-      <input type="radio" class="hidden" value={mode} bind:group={$settings.readMode} />
+    {#if settings.current !== null}
+      <input type="radio" class="hidden" value={mode} bind:group={settings.current.readMode} />
     {/if}
     {$_(`media.image.read_mode_options.${mode}`)}
   </label>
@@ -845,10 +845,10 @@
 {#snippet zoomModeBtn(mode: ZoomMode)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
-    {$settings?.zoomMode === mode ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
+    {settings.current?.zoomMode === mode ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
   >
-    {#if $settings !== null}
-      <input type="radio" class="hidden" value={mode} bind:group={$settings.zoomMode} />
+    {#if settings.current !== null}
+      <input type="radio" class="hidden" value={mode} bind:group={settings.current.zoomMode} />
     {/if}
     {$_(`media.image.zoom_mode_options.${mode}`)}
   </label>
@@ -857,10 +857,10 @@
 {#snippet directionBtn(direction: PageDirection)}
   <label
     class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
-    {$settings?.pageDirection === direction ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
+    {settings.current?.pageDirection === direction ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
   >
-    {#if $settings !== null}
-      <input type="radio" class="hidden" value={direction} bind:group={$settings.pageDirection} />
+    {#if settings.current !== null}
+      <input type="radio" class="hidden" value={direction} bind:group={settings.current.pageDirection} />
     {/if}
     {$_(`media.image.page_direction_options.${direction}`)}
   </label>

@@ -3,7 +3,7 @@
   import { Container, Label, Select, Setting } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import { onMount } from 'svelte';
 
   // the loading state
@@ -20,7 +20,7 @@
       { value: '/medialibs', label: 'nav.medialibs.title' },
       { value: '/settings', label: 'nav.settings.title' }
     ];
-    if ($user?.role === 'admin') {
+    if (user.current?.role === 'admin') {
       options.splice(3, 0, { value: '/downloads', label: 'nav.downloads.title' });
     }
     return options;
@@ -32,13 +32,13 @@
    * @param key - Preference key.
    */
   function update(key: string) {
-    if ($user?.preferences) {
+    if (user.current?.preferences) {
       api
         .post('user/update_pref', {
-          json: { key: key, value: $user.preferences[key] }
+          json: { key: key, value: user.current.preferences[key] }
         })
         .catch(() => {
-          user.set(null);
+          user.current = null;
         });
     }
   }
@@ -46,22 +46,22 @@
   onMount(() => {
     // refresh user info when mounted
     loading.start();
-    user.set(null);
+    user.current = null;
     $effect(() => {
-      $user && loading.end();
+      user.current && loading.end();
     });
   });
 </script>
 
 <Container type="settings" loading={$loading}>
-  {#if $user?.preferences}
+  {#if user.current?.preferences}
     <Setting title={$_('preference.navigation.title')}>
       <fieldset class="fieldset">
         <Label>{$_('preference.navigation.homepage')}</Label>
         <Select
           translate
           options={homepageOptions}
-          bind:value={$user.preferences.homepage}
+          bind:value={user.current.preferences.homepage}
           onchange={() => update('homepage')}
           class="w-full"
         />
@@ -74,7 +74,7 @@
             { value: false, label: 'action.toggle_off' },
             { value: true, label: 'action.toggle_on' }
           ]}
-          bind:value={$user.preferences.vibration}
+          bind:value={user.current.preferences.vibration}
           onchange={() => update('vibration')}
           class="w-full"
         />
@@ -87,7 +87,7 @@
           <input
             type="checkbox"
             class="toggle self-center justify-self-end"
-            bind:checked={$user.preferences.recent_searches}
+            bind:checked={user.current.preferences.recent_searches}
             onchange={() => update('recent_searches')}
           />
         </fieldset>
@@ -96,7 +96,7 @@
           <input
             type="checkbox"
             class="toggle self-center justify-self-end"
-            bind:checked={$user.preferences.recent_watches}
+            bind:checked={user.current.preferences.recent_watches}
             onchange={() => update('recent_watches')}
           />
         </fieldset>
@@ -106,7 +106,7 @@
             type="checkbox"
             class="toggle self-center justify-self-end"
             aria-label={$_('preference.dashboard.read')}
-            bind:checked={$user.preferences.recent_reads}
+            bind:checked={user.current.preferences.recent_reads}
             onchange={() => update('recent_reads')}
           />
         </fieldset>
@@ -114,10 +114,10 @@
     </Setting>
     <Setting title={$_('preference.privacy.title')} tip={$_('preference.privacy.tip')}>
       {#each [['search_records', 'search'], ['watch_records', 'watch'], ['read_records', 'read']] as [key, label] (key)}
-        {@const current = $user.preferences[key]}
+        {@const current = user.current.preferences[key]}
         <fieldset class="fieldset">
           <Label>{$_(`preference.privacy.${label}`)}</Label>
-          <Select name={key} bind:value={$user.preferences[key]} onchange={() => update(key)} class="w-full">
+          <Select name={key} bind:value={user.current.preferences[key]} onchange={() => update(key)} class="w-full">
             <option value={0}>{$_('preference.privacy.untrack')}</option>
             {#each retentionDays as days (days)}
               <option value={days}>{days} {$_(days === 1 ? 'duration.day' : 'duration.days').toLowerCase()}</option>

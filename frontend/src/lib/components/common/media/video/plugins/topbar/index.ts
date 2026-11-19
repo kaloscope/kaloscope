@@ -1,5 +1,5 @@
 import { icons, iconToSVG } from '$lib/icons';
-import { historyBack } from '$lib/stores';
+import { historyBack } from '$lib/stores.svelte';
 import { Events, Plugin } from 'xgplayer';
 
 const { POSITIONS } = Plugin;

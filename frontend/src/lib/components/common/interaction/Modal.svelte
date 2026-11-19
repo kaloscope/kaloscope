@@ -40,7 +40,7 @@
   import { portal } from '$lib/actions';
   import { Alerts } from '$lib/components';
   import { messages } from '$lib/components/common/notice/Messages.svelte';
-  import { freeze } from '$lib/stores';
+  import { freeze } from '$lib/stores.svelte';
   import { sniffer } from '$lib/utils/browser';
   import { italic } from '$lib/utils/text';
   import { tick } from 'svelte';
@@ -69,7 +69,7 @@
       pushState('', {});
     }
     modals.set(id, { shallow, onclose, explicit: false });
-    sniffer.isMobileSafari() && freeze.set(true);
+    if (sniffer.isMobileSafari()) freeze.current = true;
     tick().then(() => dialog?.showModal());
   }
 
@@ -92,7 +92,7 @@
         history.back();
       } else {
         modals.delete(id);
-        freeze.set(false);
+        freeze.current = false;
       }
     }
   }
@@ -118,7 +118,7 @@
           setTimeout(() => modal.onclose?.(), TRANSITION_DURATION);
         }
         modals.delete(id);
-        freeze.set(false);
+        freeze.current = false;
       }
     }
   }}

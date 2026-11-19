@@ -22,7 +22,7 @@
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { captureScrollPosition, restorePosition } from '$lib/stores';
+  import { captureScrollPosition, restorePosition } from '$lib/stores.svelte';
   import type { IndexerAuth, Page, Resource, Resp, ViewMode, ViewModes } from '$lib/types';
   import { sniffer } from '$lib/utils/browser';
   import { aspectRatio } from '$lib/utils/number';

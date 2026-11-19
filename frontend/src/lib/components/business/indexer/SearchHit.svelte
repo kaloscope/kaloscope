@@ -75,7 +75,7 @@
   import { Badge, Button, Cell, Image, Rating, Ranking, Uploader, downloadPrompt } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
 
   let { indexerId, indexerConfig, mode, rsrc, coverRatio, searchButton }: SearchHitProps = $props();
   let detailsConfig = $derived(indexerConfig.details);
@@ -191,7 +191,7 @@
         onclick: () => (rsrc.favorite ? unfavorite(rsrc) : favorite(rsrc))
       },
       {
-        condition: !!rsrc.link && $user?.role === 'admin',
+        condition: !!rsrc.link && user.current?.role === 'admin',
         icon: icons.download,
         text: $_('action.download'),
         onclick: () => downloadPrompt(rsrc.link)
@@ -238,7 +238,7 @@
             }}
           />
         {/if}
-        {#if rsrc.link && $user?.role === 'admin'}
+        {#if rsrc.link && user.current?.role === 'admin'}
           <Button
             icon={icons.download}
             class={btnClass}

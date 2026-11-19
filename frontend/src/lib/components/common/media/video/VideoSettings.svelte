@@ -1,9 +1,8 @@
 <script lang="ts" module>
-  import { persisted } from '$lib/stores';
+  import { persisted } from '$lib/stores.svelte';
   import type { Danmaku, DanmakuAnime, Definition, MediaProbe, Resp, Subtitle } from '$lib/types';
   import { isWhite } from '$lib/utils/color';
   import type { IconifyIcon } from 'iconify-icon';
-  import { get } from 'svelte/store';
   import { v4 as uuidv4 } from 'uuid';
   import type Player from 'xgplayer';
   import type { IUrl } from 'xgplayer/es/defaultConfig';
@@ -178,7 +177,7 @@
     danmakus: Danmaku[] | null | undefined,
     container?: HTMLDivElement,
     direction?: 'r2l' | 'b2t',
-    settings: DanmakuSettings | null = get(danmaku)
+    settings: DanmakuSettings | null = danmaku.current
   ) {
     if (!danmakus || danmakus.length === 0) {
       return [];
@@ -316,7 +315,7 @@
   /**
    * Get current landscape mode setting.
    */
-  export const landscapeMode = () => $video?.landscapeMode;
+  export const landscapeMode = () => video.current?.landscapeMode;
 
   /**
    * Probe playback metadata for a local media stream.
@@ -386,9 +385,9 @@
    */
   export function init() {
     // playback mode
-    if (localMedia && $video !== null) {
+    if (localMedia && video.current !== null) {
       const url = player?.config.url;
-      $video.playbackMode = isTranscodedStream(url) ? 'transcode' : 'direct';
+      video.current.playbackMode = isTranscodedStream(url) ? 'transcode' : 'direct';
     }
     // playback rate
     changePressRate();
@@ -409,15 +408,15 @@
     applySubtitleSettings();
     loadLocalSubtitles();
     // overlay comment
-    if ($danmaku !== null && danmakuPlugin !== null) {
-      danmakuPlugin.setArea({ start: 0, end: $danmaku.area / 100 || 0.1 });
-      danmakuPlugin.setOpacity($danmaku.opacity / 100);
-      danmakuPlugin.setFontSize($danmaku.fontSize, null);
-      danmakuPlugin.danmujs?.setPlayRate('scroll', 1 + ($danmaku.speed - 50) / 100);
-      for (const mode of $danmaku.blocks) {
+    if (danmaku.current !== null && danmakuPlugin !== null) {
+      danmakuPlugin.setArea({ start: 0, end: danmaku.current.area / 100 || 0.1 });
+      danmakuPlugin.setOpacity(danmaku.current.opacity / 100);
+      danmakuPlugin.setFontSize(danmaku.current.fontSize, null);
+      danmakuPlugin.danmujs?.setPlayRate('scroll', 1 + (danmaku.current.speed - 50) / 100);
+      for (const mode of danmaku.current.blocks) {
         danmakuPlugin.hideMode(mode);
       }
-      if (!$danmaku.enabled) {
+      if (!danmaku.current.enabled) {
         danmakuPlugin.stop();
       }
     }
@@ -449,8 +448,8 @@
       return;
     }
     // persist the new mode
-    if ($video !== null) {
-      $video.playbackMode = mode;
+    if (video.current !== null) {
+      video.current.playbackMode = mode;
     }
     // switch the URL and restore the direct playback pipeline only when leaving a transcoded stream
     const newUrl = mode === 'transcode' ? url + '&transcode=true' : url.replace('&transcode=true', '');
@@ -467,7 +466,7 @@
     if (!url.startsWith(MEDIA_STREAM_PREFIX)) {
       return url;
     }
-    if ($video?.playbackMode === 'transcode') {
+    if (video.current?.playbackMode === 'transcode') {
       return isTranscodedStream(url) ? url : `${url}&transcode=true`;
     }
     return url.replace('&transcode=true', '');
@@ -624,9 +623,9 @@
    * Change the press rate used by keyboard and mobile press gestures.
    */
   function changePressRate() {
-    const rate = $video?.pressRate ?? DEFAULT_PRESS_RATE;
-    if ($video !== null) {
-      $video.pressRate = rate;
+    const rate = video.current?.pressRate ?? DEFAULT_PRESS_RATE;
+    if (video.current !== null) {
+      video.current.pressRate = rate;
     }
     const keyboardPlugin = player?.getPlugin('keyboard');
     if (keyboardPlugin) {
@@ -661,17 +660,17 @@
    * @param autoSelect - Whether to select the preferred subtitle track.
    */
   function applySubtitleSettings(autoSelect: boolean = false) {
-    if ($subtitle === null || textTrackPlugin === null) {
+    if (subtitle.current === null || textTrackPlugin === null) {
       return;
     }
-    textTrackPlugin.applySubtitleSettings($subtitle);
-    if (!autoSelect || !$subtitle.autoShow) {
+    textTrackPlugin.applySubtitleSettings(subtitle.current);
+    if (!autoSelect || !subtitle.current.autoShow) {
       return;
     }
 
     // switch to the preferred subtitle track
     const tracks = (textTrackPlugin.config.list ?? []) as TrackWrapper[];
-    const preferredTrack = findPreferredTrack(tracks, $subtitle.languagePreference);
+    const preferredTrack = findPreferredTrack(tracks, subtitle.current.languagePreference);
     if (!preferredTrack) {
       return;
     }
@@ -706,7 +705,7 @@
     if (textTrackPlugin === null) {
       return;
     }
-    const subtitles = formatSubtitles(data, $subtitle);
+    const subtitles = formatSubtitles(data, subtitle.current);
     textTrackPlugin.updateSubtitles(subtitles, true);
     applySubtitleSettings(true);
   }
@@ -845,7 +844,7 @@
    *
    * @param settings - Settings to apply.
    */
-  function applyDanmakuSettings(settings: DanmakuSettings | null = $danmaku) {
+  function applyDanmakuSettings(settings: DanmakuSettings | null = danmaku.current) {
     if (danmakuPlugin === null || rawDanmakus.length === 0) {
       return;
     }
@@ -935,19 +934,19 @@
           <Select translate options={[{ value: '', label: 'media.video.default' }]} disabled />
         {/if}
       </div>
-      {#if $video !== null}
+      {#if video.current !== null}
         <div>
           {@render optionLabel($_('media.video.press_rate'))}
           <Select
             native={!rotateFullscreen}
             options={PRESS_RATE_OPTIONS}
-            bind:value={$video.pressRate}
+            bind:value={video.current.pressRate}
             onchange={changePressRate}
             class="dropdown-top [&_p]:max-h-32!"
           />
         </div>
       {/if}
-      {#if $video !== null}
+      {#if video.current !== null}
         <div>
           {@render optionLabel($_('media.video.landscape.title'), $_('media.video.landscape.tip'))}
           <Select
@@ -957,7 +956,7 @@
               { value: 'rotate', label: 'media.video.landscape.rotate' },
               { value: 'web_api', label: 'media.video.landscape.web_api' }
             ]}
-            bind:value={$video.landscapeMode}
+            bind:value={video.current.landscapeMode}
             class="dropdown-top [&_p]:max-h-32!"
           />
         </div>
@@ -971,8 +970,8 @@
                 { value: 'direct', label: 'media.video.playback.direct' },
                 { value: 'transcode', label: 'media.video.playback.transcode' }
               ]}
-              bind:value={$video.playbackMode}
-              onchange={() => changePlaybackMode($video.playbackMode)}
+              bind:value={video.current.playbackMode}
+              onchange={() => changePlaybackMode(video.current!.playbackMode)}
               class="dropdown-top [&_p]:max-h-32!"
             />
           </div>
@@ -983,13 +982,13 @@
     <!-- the subtitle settings tab -->
     {#if localMedia}
       <div class="video-settings-content" hidden={tabId !== 'subtitle'}>
-        {#if $subtitle !== null}
+        {#if subtitle.current !== null}
           <div>
             {@render optionLabel($_('media.subtitle.auto_show'))}
             <input
               type="checkbox"
               class="toggle"
-              bind:checked={$subtitle.autoShow}
+              bind:checked={subtitle.current.autoShow}
               onchange={() => applySubtitleSettings(true)}
             />
           </div>
@@ -1000,9 +999,9 @@
             )}
             <input
               class="subtitle-setting-field input"
-              bind:value={$subtitle.languagePreference}
+              bind:value={subtitle.current.languagePreference}
               placeholder={$_('media.subtitle.language_preference_placeholder')}
-              disabled={!$subtitle.autoShow}
+              disabled={!subtitle.current.autoShow}
               onchange={() => applySubtitleSettings(true)}
             />
           </div>
@@ -1015,7 +1014,7 @@
                 { value: 'stroke', label: 'media.subtitle.display_mode_options.stroke' },
                 { value: 'bg', label: 'media.subtitle.display_mode_options.bg' }
               ]}
-              bind:value={$subtitle.displayMode}
+              bind:value={subtitle.current.displayMode}
               onchange={() => applySubtitleSettings()}
               class="dropdown-top [&_p]:max-h-32!"
             />
@@ -1028,12 +1027,14 @@
                 min="-3600"
                 max="3600"
                 step="0.1"
-                bind:value={$subtitle.timeOffset}
+                bind:value={subtitle.current.timeOffset}
                 onchange={() => {
-                  if ($subtitle !== null) {
-                    const value = Number($subtitle.timeOffset);
+                  if (subtitle.current !== null) {
+                    const value = Number(subtitle.current.timeOffset);
                     const roundedValue = Math.round(value * 10) / 10;
-                    $subtitle.timeOffset = Number.isFinite(value) ? Math.max(-3600, Math.min(3600, roundedValue)) : 0;
+                    subtitle.current.timeOffset = Number.isFinite(value)
+                      ? Math.max(-3600, Math.min(3600, roundedValue))
+                      : 0;
                     applySubtitleSettings();
                   }
                 }}
@@ -1044,7 +1045,7 @@
           <div>
             {@render optionLabel($_('media.subtitle.font_scale'))}
             <Range
-              bind:value={$subtitle.fontScale}
+              bind:value={subtitle.current.fontScale}
               min={50}
               max={200}
               step={5}
@@ -1057,7 +1058,7 @@
           <div>
             {@render optionLabel($_('media.subtitle.vertical_position'))}
             <Range
-              bind:value={$subtitle.verticalPosition}
+              bind:value={subtitle.current.verticalPosition}
               min={0}
               max={15}
               class="pt-2"
@@ -1072,15 +1073,15 @@
 
     <!-- the overlay comment settings tab -->
     <div class="video-settings-content" hidden={tabId !== 'danmaku'}>
-      {#if $danmaku !== null && danmakuPlugin !== null}
+      {#if danmaku.current !== null && danmakuPlugin !== null}
         <div>
           {@render optionLabel($_('media.danmaku.toggle'))}
           <input
             type="checkbox"
             class="toggle"
-            bind:checked={$danmaku.enabled}
+            bind:checked={danmaku.current.enabled}
             onchange={() => {
-              $danmaku.enabled ? danmakuPlugin.start() : danmakuPlugin.stop();
+              danmaku.current!.enabled ? danmakuPlugin.start() : danmakuPlugin.stop();
             }}
           />
         </div>
@@ -1096,7 +1097,7 @@
         <div>
           {@render optionLabel($_('media.danmaku.area'))}
           <Range
-            bind:value={$danmaku.area}
+            bind:value={danmaku.current.area}
             values={[10, 25, 50, 75, 100]}
             class="pt-2"
             textClass="text-white/80"
@@ -1109,7 +1110,7 @@
         <div>
           {@render optionLabel($_('media.danmaku.opacity'))}
           <Range
-            bind:value={$danmaku.opacity}
+            bind:value={danmaku.current.opacity}
             class="pt-2"
             textClass="text-white/80"
             sliderClass="range-primary"
@@ -1121,7 +1122,7 @@
         <div>
           {@render optionLabel($_('media.danmaku.font_size'))}
           <Range
-            bind:value={$danmaku.fontSize}
+            bind:value={danmaku.current.fontSize}
             min={5}
             max={50}
             unit="px"
@@ -1136,7 +1137,7 @@
         <div>
           {@render optionLabel($_('media.danmaku.speed'))}
           <Range
-            bind:value={$danmaku.speed}
+            bind:value={danmaku.current.speed}
             values={[0.5, 0.75, '1.0', 1.25, 1.5]}
             unit="x"
             class="pt-2"
@@ -1152,8 +1153,8 @@
           <input
             type="checkbox"
             class="toggle"
-            bind:checked={$danmaku.merge}
-            onchange={(event) => applyDanmakuSettings({ ...$danmaku, merge: event.currentTarget.checked })}
+            bind:checked={danmaku.current.merge}
+            onchange={(event) => applyDanmakuSettings({ ...danmaku.current!, merge: event.currentTarget.checked })}
           />
         </div>
         <div>
@@ -1161,12 +1162,12 @@
           <input
             class="input w-full max-w-xs"
             list="danmaku-block-pattern-presets"
-            bind:value={$danmaku.blockPattern}
+            bind:value={danmaku.current.blockPattern}
             placeholder={DANMAKU_BLOCK_PATTERN_PRESET}
-            oninput={(event) => applyDanmakuSettings({ ...$danmaku, blockPattern: event.currentTarget.value })}
+            oninput={(event) => applyDanmakuSettings({ ...danmaku.current!, blockPattern: event.currentTarget.value })}
           />
           <datalist id="danmaku-block-pattern-presets">
-            {#if $danmaku.blockPattern && DANMAKU_BLOCK_PATTERN_PRESET.startsWith($danmaku.blockPattern)}
+            {#if danmaku.current.blockPattern && DANMAKU_BLOCK_PATTERN_PRESET.startsWith(danmaku.current.blockPattern)}
               <option value={DANMAKU_BLOCK_PATTERN_PRESET}></option>
             {/if}
           </datalist>
@@ -1308,18 +1309,18 @@
 
 <!-- the overlay comment block rendering snippet -->
 {#snippet danmakuBlock(mode: DanmakuMode, icon: IconifyIcon)}
-  {@const blocked = $danmaku?.blocks.includes(mode)}
+  {@const blocked = danmaku.current?.blocks.includes(mode)}
   <button
     class="flex-col-center cursor-pointer transition-all {blocked
       ? 'text-white/80'
       : 'text-white/20 hover:text-white/50'}"
     onclick={() => {
-      if ($danmaku !== null && danmakuPlugin !== null) {
+      if (danmaku.current !== null && danmakuPlugin !== null) {
         if (blocked) {
-          $danmaku.blocks = $danmaku.blocks.filter((m) => m !== mode);
+          danmaku.current.blocks = danmaku.current.blocks.filter((m) => m !== mode);
           danmakuPlugin.showMode(mode);
         } else {
-          $danmaku.blocks = [...$danmaku.blocks, mode];
+          danmaku.current.blocks = [...danmaku.current.blocks, mode];
           danmakuPlugin.hideMode(mode);
         }
       }

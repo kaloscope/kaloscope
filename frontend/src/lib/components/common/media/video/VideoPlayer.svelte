@@ -92,7 +92,7 @@
    * @param owner - Account that opened this player; undefined skips recording.
    */
   async function recordHistory(player: Player | null, owner: number | undefined) {
-    const current = get(user);
+    const current = user.current;
     if (!player || !owner || current?.id !== owner || current.preferences?.watch_records === 0) {
       return;
     }
@@ -113,7 +113,7 @@
       const { data } = await api
         .get('media/list', { searchParams: { page_num: 0, path } })
         .json<Resp<Page<MediaItem>>>();
-      if (get(user)?.id !== owner || get(user)?.preferences?.watch_records === 0) return;
+      if (user.current?.id !== owner || user.current?.preferences?.watch_records === 0) return;
       await Promise.all(
         data.items.map((item) =>
           api.post('user/history/record', {
@@ -131,17 +131,16 @@
 </script>
 
 <script lang="ts">
-  import { freeze, user } from '$lib/stores';
+  import { freeze, user } from '$lib/stores.svelte';
   import { sniffer } from '$lib/utils/browser';
   import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
   import { v4 as uuidv4 } from 'uuid';
   import Player, { Events, SimplePlayer } from 'xgplayer';
   import DefaultPreset from './plugins/preset';
   import VideoSettings, { formatDanmakus } from './VideoSettings.svelte';
 
   const { width = '100%', height = '100%', onhistory }: VideoPlayerOptions = $props();
-  const historyUserId = get(user)?.id;
+  const historyUserId = user.current?.id;
   // player ID
   const id: string = `player-${uuidv4()}`;
   // video container
@@ -584,9 +583,9 @@
       window.addEventListener('orientationchange', onorientationchange);
     }
     // freeze the background to prevent scrolling when the player is active
-    freeze.set(true);
+    freeze.current = true;
     return () => {
-      freeze.set(false);
+      freeze.current = false;
       // destroy the player instance
       void recordHistory(player, historyUserId)
         .catch(console.error)

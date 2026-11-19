@@ -84,18 +84,18 @@
   import { createLoading } from '$lib/helpers';
   import { _, dateTime, milliseconds } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { token, user } from '$lib/stores';
+  import { token, user } from '$lib/stores.svelte';
   import type { FlowTemplate, Page, Resp } from '$lib/types';
   import { downloadBlob } from '$lib/utils/browser';
   import { onMount, tick, untrack } from 'svelte';
 
-  const sessionToken = untrack(() => $token);
+  const sessionToken = untrack(() => token.current);
   const restoredList = untrack(() => {
     const saved = savedList;
     savedList = undefined;
     return saved &&
       saved.editorPath === navigating.from?.url.pathname &&
-      saved.userId === $user?.id &&
+      saved.userId === user.current?.id &&
       saved.sessionToken === sessionToken
       ? saved
       : undefined;
@@ -353,7 +353,7 @@
       list,
       editorPath: to.url.pathname,
       graphId: graph.id,
-      userId: $user?.id,
+      userId: user.current?.id,
       sessionToken,
       name: graphName,
       state: graphState,

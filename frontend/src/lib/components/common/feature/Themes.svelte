@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { DropdownProps } from '$lib/components';
-  import { mediaQuery, persisted } from '$lib/stores';
+  import { persisted } from '$lib/stores.svelte';
+  import { MediaQuery } from 'svelte/reactivity';
 
   export type ThemesProps = {
     /** Default dark theme. */
@@ -54,18 +55,18 @@
     'silk'
   ];
 
-  // the persisted theme store
-  const themeStore = persisted<string>('theme');
+  // the persisted theme
+  const savedTheme = persisted<string>('theme');
 
-  // the preferred color scheme media query store
-  const darkMode = mediaQuery('(prefers-color-scheme: dark)', false);
+  // the preferred color scheme media query
+  const darkMode = new MediaQuery('(prefers-color-scheme: dark)');
 </script>
 
 <script lang="ts">
   import { Dropdown, Modal } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
 
   let {
     dark = 'dark',
@@ -86,7 +87,7 @@
    * @param theme - Theme to activate.
    */
   function switchTheme(theme: string) {
-    themeStore.set(theme);
+    savedTheme.current = theme;
     const root = document.documentElement;
     root.setAttribute('data-theme', theme);
     // synchronize the PWA theme color with the specified theme color variable
@@ -101,17 +102,24 @@
   }
 
   onMount(() => {
-    switchTheme($themeStore || ($darkMode ? dark : light));
-    const unsubscribe = darkMode.subscribe((matches) => {
-      if (matches !== null) {
-        const theme = $themeStore;
+    // a first visit follows the preferred color scheme
+    switchTheme(savedTheme.current || (darkMode.current ? dark : light));
+  });
+
+  // follow later changes of the preferred color scheme
+  let lastMatches: boolean | undefined;
+  $effect(() => {
+    const matches = darkMode.current;
+    untrack(() => {
+      if (lastMatches !== undefined && matches !== lastMatches) {
+        const theme = savedTheme.current;
         // only switch theme if it's one of the defaults
         if (!theme || [dark, light].includes(theme)) {
           switchTheme(matches ? dark : light);
         }
       }
+      lastMatches = matches;
     });
-    return () => unsubscribe();
   });
 </script>
 
@@ -119,7 +127,7 @@
   {#each AVAILABLE_THEMES as theme (theme)}
     <li data-theme={theme} class="rounded-field">
       <button
-        class="bg-base-100 font-sans shadow-sm hover:bg-base-300 {$themeStore === theme ? '[&_svg]:block' : ''}"
+        class="bg-base-100 font-sans shadow-sm hover:bg-base-300 {savedTheme.current === theme ? '[&_svg]:block' : ''}"
         onclick={() => {
           switchTheme(theme);
         }}

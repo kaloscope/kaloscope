@@ -4,7 +4,7 @@
   import { createLoading } from '$lib/helpers';
   import { _, nodeFormatter } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { user } from '$lib/stores';
+  import { user } from '$lib/stores.svelte';
   import type { AIModelSelection, AIProvider, Field, FlowGraphContext, Resp } from '$lib/types';
   import { useSvelteFlow } from '@xyflow/svelte';
   import { getContext, hasContext, untrack } from 'svelte';
@@ -21,7 +21,7 @@
   let providerSelect: HTMLSelectElement;
   let modelSelect: HTMLSelectElement;
 
-  const editable = $derived($user?.role === 'admin');
+  const editable = $derived(user.current?.role === 'admin');
   const provider = $derived(providers?.find((item) => item.id === data?.provider_id));
   const issue = $derived.by(() => {
     if (!providers || !data?.provider_id) return null;

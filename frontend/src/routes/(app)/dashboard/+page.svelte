@@ -17,7 +17,7 @@
   import { LibType } from '$lib/enums';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { restorePosition, user } from '$lib/stores';
+  import { restorePosition, user } from '$lib/stores.svelte';
   import type {
     FlowGraph,
     IndexerAuth,
@@ -100,9 +100,11 @@
   });
   let searches: SearchHistory[] = $state([]);
   let reads: ReadingHistory[] = $state([]);
-  let loadWatches = $derived($user?.preferences?.recent_watches ?? false);
-  let loadSearches = $derived($user?.preferences?.recent_searches ?? false);
-  let loadReads = $derived(($user?.preferences?.recent_reads ?? false) && $user?.preferences?.read_records !== 0);
+  let loadWatches = $derived(user.current?.preferences?.recent_watches ?? false);
+  let loadSearches = $derived(user.current?.preferences?.recent_searches ?? false);
+  let loadReads = $derived(
+    (user.current?.preferences?.recent_reads ?? false) && user.current?.preferences?.read_records !== 0
+  );
   let showWatches = $derived(loadWatches && latestWatches.length > 0);
   let showSearches = $derived(loadSearches && searches.length > 0);
   let showReads = $derived(loadReads && reads.length > 0);
@@ -355,7 +357,7 @@
 
   // discard reading results from an old account or a disabled dashboard section
   $effect(() => {
-    const owner = $user?.id;
+    const owner = user.current?.id;
     const enabled = loadReads;
     const controller = new AbortController();
     reads = [];
@@ -640,7 +642,7 @@
   {#if settled && Object.keys(boards).length === 0}
     <div class="flex-center {historyCount > 0 ? '' : 'min-h-[60vh]'}">
       <Empty compact={historyCount > 0} title={$_('empty.boards.title')} description={$_('empty.boards.tip')}>
-        {#if $user?.role === 'admin'}
+        {#if user.current?.role === 'admin'}
           <a href="/settings/workflows/templates" class="empty-action">
             <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>
             {$_('empty.browse_templates')}

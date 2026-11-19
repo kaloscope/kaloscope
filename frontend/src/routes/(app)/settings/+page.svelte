@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { restoreRoute } from '$lib/stores';
+  import { restoreRoute } from '$lib/stores.svelte';
   import { onMount } from 'svelte';
   import type { PageData } from './$types';
 

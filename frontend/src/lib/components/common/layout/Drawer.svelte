@@ -10,7 +10,7 @@
 </script>
 
 <script lang="ts">
-  import { freeze } from '$lib/stores';
+  import { freeze } from '$lib/stores.svelte';
   import { MediaQuery } from 'svelte/reactivity';
 
   let { children, side }: DrawerProps = $props();
@@ -22,15 +22,15 @@
   $effect(() => {
     // set the freeze state based on the drawer toggle state
     if (drawerOpen.current) {
-      freeze.set(false);
+      freeze.current = false;
     } else {
-      freeze.set(checked);
+      freeze.current = checked;
     }
   });
 </script>
 
 <div class="drawer sm:drawer-open">
-  <input id="drawer" type="checkbox" class="drawer-toggle" bind:checked onchange={() => freeze.set(checked)} />
+  <input id="drawer" type="checkbox" class="drawer-toggle" bind:checked onchange={() => (freeze.current = checked)} />
   <div class="drawer-content flex items-start justify-center">
     {@render children()}
   </div>

@@ -21,7 +21,7 @@
   import { Image, Logo } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { freeze, menuIcon, signposts } from '$lib/stores';
+  import { freeze, menuIcon, signposts } from '$lib/stores.svelte';
   import { onMount } from 'svelte';
 
   let { menus, interpolation = {}, translate = true, action }: MenuProps = $props();
@@ -36,7 +36,7 @@
     if (drawer && drawer.checked) {
       drawer.checked = false;
       // disable the freeze state to allow scrolling
-      freeze.set(false);
+      freeze.current = false;
       // wait for the drawer to close
       setTimeout(callback, 300);
     } else {
@@ -64,15 +64,15 @@
           }
         }
       }
-      signposts.set(titles);
-      menuIcon.set(icon);
+      signposts.current = titles;
+      menuIcon.current = icon;
     };
     updateSignposts();
     afterNavigate(updateSignposts);
     // clear the signposts when the component is destroyed
     return () => {
-      signposts.set([]);
-      menuIcon.set(null);
+      signposts.current = [];
+      menuIcon.current = null;
     };
   });
 </script>
