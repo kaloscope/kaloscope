@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, Grid, Image, confirm } from '$lib/components';
+  import { Button, EntityCard, Grid, Image, confirm } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _, dateTime, duration } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -43,59 +43,76 @@
   });
 </script>
 
-{#snippet term(name: string, description: string)}
-  <div class="flex items-center justify-between gap-4 py-2" title={description}>
-    <dt class="whitespace-nowrap">{name}:</dt>
-    <dd class="truncate opacity-70">{description}</dd>
-  </div>
-{/snippet}
-
 <Grid
   data={sessions}
   loading={$loading}
   uniqueKey="login_id"
   class="pull-to-refresh"
-  gridClass="lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
+  gridClass="grid-cols-cards"
   itemClass="card-surface"
-  skeleton={{ ratio: '4/1', lines: 3 }}
+  skeleton={{ ratio: '3/1', lines: 3 }}
 >
   {#snippet item(session, index)}
     {@const { browser, device, os } = UAParser(session.user_agent)}
-    <div class="flex justify-between gap-2 rounded-t-card bg-base-200/60 p-4">
-      <div class="grid grid-flow-col items-center gap-2" title={session.user_agent}>
+    <EntityCard
+      title={browser.name ? `${browser.name} ${browser.major ?? ''}`.trim() : session.user_agent}
+      subtitle={[os.name ? `${os.name} ${os.version ?? ''}`.trim() : null, session.client_ip]
+        .filter(Boolean)
+        .join(' · ')}
+      tip={session.user_agent}
+    >
+      {#snippet media()}
         <Image
           transparent
           preset={browser.name?.toLowerCase()}
           icon={device.type === 'mobile' ? icons.phone : device.type === 'tablet' ? icons.tablet : icons.desktop}
-          width="2rem"
-          class="[&_iconify-icon]:opacity-70!"
+          width="1.5rem"
+          class="[&_iconify-icon]:opacity-100!"
         />
-        <div class="flex items-baseline gap-1 overflow-hidden">
-          <span class="text-base {browser.version ? '' : 'truncate'}">
-            {browser.name ?? session.user_agent}
-          </span>
-          {#if browser.version}
-            <span class="truncate italic-text">{browser.version}</span>
-          {/if}
-        </div>
-      </div>
-      <div class="flex items-center gap-1">
+      {/snippet}
+      {#snippet actions()}
         {#if index === 0}
-          <Button icon={icons.redo} onclick={getSessions} />
-          <Button
-            icon={icons.clear}
-            disabled={sessions.length <= 1}
-            onclick={() => {
-              confirm({
-                icon: icons.clear,
-                message: $_('session.kill.others'),
-                onconfirm: () => killSessions(sessions.slice(1).map((s) => s.login_id))
-              });
-            }}
-          />
+          <span class="rounded-field bg-primary/10 px-2 py-1 text-xs font-medium text-primary">
+            {$_('session.current')}
+          </span>
+        {/if}
+      {/snippet}
+      <dl class="grid grid-cols-2 gap-3 text-sm">
+        <div class="min-w-0">
+          <dt class="text-xs text-base-content/60">{$_('session.duration')}</dt>
+          <dd class="mt-0.5 truncate">{$duration(session.login_at)}</dd>
+        </div>
+        <div class="min-w-0">
+          <dt class="text-xs text-base-content/60">{$_('session.activity')}</dt>
+          <dd class="mt-0.5 truncate" title={$dateTime(session.last_activity)}>{$dateTime(session.last_activity)}</dd>
+        </div>
+      </dl>
+      {#snippet footer()}
+        <span class="truncate text-xs text-base-content/50">
+          {$_('session.expires', $dateTime(session.expire_at))}
+        </span>
+        {#if index === 0}
+          <div class="flex shrink-0 items-center gap-1">
+            <Button icon={icons.redo} text={$_('action.reload')} onclick={getSessions} />
+            <Button
+              square={false}
+              icon={icons.clear}
+              text={$_('session.sign_out_others')}
+              disabled={sessions.length <= 1}
+              onclick={() => {
+                confirm({
+                  icon: icons.clear,
+                  message: $_('session.kill.others'),
+                  onconfirm: () => killSessions(sessions.slice(1).map((s) => s.login_id))
+                });
+              }}
+            />
+          </div>
         {:else}
           <Button
+            square={false}
             icon={icons.logout}
+            text={$_('session.sign_out')}
             onclick={() => {
               confirm({
                 icon: icons.logout,
@@ -105,21 +122,7 @@
             }}
           />
         {/if}
-      </div>
-    </div>
-    <dl class="rounded-b-card bg-base-100 p-4 text-sm">
-      {@render term($_('session.os'), os.name ? `${os.name} ${os.version ?? ''}` : 'Unknown')}
-      <div class="divider my-0"></div>
-      {@render term($_('session.ip'), session.client_ip)}
-      <div class="divider my-0"></div>
-      {@render term($_('session.duration'), $duration(session.login_at))}
-      <div class="divider my-0"></div>
-      {@render term($_('session.activity'), $dateTime(session.last_activity))}
-    </dl>
-    {#if index === 0}
-      <div class="absolute -top-2 -right-2 z-1">
-        <iconify-icon icon={icons.pinFill} width="1.5rem"></iconify-icon>
-      </div>
-    {/if}
+      {/snippet}
+    </EntityCard>
   {/snippet}
 </Grid>

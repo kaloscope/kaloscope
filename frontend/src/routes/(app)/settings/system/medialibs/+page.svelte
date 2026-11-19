@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, Dropdown, Grid, Image, MediaLibEditor, confirm } from '$lib/components';
+  import { Button, Dropdown, Empty, EntityCard, Grid, MediaLibEditor, confirm } from '$lib/components';
   import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
@@ -90,13 +90,11 @@
   });
 </script>
 
-{#snippet term(name: string, description: string | null, hiddenLeft?: boolean)}
-  <div class="flex items-center justify-between gap-4 py-2" title={description}>
-    <dt class="whitespace-nowrap">{name}:</dt>
-    <dd class="truncate opacity-70 {hiddenLeft ? 'direction-rtl' : ''}">
-      {hiddenLeft && description ? description.split('').reverse().join('') : description}
-    </dd>
-  </div>
+{#snippet addTile()}
+  <button class="flex-center size-full min-h-20 cursor-pointer gap-2 p-4 text-sm" onclick={() => creator?.showModal()}>
+    <iconify-icon icon={icons.addCircle} width="1.25rem" aria-hidden="true"></iconify-icon>
+    {$_('action.add', $_('entity.media_lib'))}
+  </button>
 {/snippet}
 
 <Grid
@@ -104,10 +102,11 @@
   loading={$loading}
   uniqueKey="id"
   class="pull-to-refresh"
-  gridClass="grid-cols-sparse"
+  gridClass="grid-cols-cards"
   itemClass="z-1 card-surface card-hover"
-  tailClass="rounded-card border-1 border-dashed duration-300 opacity-30 hover:opacity-60"
-  skeleton={{ ratio: '4/1', lines: 3 }}
+  tail={libs.length ? addTile : undefined}
+  tailClass="card-add"
+  skeleton={{ ratio: '3/1', lines: 3 }}
   ondragged={(data) => {
     libs = data;
     sort();
@@ -115,27 +114,8 @@
 >
   {#snippet item(lib, index)}
     {@const libType = LibType[lib.lib_type]}
-    <div class="flex justify-between gap-2 rounded-t-card bg-base-200/60 p-4">
-      <div class="grid grid-flow-col items-center gap-2">
-        <Image transparent icon={libType.icon} width="2rem" class="[&_iconify-icon]:opacity-70!" />
-        <div class="truncate text-base">{lib.name}</div>
-      </div>
-      <div class="flex items-center gap-1">
-        <Button
-          loading={lib.scanning}
-          icon={icons.folderSearch}
-          text={$_('action.scan')}
-          onclick={() => {
-            scan(lib.id);
-          }}
-        />
-        <Button
-          icon={icons.edit}
-          onclick={() => {
-            selected = lib;
-            tick().then(() => updater?.showModal());
-          }}
-        />
+    <EntityCard title={lib.name} subtitle={lib.dir} mono truncateStart icon={libType.icon} tone={libType.iconColor}>
+      {#snippet actions()}
         <Dropdown contentWidth="10rem" class="dropdown-end">
           {#snippet trigger()}
             <div class="btn btn-square btn-subtle btn-sm">
@@ -188,21 +168,76 @@
             </li>
           </ul>
         </Dropdown>
-      </div>
-    </div>
-    <dl class="rounded-b-card bg-base-100 p-4 text-sm">
-      {@render term($_('field.dir'), lib.dir, true)}
-      <div class="divider my-0"></div>
-      {@render term($_('field.language'), $_(lib.language, { locale: 'languages' }))}
-      <div class="divider my-0"></div>
-      {@render term($_('flow.trigger.count'), String(lib.triggers.length))}
-    </dl>
+      {/snippet}
+      <ul class="flex flex-wrap gap-2">
+        {#if lib.scanning}
+          <li class="card-tag">
+            <span class="loading loading-xs loading-spinner text-primary" aria-hidden="true"></span>
+            {$_('media.scanning')}
+          </li>
+        {/if}
+        {#if lib.language}
+          <li class="card-tag">
+            <iconify-icon icon={icons.language} width="0.875rem" aria-hidden="true"></iconify-icon>
+            {$_(lib.language, { locale: 'languages' })}
+          </li>
+        {/if}
+        <li class="card-tag" title={lib.triggers.map((trigger) => trigger.graph_name).join('\n')}>
+          <iconify-icon icon={icons.flowchart} width="0.875rem" aria-hidden="true"></iconify-icon>
+          {$_('flow.trigger.bound_count', lib.triggers.length)}
+        </li>
+        {#if lib.scan_on_startup}
+          <li class="card-tag">
+            <iconify-icon icon={icons.arrowSyncCircle} width="0.875rem" aria-hidden="true"></iconify-icon>
+            {$_('media.scan_on_startup')}
+          </li>
+        {/if}
+        {#if lib.danmaku_server}
+          <li class="card-tag" title={lib.danmaku_server}>
+            <iconify-icon icon={icons.danmaku} width="0.875rem" aria-hidden="true"></iconify-icon>
+            {$_('media.danmaku.settings')}
+          </li>
+        {/if}
+      </ul>
+      {#snippet footer()}
+        <span class="flex items-center gap-1 text-xs text-base-content/50" title={$_('action.drag_sort')}>
+          <iconify-icon icon={icons.sort} width="0.875rem" aria-hidden="true"></iconify-icon>
+          #{index + 1}
+        </span>
+        <div class="flex items-center gap-1">
+          <Button
+            square={false}
+            disabled={lib.scanning}
+            icon={icons.folderSearch}
+            text={$_('action.scan')}
+            onclick={() => {
+              scan(lib.id);
+            }}
+          />
+          <Button
+            square={false}
+            icon={icons.edit}
+            text={$_('action.edit')}
+            onclick={() => {
+              selected = lib;
+              tick().then(() => updater?.showModal());
+            }}
+          />
+        </div>
+      {/snippet}
+    </EntityCard>
   {/snippet}
-  {#snippet tail()}
-    <button class="flex-col-center size-full cursor-pointer gap-2 p-4" onclick={() => creator?.showModal()}>
-      <iconify-icon icon={icons.addCircle} width="2.5rem"></iconify-icon>
-      <span class="text-2xl">{$_('action.add')}</span>
-    </button>
+  {#snippet empty()}
+    <Empty
+      title={$_('empty.medialibs.title')}
+      description={$_('empty.medialibs.setup')}
+      class="min-h-[calc(var(--ks-svh)-2rem)]"
+    >
+      <button class="btn h-12 gap-3 font-normal" onclick={() => creator?.showModal()}>
+        <iconify-icon icon={icons.addCircle} width="1.5rem" aria-hidden="true"></iconify-icon>
+        {$_('action.add', $_('entity.media_lib'))}
+      </button>
+    </Empty>
   {/snippet}
 </Grid>
 

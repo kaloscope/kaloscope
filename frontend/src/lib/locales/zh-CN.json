@@ -158,11 +158,13 @@
     "medialibs": {
       "title": "还没有媒体库",
       "tip": "将文件夹添加为媒体库后，即可在这里浏览电影、剧集、漫画和小说",
+      "setup": "添加存放电影、剧集、小说或漫画的文件夹即可开始",
       "action": "设置媒体库"
     },
     "downloaders": {
       "title": "尚未连接下载器",
       "tip": "连接下载器后，即可在这里发起下载并查看进度",
+      "setup": "连接下载器后，即可从搜索结果发起下载",
       "action": "设置下载器"
     },
     "browse_templates": "浏览工作流模板"
@@ -293,6 +295,7 @@
     "publish": "发布{0}",
     "move_up": "上移{0}",
     "move_down": "下移{0}",
+    "drag_sort": "拖动调整顺序",
     "toggle_on": "打开",
     "toggle_off": "关闭",
     "assign_permissions": "分配权限",
@@ -304,10 +307,12 @@
     "unknown": "未知"
   },
   "session": {
-    "os": "操作系统",
-    "ip": "IP 地址",
     "duration": "登录时长",
     "activity": "最后活动",
+    "current": "当前设备",
+    "expires": "{0} 过期",
+    "sign_out": "退出登录",
+    "sign_out_others": "退出其他设备",
     "kill": {
       "one": "退出此设备的登录？",
       "others": "退出其他所有设备的登录？"
@@ -433,6 +438,11 @@
     "start": "立即开始",
     "prompt": "输入 URI 或选择种子文件",
     "supported": "支持磁力链接和哈希值",
+    "source": {
+      "raw": "直链",
+      "magnet": "磁力链接",
+      "torrent": "种子文件"
+    },
     "error": {
       "submit_unknown": "提交结果未知",
       "instance_auth": "OpenList 认证失败",
@@ -474,6 +484,7 @@
       "tip": "按模板重命名并整理，留空关闭"
     },
     "scan_on_startup": "启动时全量扫描",
+    "scanning": "扫描中…",
     "movie_layout": "库目录下可直接存放视频，也可按电影分文件夹",
     "tv_show_layout": "库目录下按剧分文件夹，视频可直接放入或按季分文件夹",
     "novel_layout": "库目录下每部小说一个文件夹，内含单个 TXT 或 EPUB 文件",
@@ -988,7 +999,7 @@
       "risk_warning": "第三方仓库的工作流定义可能存在安全风险，请仅使用可信来源"
     },
     "trigger": {
-      "count": "工作流数量",
+      "bound_count": "{0, plural, =0 {未绑定工作流} other {# 个工作流}}",
       "bound": "绑定的工作流",
       "sync_mode": "同步执行",
       "async_mode": "异步执行"

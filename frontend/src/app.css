@@ -325,6 +325,33 @@
   }
 }
 
+/* small metadata tag inside a card */
+@utility card-tag {
+  @apply inline-flex max-w-full items-center gap-1.5 rounded-field bg-base-200 px-2 py-1 text-xs text-base-content/70;
+}
+/* small square that tints its icon with `--tone`, or stays neutral without one */
+@utility icon-tile {
+  --icon-tile-color: var(--tone, var(--color-base-content));
+  border-radius: min(var(--radius-field), 0.625rem);
+  background-color: color-mix(in oklab, var(--icon-tile-color) 10%, transparent);
+  color: color-mix(in oklab, var(--icon-tile-color) 75%, var(--color-base-content));
+}
+/* dashed grid tile that adds a new card */
+@utility card-add {
+  border-radius: min(var(--radius-box), 0.75rem);
+  border: 1px dashed color-mix(in oklab, var(--color-base-content) 22%, transparent);
+  color: color-mix(in oklab, var(--color-base-content) 65%, transparent);
+  transition:
+    color 200ms ease,
+    border-color 200ms ease,
+    background-color 200ms ease;
+  &:hover {
+    border-color: color-mix(in oklab, var(--color-primary) 55%, transparent);
+    background-color: color-mix(in oklab, var(--color-primary) 5%, transparent);
+    color: var(--color-primary);
+  }
+}
+
 /* soft theme-colored glow behind the sign-in and setup forms */
 @utility bg-aurora {
   background-color: var(--color-base-200);
@@ -443,6 +470,9 @@
 }
 @utility grid-cols-medium {
   @apply md:grid-cols-3! w66:grid-cols-4! w78:grid-cols-5! w90:grid-cols-6! w102:grid-cols-7!;
+}
+@utility grid-cols-cards {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 26rem), 1fr));
 }
 @utility grid-cols-compact {
   @apply md:grid-cols-3! w60:grid-cols-4! w72:grid-cols-5! w84:grid-cols-6! w96:grid-cols-7! w108:grid-cols-8!;

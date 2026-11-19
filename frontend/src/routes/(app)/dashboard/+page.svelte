@@ -109,6 +109,8 @@
   let showSearches = $derived(loadSearches && searches.length > 0);
   let showReads = $derived(loadReads && reads.length > 0);
   let historyCount = $derived([showSearches, showWatches, showReads].filter(Boolean).length);
+  // the history requests still in flight, so the empty dashboard message waits for them
+  let historyPending: number = $state(0);
 
   // the placeholder cards shown while a board loads
   const BOARD_SKELETONS = 7;
@@ -351,7 +353,10 @@
   // load the user histories
   $effect(() => {
     if (loadWatches || loadSearches) {
-      untrack(loadHistories);
+      untrack(() => {
+        historyPending++;
+        void loadHistories().finally(() => historyPending--);
+      });
     }
   });
 
@@ -361,7 +366,12 @@
     const enabled = loadReads;
     const controller = new AbortController();
     reads = [];
-    if (owner && enabled) untrack(() => void loadReadingHistory(controller.signal));
+    if (owner && enabled) {
+      untrack(() => {
+        historyPending++;
+        void loadReadingHistory(controller.signal).finally(() => historyPending--);
+      });
+    }
     return () => controller.abort();
   });
 
@@ -639,9 +649,9 @@
   {/if}
 
   <!-- nothing to show -->
-  {#if settled && Object.keys(boards).length === 0}
-    <div class="flex-center {historyCount > 0 ? '' : 'min-h-[60vh]'}">
-      <Empty compact={historyCount > 0} title={$_('empty.boards.title')} description={$_('empty.boards.tip')}>
+  {#if settled && historyPending === 0 && historyCount === 0 && Object.keys(boards).length === 0}
+    <div class="flex-center min-h-[60vh]">
+      <Empty title={$_('empty.boards.title')} description={$_('empty.boards.tip')}>
         {#if user.current?.role === 'admin'}
           <a href="/settings/workflows/templates" class="empty-action">
             <iconify-icon icon={icons.flowchart} width="1rem" aria-hidden="true"></iconify-icon>

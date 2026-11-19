@@ -1,11 +1,12 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, DownloaderEditor, Dropdown, Grid, Image, Status, confirm } from '$lib/components';
+  import { Button, DownloaderEditor, Dropdown, Empty, EntityCard, Grid, Image, confirm } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { Downloader, Resp } from '$lib/types';
+  import type { Downloader, DownloadSource, Resp } from '$lib/types';
   import { debounce } from '$lib/utils/timing';
+  import type { IconifyIcon } from 'iconify-icon';
   import { onMount, tick } from 'svelte';
 
   let downloaders: Downloader[] = $state([]);
@@ -14,6 +15,31 @@
   let updater: DownloaderEditor | null = $state(null);
   let selected: Downloader | null = $state(null);
   const loading = createLoading();
+
+  // the dot colors of the downloader states
+  const STATUS_DOTS: Record<Downloader['status'], string> = {
+    up: 'bg-success',
+    down: 'bg-error',
+    unknown: 'bg-base-content/40'
+  };
+
+  // the icons of the accepted source formats
+  const SOURCE_ICONS: Record<DownloadSource, IconifyIcon> = {
+    raw: icons.link,
+    magnet: icons.magnetUp,
+    torrent: icons.document
+  };
+
+  /**
+   * Format the network address of a downloader.
+   *
+   * @param downloader - Downloader to describe.
+   * @returns The host with its port, or `null` without a host.
+   */
+  function address(downloader: Downloader): string | null {
+    if (!downloader.host) return null;
+    return downloader.port ? `${downloader.host}:${downloader.port}` : downloader.host;
+  }
 
   /**
    * Get download clients.
@@ -53,16 +79,11 @@
   });
 </script>
 
-{#snippet term(name: string, description: string | number | null, status: Downloader['status'] | null = null)}
-  <div class="flex items-center justify-between gap-4 py-2" title={String(description ?? '')}>
-    <dt class="whitespace-nowrap">{name}:</dt>
-    <dd class="flex items-center gap-2 truncate opacity-70">
-      <span class="truncate">{description}</span>
-      {#if status}
-        <Status rate={status === 'up' ? 1 : status === 'down' ? 0 : null} class="px-1" />
-      {/if}
-    </dd>
-  </div>
+{#snippet addTile()}
+  <button class="flex-center size-full min-h-20 cursor-pointer gap-2 p-4 text-sm" onclick={() => creator?.showModal()}>
+    <iconify-icon icon={icons.addCircle} width="1.25rem" aria-hidden="true"></iconify-icon>
+    {$_('action.add', $_('download.downloader.title'))}
+  </button>
 {/snippet}
 
 <Grid
@@ -70,42 +91,28 @@
   loading={$loading}
   uniqueKey="id"
   class="pull-to-refresh"
-  gridClass="grid-cols-sparse"
+  gridClass="grid-cols-cards"
   itemClass="z-1 card-surface card-hover"
-  tailClass="rounded-card border-1 border-dashed duration-300 opacity-30 hover:opacity-60"
-  skeleton={{ ratio: '4/1', lines: 3 }}
+  tail={downloaders.length ? addTile : undefined}
+  tailClass="card-add"
+  skeleton={{ ratio: '3/1', lines: 3 }}
   ondragged={(data) => {
     downloaders = data;
     sort();
   }}
 >
   {#snippet item(downloader, index)}
-    <div class="flex justify-between gap-2 rounded-t-card bg-base-200/60 p-4">
-      <div class="grid grid-flow-col items-center gap-2" title={downloader.version}>
+    <EntityCard title={downloader.name} subtitle={address(downloader)} mono>
+      {#snippet media()}
         <Image
           transparent
           preset={downloader.preset?.toLowerCase()}
           icon={icons.box3dScanFill}
-          width="2rem"
-          class="[&_iconify-icon]:opacity-70!"
+          width="1.5rem"
+          class="[&_iconify-icon]:opacity-100!"
         />
-        <div class="flex items-baseline gap-1 overflow-hidden">
-          <span class="text-base {downloader.version ? '' : 'truncate'}">
-            {downloader.name}
-          </span>
-          {#if downloader.version}
-            <span class="truncate italic-text">{downloader.version}</span>
-          {/if}
-        </div>
-      </div>
-      <div class="flex items-center gap-1">
-        <Button
-          icon={icons.edit}
-          onclick={() => {
-            selected = downloader;
-            tick().then(() => updater?.showModal());
-          }}
-        />
+      {/snippet}
+      {#snippet actions()}
         <Dropdown contentWidth="10rem" class="dropdown-end">
           {#snippet trigger()}
             <div class="btn btn-square btn-subtle btn-sm">
@@ -158,21 +165,52 @@
             </li>
           </ul>
         </Dropdown>
-      </div>
-    </div>
-    <dl class="rounded-b-card bg-base-100 p-4 text-sm">
-      {@render term($_('field.host'), downloader.host)}
-      <div class="divider my-0"></div>
-      {@render term($_('field.port'), downloader.port)}
-      <div class="divider my-0"></div>
-      {@render term($_('field.status'), $_(`status.${downloader.status}`), downloader.status)}
-    </dl>
+      {/snippet}
+      <ul class="flex flex-wrap gap-2">
+        <li class="card-tag">
+          <span class="size-1.5 shrink-0 rounded-full {STATUS_DOTS[downloader.status]}" aria-hidden="true"></span>
+          {$_(`status.${downloader.status}`)}
+        </li>
+        {#if downloader.version}
+          <li class="card-tag font-mono" title={downloader.version}>
+            <span class="truncate">{downloader.version}</span>
+          </li>
+        {/if}
+        {#each downloader.source_types as source (source)}
+          <li class="card-tag">
+            <iconify-icon icon={SOURCE_ICONS[source]} width="0.875rem" aria-hidden="true"></iconify-icon>
+            {$_(`download.source.${source}`)}
+          </li>
+        {/each}
+      </ul>
+      {#snippet footer()}
+        <span class="flex items-center gap-1 text-xs text-base-content/50" title={$_('action.drag_sort')}>
+          <iconify-icon icon={icons.sort} width="0.875rem" aria-hidden="true"></iconify-icon>
+          #{index + 1}
+        </span>
+        <Button
+          square={false}
+          icon={icons.edit}
+          text={$_('action.edit')}
+          onclick={() => {
+            selected = downloader;
+            tick().then(() => updater?.showModal());
+          }}
+        />
+      {/snippet}
+    </EntityCard>
   {/snippet}
-  {#snippet tail()}
-    <button class="flex-col-center size-full cursor-pointer gap-2 p-4" onclick={() => creator?.showModal()}>
-      <iconify-icon icon={icons.addCircle} width="2.5rem"></iconify-icon>
-      <span class="text-2xl">{$_('action.add')}</span>
-    </button>
+  {#snippet empty()}
+    <Empty
+      title={$_('empty.downloaders.title')}
+      description={$_('empty.downloaders.setup')}
+      class="min-h-[calc(var(--ks-svh)-2rem)]"
+    >
+      <button class="btn h-12 gap-3 font-normal" onclick={() => creator?.showModal()}>
+        <iconify-icon icon={icons.addCircle} width="1.5rem" aria-hidden="true"></iconify-icon>
+        {$_('action.add', $_('download.downloader.title'))}
+      </button>
+    </Empty>
   {/snippet}
 </Grid>
 
