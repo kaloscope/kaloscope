@@ -760,6 +760,33 @@ def test_tv_preview(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+def test_single_rescrape_preview(monkeypatch, tmp_path):
+    async def run():
+        async with media(monkeypatch, tmp_path) as env:
+            search = AsyncMock(return_value=MOVIES[:1])
+            monkeypatch.setattr(env.engine, "execute", search)
+            change = {"action": "rescrape", "item_id": env.movie.id}
+            before = Path(env.movie.nfo_path).read_bytes()
+            result = await tools.execute_tool(
+                "review_media_rescrape",
+                dumps(change).decode(),
+                env.owner,
+                conversation_id=1,
+                call_id="single",
+            )
+
+            reviewed = result["data"]
+            assert reviewed["valid"] and reviewed["candidate"]["id"] == "201"
+            assert (
+                reviewed["changes"] and Path(env.movie.nfo_path).read_bytes() == before
+            )
+            applied = await apply(env.owner, reviewed, change)
+            assert applied["applied"] and title_in(env.movie.nfo_path) == "New Movie"
+            search.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_rescrape_movie(monkeypatch, tmp_path):
     async def run():
         async with media(monkeypatch, tmp_path) as env:

@@ -767,7 +767,9 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         )
 
     @classmethod
-    async def review_rescrape(cls, change: MediaRescrape, user: UserInfo) -> dict:
+    async def review_rescrape(
+        cls, change: MediaRescrape, user: UserInfo, *, preview_single: bool = False
+    ) -> dict:
         """List candidates, or preview replacing an item's metadata with one.
 
         The workflow's manual candidate search runs every time; nothing is
@@ -777,11 +779,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         Args:
             change: Item, workflow, search inputs and the chosen candidate key.
             user: Current administrator.
+            preview_single: Preview a sole usable match when no key was supplied.
 
         Returns:
             The item, usable workflows, the query and compact `candidates`
-            without a key; with a listed key, field changes, NFO, episode and
-            organization effects, notes, the `revision` and a `request_id`.
+            for selection, or the chosen match with field changes, NFO, episode
+            and organization effects, notes, the `revision` and a `request_id`.
 
         Raises:
             ForbiddenException: If the account cannot rescrape the item.
@@ -806,7 +809,14 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         chosen = next(
             (pair for pair in candidates if pair[1]["key"] == change.candidate), None
         )
-        if issues or change.candidate is None or chosen is None:
+        if (
+            preview_single
+            and change.candidate is None
+            and len(candidates) == 1
+            and candidates[0][1].get("usable", True)
+        ):
+            chosen = candidates[0]
+        if issues or chosen is None:
             if not issues:
                 issues.append(
                     {

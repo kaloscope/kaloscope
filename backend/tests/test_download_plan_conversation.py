@@ -3,6 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import httpx
 import pytest
@@ -49,6 +50,30 @@ def engine_fixture(monkeypatch, output):
     )
     monkeypatch.setattr(service.Sanic, "get_app", lambda: app)
     return execute
+
+
+@pytest.mark.parametrize("search", [{}, {"page_num": 2}, {"sources": True}])
+def test_preview_without_options(monkeypatch, search):
+    engine_fixture(monkeypatch, {"items": [{"id": "r1", "title": "Lantern"}]})
+    options = AsyncMock(side_effect=ValueError("Invalid downloader configuration"))
+    monkeypatch.setattr(service.DownloadPlanService, "authoring_options", options)
+
+    async def run():
+        async with database() as (owner, _):
+            graph, _, _ = await fixture_plan()
+            result = await tools.preview_indexer(
+                IndexerSearch(workflow_id=graph.id, keyword="Lantern", **search), owner
+            )
+
+            assert result["status"] == "ok" and result["items"][0]["id"] == "r1"
+            assert "subscription" not in result
+            if "page_num" in search:
+                options.assert_not_awaited()
+            else:
+                options.assert_awaited_once()
+                assert "subscription_note" in result
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -550,6 +575,128 @@ def test_confirmation_gate(latest_status):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "scenario,created",
+    [
+        ("choices", True),
+        ("same_title", True),
+        ("renamed", True),
+        ("editor", True),
+        ("different_title", False),
+        ("new_binding", False),
+        ("declined", False),
+        ("unrelated_turn", False),
+        ("interrupted", False),
+        ("retry_first_turn", False),
+    ],
+)
+def test_revised_subscription(scenario, created):
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan()
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            offer = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="offer",
+                prompt="Subscribe to Lantern",
+                content="Reply with your choices to create this subscription.",
+                status="interrupted" if scenario == "interrupted" else "complete",
+            )
+            original = await service.DownloadPlanService.validate_creation(
+                DownloadPlanCheck(plan=body.plan), owner
+            )
+            await AssistantToolCall.create(
+                turn_id=offer.id,
+                call_id="offer-plan",
+                name="validate_download_plan",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": original},
+            )
+            if scenario == "editor":
+                await service.DownloadPlanService.create_once(
+                    body.model_copy(
+                        update={"request_id": UUID(original["request_id"])}
+                    ),
+                    owner,
+                )
+            if scenario == "unrelated_turn":
+                await AssistantTurn.create(
+                    conversation_id=conversation["id"],
+                    request_id="other",
+                    prompt="List libraries",
+                    content="No libraries.",
+                    status="complete",
+                )
+            reply = await AssistantTurn.create(
+                conversation_id=conversation["id"],
+                request_id="reply",
+                prompt="Use my choices",
+                retry_of=offer.id if scenario == "retry_first_turn" else None,
+            )
+            body.plan.interval_num = 2
+            if scenario in {"renamed", "different_title"}:
+                body.plan.keyword = "Lantern HD"
+            checked = await service.DownloadPlanService.validate_creation(
+                DownloadPlanCheck(plan=body.plan), owner
+            )
+            if scenario == "new_binding":
+                checked["ingestion"] = {
+                    "binding": "add",
+                    "library_id": 1,
+                    "workflow_id": 2,
+                    "revision": "new",
+                }
+            await AssistantToolCall.create(
+                turn_id=reply.id,
+                call_id="final",
+                name="validate_download_plan",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": checked},
+            )
+            approval = {
+                "request_id": checked["request_id"],
+                "confirmed": scenario != "declined",
+            }
+            if scenario == "renamed":
+                approval["proposal_id"] = original["request_id"]
+            if scenario == "same_title":
+                approval["proposal_id"] = checked["request_id"]
+            args = dumps(approval).decode()
+            await AssistantToolCall.create(
+                turn_id=reply.id,
+                call_id="create",
+                name="create_download_plan",
+                arguments=args,
+            )
+            result = await tools.execute_tool(
+                "create_download_plan",
+                args,
+                owner,
+                conversation_id=conversation["id"],
+                call_id="create",
+            )
+
+            assert result["ok"] and result["data"]["created"] is created
+            assert await DownloadPlan.all().count() == int(created)
+            if scenario == "editor":
+                assert (
+                    result["data"]["replayed"]
+                    and (await DownloadPlan.get()).interval_num == 6
+                )
+            elif created:
+                plan = await DownloadPlan.get()
+                assert plan.interval_num == 2 and plan.keyword == body.plan.keyword
+            else:
+                assert result["data"]["confirmation_required"]
+                service.notify_download_changes.assert_not_called()
+
+    asyncio.run(run())
+
+
 def test_mcp_search(monkeypatch):
     async def run():
         async with application() as app:
@@ -600,7 +747,7 @@ def test_mcp_search(monkeypatch):
 
 @pytest.mark.parametrize("verbose", [False, True])
 def test_conversation(monkeypatch, verbose):
-    fixture, streams, identities = {}, [], []
+    fixture = {}
     stage = {"number": 0, "step": 0}
 
     def handler(upstream):
@@ -632,21 +779,14 @@ def test_conversation(monkeypatch, verbose):
                 },
             )
 
-        streams.append(body)
         number, step = stage["number"], stage["step"]
         stage["step"] += 1
         flow = fixture["graph_id"]
 
         actions = [
             [
-                (
-                    "list_workflows",
-                    {"category": "indexer"},
-                )
-            ],
-            [
+                ("list_workflows", {"category": "indexer"}),
                 ("get_workflow", {"workflow_id": flow}),
-                ("get_download_plan_options", {"workflow_id": flow}),
                 ("search_indexer", {"workflow_id": flow, "keyword": "Lantern"}),
             ],
             [
@@ -659,19 +799,17 @@ def test_conversation(monkeypatch, verbose):
                     },
                 ),
                 ("validate_download_plan", {"plan": fixture["plan"]}),
-            ],
-            [
                 (
                     "create_download_plan",
                     {
-                        "request_id": identities[0] if identities else "",
+                        "request_id": fixture.get("request_id", ""),
                         "confirmed": True,
                     },
                 ),
                 (
                     "create_download_plan",
                     {
-                        "request_id": identities[0] if identities else "",
+                        "request_id": fixture.get("request_id", ""),
                         "confirmed": True,
                     },
                 ),
@@ -680,25 +818,21 @@ def test_conversation(monkeypatch, verbose):
 
         if step >= len(actions):
             content = [
-                "Choose the published indexer for Lantern.",
                 "Found Lantern. Category is declared; year is not a filter. "
                 "Defaults: now, no end, hourly, one resource per check/total, "
                 "Fixture downloader, no transfer.",
-                "Movie filter applied. Confirm these final settings and defaults; "
-                "creation queues a fresh search.",
                 "Created one plan.",
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
 
         name, args = actions[step]
-        if number >= 2 or (step >= 2 and number):
-            names = {item["function"]["name"] for item in body["tools"]}
-            assert {
-                "search_indexer",
-                "create_download_plan",
-                "validate_download_plan",
-            } <= names
-            assert "preview_workflow_draft" not in names
+        names = {item["function"]["name"] for item in body["tools"]}
+        assert {
+            "search_indexer",
+            "create_download_plan",
+            "validate_download_plan",
+        } <= names
+        assert "preview_workflow_draft" not in names
 
         return response(
             [
@@ -754,21 +888,22 @@ def test_conversation(monkeypatch, verbose):
             all_results = []
             for number, prompt in enumerate(
                 [
-                    "我要看 Lantern",
-                    "选择刚才的索引器",
+                    "帮我订阅 Lantern",
                     "选择电影分类，其他用所示默认值",
-                    "确认这些设置并创建",
                 ]
             ):
                 stage.update(number=number, step=0)
-                events = [
-                    event
-                    async for event in AssistantService.persistent_stream(
-                        conversation["id"],
-                        request(f"step-{number}", prompt=prompt),
-                        owner,
-                    )
-                ]
+                events = []
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request(f"step-{number}", prompt=prompt), owner
+                ):
+                    events.append(event)
+                    if (
+                        event.event == "tool_result"
+                        and event.data["name"] == "validate_download_plan"
+                    ):
+                        assert event.data["data"]["valid"]
+                        fixture["request_id"] = event.data["data"]["request_id"]
                 assert events[-1].event == "done", events[-1]
                 results = [
                     event.data for event in events if event.event == "tool_result"
@@ -776,13 +911,12 @@ def test_conversation(monkeypatch, verbose):
                 assert all(result["ok"] for result in results), results
                 all_results.extend(results)
                 if number == 0:
-                    execute.assert_not_called()
+                    execute.assert_awaited_once()
                     assert results[0]["data"]["items"][0]["downloadable_search"]
-                if number == 2:
-                    checked = results[-1]["data"]
-                    assert checked["valid"]
-                    identities.append(checked["request_id"])
-                if number < 3:
+                    assert (
+                        results[-1]["data"]["subscription"]["defaults"]
+                        == options["defaults"]
+                    )
                     assert (
                         await DownloadPlan.all().count()
                         == await DownloadTask.all().count()
@@ -807,7 +941,7 @@ def test_conversation(monkeypatch, verbose):
             assert all_results[-1]["data"]["replayed"]
             service.notify_download_changes.assert_called_once()
             assert await DownloadTask.all().count() == await FlowLog.all().count() == 0
-            preview_turn = await AssistantTurn.get(request_id="step-1")
+            preview_turn = await AssistantTurn.get(request_id="step-0")
             assert preview_turn.resource_ids == [graph.id]
             owner.role, owner.perms = UserRole.USER, Permissions(indexer_ids=[])
             denied = await tools.execute_tool(
