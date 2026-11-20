@@ -172,7 +172,7 @@
       <ul class="flex flex-wrap gap-2">
         {#if lib.scanning}
           <li class="card-tag">
-            <span class="loading loading-xs loading-spinner text-primary" aria-hidden="true"></span>
+            <span class="loading loading-xs loading-spinner" aria-hidden="true"></span>
             {$_('media.scanning')}
           </li>
         {/if}
