@@ -78,7 +78,6 @@ const fluentUISystemIcons = {
   globeSearchFilled: 'fluent:globe-search-24-filled',
   grid: 'fluent:grid-24-regular',
   image: 'fluent:image-24-regular',
-  imageMultiple: 'fluent:image-multiple-24-regular',
   imageSearch: 'fluent:image-search-24-regular',
   imageSearchFilled: 'fluent:image-search-24-filled',
   info: 'fluent:info-24-regular',
@@ -92,7 +91,6 @@ const fluentUISystemIcons = {
   lockClosedKey: 'fluent:lock-closed-key-24-regular',
   lockOpen: 'fluent:lock-open-24-regular',
   moreVertical: 'fluent:more-vertical-24-regular',
-  moviesAndTv: 'fluent:movies-and-tv-24-regular',
   pageFit: 'fluent:page-fit-24-regular',
   panelLeftText: 'fluent:panel-left-text-24-regular',
   pause: 'fluent:pause-24-regular',
@@ -147,7 +145,6 @@ const fluentUISystemIcons = {
  */
 const mageIcons = {
   alignRight: 'mage:align-right',
-  bookText: 'mage:book-text',
   box3d: 'mage:box-3d',
   box3dDownload: 'mage:box-3d-download',
   box3dDownloadFill: 'mage:box-3d-download-fill',
@@ -183,7 +180,6 @@ const tablerIcons = {
   arrowNarrowDownDashed: 'tabler:arrow-narrow-down-dashed',
   circleDashedPlus: 'tabler:circle-dashed-plus',
   colorSwatch: 'tabler:color-swatch',
-  deviceTvOld: 'tabler:device-tv-old',
   focusCentered: 'tabler:focus-centered',
   link: 'tabler:link',
   map: 'tabler:map',

@@ -133,6 +133,9 @@
     }
   });
 
+  // full-color icons carry their own palette, so only monochrome fallback icons are dimmed
+  let colorful = $derived(typeof icon === 'object' && /="#/.test(icon.body));
+
   // the dynamic class names
   let roundedClass = $derived(circle ? 'rounded-full' : 'rounded-sm');
   let btnClass = $derived(onclick ? 'btn-scale' : '');
@@ -170,10 +173,17 @@
     <span class="text-xl font-bold opacity-60">{extractInitial(text)}</span>
   {:else if icon && transparent}
     <!-- without a placeholder surface the icon itself is the image, as for avatars -->
-    <iconify-icon {icon} width="100%" height="100%" style:aspect-ratio={aspectRatio} class="opacity-50"></iconify-icon>
+    <iconify-icon
+      {icon}
+      width="100%"
+      height="100%"
+      style:aspect-ratio={aspectRatio}
+      class={colorful ? '' : 'opacity-50'}
+    ></iconify-icon>
   {:else if icon}
     <span class="@container flex-center size-full">
-      <iconify-icon {icon} width="100%" height="100%" class="image-fallback-icon opacity-40"></iconify-icon>
+      <iconify-icon {icon} width="100%" height="100%" class="image-fallback-icon {colorful ? '' : 'opacity-40'}"
+      ></iconify-icon>
     </span>
   {/if}
 </div>
