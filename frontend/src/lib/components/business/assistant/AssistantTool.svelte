@@ -14,7 +14,12 @@
   } from '$lib/types';
   import BatchPlanDialog from '../library/BatchPlanDialog.svelte';
 
-  const { tool, unsaved = false, onplan }: { tool: AssistantTool; unsaved?: boolean; onplan?: () => void } = $props();
+  const {
+    tool,
+    callNumber,
+    unsaved = false,
+    onplan
+  }: { tool: AssistantTool; callNumber?: number; unsaved?: boolean; onplan?: () => void } = $props();
 
   const trialStatus = $derived.by(() => {
     if (tool.name !== 'run_workflow' || tool.status !== 'complete' || !tool.result?.ok) return null;
@@ -154,7 +159,9 @@
     {/if}
   </span>
   <span class="min-w-0 truncate font-medium">
-    {$_(`assistant.tools.${tool.name}`, { default: tool.name })}
+    {callNumber
+      ? $_('assistant.activity_call', callNumber)
+      : $_(`assistant.tools.${tool.name}`, { default: tool.name })}
   </span>
   <span class="shrink-0" class:sr-only={!trialStatus && (tool.status === 'complete' || tool.status === 'running')}>
     {trialStatus

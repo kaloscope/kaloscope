@@ -26,6 +26,7 @@
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
+  import AssistantActivity from './AssistantActivity.svelte';
   import AssistantHistory from './AssistantHistory.svelte';
   import AssistantChanges from './AssistantChanges.svelte';
   import AssistantMarkdown from './AssistantMarkdown.svelte';
@@ -311,6 +312,26 @@
   }
 
   /**
+   * Identify finished lookups and checks whose results can be folded into the activity log.
+   *
+   * @param tool - Tool call as displayed in the conversation.
+   * @returns Whether the call can share a disclosure with adjacent calls.
+   */
+  function isRoutineCall(tool: Tool): boolean {
+    return (
+      tool.status === 'complete' &&
+      (/^(get|list|read)_/.test(tool.name) ||
+        [
+          'probe_http_request',
+          'validate_workflow_template',
+          'validate_workflow',
+          'validate_download_task',
+          'navigate'
+        ].includes(tool.name))
+    );
+  }
+
+  /**
    * Split a reply into text and tool runs in the order they were streamed.
    *
    * @param turn - Conversation turn with tool start offsets.
@@ -325,8 +346,11 @@
       if (text.trim()) parts.push({ key: `text-${offset}`, text });
       offset = Math.max(offset, tool.offset);
       const previous = parts.at(-1);
-      if (previous && 'tools' in previous) previous.tools.push(tool);
-      else parts.push({ key: tool.id, tools: [tool] });
+      if (previous && 'tools' in previous && isRoutineCall(tool) && isRoutineCall(previous.tools[0])) {
+        previous.tools.push(tool);
+      } else {
+        parts.push({ key: tool.id, tools: [tool] });
+      }
     }
 
     const rest = turn.content.slice(offset);
@@ -529,22 +553,21 @@
             <p class="sr-only">{$_('assistant.title')}</p>
             {#each segments(turn) as segment (segment.key)}
               {#if 'tools' in segment}
-                <ul class="-mx-2 space-y-0.5" aria-label={$_('assistant.activity')}>
-                  {#each segment.tools as tool (tool.id)}
-                    <li>
-                      <AssistantTool
-                        {tool}
-                        unsaved={turn.context?.page_type === 'workflow_designer' && turn.context.unsaved}
-                        onplan={user.current?.role === 'admin' &&
-                        !$assistant.busy &&
-                        !$assistantCanvas &&
-                        !$assistantRestoring
-                          ? () => reviewPlan(tool)
-                          : undefined}
-                      />
-                    </li>
-                  {/each}
-                </ul>
+                <AssistantActivity tools={segment.tools}>
+                  {#snippet entry(tool, number)}
+                    <AssistantTool
+                      {tool}
+                      callNumber={number}
+                      unsaved={turn.context?.page_type === 'workflow_designer' && turn.context.unsaved}
+                      onplan={user.current?.role === 'admin' &&
+                      !$assistant.busy &&
+                      !$assistantCanvas &&
+                      !$assistantRestoring
+                        ? () => reviewPlan(tool)
+                        : undefined}
+                    />
+                  {/snippet}
+                </AssistantActivity>
               {:else if /^\s*<(?:｜|(?:tool_calls|function_calls|invoke)(?:[\s>]|$))/.test(segment.text)}
                 <p class="text-sm leading-6 text-base-content/70">{$_('assistant.invalid_tool_call')}</p>
               {:else}
