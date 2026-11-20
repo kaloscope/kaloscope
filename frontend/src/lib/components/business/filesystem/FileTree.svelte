@@ -224,7 +224,7 @@
       </ul>
       <label class="mt-2 fieldset-label w-fit">
         <input type="checkbox" class="checkbox" bind:checked={showHidden} />
-        <span class="text-base text-base-content opacity-90">{$_('filesystem.show_hidden')}</span>
+        <span class="text-sm text-base-content/80">{$_('filesystem.show_hidden')}</span>
       </label>
     </fieldset>
     <div class="modal-action">
@@ -232,7 +232,7 @@
         <div class="mr-auto flex gap-2">
           <button
             type="button"
-            class="btn btn-square {$loading !== null || !deletable() ? 'btn-disabled' : 'text-red-900'}"
+            class="btn btn-square {$loading !== null || !deletable() ? 'btn-disabled' : 'text-error'}"
             onclick={deleteDir}
             title={$_('filesystem.delete_folder')}
           >

@@ -63,7 +63,7 @@
     <fieldset class="mt-2 fieldset">
       <label class="mt-2 fieldset-label w-fit">
         <input type="checkbox" class="checkbox" checked={false} name="local" />
-        <span class="text-base text-base-content opacity-90">{$_('download.delete_local')}</span>
+        <span class="text-sm text-base-content/80">{$_('download.delete_local')}</span>
       </label>
     </fieldset>
     <div class="modal-action">

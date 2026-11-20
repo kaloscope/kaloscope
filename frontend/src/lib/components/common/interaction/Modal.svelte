@@ -40,6 +40,7 @@
   import { portal } from '$lib/actions';
   import { Alerts } from '$lib/components';
   import { messages } from '$lib/components/common/notice/Messages.svelte';
+  import { icons } from '$lib/icons';
   import { freeze } from '$lib/stores.svelte';
   import { sniffer } from '$lib/utils/browser';
   import { italic } from '$lib/utils/text';
@@ -143,7 +144,9 @@
     </form>
     <div class="modal-box {boxClass}" style:max-width={maxWidth}>
       <form method="dialog" class="modal-corner {cornerClass}">
-        <button onclick={close}>✕</button>
+        <button onclick={close} aria-label="Close">
+          <iconify-icon icon={icons.dismiss} width="1.125rem" aria-hidden="true"></iconify-icon>
+        </button>
       </form>
       {#if title}
         <h3 class="modal-title">

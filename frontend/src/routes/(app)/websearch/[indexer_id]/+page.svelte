@@ -391,12 +391,12 @@
     }}
   >
     <fieldset class="fieldset">
-      <Label small>{$_('field.username')}</Label>
+      <Label>{$_('field.username')}</Label>
       <label class="input w-full">
         <iconify-icon icon={icons.user}></iconify-icon>
         <input class="grow" bind:value={username} {...loginSchema.username} />
       </label>
-      <Label small>{$_('field.password')}</Label>
+      <Label>{$_('field.password')}</Label>
       <label class="input w-full">
         <iconify-icon icon={icons.key}></iconify-icon>
         <input class="grow" bind:value={password} {...loginSchema.password} />
