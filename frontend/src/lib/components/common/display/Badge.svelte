@@ -10,17 +10,27 @@
     icon?: string | IconifyIcon;
     /** The badge icon color. */
     iconColor?: string | null;
+    /** The color of a status dot before the text; no dot when omitted. */
+    dot?: keyof typeof DOTS;
     /** Whether to use uppercase text. */
     uppercase?: boolean;
-    /** Whether to use a dashed border. */
+    /** Whether to draw a dashed outline instead of a fill, as for drafts. */
     dashed?: boolean;
-    /** Whether to add a shadow to the badge. */
-    shadow?: boolean;
     /** The class names for the badge. */
     class?: string;
+    /** The class names for the icon. */
     iconClass?: string;
     /** The click event handler. */
     onclick?: MouseEventHandler<HTMLDivElement>;
+  };
+
+  // full class names so Tailwind can find them
+  const DOTS = {
+    success: 'bg-success',
+    warning: 'bg-warning',
+    error: 'bg-error',
+    info: 'bg-info',
+    neutral: 'bg-base-content/40'
   };
 </script>
 
@@ -29,19 +39,13 @@
     children,
     icon,
     iconColor,
+    dot,
     uppercase = false,
     dashed = false,
-    shadow = true,
     class: _class,
     iconClass,
     onclick
   }: BadgeProps = $props();
-
-  const badgeClass = 'badge h-fit flex-wrap gap-1 px-2 py-[1px] rounded-field text-xs font-medium opacity-70';
-  let borderClass = $derived(`border-1 border-base-content/10 ${dashed ? 'border-dashed' : ''}`);
-  let shadowClass = $derived(shadow ? 'shadow-inner' : '');
-  let uppercaseClass = $derived(uppercase ? 'uppercase' : '');
-  let btnClass = $derived(onclick ? 'btn-scale' : '');
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -49,10 +53,13 @@
   tabindex={onclick ? 0 : undefined}
   role={onclick ? 'button' : 'generic'}
   {onclick}
-  class="{badgeClass} {borderClass} {shadowClass} {uppercaseClass} {btnClass} {_class}"
+  class="tag {dashed ? 'tag-dashed' : ''} {uppercase ? 'uppercase' : ''} {onclick ? 'btn-scale' : ''} {_class}"
 >
+  {#if dot}
+    <span class="size-1.5 shrink-0 rounded-full {DOTS[dot]}" aria-hidden="true"></span>
+  {/if}
   {#if icon}
-    <iconify-icon {icon} width="1rem" class="size-4 {iconClass}" style:color={iconColor}></iconify-icon>
+    <iconify-icon {icon} width="0.875rem" class="size-3.5 shrink-0 {iconClass}" style:color={iconColor}></iconify-icon>
   {/if}
   {@render children()}
 </div>

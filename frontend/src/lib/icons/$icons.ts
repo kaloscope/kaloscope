@@ -716,6 +716,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     hFlip: false,
     body: '<path fill="currentColor" d="M17.75 3A3.25 3.25 0 0 1 21 6.25v11.5A3.25 3.25 0 0 1 17.75 21H6.25A3.25 3.25 0 0 1 3 17.75V6.25A3.25 3.25 0 0 1 6.25 3zm.58 16.401l-5.805-5.686a.75.75 0 0 0-.966-.071l-.084.07l-5.807 5.687q.274.097.582.099h11.5c.203 0 .399-.035.58-.099l-5.805-5.686zM17.75 4.5H6.25A1.75 1.75 0 0 0 4.5 6.25v11.5q.001.313.103.594l5.823-5.701a2.25 2.25 0 0 1 3.02-.116l.128.116l5.822 5.702q.102-.28.104-.595V6.25a1.75 1.75 0 0 0-1.75-1.75m-2.498 2a2.252 2.252 0 1 1 0 4.504a2.252 2.252 0 0 1 0-4.504m0 1.5a.752.752 0 1 0 0 1.504a.752.752 0 0 0 0-1.504"/>'
   },
+  imageMultiple: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="currentColor" d="M13.748 8.996a1.248 1.248 0 1 0 0-2.496a1.248 1.248 0 0 0 0 2.496M6.25 3A3.25 3.25 0 0 0 3 6.25v9a3.25 3.25 0 0 0 3.25 3.25h9a3.25 3.25 0 0 0 3.25-3.25v-9A3.25 3.25 0 0 0 15.25 3zM4.5 6.25c0-.966.784-1.75 1.75-1.75h9c.966 0 1.75.784 1.75 1.75v9c0 .231-.045.452-.126.654l-4.587-4.291a2.25 2.25 0 0 0-3.074 0l-4.587 4.29a1.8 1.8 0 0 1-.126-.653zm6.762 6.458l4.505 4.214q-.246.076-.517.078h-9q-.271 0-.517-.078l4.504-4.214a.75.75 0 0 1 1.025 0M8.75 21a3.25 3.25 0 0 1-2.74-1.5h9.74a3.75 3.75 0 0 0 3.75-3.75V6.011a3.25 3.25 0 0 1 1.5 2.74v7A5.25 5.25 0 0 1 15.75 21z"/>'
+  },
   imageSearch: {
     left: 0,
     top: 0,
@@ -845,6 +855,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     vFlip: false,
     hFlip: false,
     body: '<path fill="currentColor" d="M12 7.75a1.75 1.75 0 1 1 0-3.5a1.75 1.75 0 0 1 0 3.5m0 6a1.75 1.75 0 1 1 0-3.5a1.75 1.75 0 0 1 0 3.5M10.25 18a1.75 1.75 0 1 0 3.5 0a1.75 1.75 0 0 0-3.5 0"/>'
+  },
+  moviesAndTv: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="currentColor" d="m19.729 3.917l.05.16l.552 1.922a.75.75 0 0 1-.418.893l-.096.035L9.09 10.002h11.16a.75.75 0 0 1 .742.65l.007.1v8.499a2.75 2.75 0 0 1-2.582 2.745l-.168.005H5.75a2.75 2.75 0 0 1-2.745-2.582L3 19.25v-8.392l-.522-1.821a2.75 2.75 0 0 1 1.726-3.35l.16-.052L16.378 2.19a2.75 2.75 0 0 1 3.35 1.726m-.23 7.585H4.5v7.749c0 .604.429 1.108.998 1.224l.124.02l.128.006h12.5a1.25 1.25 0 0 0 1.243-1.122l.006-.128zM6.272 6.649l-1.496.43a1.25 1.25 0 0 0-.886 1.42l.03.125l.344 1.201l.295-.085zm4.756-1.363l-2.717.779l-1.714 3.09l2.718-.778zm4.758-1.365l-2.718.78l-1.713 3.09l2.716-.778zm1.847-.233l-1.521 2.74l2.569-.737l-.344-1.2a1.25 1.25 0 0 0-.704-.803"/>'
   },
   pageFit: {
     left: 0,
@@ -1296,6 +1316,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     hFlip: false,
     body: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="1.5" d="M19.5 12h-8m8-6.25h-15m15 12.5h-15"/>'
   },
+  bookText: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M2.756 16.358a1.09 1.09 0 0 0 1.154 1.198a16.6 16.6 0 0 1 3.54.338c1.635.2 3.197.794 4.552 1.731V6.448A10.16 10.16 0 0 0 7.45 4.694a16.6 16.6 0 0 0-3.605-.316a1.09 1.09 0 0 0-1.09 1.09zm18.492 0a1.09 1.09 0 0 1-1.154 1.154a16.6 16.6 0 0 0-3.54.338a10.16 10.16 0 0 0-4.552 1.775V6.448a10.16 10.16 0 0 1 4.552-1.754a16.6 16.6 0 0 1 3.605-.316a1.09 1.09 0 0 1 1.089 1.155zM5.621 8.234h1.252m-1.252 6.011h1.834M5.78 11.24h3.35"/>'
+  },
   box3d: {
     left: 0,
     top: 0,
@@ -1555,6 +1585,16 @@ export const icons: Readonly<{ [key in keyof typeof names]: IconifyIcon }> = {
     vFlip: false,
     hFlip: false,
     body: '<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M19 3h-4a2 2 0 0 0-2 2v12a4 4 0 0 0 8 0V5a2 2 0 0 0-2-2"/><path d="m13 7.35l-2-2a2 2 0 0 0-2.828 0L5.344 8.178a2 2 0 0 0 0 2.828l9 9"/><path d="M7.3 13H5a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h12m0-4v.01"/></g>'
+  },
+  deviceTvOld: {
+    left: 0,
+    top: 0,
+    width: 24,
+    height: 24,
+    rotate: 0,
+    vFlip: false,
+    hFlip: false,
+    body: '<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zm13-6l-4 4l-4-4m7 4v13m3-5v.01M18 12v.01"/>'
   },
   focusCentered: {
     left: 0,

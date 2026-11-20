@@ -118,11 +118,11 @@
         },
         {
           disabled: user.role === 'admin',
-          icon: icons.deleteDismiss,
+          icon: icons.delete,
           text: $_('action.delete', $_('entity.user')),
           onclick: () => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.user'))} [${user.username}]`,
               onconfirm: () => del(user.id)
             });

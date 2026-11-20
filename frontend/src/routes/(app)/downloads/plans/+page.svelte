@@ -204,11 +204,11 @@
             }
           },
           {
-            icon: icons.deleteDismiss,
+            icon: icons.delete,
             text: $_('action.delete', $_('entity.plan')),
             onclick: () => {
               confirm({
-                icon: icons.deleteDismiss,
+                icon: icons.delete,
                 title: `${$_('action.delete', $_('entity.plan'))} [${plan.id}]`,
                 onconfirm: () => del(plan.id)
               });

@@ -572,11 +572,11 @@
         },
         {
           condition: draft,
-          icon: icons.deleteDismiss,
+          icon: icons.delete,
           text: $_('action.delete', $_('entity.graph')),
           onclick: () => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.graph'))} [${graph.name}]`,
               onconfirm: () => del(graph.id)
             });

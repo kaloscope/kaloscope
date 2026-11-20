@@ -1,6 +1,16 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, Container, Empty, ProviderEditor, ProviderIcon, Setting, alert, confirm } from '$lib/components';
+  import {
+    Badge,
+    Button,
+    Container,
+    Empty,
+    ProviderEditor,
+    ProviderIcon,
+    Setting,
+    alert,
+    confirm
+  } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -148,31 +158,19 @@
                     </p>
                   </div>
                 </div>
-                <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-base-content/70">
-                  <span class="inline-flex items-center gap-1.5 rounded-field bg-base-200 px-2 py-1">
-                    <span
-                      class="size-1.5 shrink-0 rounded-full {provider.enabled ? 'bg-success' : 'bg-base-content/40'}"
-                      aria-hidden="true"
-                    ></span>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <Badge dot={provider.enabled ? 'success' : 'neutral'}>
                     {$_(provider.enabled ? 'ai.enabled' : 'ai.disabled')}
-                  </span>
-                  <span class="inline-flex items-center gap-1.5 rounded-field bg-base-200 px-2 py-1">
-                    <iconify-icon icon={icons.key} width="0.875rem" aria-hidden="true"></iconify-icon>
-                    {$_(provider.has_api_key ? 'ai.key_saved' : 'ai.key_missing')}
-                  </span>
-                  <span class="inline-flex items-center gap-1.5 rounded-field bg-base-200 px-2 py-1">
-                    <iconify-icon icon={icons.layerDiagonalSparkle} width="0.875rem" aria-hidden="true"></iconify-icon>
-                    {$_('ai.model_count', provider.model_ids.length)}
-                  </span>
+                  </Badge>
+                  <Badge icon={icons.key}>{$_(provider.has_api_key ? 'ai.key_saved' : 'ai.key_missing')}</Badge>
+                  <Badge icon={icons.layerDiagonalSparkle}>{$_('ai.model_count', provider.model_ids.length)}</Badge>
                 </div>
                 {#if provider.model_ids.length}
                   <div class="mt-3 flex flex-wrap gap-2">
                     {#each provider.model_ids.slice(0, 6) as model (model)}
-                      <span class="max-w-full truncate rounded bg-base-200 px-2 py-1 text-xs" title={model}
-                        >{model}</span
-                      >
+                      <span class="tag" title={model}><span class="truncate">{model}</span></span>
                     {/each}
-                    {#if provider.model_ids.length > 6}<span class="px-2 py-1 text-xs text-base-content/70"
+                    {#if provider.model_ids.length > 6}<span class="px-2 py-1 text-xs text-muted"
                         >+{provider.model_ids.length - 6}</span
                       >{/if}
                   </div>
