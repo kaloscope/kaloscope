@@ -404,9 +404,10 @@ class PlanCreate(ToolArguments):
     """Create settings retained by successful validation in this conversation."""
 
     request_id: UUID
+    proposal_id: str | None = Field(default=None, max_length=255)
     confirmed: bool = Field(
         default=False,
-        description="True only after the user approves these final settings.",
+        description="True for accepted subscription choices.",
     )
 
 
@@ -589,14 +590,13 @@ class AssistantTool:
 TOOLS = (
     AssistantTool(
         "search_indexer",
-        "Run selected published search (10s/page<=20); metadata only, no "
-        "downloads. Requires user indexer choice.",
+        "Preview only (10s/page<=20). One-off downloads: user picks the indexer.",
         IndexerSearch,
         admin=True,
     ),
     AssistantTool(
         "get_download_plan_options",
-        "Read published indexer filters/downloaders; unlock plan validation/creation.",
+        "Read subscription defaults, filters and creation rules.",
         PlanOptions,
         admin=True,
     ),
@@ -608,9 +608,8 @@ TOOLS = (
     ),
     AssistantTool(
         "create_download_plan",
-        "Create a prior turn's reviewed settings after final user "
-        "confirmation; reuse request_id. "
-        "Active plans queue real search/downloads; future starts wait.",
+        "Set confirmed=true on acceptance. Changed keyword: proposal_id = prior "
+        "request_id or search call ID.",
         PlanCreate,
         admin=True,
     ),
@@ -650,7 +649,7 @@ TOOLS = (
     ),
     AssistantTool(
         "list_workflows",
-        "Page accessible workflow metadata/IDs without graphs.",
+        "Page accessible workflow metadata/IDs.",
         WorkflowList,
     ),
     AssistantTool(
@@ -716,8 +715,8 @@ TOOLS = (
     ),
     AssistantTool(
         CREATE_TOOL,
-        "Create one empty unpublished draft: unique name, category, purpose. "
-        "Retries replay it; name_already_exists creates nothing.",
+        "Explicit workflow authoring only. Create an empty unpublished draft; "
+        "retries replay, duplicate names fail.",
         WorkflowCreate,
         admin=True,
     ),
@@ -1244,7 +1243,7 @@ async def execute_tool(
         async with asyncio.timeout(TOOL_TIMEOUT):
             match args:
                 case IndexerSearch():
-                    result = await DownloadPlanService.search_indexer(args, user)
+                    result = await preview_indexer(args, user)
                 case PlanOptions():
                     result = await DownloadPlanService.authoring_options(
                         **args.model_dump(), user=user
@@ -1790,13 +1789,146 @@ async def run_reviewed(
     )
 
 
+async def preview_indexer(args: IndexerSearch, user: UserInfo) -> dict:
+    """Include subscription defaults with the first page of a metadata preview.
+
+    Args:
+        args: Published indexer and search parameters.
+        user: Account used to read both the results and the available settings.
+
+    Returns:
+        Search results with suggested plan settings when available. Sealed-source
+        searches and later pages retain their original result format.
+    """
+    result = await DownloadPlanService.search_indexer(args, user)
+    if args.sources or args.page_num != 1 or result["status"] != "ok":
+        return result
+
+    try:
+        options = await DownloadPlanService.authoring_options(args.workflow_id, user)
+    except (KaloscopeException, ValueError):
+        # a misconfigured downloader should not hide the search results
+        result["subscription_note"] = "Plan settings unavailable; check plan options."
+        return result
+    if not options["only_preview"]:
+        defaults = options["defaults"]
+        result["subscription"] = {
+            "defaults": defaults,
+            "downloader": next(
+                (
+                    item["name"]
+                    for item in options["downloaders"]["items"]
+                    if item["id"] == defaults["downloader_id"]
+                ),
+                None,
+            ),
+            "interval_unit": options["interval_unit"],
+            "timezone": options["timezone"],
+            "creation_rules": options["creation_rules"],
+        }
+    return result
+
+
+async def _answered_plan_request(
+    conversation_id: int,
+    original_turn_id: int,
+    validation: dict,
+    proposal_id: str | None,
+) -> UUID | None:
+    """Check whether the user is answering a pending subscription proposal.
+
+    Args:
+        conversation_id: Conversation containing the current validation.
+        original_turn_id: First attempt at the user's current reply, before retries.
+        validation: Validated settings selected in that reply.
+        proposal_id: Earlier validation or preview that the user's choices revise.
+
+    Returns:
+        The preceding proposal ID, or the current validation ID for a search-only
+        proposal. Return `None` without matching setup in the last reply. A new
+        library-wide binding requires the same previously reviewed revision.
+    """
+    previous = (
+        await AssistantTurn.filter(
+            conversation_id=conversation_id, id__lt=original_turn_id
+        )
+        .order_by("-id")
+        .first()
+    )
+    if (
+        previous is None
+        or previous.status != "complete"
+        or not previous.content.strip()
+    ):
+        return None
+
+    calls = (
+        await AssistantToolCall.filter(
+            turn_id=previous.id,
+            name__in=(
+                "validate_download_plan",
+                "get_download_plan_options",
+                "search_indexer",
+                "create_download_plan",
+                "validate_download_task",
+                "create_download_task",
+            ),
+        )
+        .order_by("id")
+        .values_list("name", "call_id", "result")
+    )
+    proposal = None
+    options_shown: set[int] = set()
+    previews: set[int] = set()
+    keyword = validation["plan"]["keyword"]
+    for name, call_id, result in calls:
+        data = (result or {}).get("data") or {}
+        if name in {"validate_download_task", "create_download_task"} or (
+            name == "create_download_plan" and data.get("created")
+        ):
+            return None
+        if name == "validate_download_plan":
+            proposal = data
+        elif workflow_id := data.get("workflow_id"):
+            if name == "get_download_plan_options" and data.get("published"):
+                options_shown.add(workflow_id)
+            if name == "search_indexer" and data.get("status") == "ok":
+                query = data.get("query") or {}
+                matches = query.get("keyword") == keyword or call_id == proposal_id
+                if matches and not query.get("sources"):
+                    previews.add(workflow_id)
+                    if data.get("subscription"):
+                        options_shown.add(workflow_id)
+
+    # a new library-wide effect needs the same binding the user was shown
+    binding = validation.get("ingestion") or {}
+    if binding.get("binding") == "add":
+        shown = (proposal or {}).get("ingestion") or {}
+        if any(
+            binding[key] != shown.get(key)
+            for key in ("binding", "library_id", "workflow_id", "revision")
+        ):
+            return None
+
+    if proposal and proposal.get("plan"):
+        matches = (
+            proposal["plan"]["keyword"] == keyword
+            or proposal["request_id"] == proposal_id
+        )
+        return UUID(proposal["request_id"]) if matches else None
+    # a reply may have offered defaults and a preview without a full draft
+    if previews & options_shown:
+        return UUID(validation["request_id"])
+    return None
+
+
 async def create_plan(
     args: PlanCreate, conversation_id: int, call_id: str, user: UserInfo
 ) -> dict:
     """Recover a plan across retries and create only a reviewed request identity.
 
     Args:
-        args: Validated request ID and explicit approval of its final settings.
+        args: Validated request ID and approval of the subscription choices.
         conversation_id: Server-owned conversation.
         call_id: Server-owned call record.
         user: Current account whose administrator rights are checked by the service.
@@ -1807,10 +1939,6 @@ async def create_plan(
     Raises:
         NotFoundException: If the call or validation record is unavailable.
     """
-    import hashlib
-
-    from app.models.download import DownloadPlan
-
     call = await AssistantToolCall.get_or_none(
         call_id=call_id, turn__conversation_id=conversation_id
     )
@@ -1829,10 +1957,9 @@ async def create_plan(
             request = PlanCreate.model_validate_json(earlier.arguments)
         except ValidationError:
             continue
-        key = hashlib.sha256(f"{user.id}:{request.request_id}".encode()).hexdigest()
-        plan = await DownloadPlan.get_or_none(creation_key=key)
-        if plan is not None:
-            return await DownloadPlanService.creation_result(plan, user, replayed=True)
+        receipt = await DownloadPlanService.find_creation(request.request_id, user)
+        if receipt["created"]:
+            return receipt
 
     records = (
         await AssistantToolCall.filter(
@@ -1846,27 +1973,33 @@ async def create_plan(
         data = (record.result or {}).get("data") or {}
         if data.get("valid") and data.get("request_id") == str(args.request_id):
             # an editor may already have created this reviewed proposal
-            key = hashlib.sha256(f"{user.id}:{args.request_id}".encode()).hexdigest()
-            plan = await DownloadPlan.get_or_none(creation_key=key)
-            if plan is not None:
-                return await DownloadPlanService.creation_result(
-                    plan, user, replayed=True
-                )
+            receipt = await DownloadPlanService.find_creation(args.request_id, user)
+            if receipt["created"]:
+                return receipt
 
-            reviewed_turn = await AssistantTurn.get(id=record.turn_id)
-            if (
-                index
-                or record.turn_id in turn_ids
-                or reviewed_turn.status != "complete"
-            ):
+            ready = False
+            if index == 0 and record.turn_id in turn_ids:
+                proposal = await _answered_plan_request(
+                    conversation_id, turn_ids[-1], data, args.proposal_id
+                )
+                ready = proposal is not None
+                if proposal and proposal != args.request_id:
+                    # the editor may already have submitted the original proposal
+                    receipt = await DownloadPlanService.find_creation(proposal, user)
+                    if receipt["created"]:
+                        return receipt
+            elif index == 0:
+                ready = await AssistantTurn.filter(
+                    id=record.turn_id, status="complete"
+                ).exists()
+            if not ready:
                 return {
                     **data,
                     "created": False,
                     "confirmation_required": True,
                     "message": (
-                        "Show the latest validated settings and defaults, finish the "
-                        "turn, and wait for the user's final confirmation before "
-                        "creating."
+                        "Propose the latest settings and collect all remaining choices "
+                        "in one reply. Create when the user accepts or supplies them."
                     ),
                 }
 
