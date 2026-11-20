@@ -297,11 +297,11 @@
           }
         },
         {
-          icon: icons.deleteDismiss,
+          icon: icons.delete,
           text: $_('action.delete', $_('entity.job')),
           onclick: () => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.job'))} [${job.id}]`,
               onconfirm: () => del(job.id)
             });

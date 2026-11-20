@@ -1,7 +1,7 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
-  import { Button, Container, Empty, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
+  import { Badge, Button, Container, Empty, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -241,15 +241,11 @@
                   })}
               />
             </div>
-            <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-base-content/70">
-              <span class="inline-flex items-center gap-1.5 rounded-field bg-base-200 px-2 py-1">
-                <span
-                  class="size-1.5 rounded-full {token.status === 'active' ? 'bg-success' : 'bg-base-content/40'}"
-                  aria-hidden="true"
-                ></span>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <Badge dot={token.status === 'active' ? 'success' : 'neutral'}>
                 {$_(`access_token.status.${token.status}`)}
-              </span>
-              <span class="rounded-field bg-base-200 px-2 py-1">{$_(`access_token.${token.scope}`)}</span>
+              </Badge>
+              <Badge>{$_(`access_token.${token.scope}`)}</Badge>
             </div>
             <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-3">
               <div>

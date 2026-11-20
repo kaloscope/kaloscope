@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { Badge, Dropdown, Modal } from '$lib/components';
+  import { Dropdown, Modal } from '$lib/components';
   import { _, locale, locales } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
@@ -36,7 +36,12 @@
           switchLocale(code);
         }}
       >
-        <Badge uppercase>{code.split('-')[0]}</Badge>
+        <!-- the language menu keeps its bordered code badge -->
+        <span
+          class="badge h-fit rounded-field border-base-content/10 px-2 py-px text-xs font-medium uppercase opacity-70 shadow-inner"
+        >
+          {code.split('-')[0]}
+        </span>
         {$_(code, { locale: 'languages' })}
       </button>
     </li>

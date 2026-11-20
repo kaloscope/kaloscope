@@ -133,11 +133,11 @@
           }
         },
         {
-          icon: icons.deleteDismiss,
+          icon: icons.delete,
           text: $_('action.delete', $_('entity.variable')),
           onclick: () => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.variable'))} [${variable.key}]`,
               onconfirm: () => del(variable.id)
             });

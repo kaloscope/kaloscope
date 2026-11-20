@@ -3,14 +3,14 @@
   import { page } from '$app/state';
   import { tooltip } from '$lib/actions';
   import { api } from '$lib/api';
-  import { registerAssistantContext, snapshotAssistantCanvas } from '$lib/assistant/context';
   import {
     assistantCanvas,
     discardAssistantCanvas,
     notifyAssistantEditor,
     registerAssistantEditor
   } from '$lib/assistant/canvas';
-  import { Badge, Button, GraphEditor, Image, PageHeader, alert, confirm } from '$lib/components';
+  import { registerAssistantContext, snapshotAssistantCanvas } from '$lib/assistant/context';
+  import { Button, GraphEditor, Image, PageHeader, alert, confirm } from '$lib/components';
   import { GraphState } from '$lib/enums';
   import { _, time } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -484,6 +484,7 @@
 
 <PageHeader>
   {#if graph}
+    {@const state = GraphState[graph.state]}
     <button
       class="group relative flex-center hover-dashed gap-2 px-2"
       disabled={canvasLocked}
@@ -500,8 +501,11 @@
       <span class="overflow-hidden">
         <div class="truncate text-sm opacity-90">{graph.name}</div>
         <div class="mt-0.5 flex-center">
-          <Badge shadow={false} dashed={graph.state === 'draft'}>
-            {@const state = GraphState[graph.state]}
+          <!-- keep the bordered status badge in the designer header -->
+          <span
+            class="badge h-fit flex-wrap gap-1 rounded-field border-base-content/10 px-2 py-px text-xs font-medium opacity-70"
+            class:border-dashed={graph.state === 'draft'}
+          >
             <span class="size-4">
               {#if autoSaveMode && autoSaveSignal}
                 <iconify-icon
@@ -519,7 +523,7 @@
             {:else}
               {`${$_(state.label)} (${$time(graph.updated_at)})`}
             {/if}
-          </Badge>
+          </span>
         </div>
       </span>
       <div class="invisible absolute flex-center size-full bg-blur-90 group-hover:visible">
@@ -533,7 +537,12 @@
   <GraphEditor bind:this={graphEditor} {...graph} onsave={updateGraphMetadata} />
   <div class="svelte-flow__panel right-0 flex h-8 rounded-field border bg-blur-70 px-2 py-1 shadow-md">
     <div class="flex-center gap-2">
-      <Badge dashed>{store.viewport.zoom.toFixed(1)}</Badge>
+      <!-- keep the bordered zoom indicator badge -->
+      <span
+        class="badge h-fit rounded-field border-dashed border-base-content/10 px-2 py-px text-xs font-medium opacity-70 shadow-inner"
+      >
+        {store.viewport.zoom.toFixed(1)}
+      </span>
       <Button
         size="xs"
         icon={icons.pageFit}

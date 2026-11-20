@@ -334,6 +334,19 @@
 @utility card-tag {
   @apply inline-flex max-w-full items-center gap-1.5 rounded-field bg-base-200 px-2 py-1 text-xs text-base-content/70;
 }
+/* small metadata tag in tables and lists */
+@utility tag {
+  @apply inline-flex max-w-full items-center gap-1.5 rounded-field px-2 py-1 text-xs;
+  /* tinted from the surrounding text, so it stays legible on hovered and selected rows */
+  color: color-mix(in oklab, currentColor 75%, transparent);
+  background-color: color-mix(in oklab, currentColor 8%, transparent);
+  /* an outline instead of a fill marks a draft */
+  &.tag-dashed {
+    background-color: transparent;
+    outline: 1px dashed color-mix(in oklab, currentColor 40%, transparent);
+    outline-offset: -1px;
+  }
+}
 /* small square that tints its icon with `--tone`, or stays neutral without one */
 @utility icon-tile {
   --icon-tile-color: var(--tone, var(--color-base-content));
@@ -405,7 +418,7 @@
 @utility inset-list {
   overflow: hidden;
   border-radius: min(var(--radius-field), 0.625rem);
-  background-color: color-mix(in oklab, var(--color-base-content) 4%, transparent);
+  background-color: color-mix(in oklab, var(--color-base-content) 2%, transparent);
   box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-base-content) 7%, transparent) inset;
   & > * + * {
     border-top: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);

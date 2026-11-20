@@ -220,13 +220,13 @@
         </div>
         <div class="flex flex-wrap gap-1">
           {#if quality}
-            <Badge shadow={false}>{quality}</Badge>
+            <Badge>{quality}</Badge>
           {/if}
           {#if resolution}
-            <Badge shadow={false}>{resolution}</Badge>
+            <Badge>{resolution}</Badge>
           {/if}
           {#if hwaccel}
-            <Badge shadow={false}>{hwaccel}</Badge>
+            <Badge>{hwaccel}</Badge>
           {/if}
         </div>
         {#if task.state === 'running'}

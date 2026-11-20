@@ -107,11 +107,11 @@
     <Cell
       actions={[
         {
-          icon: icons.deleteDismiss,
+          icon: icons.delete,
           text: $_('action.delete', $_('entity.favorite')),
           onclick: () => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: $_('action.delete', $_('entity.favorite')),
               onconfirm: () => del(favorite)
             });

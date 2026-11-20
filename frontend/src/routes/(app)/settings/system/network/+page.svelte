@@ -238,11 +238,11 @@
           onclick: () => moveDown(index)
         },
         {
-          icon: icons.deleteDismiss,
+          icon: icons.delete,
           text: $_('action.delete', $_('entity.rule')),
           onclick: () => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.rule'))} [${rule.pattern}]`,
               onconfirm: () => del(rule.id)
             });
@@ -275,10 +275,10 @@
         />
         <Button
           size="xs"
-          icon={icons.deleteDismiss}
+          icon={icons.delete}
           onclick={() => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.dns_resolver'))} [${resolver.name}]`,
               onconfirm: () => delDNSResolver(resolver.id)
             });
@@ -323,10 +323,10 @@
         />
         <Button
           size="xs"
-          icon={icons.deleteDismiss}
+          icon={icons.delete}
           onclick={() => {
             confirm({
-              icon: icons.deleteDismiss,
+              icon: icons.delete,
               title: `${$_('action.delete', $_('entity.proxy_server'))} [${proxy.name}]`,
               onconfirm: () => delProxyServer(proxy.id)
             });
