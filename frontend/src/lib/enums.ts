@@ -53,23 +53,23 @@ export const UserRole = createEnum({
 export const LibType = createEnum({
   movie: {
     label: 'enum.lib_type.movie',
-    icon: icons.moviesAndTv,
-    iconColor: 'var(--color-primary)'
+    icon: icons.clapperboard,
+    iconColor: null
   },
   tv_show: {
     label: 'enum.lib_type.tv_show',
-    icon: icons.deviceTvOld,
-    iconColor: 'var(--color-info)'
+    icon: icons.retroTv,
+    iconColor: null
   },
   novel: {
     label: 'enum.lib_type.novel',
-    icon: icons.bookText,
-    iconColor: 'var(--color-secondary)'
+    icon: icons.openBook,
+    iconColor: null
   },
   comic: {
     label: 'enum.lib_type.comic',
-    icon: icons.imageMultiple,
-    iconColor: 'var(--color-accent)'
+    icon: icons.imageStack,
+    iconColor: null
   }
 });
 
