@@ -2562,10 +2562,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             "interval_unit": "hours",
             "timezone": "UTC",
             "creation_rules": (
-                "One-time download of one chosen result (no plan): search_indexer "
-                "with sources=true, let the user pick a result, then use only the "
-                "downloader/dir/transfer defaults below with validate_download_task "
-                "and, after final confirmation, create_download_task. "
+                "For a one-time download, choose a suitable published indexer, "
+                "search_indexer with sources=true, and show numbered resources, "
+                "the actual downloader and directory in one reply. Say picking a "
+                "resource submits it with those defaults. On selection, validate "
+                "the exact offered source and create_download_task immediately. "
+                "Show new transfer effects or changed settings before submission. "
                 "For subscriptions, aim for one user reply. Keep the requested title "
                 "and preferences. In the first turn choose a suitable published "
                 "downloadable indexer for a preview; if several fit, recommend one "

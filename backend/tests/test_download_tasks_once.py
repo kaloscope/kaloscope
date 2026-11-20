@@ -662,7 +662,7 @@ def test_mcp_parity(monkeypatch):
 
 @pytest.mark.parametrize("verbose", [False, True], ids=["short", "compacted"])
 def test_conversation(monkeypatch, verbose):
-    fixture, identities = {}, []
+    fixture = {}
     stage = {"number": 0, "step": 0}
     driver = Rpc()
 
@@ -694,14 +694,9 @@ def test_conversation(monkeypatch, verbose):
         number, step = stage["number"], stage["step"]
         stage["step"] += 1
         flow = fixture["graph_id"]
-        unlock = [
-            ("get_workflow", {"workflow_id": flow}),
-            ("get_download_plan_options", {"workflow_id": flow}),
-        ]
         actions = [
-            [("list_workflows", {"category": "indexer"})],
             [
-                *unlock,
+                ("list_workflows", {"category": "indexer"}),
                 (
                     "search_indexer",
                     {"workflow_id": flow, "keyword": "Lantern", "sources": True},
@@ -713,19 +708,17 @@ def test_conversation(monkeypatch, verbose):
                     {"tool_call_id": fixture.get("search_call_id", ""), "limit": 8000},
                 ),
                 ("validate_download_task", fixture.get("check", {})),
-            ],
-            [
                 (
                     "create_download_task",
                     {
-                        "request_id": identities[0] if identities else "",
+                        "request_id": fixture.get("request_id", ""),
                         "confirmed": True,
                     },
                 ),
                 (
                     "create_download_task",
                     {
-                        "request_id": identities[0] if identities else "",
+                        "request_id": fixture.get("request_id", ""),
                         "confirmed": True,
                     },
                 ),
@@ -733,9 +726,8 @@ def test_conversation(monkeypatch, verbose):
         ][number]
         if step >= len(actions):
             content = [
-                "Choose the published indexer for Lantern.",
-                "Results: 1) Lantern 2024 1080p  2) Lantern 2024 720p. Which?",
-                "Lantern 2024 720p (torrent), default downloader and dir. Confirm?",
+                "1) Lantern 2024 1080p  2) Lantern 2024 720p. Pick one to download "
+                "with the indicated downloader and directory.",
                 "Submitted task; downloading continues in the background.",
             ][number]
             return response([chunk({"role": "assistant", "content": content}, "stop")])
@@ -746,9 +738,8 @@ def test_conversation(monkeypatch, verbose):
                 fixture["check"]["resource"]["source"]
                 in dumps(body["messages"]).decode()
             )
-        if number >= 2 or (step >= 2 and number):
-            names = {item["function"]["name"] for item in body["tools"]}
-            assert {"validate_download_task", "create_download_task"} <= names
+        names = {item["function"]["name"] for item in body["tools"]}
+        assert {"validate_download_task", "create_download_task"} <= names
         return response(
             [
                 chunk(
@@ -784,39 +775,35 @@ def test_conversation(monkeypatch, verbose):
             results = []
             for number, prompt in enumerate(
                 [
-                    "下载一次 Lantern",
-                    "选择 Published indexer",
+                    "Please download Lantern" if verbose else "帮我下载《Lantern》",
                     "选第二个，其他用默认",
-                    "确认下载",
                 ]
             ):
                 stage.update(number=number, step=0)
-                events = [
-                    event
-                    async for event in AssistantService.persistent_stream(
-                        conversation["id"],
-                        request(f"step-{number}", prompt=prompt),
-                        owner,
-                    )
-                ]
+                events = []
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request(f"step-{number}", prompt=prompt), owner
+                ):
+                    events.append(event)
+                    if (
+                        event.event == "tool_result"
+                        and event.data["name"] == "validate_download_task"
+                    ):
+                        fixture["request_id"] = event.data["data"]["request_id"]
                 assert events[-1].event == "done", events[-1]
                 turn = [e.data for e in events if e.event == "tool_result"]
                 assert all(result["ok"] for result in turn), turn
                 results.extend(turn)
-                if number == 1:
+                if number == 0:
                     fixture["search_call_id"] = turn[-1]["id"]
                     found = {i["id"]: i for i in turn[-1]["data"]["items"]}
-                    options = turn[1]["data"]["defaults"]
+                    options = turn[-1]["data"]["one_time_download"]
                     fixture["check"] = settings(
                         graph.id,
                         found["r2"],
                         options["downloader_id"],
                         dir=options["dir"],
                     )
-                    fixture["check"]["dir"] = options["dir"]
-                if number == 2:
-                    identities.append(turn[-1]["data"]["request_id"])
-                if number < 3:
                     assert not driver.added and not await DownloadTask.exists()
 
             created = [
@@ -829,7 +816,7 @@ def test_conversation(monkeypatch, verbose):
             assert not await DownloadPlan.exists()
             assert await FlowLog.all().count() == 0
             assert "PASSKEY" not in dumps(results).decode()
-            checked = await AssistantTurn.get(request_id="step-2")
+            checked = await AssistantTurn.get(request_id="step-1")
             assert graph.id in checked.resource_ids
             owner.role, owner.perms = UserRole.USER, Permissions(indexer_ids=[])
             denied = await tools.execute_tool(
@@ -890,7 +877,20 @@ def test_followup_recovery(outcome):
     asyncio.run(run())
 
 
-def test_same_turn_confirmation(monkeypatch):
+@pytest.mark.parametrize(
+    "previous",
+    [
+        "none",
+        "other_source",
+        "other_dir",
+        "interrupted",
+        "retry",
+        "preview_only",
+        "refreshed",
+        "changed_link",
+    ],
+)
+def test_same_turn_confirmation(monkeypatch, previous):
     driver = Rpc()
     _, client = setup(monkeypatch, driver)
 
@@ -901,19 +901,59 @@ def test_same_turn_confirmation(monkeypatch):
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
+            fields = settings(graph.id, items["r1"], downloader.id)
+            from app.models.assistant import AssistantToolCall
+
+            offer = None
+            if previous != "none":
+                offer = await AssistantTurn.create(
+                    conversation_id=conversation["id"],
+                    request_id="offer",
+                    status="interrupted" if previous == "interrupted" else "complete",
+                    prompt="Download Lantern",
+                    content="Pick one to submit with these settings.",
+                )
+                item = items["r2" if previous == "other_source" else "r1"]
+                if previous in {"refreshed", "changed_link"}:
+                    link = RESULTS["items"][0]["link"]
+                    if previous == "changed_link":
+                        link = link.replace(HASH, OTHER)
+                    source = await service.seal_source(
+                        graph.id, item["id"], item["title"], link
+                    )
+                    assert source != item["source"]
+                    item = {**item, "source": source}
+                await AssistantToolCall.create(
+                    turn=offer,
+                    call_id="offer-results",
+                    name="search_indexer",
+                    arguments="{}",
+                    status="complete",
+                    result={
+                        "ok": True,
+                        "data": {
+                            "workflow_id": graph.id,
+                            "items": [item],
+                            "one_time_download": {
+                                "downloader_id": downloader.id,
+                                "dir": "/other"
+                                if previous == "other_dir"
+                                else fields["dir"],
+                            },
+                        },
+                    },
+                )
             turn = await AssistantTurn.create(
                 conversation_id=conversation["id"],
                 request_id="same",
                 status="running",
                 prompt="Download now",
                 model={"model_id": "m"},
+                retry_of=offer.id if previous == "retry" else None,
             )
-            fields = settings(graph.id, items["r1"], downloader.id)
             check = await tools.DownloadTaskService.validate_request(
                 DownloadTaskCheck.model_validate(fields), owner
             )
-            from app.models.assistant import AssistantToolCall
-
             await AssistantToolCall.create(
                 turn=turn,
                 call_id="v",
@@ -927,15 +967,19 @@ def test_same_turn_confirmation(monkeypatch):
             )
 
             result = await tools.create_task(
-                tools.TaskCreate(request_id=check["request_id"], confirmed=True),
+                tools.TaskCreate(
+                    request_id=check["request_id"], confirmed=previous != "preview_only"
+                ),
                 conversation["id"],
                 "c",
                 owner,
             )
 
-            # approval must come from a later turn after the user saw the review
-            assert result["confirmation_required"] and not result["created"]
-            assert not driver.added and not await DownloadTask.exists()
+            if previous == "refreshed":
+                assert result["created"] and len(driver.added) == 1
+            else:
+                assert result["confirmation_required"] and not result["created"]
+                assert not driver.added and not await DownloadTask.exists()
             assert not await FlowTrigger.exists()
 
     asyncio.run(run())

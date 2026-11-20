@@ -67,7 +67,7 @@ def test_preview_without_options(monkeypatch, search):
 
             assert result["status"] == "ok" and result["items"][0]["id"] == "r1"
             assert "subscription" not in result
-            if search:
+            if "page_num" in search:
                 options.assert_not_awaited()
             else:
                 options.assert_awaited_once()

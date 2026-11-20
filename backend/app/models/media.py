@@ -499,7 +499,7 @@ class MediaRescrape(BaseModel):
     candidate: str | None = Field(
         default=None,
         max_length=64,
-        description="Listed candidate key; omit to list candidates.",
+        description="Listed candidate key; omit to search for matches.",
     )
 
 

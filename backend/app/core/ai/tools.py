@@ -107,7 +107,7 @@ from app.models.media import (
 )
 from app.models.user import UserInfo, UserRole
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
-from app.services.download import DownloadPlanService, DownloadTaskService
+from app.services.download import DownloadPlanService, DownloadTaskService, open_source
 from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
@@ -391,12 +391,12 @@ class DownloadDetails(ToolArguments):
 
 
 class TaskCreate(ToolArguments):
-    """Submit a result validated in an earlier turn of this conversation."""
+    """Submit one validated result with settings the user approved."""
 
     request_id: UUID
     confirmed: bool = Field(
         default=False,
-        description="True only after the user approves this result and settings.",
+        description="True when the user accepts the offered result and settings.",
     )
 
 
@@ -590,7 +590,7 @@ class AssistantTool:
 TOOLS = (
     AssistantTool(
         "search_indexer",
-        "Preview only (10s/page<=20). One-off downloads: user picks the indexer.",
+        "Preview (10s/page<=20). For one download use sources=true; offer choices.",
         IndexerSearch,
         admin=True,
     ),
@@ -622,8 +622,8 @@ TOOLS = (
     ),
     AssistantTool(
         "create_download_task",
-        "Submit a prior turn's validated result once after final confirmation; "
-        "reuse request_id. Returns task state without waiting.",
+        "Submit one approved result. Picking an offered source with its defaults "
+        "confirms it. Reuse request_id on retry.",
         TaskCreate,
         admin=True,
     ),
@@ -778,9 +778,8 @@ TOOLS = (
     ),
     AssistantTool(
         "review_workflow_schedule",
-        "Review a schedule change; saves nothing. Use listed IDs; ask if ambiguous. "
-        "Times need offsets. Summarize changes, defaults, first_run and notes in "
-        "the user's language, not JSON. End the turn for confirmation.",
+        "Preview schedule changes with listed IDs and offset times. Show changes, "
+        "defaults, first_run and notes together for confirmation.",
         ScheduleReview,
         admin=True,
     ),
@@ -793,10 +792,8 @@ TOOLS = (
     ),
     AssistantTool(
         "review_download_plan_change",
-        "Review an update/delete of a plan read via get_download_plan; saves "
-        "nothing. Omitted fields keep values, null clears; the indexer is fixed. "
-        "Summarize changes, timing and notes in the user's language, not JSON. "
-        "End the turn for confirmation.",
+        "Preview update/delete after get_download_plan. Omissions keep values, null "
+        "clears; indexer is fixed. Show changes, timing and notes for confirmation.",
         PlanChangeReview,
         admin=True,
     ),
@@ -810,9 +807,8 @@ TOOLS = (
     ),
     AssistantTool(
         "review_download_task_action",
-        "Review pause/resume/retry/delete of one task; does nothing. Ask which "
-        "task if several match. Summarize target, effect and notes in the user's "
-        "language, not JSON. End the turn for confirmation.",
+        "Preview pause/resume/retry/delete for a unique match now. Ask which task "
+        "only for ties. Show target, effect and notes for confirmation.",
         TaskActionReview,
     ),
     AssistantTool(
@@ -824,18 +820,15 @@ TOOLS = (
     ),
     AssistantTool(
         "review_library_scan",
-        "Review scanning one movie/TV library; starts nothing. Summarize library, "
-        "bindings and notes in the user's language, not JSON. End the turn for "
-        "confirmation.",
+        "Preview a movie/TV scan. Show library, bindings and notes for confirmation.",
         ScanReview,
         admin=True,
     ),
     AssistantTool(
         "review_media_rescrape",
-        "Run a top-level movie/show's scraper: without candidate, list matches for "
-        "the user to pick (never pick the first yourself); with a listed key, "
-        "preview it. Saves nothing. Summarize changes, episodes, organization and "
-        "notes in the user's language; end the turn for confirmation.",
+        "Preview a top-level movie/show rescrape. Use a sole compatible workflow. "
+        "A sole result gets a preview; otherwise use a key the user identified "
+        "or ask which match. Show changes, episodes and organization to confirm.",
         RescrapeReview,
         admin=True,
     ),
@@ -1277,7 +1270,9 @@ async def execute_tool(
                 case LibraryScan():
                     result = await MediaChangeService.review_scan(args, user)
                 case MediaRescrape():
-                    result = await MediaChangeService.review_rescrape(args, user)
+                    result = await MediaChangeService.review_rescrape(
+                        args, user, preview_single=True
+                    )
                 case LibraryConfig():
                     result = await MediaChangeService.review_config(args, user)
                 case MediaBatch():
@@ -1790,43 +1785,81 @@ async def run_reviewed(
 
 
 async def preview_indexer(args: IndexerSearch, user: UserInfo) -> dict:
-    """Include subscription defaults with the first page of a metadata preview.
+    """Offer download settings alongside the search results they apply to.
 
     Args:
         args: Published indexer and search parameters.
         user: Account used to read both the results and the available settings.
 
     Returns:
-        Search results with suggested plan settings when available. Sealed-source
-        searches and later pages retain their original result format.
+        Sealed-source results with one-time download settings, or the first
+        page of a metadata preview with suggested subscription settings.
     """
     result = await DownloadPlanService.search_indexer(args, user)
-    if args.sources or args.page_num != 1 or result["status"] != "ok":
+    if result["status"] != "ok" or (not args.sources and args.page_num != 1):
         return result
 
     try:
         options = await DownloadPlanService.authoring_options(args.workflow_id, user)
     except (KaloscopeException, ValueError):
         # a misconfigured downloader should not hide the search results
-        result["subscription_note"] = "Plan settings unavailable; check plan options."
+        result["subscription_note"] = (
+            "Download settings unavailable; check plan options."
+        )
         return result
     if not options["only_preview"]:
         defaults = options["defaults"]
-        result["subscription"] = {
-            "defaults": defaults,
-            "downloader": next(
-                (
-                    item["name"]
-                    for item in options["downloaders"]["items"]
-                    if item["id"] == defaults["downloader_id"]
-                ),
-                None,
+        downloader = next(
+            (
+                item["name"]
+                for item in options["downloaders"]["items"]
+                if item["id"] == defaults["downloader_id"]
             ),
-            "interval_unit": options["interval_unit"],
-            "timezone": options["timezone"],
-            "creation_rules": options["creation_rules"],
-        }
+            None,
+        )
+        if args.sources:
+            result["one_time_download"] = {
+                "downloader": downloader,
+                "downloader_id": defaults["downloader_id"],
+                "dir": defaults["dir"],
+                "transfer_lib_id": defaults["transfer_lib_id"],
+                "selection": "Show numbered results and defaults. On selection, use "
+                "the original source (read_conversation_history if needed), validate "
+                "and submit with confirmed=true.",
+            }
+        else:
+            result["subscription"] = {
+                "defaults": defaults,
+                "downloader": downloader,
+                "interval_unit": options["interval_unit"],
+                "timezone": options["timezone"],
+                "creation_rules": options["creation_rules"],
+            }
     return result
+
+
+async def _previous_offer(
+    conversation_id: int, original_turn_id: int
+) -> AssistantTurn | None:
+    """Find the completed reply immediately preceding a logical user request.
+
+    Args:
+        conversation_id: Server-owned conversation to inspect.
+        original_turn_id: First attempt at the current message, before retries.
+
+    Returns:
+        The previous turn if it finished and contained a visible assistant reply.
+    """
+    previous = (
+        await AssistantTurn.filter(
+            conversation_id=conversation_id, id__lt=original_turn_id
+        )
+        .order_by("-id")
+        .first()
+    )
+    if previous and previous.status == "complete" and previous.content.strip():
+        return previous
+    return None
 
 
 async def _answered_plan_request(
@@ -1848,18 +1881,8 @@ async def _answered_plan_request(
         proposal. Return `None` without matching setup in the last reply. A new
         library-wide binding requires the same previously reviewed revision.
     """
-    previous = (
-        await AssistantTurn.filter(
-            conversation_id=conversation_id, id__lt=original_turn_id
-        )
-        .order_by("-id")
-        .first()
-    )
-    if (
-        previous is None
-        or previous.status != "complete"
-        or not previous.content.strip()
-    ):
+    previous = await _previous_offer(conversation_id, original_turn_id)
+    if previous is None:
         return None
 
     calls = (
@@ -2023,6 +2046,60 @@ async def create_plan(
     raise NotFoundException
 
 
+async def _offered_download(
+    conversation_id: int, original_turn_id: int, checked: DownloadTaskCheck
+) -> bool:
+    """Match a selected result and settings to the preceding download offer.
+
+    Args:
+        conversation_id: Conversation holding the indexer search.
+        original_turn_id: First attempt at the current user reply.
+        checked: Validated one-time download for that reply.
+
+    Returns:
+        Whether the exact source, downloader and directory were offered
+        together. Transfer, ingestion and renaming require their own review.
+    """
+    if (
+        checked.transfer_lib_id
+        or checked.transfer_method
+        or checked.ingest_workflow_id
+        or checked.sub_pattern
+        or checked.sub_repl
+    ):
+        return False
+    previous = await _previous_offer(conversation_id, original_turn_id)
+    if previous is None:
+        return False
+    if await AssistantToolCall.filter(
+        turn_id=previous.id, name="create_download_task"
+    ).exists():
+        return False
+    searches = await AssistantToolCall.filter(
+        turn_id=previous.id, name="search_indexer", status="complete"
+    ).values_list("result", flat=True)
+    selection = checked.resource
+    current = await open_source(selection)
+    if current is None:
+        return False
+    for result in searches:
+        data = (result or {}).get("data") or {}
+        settings = data.get("one_time_download") or {}
+        if (
+            data.get("workflow_id") != selection.workflow_id
+            or settings.get("downloader_id") != checked.downloader_id
+            or settings.get("dir") != checked.dir
+        ):
+            continue
+        for item in data.get("items", []):
+            if item.get("id") == selection.resource_id and item.get("source"):
+                # a second search seals the same link with a fresh nonce
+                original = selection.model_copy(update={"source": item["source"]})
+                if await open_source(original) == current:
+                    return True
+    return False
+
+
 async def create_task(
     args: TaskCreate, conversation_id: int, call_id: str, user: UserInfo
 ) -> dict:
@@ -2058,12 +2135,21 @@ async def create_task(
         if not (data.get("valid") and data.get("request_id") == str(args.request_id)):
             continue
 
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        # the service replays a committed request before any other check
-        replayable = index == 0 and (
-            record.turn_id != call.turn_id and reviewed.status == "complete"
-        )
         checked = DownloadTaskCheck.model_validate_json(record.arguments)
+        attempts = await retry_chain(call.turn_id, conversation_id)
+        ready = False
+        if index == 0 and record.turn_id not in attempts:
+            ready = await AssistantTurn.filter(
+                id=record.turn_id, status="complete"
+            ).exists()
+        elif index == 0 and args.confirmed:
+            # one selection authorizes one submission, even if the reply is retried
+            attempted = await AssistantToolCall.filter(
+                turn_id__in=attempts, name="create_download_task", id__lt=call.id
+            ).exists()
+            ready = not attempted and await _offered_download(
+                conversation_id, attempts[-1], checked
+            )
         review = data.get("ingestion")
         body = DownloadTaskCreate(
             request_id=args.request_id,
@@ -2075,11 +2161,11 @@ async def create_task(
             }
             if review
             else None,
-            confirmed=args.confirmed and replayable,
+            confirmed=args.confirmed and ready,
         )
 
         result = await DownloadTaskService.create_once(body, user)
-        if not replayable and not result.get("created"):
+        if not ready and not result.get("created"):
             return {
                 **result,
                 "created": False,
