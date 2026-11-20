@@ -80,17 +80,17 @@
           }}
         >
           <fieldset class="fieldset gap-y-2">
-            <Label small>{$_('field.username')}</Label>
+            <Label>{$_('field.username')}</Label>
             <label class="input w-full">
               <iconify-icon icon={icons.user}></iconify-icon>
               <input class="grow" {...schema.username} />
             </label>
-            <Label small>{$_('password.initial')}</Label>
+            <Label>{$_('password.initial')}</Label>
             <label class="input w-full">
               <iconify-icon icon={icons.key}></iconify-icon>
               <input class="grow" {...schema.password} />
             </label>
-            <Label small>{$_('password.confirm')}</Label>
+            <Label>{$_('password.confirm')}</Label>
             <label class="input w-full">
               <iconify-icon icon={icons.key}></iconify-icon>
               <input class="grow" {...schema.confirm_pwd} />

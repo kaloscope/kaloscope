@@ -63,6 +63,10 @@
   --color-base-150: color-mix(in oklab, var(--color-base-100) 50%, var(--color-base-200) 50%);
   /* neutral shadow tint, so drop shadows never glow on dark themes */
   --color-shade: oklch(0% 0 0);
+  /* secondary text and icons, without fading the whole element */
+  --color-muted: color-mix(in oklab, var(--color-base-content) 75%, transparent);
+  /* the primary action, contrasting with the page in light and dark themes alike */
+  --color-action: color-mix(in oklab, var(--color-primary) 18%, var(--color-base-content));
 
   /* custom breakpoints */
   --breakpoint-w60: 60rem;
@@ -204,7 +208,7 @@
     .modal-corner {
       @apply absolute top-4 right-3;
       > button {
-        @apply btn btn-circle size-8 btn-subtle font-title text-base opacity-60 hover:opacity-100;
+        @apply btn btn-circle size-8 btn-subtle text-muted hover:text-base-content;
       }
     }
     .modal-action {
@@ -245,10 +249,11 @@
   }
 }
 
+/* the primary action of forms and dialogs */
 @utility btn-submit {
-  --btn-color: var(--color-emphasis);
+  --btn-color: var(--color-action);
   &:not(:disabled, [disabled], .btn-disabled) {
-    --btn-fg: var(--color-neutral-content);
+    --btn-fg: var(--color-base-100);
   }
 }
 

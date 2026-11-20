@@ -294,7 +294,7 @@
       {#if supportsPausedSubmission}
         <label class="mt-2 fieldset-label w-fit">
           <input type="checkbox" class="checkbox checkbox-sm" checked={true} name="start" />
-          <span class="text-base text-base-content opacity-90">{$_('download.start')}</span>
+          <span class="text-sm text-base-content/80">{$_('download.start')}</span>
         </label>
       {/if}
       <Label class="mt-6">{$_('download.transfer.title')}</Label>

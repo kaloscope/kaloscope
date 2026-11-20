@@ -91,7 +91,7 @@
       <input placeholder="1.1.1.1" class="input w-full" bind:value={nameserver} {...schema.nameserver} />
       <label class="mt-2 fieldset-label w-fit">
         <input type="checkbox" class="checkbox checkbox-sm" name="dnssec" bind:checked={dnssec} />
-        <span class="text-base text-base-content opacity-90">DNSSEC</span>
+        <span class="text-sm text-base-content/80">DNSSEC</span>
       </label>
     </fieldset>
     <div class="modal-action">

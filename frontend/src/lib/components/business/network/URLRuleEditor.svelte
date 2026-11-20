@@ -111,7 +111,7 @@
                   }
                 }}
               />
-              <span class="text-base text-base-content/80">{resolver.name}</span>
+              <span class="text-sm text-base-content/80">{resolver.name}</span>
             </label>
           {/each}
         </div>
@@ -129,7 +129,7 @@
                   proxy_id = proxy_id === proxy.id ? null : proxy.id;
                 }}
               />
-              <span class="text-base text-base-content/80">{proxy.name}</span>
+              <span class="text-sm text-base-content/80">{proxy.name}</span>
             </label>
           {/each}
         </div>

@@ -109,7 +109,7 @@
         disabled={items.length === 0}
         onchange={(event) => onToggleAll(event.currentTarget.checked)}
       />
-      <span class="font-semibold text-base-content">{title}</span>
+      <span class="text-sm font-medium text-base-content">{title}</span>
     </label>
     <div class="mt-2 ml-6 flex flex-col gap-2.5">
       {#each items as item (item.id)}
@@ -145,10 +145,13 @@
   )}
 
   <div class="modal-action">
-    <button class="btn w-full btn-submit" onclick={save} disabled={$loading !== null}>
+    <button type="button" class="btn" onclick={() => modal.close()}>
+      {$_('message.cancel')}
+    </button>
+    <button class="btn btn-submit" onclick={save} disabled={$loading !== null}>
       {$_('action.save')}
       {#if $loading}
-        <span class="loading loading-sm loading-spinner"></span>
+        <span class="loading loading-xs loading-dots"></span>
       {/if}
     </button>
   </div>

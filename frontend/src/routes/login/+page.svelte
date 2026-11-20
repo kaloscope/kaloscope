@@ -100,12 +100,12 @@
           }}
         >
           <fieldset class="fieldset gap-y-2">
-            <Label small>{$_('field.username')}</Label>
+            <Label>{$_('field.username')}</Label>
             <label class="input w-full">
               <iconify-icon icon={icons.user}></iconify-icon>
               <input class="grow" {...schema.username} bind:value={usernameValue} />
             </label>
-            <Label small>{$_('field.password')}</Label>
+            <Label>{$_('field.password')}</Label>
             <label class="input w-full">
               <iconify-icon icon={icons.key}></iconify-icon>
               <input class="grow" {...schema.password} bind:value={passwordValue} />

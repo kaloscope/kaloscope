@@ -804,13 +804,13 @@ methods:
     <div class="modal-action items-center">
       <label class="label mr-auto gap-2" class:cursor-pointer={!!preset} class:opacity-60={!preset}>
         <input type="checkbox" class="toggle toggle-sm" checked={advanced} disabled={!preset} onchange={switchMode} />
-        <span>{$_('download.downloader.advanced_mode')}</span>
+        <span class="text-sm text-base-content/80">{$_('download.downloader.advanced_mode')}</span>
       </label>
       <div class="flex gap-2">
-        <button type="button" class="btn" onclick={() => modal.close()}>
+        <button type="button" class="btn min-w-20" onclick={() => modal.close()}>
           {$_('message.cancel')}
         </button>
-        <button type="submit" class="btn btn-submit" disabled={$loading !== null}>
+        <button type="submit" class="btn min-w-20 btn-submit" disabled={$loading !== null}>
           {$_('message.confirm')}
           {#if $loading}
             <span class="loading loading-xs loading-dots"></span>

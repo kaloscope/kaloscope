@@ -15,8 +15,6 @@
     preventDefault?: boolean;
     /** Whether to use a bold font weight. */
     bold?: boolean;
-    /** Whether to use a smaller font size. */
-    small?: boolean;
     /** The class names for the label. */
     class?: string;
   };
@@ -34,7 +32,6 @@
     required = false,
     preventDefault = true,
     bold = false,
-    small = false,
     class: _class
   }: LabelProps = $props();
 </script>
@@ -45,7 +42,7 @@
   class="mt-2 flex min-h-6.5 items-center justify-between gap-1 px-1 {_class}"
   onclick={(event) => preventDefault && event.preventDefault()}
 >
-  <span class="opacity-90 {bold ? 'font-bold' : ''} {small ? 'text-sm' : 'text-base'}">
+  <span class="text-sm {bold ? 'font-semibold' : 'font-medium'}">
     {#if required}
       <span class="align-middle text-error">* </span>
     {/if}
@@ -56,7 +53,7 @@
       class="flex-center cursor-help text-lg"
       use:tooltip={{ content: tip, placement: tipPlacement, trigger: sniffer.isDesktop() ? 'mouseenter' : 'click' }}
     >
-      <iconify-icon icon={icons.questionCircle} class="opacity-90"></iconify-icon>
+      <iconify-icon icon={icons.questionCircle} class="text-muted"></iconify-icon>
     </span>
   {/if}
 </div>

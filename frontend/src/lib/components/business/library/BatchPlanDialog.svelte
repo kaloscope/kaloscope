@@ -564,7 +564,7 @@
   <div class="modal-action flex-wrap items-center">
     {#if batch?.hideable && reviewed && !failed}
       <!-- the box shows the plan in effect; a change reviews the other plan before it is shown -->
-      <label class="mr-auto flex cursor-pointer items-center gap-2 text-sm">
+      <label class="mr-auto flex cursor-pointer items-center gap-2 text-sm text-base-content/80">
         <input
           type="checkbox"
           class="checkbox checkbox-sm"
@@ -580,19 +580,20 @@
         {#if switching}<span class="loading loading-xs loading-spinner text-base-content/60"></span>{/if}
       </label>
     {/if}
+    <button type="button" class="btn" onclick={() => modal.close()}>{$_('action.close', '')}</button>
     {#if batch?.confirmable && !failed}
+      <!-- a permanent deletion keeps the danger color; every other plan uses the shared primary action -->
       <button
         type="button"
-        class="btn {!hiding && batch.deletion === 'permanent' ? 'btn-error' : 'btn-primary'}"
+        class="btn {!hiding && batch.deletion === 'permanent' ? 'btn-error' : 'btn-submit'}"
         disabled={$loading !== null || switching}
         onclick={confirmApply}
       >
-        {#if $loading !== null}<span class="loading loading-xs loading-spinner"></span>{/if}
         {hiding
           ? $_('media.batch.confirm.hide')
           : $_(`media.batch.confirm.${batch.deletion ?? 'apply'}`, $number(batch.planned.units))}
+        {#if $loading !== null}<span class="loading loading-xs loading-dots"></span>{/if}
       </button>
     {/if}
-    <button type="button" class="btn" onclick={() => modal.close()}>{$_('action.close', '')}</button>
   </div>
 </Modal>
