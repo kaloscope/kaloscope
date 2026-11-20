@@ -487,6 +487,10 @@ async def update_metadata(
 ) -> list[int]:
     """Update media items matched by their NFO path.
 
+    Write before reading the affected IDs so a concurrent SQLite commit cannot
+    invalidate a read snapshot before the update. The write sets `nfo_path` to
+    the matched path, so the same filter still identifies every updated row.
+
     Args:
         lib: Media library instance.
         path: Path to the NFO file.
@@ -555,9 +559,7 @@ async def update_metadata(
             Q(nfo_path=str(path)) | Q(dir=str(path.parent), name=path.stem),
             lib_id=lib.id,
         )
-        # account for `flat=True` in the return annotation
-        ids = cast(list[int], await items.values_list("id", flat=True))
-        if ids:
-            await MediaItem.filter(id__in=ids).update(**data)
-        return ids
+        async with in_transaction("default"):
+            if await items.update(**data):
+                return cast(list[int], await items.values_list("id", flat=True))
     return []
