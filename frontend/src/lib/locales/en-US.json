@@ -1210,6 +1210,8 @@
     "no_models": "No models available",
     "conversation": "Conversation",
     "activity": "Tool Activity",
+    "activity_count": "{0, plural, one {# call} other {# calls}}",
+    "activity_call": "Call {0}",
     "latest": "Jump to Latest",
     "turn_actions": "Latest Reply Actions",
     "welcome": "Kaloscope Assistant",
