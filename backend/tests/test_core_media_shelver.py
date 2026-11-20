@@ -16,6 +16,7 @@ from filelock import Timeout
 from lxml import etree
 from sanic import Sanic
 from tortoise import Tortoise
+from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import NFO_MIME_TYPE
@@ -863,6 +864,53 @@ def test_metadata_recovery(tmp_path, monkeypatch, recovery):
             assert not video.exists()
             assert not await MediaEvent.all().exists()
             fire.assert_not_awaited()
+        finally:
+            await Tortoise.close_connections()
+
+    asyncio.run(run())
+
+
+def test_metadata_concurrent_writer(tmp_path, monkeypatch):
+    database = tmp_path / "media.sqlite"
+    video = tmp_path / "show.mkv"
+    video.touch()
+
+    async def run():
+        await Tortoise.init(
+            db_url=f"sqlite://{database}", modules={"models": ["app.models"]}
+        )
+        await Tortoise.generate_schemas()
+        try:
+            lib = await MediaLib.create(
+                name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
+            )
+            item = await MediaItem.create(
+                lib=lib, path=str(video), dir=str(tmp_path), name=video.stem
+            )
+            update = QuerySet.update
+
+            def concurrent_update(queryset, **fields):
+                if queryset.model is MediaItem:
+                    with closing(sqlite3.connect(database, timeout=0)) as writer:
+                        writer.execute(
+                            "UPDATE media_lib SET priority = 2 WHERE id = ?", (lib.id,)
+                        )
+                        writer.commit()
+                return update(queryset, **fields)
+
+            monkeypatch.setattr(QuerySet, "update", concurrent_update)
+            assert await shelver.gen_nfo(
+                NFOType.TV_SHOW,
+                str(video.with_suffix(".nfo")),
+                {"title": "Updated"},
+                item_id=item.id,
+                refresh=True,
+            )
+
+            await item.refresh_from_db()
+            await lib.refresh_from_db()
+            assert item.title == "Updated"
+            assert lib.priority == 2
         finally:
             await Tortoise.close_connections()
 
