@@ -173,8 +173,8 @@ def test_new_review_during_validation(application, monkeypatch, channel):
             }
             validate = DownloadPlanService.validate_creation
 
-            async def validate_then_replace(check, account):
-                result = await validate(check, account)
+            async def validate_then_replace(check, account, **kwargs):
+                result = await validate(check, account, **kwargs)
                 await replace_review(turn, call)
                 return result
 

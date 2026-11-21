@@ -390,6 +390,11 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                 if scenario in {"simple", "edition"}:
                     assert plan.transfer_lib_id == library.id
                     assert plan.transfer_method == "hardlink"
+                    assert plan.batch_limit == 12
+                    assert (plan.sub_pattern, plan.sub_repl) == (
+                        "^(.+/)?",
+                        "{{title}}/",
+                    )
                     assert plan.total_limit is None
                 else:
                     assert plan.transfer_lib_id is None

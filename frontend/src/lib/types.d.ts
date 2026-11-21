@@ -1166,6 +1166,7 @@ export type DownloadPlanCreateResult =
   | DownloadPlanCreation
   | {
       created: false;
+      duplicate_plan_id?: number;
       issues: { path: string; message: string }[];
       confirmation_required?: boolean;
     };
@@ -1617,7 +1618,7 @@ export type QuestionCard = {
   version: string;
   state: 'pending' | 'deferred' | 'answered';
   questions: AssistantQuestion[];
-  subscription?: Pick<DownloadPlanPreview, 'workflow_name' | 'plan'>;
+  subscription?: Pick<DownloadPlanPreview, 'workflow_name' | 'plan'> & { related_plan_ids?: number[] };
   answers?: QuestionAnswer[];
   summary?: { id: string; title: string; values: string[]; skipped: boolean }[];
 };

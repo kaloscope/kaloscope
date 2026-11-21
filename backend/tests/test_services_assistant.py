@@ -66,7 +66,9 @@ def make_turn(text="查看 AI 节点", *, context=None) -> AssistantTurn:
 def stored_context(monkeypatch):
     """Isolate SDK transport; persistence and history use separate database tests."""
 
-    async def prepare(_client, turn, _user, prompt, _schemas, _preset, continuation=()):
+    async def prepare(
+        _client, turn, _user, prompt, _schemas, _preset, continuation=(), trailing=None
+    ):
         return (
             [
                 {"role": "system", "content": prompt},

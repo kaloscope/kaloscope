@@ -236,6 +236,15 @@ class IngestionDiagnosis(Result):
     next_page: int | None = None
 
 
+class DownloadIndexerInfo(Result):
+    """Describe an accessible published search source and its public inputs."""
+
+    workflow_id: int
+    name: str
+    only_preview: bool
+    filters: dict[str, dict[str, JSONType]]
+
+
 class IndexerSearchResult(Result):
     """Report a bounded published search, including distinct failure states."""
 

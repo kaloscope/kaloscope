@@ -8,10 +8,11 @@ from tortoise.expressions import Q
 from tortoise.queryset import QuerySet
 
 from app.models.assistant import media_resource
-from app.models.download import DownloadDir
+from app.models.download import DEFAULT_TRANSFER_NAMING, DownloadDir
 from app.models.media import MediaLib
 from app.models.user import UserInfo
 from app.services.media import accessible_library_ids
+from app.utils.json import json_digest
 
 
 def libraries(user: UserInfo) -> QuerySet[MediaLib]:
@@ -118,6 +119,15 @@ async def destination_questions(
             }
         )
     if not library_known:
+        # before a destination is chosen, nulls describe the download-only draft
+        use_default_naming = all(
+            plan.get(key) is None for key in DEFAULT_TRANSFER_NAMING
+        )
+        naming_hint = (
+            (" · 按标题建目录" if chinese else " · title folder")
+            if use_default_naming
+            else ""
+        )
         hint = (
             (
                 "自填：下载路径 | 库名或 #编号"
@@ -135,12 +145,18 @@ async def destination_questions(
                 if combined
                 else ("转存到哪个媒体库？" if chinese else "Which transfer library?"),
                 "method": method,
+                **(
+                    {"naming": DEFAULT_TRANSFER_NAMING.copy()}
+                    if use_default_naming
+                    else {}
+                ),
                 "options": [
                     {"label": only, "detail": f"{prefix}{hint}", "value": None},
                     *[
                         {
                             "label": f"{lib['name']} · #{lib['id']}",
-                            "detail": f"{prefix}{method_name} → {lib['dir']}",
+                            "detail": f"{prefix}{method_name} → {lib['dir']}"
+                            + naming_hint,
                             "value": lib["id"],
                         }
                         for lib in available
@@ -211,7 +227,10 @@ async def resolve_destination(
         transfer_lib_id=library_id, transfer_method=q["method"] if library_id else None
     )
     if library_id != plan.get("transfer_lib_id"):
-        changes.update(sub_pattern=None, sub_repl=None)
+        changes.update(
+            (q.get("naming") if library_id else None)
+            or {"sub_pattern": None, "sub_repl": None}
+        )
     return changes
 
 
@@ -225,10 +244,14 @@ def bind_questions(card: dict, specs: list[dict], review: dict) -> None:
     """
     card["subscription"] = review
     for q, spec in zip(card["questions"], specs, strict=True):
-        q["field"] = spec["field"]
-        if "method" in spec:
-            q["method"] = spec["method"]
+        q.update(title=spec["title"], field=spec["field"])
+        for key in ("method", "naming"):
+            if key in spec:
+                q[key] = spec[key]
         for option, source in zip(q["options"], spec["options"], strict=True):
-            option["value"] = source["value"]
+            option.update(
+                label=source["label"], detail=source["detail"], value=source["value"]
+            )
             if spec["field"] in {"library", "destination"} and source["value"]:
                 card["resources"].append(media_resource(source["value"]))
+    card["version"] = json_digest(card["questions"])[:24]

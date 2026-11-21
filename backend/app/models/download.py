@@ -16,6 +16,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 from sanic.request.form import File
 from tortoise.fields import (
     CASCADE,
@@ -44,6 +45,9 @@ from app.models.flow import FlowGraph
 from app.models.media import MediaLib
 from app.utils.datetime import duration
 from app.utils.disk import format_bytes
+
+DEFAULT_PLAN_BATCH_LIMIT = 12
+DEFAULT_TRANSFER_NAMING = {"sub_pattern": "^(.+/)?", "sub_repl": "{{title}}/"}
 
 
 # -------------------- Enumerations --------------------
@@ -168,7 +172,7 @@ class DownloadPlan(TortoiseModel):
     interval_num = IntField(default=1)
     interval_start = DatetimeField(null=True)
     interval_end = DatetimeField(null=True)
-    batch_limit = IntField(default=10)
+    batch_limit = IntField(default=DEFAULT_PLAN_BATCH_LIMIT)
     total_limit = IntField(null=True)
     total_count = IntField(default=0)
     last_exec = DatetimeField(null=True)
@@ -647,6 +651,7 @@ class DownloadPlanSettings(DownloadPlanUpsert):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     id: None = None
     interval_end: datetime | None = None
+    batch_limit: PositiveInt = DEFAULT_PLAN_BATCH_LIMIT
 
 
 def _check_samples(samples: list[str] | None) -> list[str] | None:
@@ -728,6 +733,8 @@ class DownloadPlanCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
     plan: DownloadPlanSettings
+    # accept old editor payloads without advertising or honoring the override
+    separate_plan: SkipJsonSchema[bool] = Field(default=False, exclude=True)
     ingestion: IngestionBinding | None = Field(
         default=None,
         description="Validation's ingestion review; binds it before creating.",

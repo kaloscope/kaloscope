@@ -68,6 +68,7 @@ from app.services.subscription_intent import (
     confirmed_subscription_plan,
     deferred_subscription,
     explicit_subscription,
+    revised_subscription_plan,
     subscription_intent,
 )
 from app.utils.json import dumps, loads
@@ -489,24 +490,53 @@ class AssistantService:
         current_context = turn.context
         # direct download requests need the search tools from the first turn
         intent = (
-            await subscription_intent(turn)
-            if answer_only and user.role == UserRole.ADMIN
-            else None
+            await subscription_intent(turn) if user.role == UserRole.ADMIN else None
         )
-        subscription_answer = intent is not None
+        target_id = None
+        if answer_only:
+            with suppress(TypeError, ValueError, AttributeError):
+                target_id = next(
+                    (
+                        q["plan_id"]
+                        for q in loads(turn.prompt)
+                        if q.get("id") == "plan" and q.get("plan_id")
+                    ),
+                    None,
+                )
+        subscription_answer = intent is not None and answer_only
         confirmed = (
             await confirmed_subscription_plan(intent.confirmation, user)
             if intent and intent.confirmation
             else None
         )
+        revising = bool(intent and intent.revision)
+        revised_plan = (
+            await revised_subscription_plan(intent, turn.prompt, user)
+            if revising and not answer_only
+            else None
+        )
         direct_download = (
             subscription_answer
+            or revising
             or explicit_subscription(turn.prompt)
             or bool(DOWNLOAD_REQUEST.match(turn.prompt.lstrip()))
         )
         pending_subscription = user.role == UserRole.ADMIN and (
-            subscription_answer or explicit_subscription(turn.prompt)
+            subscription_answer or revising or explicit_subscription(turn.prompt)
         )
+        named_replacement = None
+        if (
+            user.role == UserRole.ADMIN
+            and not answer_only
+            and not (current_context or {}).get("selected_plan")
+            and not re.search(r"#\s*\d+", turn.prompt)
+        ):
+            named_replacement = re.search(
+                r"(?:重建|替换)\s*[《「“]?([^，。！？《》「」“”]{1,120}?)[》」”]?\s*(?:的)?下载计划"
+                r"|\brebuild\s+(?:the\s+)?(.{1,120}?)\s+download plan\b",
+                turn.prompt,
+                re.I,
+            )
         workspace_focus = False
         batch_focus = "review_media_batch" in reviewed and not direct_download
         plan_authoring = (
@@ -636,6 +666,13 @@ class AssistantService:
                             "choices together. Use preview defaults, no transfer and "
                             "no total cap unless requested. Ask separately only "
                             "for a blocker preventing validation."
+                            + (
+                                f" Revise {intent.revision['title']!r}. "
+                                "Search the title first. Use the latest directory and "
+                                "transfer requests and validate for a fresh card."
+                                if intent and intent.revision
+                                else ""
+                            )
                         ),
                     }
                 ]
@@ -645,7 +682,7 @@ class AssistantService:
                     for s in schemas
                     if allow_answer_tool(s["function"]["name"], subscription_answer)
                 ]
-            if subscription_answer:
+            if pending_subscription:
                 for schema in schemas:
                     if schema["function"]["name"] == "search_indexer":
                         schema["function"]["parameters"]["properties"].pop(
@@ -666,6 +703,7 @@ class AssistantService:
                         request_schemas,
                         provider.preset,
                         continuation,
+                        trailing=ending,
                     )
                 except KaloscopeException as error:
                     if (
@@ -695,6 +733,7 @@ class AssistantService:
                         request_schemas,
                         provider.preset,
                         continuation,
+                        trailing=ending,
                     )
 
                 for key in usage:
@@ -712,20 +751,27 @@ class AssistantService:
             if not await AssistantSessionService.allowed(turn.resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
 
-            search_plan = confirmed
+            search_plan = confirmed or revised_plan
             planned_search = None
-            if confirmed and model_turn == 0:
+            if search_plan and model_turn == 0:
                 # the selected plan supplies exact inputs without another planning round
-                plan = confirmed["plan"]
+                plan = search_plan["plan"]
                 planned_search = _planned_call(
                     "search_indexer",
                     {
                         "workflow_id": plan["graph_id"],
                         "keyword": plan["keyword"],
-                        "filters": plan["filters"],
+                        "filters": plan.get("filters") or {},
                     },
                 )
                 calls = [planned_search]
+                message = ChatCompletionMessage(role="assistant", tool_calls=calls)
+                reasoning_details = []
+            elif named_replacement and model_turn == 0:
+                keyword = next(
+                    group.strip() for group in named_replacement.groups() if group
+                )
+                calls = [_planned_call("list_download_plans", {"keyword": keyword})]
                 message = ChatCompletionMessage(role="assistant", tool_calls=calls)
                 reasoning_details = []
             else:
@@ -934,6 +980,16 @@ class AssistantService:
                             loads(call.function.arguments).get("page")
                             == "download_plans"
                         )
+                wrong_target = False
+                if target_id and call.function.name in {
+                    "get_download_plan",
+                    "review_plan_replacement",
+                    "review_download_plan_change",
+                }:
+                    with suppress(ValueError, AttributeError):
+                        wrong_target = (
+                            loads(call.function.arguments).get("plan_id") != target_id
+                        )
                 if navigate_away:
                     result = {
                         "ok": False,
@@ -943,6 +999,14 @@ class AssistantService:
                                 "Finish the subscription. Search and validate "
                                 "its exact settings, or ask for the missing input."
                             ),
+                        },
+                    }
+                elif wrong_target:
+                    result = {
+                        "ok": False,
+                        "error": {
+                            "code": "bad_request",
+                            "guidance": f"Use the selected plan_id {target_id}.",
                         },
                     }
                 elif answer_only and not allow_answer_tool(
@@ -969,7 +1033,7 @@ class AssistantService:
                         canvas_snapshot_id=canvas_snapshot_id,
                         **(
                             {"metadata_search": True}
-                            if subscription_answer
+                            if pending_subscription
                             and call.function.name == "search_indexer"
                             else {}
                         ),
@@ -991,7 +1055,7 @@ class AssistantService:
                     else "unlisted",
                     "ok" if result["ok"] else result["error"]["code"],
                 )
-                if call is question_call and result["ok"]:
+                if subscription_review and call is question_call and result["ok"]:
                     bind_questions(
                         result["data"],
                         subscription_review["questions"],
@@ -1455,6 +1519,23 @@ class AssistantService:
                                 "ingest_workflow_id": search_plan["ingest_workflow_id"],
                             },
                         )
+                elif (
+                    call.function.name == "list_download_plans"
+                    and result["ok"]
+                    and not (current_context or {}).get("selected_plan")
+                    and re.search(r"重建|替换|rebuild|replace", turn.prompt, re.I)
+                    and not re.search(r"#\s*\d+", turn.prompt)
+                ):
+                    listed = result["data"]
+                    targets = [
+                        item["plan_id"]
+                        for item in listed["items"]
+                        if isinstance(item.get("keyword"), str)
+                        and item["keyword"]
+                        and item["keyword"].casefold() in turn.prompt.casefold()
+                    ]
+                    if 2 <= len(targets) <= 8 and not listed.get("next_page_num"):
+                        follow_up = ("ask_user", {"plan_ids": targets})
                 elif call.function.name == "validate_download_plan":
                     data = result.get("data") or {}
                     check = data.get("assistant_submission") or {}
@@ -1506,6 +1587,7 @@ class AssistantService:
                             "review": {
                                 "title": check["title"],
                                 "release": check["release"],
+                                "related_plan_ids": check.get("related_plan_ids", []),
                                 "turn_id": turn.id,
                                 "workflow_name": data["workflow_name"],
                                 "plan": data["plan"],
@@ -1554,9 +1636,7 @@ class AssistantService:
                         "text": confirmation_outcome(
                             call.function.name,
                             result,
-                            chinese=bool(
-                                re.match(r"[\u3400-\u9fff]", intent.prompt.strip())
-                            ),
+                            chinese=bool(re.search(r"[\u3400-\u9fff]", intent.prompt)),
                         )
                     },
                 )

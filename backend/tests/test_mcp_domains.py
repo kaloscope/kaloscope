@@ -109,6 +109,7 @@ def test_catalog():
                 if domain == "downloads":
                     assert {
                         "search_indexer",
+                        "list_download_indexers",
                         "diagnose_download_ingestion",
                         "review_plan_replacement",
                         "get_plan_replacement",
@@ -124,6 +125,26 @@ def test_catalog():
 
             reader = app.shared_ctx.sessions["reader"]
             downloads = (await issue(reader, "downloads"))["token"]
+            from tests.test_download_plan_authoring import fixture_plan
+
+            graph, _, _ = await fixture_plan()
+            ro = (await issue(reader, "downloads", scope="read_only"))["token"]
+            assert (await call(app, "list_download_indexers", token=ro))[
+                "structuredContent"
+            ]["items"] == []
+            grant = await UserPermission.create(
+                user_id=reader.id, rel_type=PermType.INDEXER, rel_id=graph.id
+            )
+            sources = (await call(app, "list_download_indexers", token=ro))[
+                "structuredContent"
+            ]
+            assert sources["total"] == 1
+            assert sources["items"][0]["workflow_id"] == graph.id
+            assert sources["items"][0]["filters"]["quality"]["type"] == "checkbox"
+            await grant.delete()
+            assert (await call(app, "list_download_indexers", token=ro))[
+                "structuredContent"
+            ]["items"] == []
             ro_media = (await issue(admin, "all", scope="read_only"))["token"]
             assert "review_media_rescrape" not in await catalog(app, ro_media)
             assert (await call(app, "review_media_rescrape", token=ro_media))["isError"]

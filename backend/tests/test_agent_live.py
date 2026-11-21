@@ -229,6 +229,8 @@ def test_plan(tmp_path, monkeypatch, scenario):
                         if event.event == "tool_result"
                         and event.data["name"] == "ask_user"
                     )
+                    assert len(result["questions"]) == 1
+                    assert result["questions"][0]["format"] == "plan"
                     assert {opt["id"] for opt in result["questions"][0]["options"]} == {
                         "40",
                         "41",

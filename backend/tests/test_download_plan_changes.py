@@ -616,9 +616,9 @@ def test_running_attempt(monkeypatch, action):
                 assert stored.last_exec > LAST_EXEC
                 assert await DownloadPlanHistory.filter(plan_id=plan.id).count() == 2
             else:
-                # deletion does not cancel it; it stops at its first history write
-                assert isinstance(outcome, Exception) and stored is None
-                assert len(driver.submitted) == len(tasks) == 1
+                # the plan vanished while searching, before any dispatch was claimed
+                assert outcome["status"] == "unconfirmed" and stored is None
+                assert len(driver.submitted) == len(tasks) == 0
                 assert not await DownloadPlanHistory.exists()
 
     asyncio.run(run())

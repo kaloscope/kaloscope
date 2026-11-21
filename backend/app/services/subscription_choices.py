@@ -1,6 +1,7 @@
 """Present release choices and the recorded outcome of assistant subscriptions."""
 
 import re
+import unicodedata
 
 _TAG = re.compile(r"^[\[【]([^\]】\r\n]{1,48})[\]】]")
 _STAR_GROUP = re.compile(r"^([^★☆]{1,40}(?:字幕组|字幕組|字幕社))[★☆]")
@@ -15,6 +16,20 @@ _EDITION = re.compile(
     re.I,
 )
 _RESOLUTION = re.compile(r"(?<!\w)(\d{3,4}[pi]|4K)(?!\w)", re.I)
+
+
+def compact(value: str) -> str:
+    """Normalize a title or option label for a literal comparison.
+
+    Args:
+        value: Search keyword, option text or user-provided title.
+
+    Returns:
+        Case-folded text with punctuation and spaces omitted.
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFKC", value).casefold() if c.isalnum()
+    )
 
 
 def release_group(item: dict, title: str) -> str:
@@ -59,6 +74,33 @@ def release_matches(item: dict, title: str, terms: list[str]) -> bool:
     return group.casefold() == terms[0].casefold() and all(
         term.casefold() in labels for term in terms[1:]
     )
+
+
+def matches_release_rule(item: dict, rule: dict) -> bool:
+    """Apply the recorded release criteria to one current indexer result.
+
+    Args:
+        item: Metadata returned alongside the candidate link.
+        rule: Verified title, credited release tags and literal restrictions.
+
+    Returns:
+        Whether the available metadata satisfies every restriction.
+    """
+    if rule["confirmed"] and rule["terms"]:
+        name = str(item.get("title") or "")
+        if compact(rule["title"]) not in compact(name):
+            return False
+        if rule["observed"]:
+            return release_matches(item, rule["title"], rule["observed"])
+        # custom values must identify the credited group or an actual edition tag
+        labels = {compact(release_group(item, rule["title"]))}
+        labels.update(
+            compact(tag)
+            for tag in (*_EDITION.findall(name), *_RESOLUTION.findall(name))
+        )
+        return all(compact(term) in labels for term in rule["terms"])
+    metadata = compact(" ".join(str(item.get(k) or "") for k in ("title", "uploader")))
+    return all(compact(term) in metadata for term in rule["terms"])
 
 
 def release_choices(items: list[dict], title: str) -> list[list[str]]:
@@ -167,6 +209,12 @@ def confirmation_outcome(tool: str, result: dict, *, chinese: bool) -> str:
         stopped preview.
     """
     data = result.get("data") or {}
+    if plan_id := data.get("duplicate_plan_id"):
+        return (
+            f"已有完全相同的下载计划 #{plan_id}，未重复创建。"
+            if chinese
+            else f"Identical plan #{plan_id} already exists. No new plan was created."
+        )
     if tool == "create_download_plan":
         if result["ok"] and data.get("created"):
             plan_id = data["plan_id"]
@@ -175,6 +223,12 @@ def confirmation_outcome(tool: str, result: dict, *, chinese: bool) -> str:
                 if chinese
                 else f"Created download plan #{plan_id}."
             )
+            if data.get("already_exists"):
+                message = (
+                    f"已存在相同的下载计划 #{plan_id}。"
+                    if chinese
+                    else f"Matching download plan #{plan_id} already exists."
+                )
             status = (data.get("first_execution") or {}).get("status")
             if status == "queued":
                 message += (

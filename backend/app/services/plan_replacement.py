@@ -55,7 +55,10 @@ class PlanReplacementService:
         """
         settings = DownloadPlanService.settings(plan)
         anchor = plan.last_exec or plan.created_at
-        due = plan.replacement_due or (anchor + timedelta(hours=plan.interval_num))
+        first_queued = bool(plan.creation_key and plan.last_exec is None)
+        due = plan.replacement_due or (
+            anchor if first_queued else anchor + timedelta(hours=plan.interval_num)
+        )
         if plan.interval_start:
             due = max(due, plan.interval_start)
         await plan.fetch_related("graph", "downloader", "transfer_lib")
@@ -75,7 +78,7 @@ class PlanReplacementService:
         now = timezone.now()
         if plan.total_limit is not None and after["total_count"] >= plan.total_limit:
             after.update(schedule="blocked", blocked_by="limit_reached", next_due=None)
-        elif run_now and (
+        elif (run_now or (first_queued and due <= now)) and (
             (not plan.interval_start or now >= plan.interval_start)
             and (not plan.interval_end or now <= plan.interval_end)
         ):
@@ -86,7 +89,7 @@ class PlanReplacementService:
             after["schedule"] = "scheduled"
         try:
             checked = await DownloadPlanService.validate_creation(
-                DownloadPlanCheck(plan=settings), user
+                DownloadPlanCheck(plan=settings), user, check_duplicate=False
             )
             issues = checked["issues"]
         except ValidationError:
@@ -353,7 +356,14 @@ class PlanReplacementService:
                 last_exec=plan.last_exec,
                 replacement_due=due,
                 total_count=preview["after"]["total_count"],
-                creation_receipt={"first_execution": first},
+                creation_receipt={
+                    **{
+                        k: v
+                        for k, v in (plan.creation_receipt or {}).items()
+                        if k in {"release_rule", "ingest_workflow_id"}
+                    },
+                    "first_execution": first,
+                },
             )
             if preview["keep_history"]:
                 await DownloadPlanHistory.filter(plan_id=plan.id).update(plan_id=new.id)

@@ -67,6 +67,7 @@ from app.models.flow import (
 )
 from app.models.mcp import (
     AdminReviewResult,
+    DownloadIndexerInfo,
     DownloadResult,
     DownloadTaskResult,
     FavoritesPage,
@@ -255,6 +256,7 @@ _DOMAIN_TOOLS = {
         "cancel_media_batch",
     },
     MCPTokenDomain.DOWNLOADS: {
+        "list_download_indexers",
         "search_indexer",
         "diagnose_download_ingestion",
         "get_download_plan",
@@ -627,6 +629,26 @@ def create_server() -> MCPServer:
     )
 
     @server.tool(annotations=READ_ONLY)
+    async def list_download_indexers(
+        ctx: Context, page_num: _PageNumber = 1, page_size: _PageSize = 10
+    ) -> PageResult[DownloadIndexerInfo]:
+        """Discover published indexers and allowed search filters for this token.
+
+        Args:
+            ctx: Authenticated caller whose current indexer grants are checked.
+            page_num: One-based source page.
+            page_size: Maximum sources returned.
+
+        Returns:
+            Authorized workflow IDs and public search inputs for search_indexer.
+        """
+        return PageResult[DownloadIndexerInfo].model_validate(
+            await _read(
+                DownloadPlanService.list_indexers(_user(ctx), page_num, page_size)
+            )
+        )
+
+    @server.tool(annotations=READ_ONLY)
     async def get_download_plan_options(
         ctx: Context,
         workflow_id: Annotated[
@@ -673,8 +695,8 @@ def create_server() -> MCPServer:
     ) -> IndexerSearchResult:
         """Search the user's selected published indexer before reviewing plan settings.
 
-        Retain the requested keyword. Read get_download_plan_options for declared
-        filters, explicit defaults and the shared creation sequence. Re-search
+        Retain the requested keyword. Use list_download_indexers for accessible
+        workflow IDs and declared filters. Re-search
         changed inputs; empty results require revision or explicit agreement to wait.
 
         Args:

@@ -85,6 +85,16 @@ def test_subscription(approve):
                 assert (await assistant_review(call.call_id, owner))["outcome"][
                     "plan_id"
                 ] == response["plan_id"]
+                await DownloadPlan.filter(id=response["plan_id"]).delete()
+                for decision in (None, click):
+                    removed = await assistant_review(call.call_id, owner, decision)
+                    assert removed["status"] == "stale"
+                    assert removed["outcome"] == {
+                        "created": False,
+                        "outcome": "absent",
+                        "plan_id": response["plan_id"],
+                    }
+                assert await DownloadPlan.all().count() == 0
 
     asyncio.run(run())
 
@@ -348,8 +358,8 @@ def test_demotion_during_validation(monkeypatch, browser):
             )
             original = DownloadPlanService.validate_creation
 
-            async def demote(body, user):
-                valid = await original(body, user)
+            async def demote(body, user, **kwargs):
+                valid = await original(body, user, **kwargs)
                 await User.filter(id=user.id).update(role="user")
                 return valid
 

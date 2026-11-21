@@ -72,6 +72,7 @@ from app.models.assistant import (
 )
 from app.models.assistant_questions import AskUser
 from app.models.download import (
+    DEFAULT_TRANSFER_NAMING,
     DownloadPlanApply,
     DownloadPlanChange,
     DownloadPlanCheck,
@@ -1534,7 +1535,13 @@ async def execute_tool(
                         **args.model_dump(), user=user
                     )
                 case DownloadPlanCheck():
-                    result = await DownloadPlanService.validate_creation(args, user)
+                    if (
+                        args.plan.transfer_lib_id
+                        and args.plan.model_fields_set.isdisjoint(
+                            DEFAULT_TRANSFER_NAMING
+                        )
+                    ):
+                        args.plan = args.plan.model_copy(update=DEFAULT_TRANSFER_NAMING)
                     original = (
                         await AssistantToolCall.filter(
                             call_id=call_id, turn__conversation_id=conversation_id
@@ -1542,11 +1549,14 @@ async def execute_tool(
                         .select_related("turn")
                         .first()
                     )
-                    if (
-                        result["valid"]
-                        and original
-                        and (intent := await subscription_intent(original.turn))
-                    ):
+                    intent = (
+                        await subscription_intent(original.turn) if original else None
+                    )
+                    # card answers may change the final plan
+                    result = await DownloadPlanService.validate_creation(
+                        args, user, check_duplicate=not intent
+                    )
+                    if result["valid"] and intent:
                         result["assistant_submission"] = await submission_check(
                             intent, result, user
                         )

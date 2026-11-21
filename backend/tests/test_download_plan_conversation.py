@@ -947,7 +947,7 @@ def test_conversation(monkeypatch, verbose):
             )
             assert options["defaults"]["downloader_id"] == downloader.id
             assert options["defaults"]["total_limit"] is None
-            assert options["defaults"]["batch_limit"] == 1
+            assert options["defaults"]["batch_limit"] == 12
             fixture.update(
                 graph_id=graph.id,
                 plan={
@@ -1047,7 +1047,7 @@ def test_conversation(monkeypatch, verbose):
             assert await DownloadPlan.all().count() == 1
             plan = await DownloadPlan.first()
             assert plan.keyword == "Lantern" and plan.filters == {"category": "movie"}
-            assert plan.batch_limit == 1 and plan.total_limit is None
+            assert plan.batch_limit == 12 and plan.total_limit is None
             assert plan.creation_receipt["first_execution"]["status"] == "queued"
             service.notify_download_changes.assert_called_once()
             assert await DownloadTask.all().count() == await FlowLog.all().count() == 0

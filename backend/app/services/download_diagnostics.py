@@ -159,6 +159,7 @@ def attempt_stage(attempt: DownloadPlanAttempt) -> str:
     if attempt.status in {
         "unconfirmed",
         "driver_offline",
+        "release_filtered",
         "partial",
         "failed",
     }:

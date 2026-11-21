@@ -242,7 +242,10 @@
 {/if}
 {#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.created}
   <p class="ml-8 text-xs leading-5 text-base-content/60">
-    {$_('assistant.plan.created', Number(tool.result.data.plan_id))}
+    {$_(
+      tool.result.data.already_exists ? 'assistant.review.plan_exists' : 'assistant.plan.created',
+      Number(tool.result.data.plan_id)
+    )}
   </p>
 {/if}
 {#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.confirmation_required}

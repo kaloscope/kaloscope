@@ -24,9 +24,11 @@ from app.services.assistant_reviews import assistant_review
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.subscription_choices import release_choices, release_matches
 from app.services.subscription_intent import (
+    SubscriptionIntent,
     accepts_offer,
     explicit_subscription,
     requested_title,
+    revised_subscription_plan,
 )
 from app.utils.json import dumps
 from tests.test_assistant_persistence import MODEL, database, request
@@ -44,6 +46,12 @@ TERM = "喵萌奶茶屋"
     [
         ("帮我订阅「为什么是我？」", True, "为什么是我？"),
         ("Subscribe me to Lantern with a total limit of 20", True, "Lantern"),
+        (
+            "《Lantern》我准备追了，有更新就自动帮我下，字幕组我自己挑。",
+            True,
+            "Lantern",
+        ),
+        ("《Lantern》有更新就自动帮我下载吗？", False, ""),
         ("请问怎么订阅？", False, ""),
         ("帮我订阅 Lantern，但先给我预览，不要创建", False, ""),
         ("帮我订阅《旧剧》，等我确认后创建", False, ""),
@@ -150,6 +158,7 @@ async def invoke(turn, owner, name, args, call_id):
         ("wrong_search", "needs_search"),
         ("empty", "no_matches"),
         ("mixed", "unverified_term"),
+        ("short_page", "needs_search"),
         ("two_terms", "needs_preferences"),
         ("old_review", "needs_confirmation"),
         ("cancelled", "needs_confirmation"),
@@ -203,8 +212,10 @@ def test_submission(case, expected):
                         if case == "wrong_search"
                         else body.plan.keyword,
                         "filters": body.plan.filters,
+                        **({"page_size": 1} if case == "short_page" else {}),
                     },
                     "status": "ok",
+                    "omitted_count": 2 if case == "short_page" else 0,
                     "items": []
                     if case == "empty"
                     else [{"title": TITLE, "uploader": g} for g in ["Tea", "ANi"]]
@@ -390,7 +401,12 @@ def test_runtime_confirmation(monkeypatch, choice):
                     "    options: {tea: 喵萌奶茶屋, uha: 悠哈璃羽字幕社}\n"
                 )
                 await graph.save(update_fields=["definition"])
-            fixture.update(graph_id=graph.id, plan=body.plan.model_dump(mode="json"))
+            fixture.update(
+                graph_id=graph.id,
+                plan=body.plan.model_dump(
+                    mode="json", exclude_unset=choice != "custom"
+                ),
+            )
             conv = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -550,12 +566,46 @@ def test_runtime_confirmation(monkeypatch, choice):
                 if choice in {"custom", "edition"}:
                     assert plan.transfer_lib_id == library.id
                     assert plan.transfer_method == "hardlink"
+                    assert (plan.sub_pattern, plan.sub_repl) == (
+                        "^(.+/)?",
+                        "{{title}}/",
+                    )
+                else:
+                    assert (plan.sub_pattern, plan.sub_repl) == (None, None)
+                assert plan.batch_limit == body.plan.batch_limit
                 assert plan.dir == (
                     "/downloads/自填" if choice == "custom" else body.plan.dir
                 )
                 assert plan.total_limit == body.plan.total_limit
                 assert plan.creation_receipt["first_execution"]["status"] == "queued"
                 download.notify_download_changes.assert_called_once()
+                if choice == "edition":
+                    from app.core.dl.syncer import execute_download_plan
+                    from tests.test_services_download import DraftDriver
+
+                    search.side_effect = [
+                        {
+                            "items": [
+                                {
+                                    "title": (
+                                        "[Other] Lantern [简体内嵌] "
+                                        "(悠哈璃羽字幕社 简繁内封)"
+                                    ),
+                                    "link": "a" * 40,
+                                },
+                                {
+                                    "title": "[悠哈璃羽字幕社] Lantern [简繁内封]",
+                                    "link": "b" * 40,
+                                },
+                            ]
+                        },
+                        {"items": []},
+                    ]
+                    outcome = await execute_download_plan(plan, DraftDriver())
+                    assert outcome["added"] == outcome["skipped_release"] == 1
+                    assert await download.DownloadTask.all().values_list(
+                        "info_hash", flat=True
+                    ) == ["b" * 40]
 
     asyncio.run(run())
 
@@ -655,6 +705,23 @@ def test_destination_access():
                 assert (
                     patch["transfer_lib_id"] == visible.id and patch["dir"] == "/target"
                 )
+                assert (patch["sub_pattern"], patch["sub_repl"]) == (
+                    "^(.+/)?",
+                    "{{title}}/",
+                )
+            answer = {"custom": "", "selected": ["0"]}
+            assert not (await resolve_destination(q, answer, plan, owner)).get(
+                "sub_pattern"
+            )
+            legacy = {k: v for k, v in q.items() if k != "naming"}
+            patch = await resolve_destination(
+                legacy, {"custom": "TV", "selected": []}, plan, owner
+            )
+            assert (patch["sub_pattern"], patch["sub_repl"]) == (None, None)
+            (disabled,) = await destination_questions(
+                {**plan, "sub_pattern": ""}, "subscribe", owner, chinese=False
+            )
+            assert "naming" not in disabled
             await visible.delete()
             assert (
                 await resolve_destination(
@@ -662,6 +729,46 @@ def test_destination_access():
                 )
                 is None
             )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "naming, expected",
+    [
+        ({}, ("^(.+/)?", "{{title}}/")),
+        ({"sub_pattern": None, "sub_repl": None}, (None, None)),
+        ({"sub_pattern": "^Raw/", "sub_repl": ""}, ("^Raw/", "")),
+    ],
+)
+def test_library_plan_defaults(naming, expected):
+    async def run():
+        async with database() as (owner, _):
+            lib = await MediaLib.create(
+                name="Anime", lib_type="tv_show", dir="/synthetic/Anime", priority=1
+            )
+            _, _, body = await fixture_plan(
+                transfer_lib_id=lib.id, transfer_method="hardlink", **naming
+            )
+            conversation = await AssistantConversation.create(
+                user_id=owner.id, title="Preview"
+            )
+            turn = await AssistantTurn.create(
+                conversation_id=conversation.id,
+                request_id="preview",
+                prompt="预览下载计划",
+            )
+            settings = body.plan.model_dump(
+                mode="json", exclude_unset=True, exclude={"batch_limit"}
+            )
+            checked = await invoke(
+                turn, owner, "validate_download_plan", {"plan": settings}, "check"
+            )
+
+            assert checked["valid"]
+            plan = checked["plan"]
+            assert plan["batch_limit"] == 12
+            assert (plan["sub_pattern"], plan["sub_repl"]) == expected
 
     asyncio.run(run())
 
@@ -693,5 +800,35 @@ def test_legacy_release_card():
             assert resolved["plan"]["keyword"] == "Lantern Tea"
             assert resolved["plan"]["dir"] == body.plan.dir
             assert resolved["plan"]["transfer_lib_id"] is None
+
+    asyncio.run(run())
+
+
+def test_revised_settings():
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan(
+                filters={"category": "tv", "uploader": "old"}
+            )
+            base = {"title": "Lantern", "plan": body.plan.model_dump(mode="json")}
+            intent = SubscriptionIntent(
+                "帮我订阅《Lantern》", [], [], False, revision=base
+            )
+            draft = await revised_subscription_plan(
+                intent,
+                "我改主意了，只要 ANi 的简体内嵌，"
+                "下载到 /changed，不用入库。请按新条件帮我订好。",
+                owner,
+            )
+            assert draft["plan"]["keyword"] == "Lantern"
+            assert draft["plan"]["dir"] == "/changed"
+            assert draft["plan"]["filters"] == {"category": "tv"}
+            assert draft["plan"]["transfer_lib_id"] is None
+            assert base["plan"]["dir"] == body.plan.dir
+            assert (
+                await revised_subscription_plan(intent, "改成每六小时下载", owner)
+                is None
+            )
+            assert await DownloadPlan.all().count() == 0
 
     asyncio.run(run())

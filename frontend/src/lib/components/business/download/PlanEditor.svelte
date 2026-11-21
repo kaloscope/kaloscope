@@ -45,7 +45,7 @@
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
   import { FileTree, Label, Modal, Overlay, Search, Select } from '$lib/components';
-  import { DEFAULT_SUB_PATTERN, DEFAULT_SUB_REPL, EMPTY_SIGN } from '$lib/constants';
+  import { DEFAULT_PLAN_BATCH_LIMIT, DEFAULT_SUB_PATTERN, DEFAULT_SUB_REPL, EMPTY_SIGN } from '$lib/constants';
   import { createFormSchema, createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -64,7 +64,7 @@
     interval_num = 1,
     interval_start = null,
     interval_end = null,
-    batch_limit = 10,
+    batch_limit = DEFAULT_PLAN_BATCH_LIMIT,
     total_limit = null,
     transfer_lib_id = 0,
     transfer_method = null,
@@ -246,7 +246,9 @@
               })
               .json<Resp<DownloadPlanCreateResult>>();
         if (!data.created) {
-          issues = data.issues ?? [];
+          issues = data.duplicate_plan_id
+            ? [{ path: '', message: $_('assistant.review.plan_exists', data.duplicate_plan_id) }]
+            : (data.issues ?? []);
           attempted = null;
           return;
         }
@@ -265,7 +267,7 @@
           interval_num = 1;
           interval_start = null;
           interval_end = null;
-          batch_limit = 10;
+          batch_limit = DEFAULT_PLAN_BATCH_LIMIT;
           total_limit = null;
           transfer_lib_id = 0;
           transfer_method = supportsHardlink ? 'hardlink' : 'symlink';
@@ -369,7 +371,7 @@
     {/if}
     {#if issues.length}
       <ul class="mb-3 list-inside list-disc text-sm text-error" role="alert">
-        {#each issues as issue, index (index)}<li>{issue.path}: {issue.message}</li>{/each}
+        {#each issues as issue, index (index)}<li>{issue.path ? issue.path + ': ' : ''}{issue.message}</li>{/each}
       </ul>
     {/if}
     <fieldset class="fieldset" disabled={$loading !== null || !!attempted}>

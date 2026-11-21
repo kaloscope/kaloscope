@@ -46,6 +46,7 @@ DOWNLOAD_GRANTS = {
     "diagnose_download_ingestion": ADMIN_PREVIEW,
     "get_download_plan": READ_PLAN,
     "list_download_plans": READ_PLAN,
+    "list_download_indexers": READ_PLAN,
     "search_indexer": SEARCH_INDEXER,
     "get_download_plan_options": ADMIN_PREVIEW,
     "validate_download_plan": ADMIN_PREVIEW,

@@ -18,6 +18,7 @@ from sanic import Sanic, SanicException
 from sanic.log import logger
 from tortoise import timezone
 from tortoise.expressions import F, Q, RawSQL, Subquery
+from tortoise.functions import Lower
 from tortoise.queryset import QuerySet
 from tortoise.transactions import in_transaction
 
@@ -57,6 +58,7 @@ from app.models.download import (
 )
 from app.models.flow import GraphState
 from app.models.media import LibType, MediaLib
+from app.services.subscription_choices import matches_release_rule
 from app.utils.bittorrent import MagnetLink, standardize_magnet
 from app.utils.extractor import (
     extract_episode,
@@ -1451,7 +1453,7 @@ async def check_download_plans(*, first_only: bool = False):
                 async with in_transaction():
                     claimed = (
                         await runnable_plan(plan.id)
-                        .filter(**claim)
+                        .filter(updated_at=plan.updated_at, **claim)
                         .update(
                             last_exec=timezone.now(),
                             replacement_due=None,
@@ -1474,41 +1476,42 @@ async def check_download_plans(*, first_only: bool = False):
                 )
                 if initial:
                     await record_plan_first_execution(
-                        plan, receipt, {"status": "failed", "added": 0, "errors": 1}
+                        plan, {"status": "failed", "added": 0, "errors": 1}
                     )
                 continue
             try:
                 outcome = await execute_download_plan(plan, driver)
                 if initial:
-                    await record_plan_first_execution(plan, receipt, outcome)
+                    await record_plan_first_execution(plan, outcome)
             except Exception:
                 logger.error(
                     "Failed to execute download plan: %s", plan.id, exc_info=True
                 )
                 if initial:
-                    await record_plan_first_execution(
-                        plan, receipt, {"status": "unconfirmed"}
-                    )
+                    await record_plan_first_execution(plan, {"status": "unconfirmed"})
     finally:
         for driver in drivers.values():
             if driver is not None:
                 await driver.close()
 
 
-async def record_plan_first_execution(
-    plan: DownloadPlan, receipt: dict, outcome: dict
-) -> None:
+async def record_plan_first_execution(plan: DownloadPlan, outcome: dict) -> None:
     """Persist first-check facts on the plan and any independent replacement receipt.
 
     Args:
         plan: Subscription whose check was claimed.
-        receipt: Creation metadata captured by its scheduler.
         outcome: Settled or uncertain first-check facts.
     """
     async with in_transaction():
-        await DownloadPlan.filter(id=plan.id).update(
-            creation_receipt={**receipt, "first_execution": outcome}
-        )
+        stored = DownloadPlan.filter(id=plan.id)
+        if await stored.update(updated_at=F("updated_at")):
+            current = await stored.first()
+            await stored.update(
+                creation_receipt={
+                    **(current.creation_receipt or {}),
+                    "first_execution": outcome,
+                }
+            )
         if plan.replacement_due is not None:
             await DownloadPlanReplacement.filter(new_plan_id=plan.id).update(
                 first_execution=outcome
@@ -1532,7 +1535,7 @@ async def submit_plan_item(
         attempt_id: Recorded subscription check that requested this task.
 
     Returns:
-        `added`, `uncertain`, `pending`, `failed` or `stopped`.
+        `added`, `duplicate`, `uncertain`, `pending`, `failed` or `stopped`.
 
     Raises:
         RuntimeError: If a legacy deletion removed the plan during submission.
@@ -1550,8 +1553,25 @@ async def submit_plan_item(
                     plan_id=plan.id, status__in=["approved", "uncertain", "applied"]
                 ).update(updated_at=F("updated_at")):
                     return "stopped"
-                if await DownloadPlanDispatch.filter(key=key).exists():
+                identity = Q()
+                if magnet.info_hash:
+                    identity |= Q(info_hash__iexact=magnet.info_hash)
+                if magnet.info_hash_v2:
+                    identity |= Q(info_hash_v2__iexact=magnet.info_hash_v2)
+                if await DownloadPlanHistory.filter(identity, plan_id=plan.id).exists():
+                    return "duplicate"
+                if await DownloadPlanDispatch.filter(
+                    identity, plan_id=plan.id
+                ).exists():
                     return "pending"
+                current = await DownloadPlan.get_or_none(id=plan.id)
+                if (
+                    current is None
+                    or current.inactive()
+                    or (current.creation_receipt or {}).get("release_rule")
+                    != (plan.creation_receipt or {}).get("release_rule")
+                ):
+                    return "stopped"
                 dispatch = await DownloadPlanDispatch.create(
                     plan_id=plan.id,
                     key=key,
@@ -1608,14 +1628,15 @@ async def settle_plan_submission(
         if await DownloadPlanDispatch.filter(id=dispatch.id, counted=False).update(
             counted=True
         ) and await DownloadPlan.exists(id=dispatch.plan_id):
-            await DownloadPlanHistory.get_or_create(
+            _, created = await DownloadPlanHistory.get_or_create(
                 plan_id=dispatch.plan_id,
                 info_hash=dispatch.info_hash,
                 info_hash_v2=dispatch.info_hash_v2,
             )
-            await DownloadPlan.filter(id=dispatch.plan_id).update(
-                total_count=F("total_count") + 1
-            )
+            if created:
+                await DownloadPlan.filter(id=dispatch.plan_id).update(
+                    total_count=F("total_count") + 1
+                )
         if task is None or task.state not in {
             DownloadState.SUBMIT_UNKNOWN,
             DownloadState.SUBMITTING,
@@ -1696,6 +1717,10 @@ async def _run_plan_attempt(
     engine: FlowEngine = Sanic.get_app().ctx.flow_engine
     page_num = 1
     seen_links: set[str] = set()
+    accepted_links: set[str] = set()
+    seen_hashes: set[str] = set()
+    release_rule = (plan.creation_receipt or {}).get("release_rule")
+    skipped_release = 0
     errors = 0
     uncertain = 0
 
@@ -1743,15 +1768,16 @@ async def _run_plan_attempt(
 
         filter = Q()
         if hashes:
-            filter |= Q(info_hash__in=hashes)
+            filter |= Q(v1__in=hashes)
         if hashes_v2:
-            filter |= Q(info_hash_v2__in=hashes_v2)
+            filter |= Q(v2__in=hashes_v2)
 
-        records = await model.filter(filter, *args).only("info_hash", "info_hash_v2")
-        return (
-            set(v1 for r in records if (v1 := getattr(r, "info_hash", None))),
-            set(v2 for r in records if (v2 := getattr(r, "info_hash_v2", None))),
+        records = (
+            await model.annotate(v1=Lower("info_hash"), v2=Lower("info_hash_v2"))
+            .filter(filter, *args)
+            .values_list("v1", "v2")
         )
+        return ({v1 for v1, _ in records if v1}, {v2 for _, v2 in records if v2})
 
     async def _magnet_links() -> list[MagnetLink] | None:
         """Get magnet links from the graph execution result of the download plan.
@@ -1760,7 +1786,7 @@ async def _run_plan_attempt(
             New links, an empty list when all links are already known, or `None`
             at the end of pagination or after a recorded search failure.
         """
-        nonlocal errors
+        nonlocal errors, skipped_release
         # prepare the boot parameters for graph execution
         bootparams = {
             "$start": "search_start",
@@ -1802,29 +1828,43 @@ async def _run_plan_attempt(
             for item in items
         )
         # detect non-paginated API by checking for duplicate links on page > 1
-        links = list(
-            dict.fromkeys(
-                item["link"]
-                for item in items
-                if isinstance(item, dict) and isinstance(item.get("link"), str)
-            )
+        rows = [
+            item
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("link"), str)
+        ]
+        links = {item["link"] for item in rows}
+        accepted = []
+        for item in rows:
+            if release_rule and not matches_release_rule(item, release_rule):
+                skipped_release += int(item["link"] not in seen_links)
+            else:
+                accepted.append(item["link"])
+        new_links = dict.fromkeys(
+            link for link in accepted if link not in accepted_links
         )
-        if page_num > 1 and set(links).issubset(seen_links):
+        if page_num > 1 and not new_links and links.issubset(seen_links):
             return None
+        accepted_links.update(new_links)
+        seen_links.update(links)
 
         # extract valid magnet links from the graph execution result
         magnets: list[MagnetLink] = []
-        for link in links:
-            # skip if the link has been seen in previous pages
-            if link in seen_links:
-                continue
-            seen_links.add(link)
+        for link in new_links:
             # check if the link is a valid magnet/hash
             magnet = await standardize_magnet(link)
             if magnet is None:
                 errors += 1
                 continue
-            magnets.append(magnet)
+            if magnet.info_hash:
+                magnet.info_hash = magnet.info_hash.lower()
+            if magnet.info_hash_v2:
+                magnet.info_hash_v2 = magnet.info_hash_v2.lower()
+            hashes = {h for h in (magnet.info_hash, magnet.info_hash_v2) if h}
+            duplicate = not hashes.isdisjoint(seen_hashes)
+            seen_hashes.update(hashes)
+            if not duplicate:
+                magnets.append(magnet)
 
         if not magnets:
             return []
@@ -1929,6 +1969,8 @@ async def _run_plan_attempt(
         if outcome == "stopped":
             stopped = True
             break
+        if outcome == "duplicate":
+            continue
         if outcome == "failed":
             errors += 1
             continue
@@ -1950,7 +1992,10 @@ async def _run_plan_attempt(
         if errors and task_count
         else "failed"
         if errors
+        else "release_filtered"
+        if skipped_release and not task_count
         else "completed",
+        **({"skipped_release": skipped_release} if skipped_release else {}),
         "added": task_count,
         "errors": errors,
         "uncertain": uncertain,

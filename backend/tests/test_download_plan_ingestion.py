@@ -348,6 +348,29 @@ def test_add_then_reuse(tmp_path):
     asyncio.run(run())
 
 
+def test_duplicate_skips_binding(tmp_path, monkeypatch):
+    async def run():
+        async with database() as (owner, _):
+            data = await libraries(tmp_path)
+            validation = await reviewed(owner, data)
+            first = await service.DownloadPlanService.create_once(
+                creation(data, validation), owner
+            )
+
+            ensure = AsyncMock()
+            monkeypatch.setattr(service.MediaLibService, "ensure_ingestion", ensure)
+            duplicate = await service.DownloadPlanService.create_once(
+                creation(data, validation, request_id=uuid4()), owner
+            )
+
+            assert not duplicate["created"]
+            assert duplicate["duplicate_plan_id"] == first["plan_id"]
+            ensure.assert_not_awaited()
+            assert await DownloadPlan.all().count() == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("change", ["added", "reordered", "edited", "removed"])
 @pytest.mark.parametrize("bound", [False, True], ids=["add", "reuse"])
 def test_changed_bindings(tmp_path, change, bound):

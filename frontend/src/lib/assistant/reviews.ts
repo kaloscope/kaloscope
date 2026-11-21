@@ -64,15 +64,31 @@ function record(value: unknown): Fact {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Fact) : {};
 }
 
+const sensitiveParameter =
+  /password|passwd|passphrase|secret|token|authorization|credential|cookie|api[-_]?key|private[-_]?key|access[-_]?key/i;
+
 /**
- * Limit schedule arguments to their top-level names in expanded tool output.
- * @param key - Field currently serialized by `JSON.stringify`.
- * @param value - Original value for this field.
- * @returns Names for boot parameters, or the original value for other fields.
+ * Prepare schedule values for display while masking nested credential fields.
+ * @param value - Parameter value from the schedule preview.
+ * @returns Its public value with credential-bearing fields masked.
+ */
+function publicParameters(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(publicParameters);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, sensitiveParameter.test(key) ? '••••' : publicParameters(item)])
+  );
+}
+
+/**
+ * Render the same public parameter values in expanded schedule details and approvals.
+ * @param key - Field currently serialized.
+ * @param value - Original value for the field.
+ * @returns The public review value.
  */
 export function scheduleDetail(this: unknown, key: string, value: unknown): unknown {
   if (key === 'bootparams' || (record(this).field === 'bootparams' && (key === 'before' || key === 'after'))) {
-    return Object.keys(record(value));
+    return publicParameters(value);
   }
   return value;
 }
@@ -148,7 +164,7 @@ export function reviewFields(receipt: AssistantReview): [string, unknown][] {
         ['assistant.review.next_run', first.local ?? first.estimate],
         ['assistant.review.repeatable', schedule.repeatable],
         ['assistant.review.recoverable', schedule.recoverable],
-        ['assistant.review.bootparams', Object.keys(record(schedule.bootparams)).join(' · ')]
+        ['assistant.review.bootparams', publicParameters(schedule.bootparams)]
       );
       break;
     case 'review_media_rescrape':
@@ -192,6 +208,30 @@ export function reviewFields(receipt: AssistantReview): [string, unknown][] {
 }
 
 /**
+ * Identify changed credential fields without returning their values.
+ * @param before - Previous parameters.
+ * @param after - Proposed parameters.
+ * @param path - Parent property names used to identify nested fields.
+ * @returns Names of masked fields whose contents changed.
+ */
+function changedCredentials(before: unknown, after: unknown, path: string[] = []): string[] {
+  const left = before && typeof before === 'object' ? Object.entries(before) : [];
+  const right = after && typeof after === 'object' ? Object.entries(after) : [];
+  const oldValues = new Map<string, unknown>(left);
+  const newValues = new Map<string, unknown>(right);
+  const changes: string[] = [];
+  for (const key of new Set([...oldValues.keys(), ...newValues.keys()])) {
+    const previous = oldValues.get(key);
+    const next = newValues.get(key);
+    if (JSON.stringify(previous) === JSON.stringify(next)) continue;
+    const names = [...path, key];
+    if (sensitiveParameter.test(key)) changes.push(names.join('.'));
+    else changes.push(...changedCredentials(previous, next, names));
+  }
+  return changes;
+}
+
+/**
  * Return material before-and-after changes supplied by the reviewed service.
  * @param preview - Frozen facts displayed to the owner.
  * @returns Changed fields in display order.
@@ -203,8 +243,9 @@ export function reviewChanges(preview: Fact): Fact[] {
     if (entry.field === 'bootparams') {
       changes[i] = {
         field: entry.field,
-        before: Object.keys(record(entry.before)).join(' · '),
-        after: Object.keys(record(entry.after)).join(' · ')
+        maskedChanges: changedCredentials(entry.before, entry.after),
+        before: publicParameters(entry.before),
+        after: publicParameters(entry.after)
       };
     }
   }

@@ -109,7 +109,14 @@ class AssistantReviewDecision(TortoiseModel):
             state = {
                 "status": "failed",
                 "retryable": retryable,
-                "outcome": {"issues": result.get("issues", [])},
+                "outcome": {
+                    "issues": result.get("issues", []),
+                    **(
+                        {"duplicate_plan_id": result["duplicate_plan_id"]}
+                        if "duplicate_plan_id" in result
+                        else {}
+                    ),
+                },
             }
             result = {**result, "retryable": retryable}
         else:

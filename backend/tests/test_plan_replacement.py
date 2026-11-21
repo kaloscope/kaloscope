@@ -333,7 +333,8 @@ def test_first_check(monkeypatch, immediate, window, limit):
                 syncer.check_download_plans(first_only=True),
             )
             await syncer.check_download_plans()
-            expected = immediate and not window and not limit
+            # the original plan already had a queued first check
+            expected = not window and not limit
             assert check.await_count == int(expected), new
             await DownloadPlan.filter(id=new["new_plan_id"]).delete()
             status = await Replacement.status(a["operation_id"], owner)

@@ -1181,6 +1181,7 @@
     "assistant_canvas_wait_save": "Check the save result before leaving the canvas.",
     "assistant_canvas_already_saved": "The draft had already been saved, so the changes were kept.",
     "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved.",
+    "download_plan_already_exists": "An identical download plan already exists",
     "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it.",
     "assistant_review_unavailable": "This review can no longer be saved. Check its latest status in the assistant."
   },
@@ -1225,6 +1226,7 @@
       "unconfirmed": "This device could not confirm opening"
     },
     "question": {
+      "resume": "Resume questions",
       "back_to_chat": "Return to chat",
       "progress": "Question {0} of {1}",
       "plan_title": "Which download plan do you mean?",
@@ -1234,6 +1236,7 @@
       "next": "Next",
       "submit": "Submit answers",
       "confirm_subscription": "Confirm subscription",
+      "related_plans": "Related plans include {0}. Identical plans cannot be created twice.",
       "subscription_settings": "{0} · Interval {1} h · Per check {2} · Total {3}",
       "submitted": "Submitted answers",
       "skipped": "Skipped",
@@ -1329,6 +1332,9 @@
       "download_plans": "Download Plans"
     },
     "review": {
+      "plan_removed": "Download plan #{0} was created and later removed.",
+      "masked_changes": "Changed parameters with masked values: {0}",
+      "plan_exists": "Matching download plan #{0} already exists.",
       "download_created": "Download task #{0} was submitted. Track its progress in Downloads.",
       "partial_plan": "The library kept its ingestion workflow binding. The download plan was not created.",
       "partial_download": "The library kept its ingestion workflow binding. The download was not submitted.",
@@ -1379,7 +1385,7 @@
       "cron_utc": "Cron schedule (UTC)",
       "interval_num": "Repeat interval",
       "interval_unit": "Interval unit",
-      "bootparams": "Boot parameter names",
+      "bootparams": "Boot parameters",
       "repeatable": "Allow overlapping runs with identical parameters",
       "recoverable": "Resume interrupted runs after restart",
       "match": "Selected metadata",
@@ -1625,6 +1631,7 @@
       "created": "Download plan #{0} created",
       "creation_unknown": "Creation result unknown. Keep these settings and recover the result to avoid duplicates.",
       "first": {
+        "release_filtered": "No first-run submissions matched the confirmed release criteria",
         "blocked": "No first check scheduled under the current limits",
         "scheduled": "First check scheduled at the original interval",
         "queued": "First attempt queued",

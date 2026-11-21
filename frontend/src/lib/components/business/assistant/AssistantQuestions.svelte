@@ -193,6 +193,14 @@
               plan.batch_limit ?? $_('assistant.replacement.no_limit'),
               plan.total_limit ?? $_('assistant.replacement.no_limit')
             ])}
+            {#if card.subscription.related_plan_ids?.length}
+              <span class="block"
+                >{$_(
+                  'assistant.question.related_plans',
+                  card.subscription.related_plan_ids.map((id) => `#${id}`).join(', ')
+                )}</span
+              >
+            {/if}
           </p>
         {/if}
         {#each heading.options as option (option.id)}

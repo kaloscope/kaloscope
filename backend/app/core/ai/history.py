@@ -662,6 +662,7 @@ async def prepare_context(
     schemas: Sequence[Mapping[str, object]],
     preset: AIProviderPreset | None,
     continuation: list[dict] | None = None,
+    trailing: list[dict] | None = None,
 ) -> tuple[list[dict], dict[str, int], bool]:
     """Compact completed prefixes and atomically checkpoint their summaries.
 
@@ -677,6 +678,7 @@ async def prepare_context(
         preset: Provider option compatibility preset.
         continuation: Completed exchanges in this turn, compacted in place only
             when their size leaves insufficient room for historical context.
+        trailing: Current-round instructions appended by the caller after compaction.
 
     Returns:
         Bounded model messages, summary usage, and whether a checkpoint changed.
@@ -691,6 +693,8 @@ async def prepare_context(
     conversation = await AssistantSessionService.owned(turn.conversation_id, user)
     input_budget, output_budget = budgets(turn.model["model_id"], preset=preset)
     hard = min(input_budget, 512 * 1024) - output_budget
+    if trailing:
+        hard -= len(dumps(trailing)) - 1
     if not continuation:
         hard -= 4096
     if hard <= context_size([{"role": "system", "content": system}], schemas):

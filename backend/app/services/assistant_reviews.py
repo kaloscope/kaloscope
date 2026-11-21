@@ -100,6 +100,8 @@ def _outcome(result: dict) -> dict:
             for key in (
                 "outcome",
                 "created",
+                "already_exists",
+                "duplicate_plan_id",
                 "applied",
                 "task_id",
                 "plan_id",
@@ -133,10 +135,13 @@ async def _recorded(tool: str, key: str, user: UserInfo) -> dict | None:
             return None
         plan = await DownloadPlan.filter(id=row.plan_id).first()
         if plan is None:
-            return _outcome({"created": True, "plan_id": row.plan_id})
-        return _outcome(
-            await DownloadPlanService.creation_result(plan, user, replayed=True)
-        )
+            return _outcome(
+                {"created": False, "outcome": "absent", "plan_id": row.plan_id}
+            )
+        result = await DownloadPlanService.creation_result(plan, user, replayed=True)
+        if plan.creation_key != key:
+            result["already_exists"] = True
+        return _outcome(result)
     if tool == "validate_download_task":
         receipt = await DownloadTaskCreation.get_or_none(key=key)
         task = await DownloadTask.get_or_none(creation_key=key)

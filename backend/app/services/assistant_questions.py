@@ -1,6 +1,7 @@
 """Issue immutable assistant questions and validate their answers."""
 
 import hashlib
+import re
 from datetime import datetime
 
 from tortoise.transactions import in_transaction
@@ -68,6 +69,22 @@ async def build_card(body: AskUser, user: UserInfo) -> dict:
         )
 
     for i, q in enumerate(body.questions):
+        if (
+            body.plan_ids
+            and len(
+                {
+                    plan_id
+                    for plan_id in body.plan_ids
+                    for option in q.options
+                    if re.search(
+                        rf"(?:#|(?:计划|plan)\s*){plan_id}(?!\d)", option.label, re.I
+                    )
+                    or option.label.strip() == str(plan_id)
+                }
+            )
+            >= 2
+        ):
+            continue
         questions.append(
             {
                 **q.model_dump(exclude={"options"}),
@@ -190,6 +207,7 @@ async def answer_card(
                     and answer.custom.strip() != q["options"][0]["label"]
                 ):
                     return {"issue": "invalid", "id": q["id"]}
+            target = None
             if q["format"] == "plan" and parts:
                 target = next(o for o in q["options"] if o["label"] == parts[0])
                 plan = await DownloadPlan.get_or_none(id=int(target["id"]))
@@ -201,6 +219,11 @@ async def answer_card(
                     "id": q["id"],
                     "title": q["title"],
                     "values": parts,
+                    **(
+                        {"plan_id": int(target["id"]), "revision": target["revision"]}
+                        if target
+                        else {}
+                    ),
                     "skipped": answer.skipped,
                 }
             )

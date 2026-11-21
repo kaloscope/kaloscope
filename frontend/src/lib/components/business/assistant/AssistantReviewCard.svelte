@@ -82,9 +82,13 @@
       if (tool === 'validate_download_task') return $_('assistant.review.partial_download');
       return fallback;
     }
+    if (tool === 'validate_download_plan' && outcome?.outcome === 'absent' && typeof outcome.plan_id === 'number')
+      return $_('assistant.review.plan_removed', outcome.plan_id);
+    if (tool === 'validate_download_plan' && typeof outcome?.duplicate_plan_id === 'number')
+      return $_('assistant.review.plan_exists', outcome.duplicate_plan_id);
     if (!outcome || !['applied', 'pending'].includes(receipt.status)) return fallback;
     if (tool === 'validate_download_plan' && outcome.created && typeof outcome.plan_id === 'number')
-      return $_('assistant.plan.created', outcome.plan_id);
+      return $_(outcome.already_exists ? 'assistant.review.plan_exists' : 'assistant.plan.created', outcome.plan_id);
     if (tool === 'validate_download_task' && outcome.created && typeof outcome.task_id === 'number')
       return $_('assistant.review.download_created', outcome.task_id);
     const target = outcome.job_id ?? outcome.task_id ?? outcome.item_id ?? outcome.library_id;
@@ -210,6 +214,9 @@
               </dt>
               <dd class="break-words">
                 {display(change.before, String(change.field))} → {display(change.after, String(change.field))}
+                {#if Array.isArray(change.maskedChanges) && change.maskedChanges.length}
+                  <span class="block">{$_('assistant.review.masked_changes', change.maskedChanges.join(', '))}</span>
+                {/if}
               </dd>
             </div>
           {/each}
@@ -229,7 +236,7 @@
           </ul>
         </details>
       {/if}
-      {#if outcome?.issues?.length}
+      {#if outcome?.issues?.length && !outcome.duplicate_plan_id}
         <ul class="list-disc pl-4 text-xs">
           {#each outcome.issues as issue, index (index)}<li>
               {issue.path ? issue.path + ' · ' : ''}{issue.message}

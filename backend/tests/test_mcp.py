@@ -262,6 +262,7 @@ def test_catalog():
                 "list_indexer_favorites",
                 "diagnose_download_ingestion",
                 "list_download_plans",
+                "list_download_indexers",
                 "get_library_ingestion",
                 "validate_download_task",
                 "create_download_task",

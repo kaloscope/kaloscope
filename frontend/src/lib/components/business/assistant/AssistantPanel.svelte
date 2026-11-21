@@ -79,10 +79,20 @@
       : undefined
   );
   let dismissedQuestion = $state<string | null>(null);
-  const questionTool = $derived(
+  const latestQuestion = $derived(
     lastTurn?.status === 'complete'
-      ? lastTurn.tools.find((tool) => tool.name === 'ask_user' && tool.result?.ok && tool.id !== dismissedQuestion)
+      ? lastTurn.tools.findLast((tool) => tool.name === 'ask_user' && tool.result?.ok)
       : null
+  );
+  const questionTool = $derived(latestQuestion?.id === dismissedQuestion ? null : latestQuestion);
+  const canResumeQuestion = $derived(
+    !!latestQuestion &&
+      latestQuestion.id === dismissedQuestion &&
+      latestQuestion.result?.data?.state !== 'answered' &&
+      !$assistant.busy &&
+      !$assistant.conversation?.busy &&
+      !$assistant.historyLoading &&
+      !$assistantRestoring
   );
   const card = $derived(questionTool?.result?.data as QuestionCard | undefined);
   const isOpen = $derived($assistant.open);
@@ -825,6 +835,15 @@
               />
             {/key}
           {:else}
+            {#if canResumeQuestion}
+              <button
+                type="button"
+                class="btn m-2 btn-soft btn-primary btn-sm"
+                onclick={() => (dismissedQuestion = null)}
+              >
+                {$_('assistant.question.resume')}
+              </button>
+            {/if}
             <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
             <textarea
               id="assistant-input"

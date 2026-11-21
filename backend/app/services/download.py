@@ -24,7 +24,7 @@ from sanic import Sanic
 from sanic.log import logger
 from tortoise import timezone
 from tortoise.exceptions import IntegrityError
-from tortoise.expressions import F, Q
+from tortoise.expressions import F, Q, RawSQL
 from tortoise.functions import Count, Sum
 from tortoise.queryset import QuerySet
 from tortoise.transactions import atomic, in_transaction
@@ -71,6 +71,8 @@ from app.core.flow.outputs import check_output, download_link_kind
 from app.core.renderer import SANDBOX_ENV, is_template
 from app.models.assistant import DOWNLOAD_PATHS, AssistantToolCall
 from app.models.download import (
+    DEFAULT_PLAN_BATCH_LIMIT,
+    DEFAULT_TRANSFER_NAMING,
     PLAN_SETTINGS,
     DownloadAdd,
     DownloadDir,
@@ -119,7 +121,7 @@ from app.utils.bittorrent import (
     standardize_magnet,
 )
 from app.utils.crypto import fernet_decrypt, fernet_encrypt
-from app.utils.json import dumps, loads
+from app.utils.json import dumps, json_digest, loads
 
 
 def default_download_directory() -> Path:
@@ -2614,6 +2616,60 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         return result
 
     @classmethod
+    async def list_indexers(cls, user: UserInfo, page_num: int, page_size: int) -> dict:
+        """List authorized published search entries and their public input definitions.
+
+        Args:
+            user: Current caller with workflow permissions loaded.
+            page_num: One-based page number.
+            page_size: Maximum search entries to return.
+
+        Returns:
+            Searchable workflow IDs, display names and supported filters.
+        """
+        query = FlowGraph.filter(
+            category=GraphCategory.INDEXER, state__not=GraphState.DRAFT
+        )
+        if user.role != UserRole.ADMIN:
+            query = query.filter(id__in=user.perms.indexer_ids if user.perms else [])
+        query = query.annotate(
+            searchable=RawSQL(
+                """EXISTS (SELECT 1 FROM json_each(definition, '$.nodes') n
+               WHERE json_extract(n.value, '$.data."$schema"') = 'search_start')"""
+            )
+        ).filter(searchable=1)
+        total = await query.count()
+        items = []
+        for graph in (
+            await query.order_by("id")
+            .offset((page_num - 1) * page_size)
+            .limit(page_size)
+        ):
+            config = (await start_config(graph, "search"))["search"] or {}
+            definitions = config.get("filters")
+            items.append(
+                {
+                    "workflow_id": graph.id,
+                    "name": graph.name,
+                    "only_preview": graph.only_preview(),
+                    "filters": {
+                        key: {
+                            k: v
+                            for k, v in field.items()
+                            if k in {"type", "label", "options"}
+                        }
+                        for key, field in definitions.items()
+                        if isinstance(field, dict)
+                        and not key.startswith("$")
+                        and key not in {"keyword", "page_num", "page_size"}
+                    }
+                    if isinstance(definitions, dict)
+                    else {},
+                }
+            )
+        return {"items": items, "total": total}
+
+    @classmethod
     async def authoring_options(
         cls, workflow_id: int, user: UserInfo, page_num: int = 1, page_size: int = 20
     ) -> dict:
@@ -2680,7 +2736,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "interval_num": 1,
                 "interval_start": None,
                 "interval_end": None,
-                "batch_limit": 1,
+                "batch_limit": DEFAULT_PLAN_BATCH_LIMIT,
                 "total_limit": None,
                 "downloader_id": default_downloader,
                 "dir": directories[0],
@@ -2714,9 +2770,14 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "types and IDs; report "
                 "incomplete evidence briefly. Never reject or change an existing "
                 "plan because of a possible overlap. Copy defaults for omitted "
-                "settings (including interval and batch_limit). Counts mean resources, "
-                "not episodes; propose a total appropriate to an ongoing "
-                "subscription. Only use declared "
+                "settings (including interval and batch_limit). When a transfer "
+                "library is specified, use its editor naming defaults "
+                f"sub_pattern={DEFAULT_TRANSFER_NAMING['sub_pattern']} and "
+                f"sub_repl={DEFAULT_TRANSFER_NAMING['sub_repl']} unless instructed "
+                "otherwise. Omit both while the library is undecided. Set sub_pattern "
+                "to an empty string if asked to preserve original paths. Counts "
+                "mean resources, not episodes; propose a total appropriate to an "
+                "ongoing subscription. Only use declared "
                 "filters. Validate a proposed plan before replying when possible. "
                 "Summarize the indexer, keyword/filters, schedule, per-check/total "
                 "limits, downloader/directory, optional transfer and first execution "
@@ -2850,7 +2911,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
     @classmethod
     async def validate_creation(
-        cls, body: DownloadPlanCheck, user: UserInfo | User, *, search: bool = True
+        cls,
+        body: DownloadPlanCheck,
+        user: UserInfo | User,
+        *,
+        search: bool = True,
+        check_duplicate: bool = True,
     ) -> dict:
         """Check a plan against the published indexer without executing it.
 
@@ -2860,6 +2926,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             user: Current account; creation requires the same administrator role.
             search: Check the indexer, keyword and filters. An update that keeps
                 its search inputs skips them.
+            check_duplicate: Check a new plan once its release settings are final.
 
         Returns:
             Located issues, normalized editor data, the transfer preview and
@@ -2999,7 +3066,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             value = getattr(plan, field)
             if value is not None and value.tzinfo is not None:
                 data[field] = value.astimezone(UTC).isoformat()
-        return {
+        result = {
             "valid": not issues,
             "workflow_id": graph.id,
             "workflow_name": graph.name,
@@ -3017,6 +3084,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             **({"transfer": transfer} if transfer else {}),
             **({"ingestion": ingestion} if ingestion else {}),
         }
+
+        if check_duplicate and not issues:
+            result.update(await cls.duplicate_settings(plan, body.ingest_workflow_id))
+        return result
 
     @classmethod
     async def creation_result(
@@ -3075,6 +3146,65 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     else "missing",
                 }
         return result
+
+    @classmethod
+    async def duplicate_settings(
+        cls,
+        settings: DownloadPlanUpsert,
+        workflow_id: int | None = None,
+        rule: dict | None = None,
+    ) -> dict:
+        """Find an existing plan with the same configuration and release restrictions.
+
+        Args:
+            settings: Proposed editor fields, excluding runtime counters and history.
+            workflow_id: Requested library ingestion binding.
+            rule: Server-confirmed release restrictions for future downloads.
+
+        Returns:
+            Validation failure with the matching plan ID, or an empty dictionary.
+        """
+
+        def signature(plan: DownloadPlan | DownloadPlanUpsert) -> bytes:
+            """Normalize optional editor fields for an exact configuration comparison.
+
+            Args:
+                plan: Proposed or stored plan configuration.
+
+            Returns:
+                Stable JSON preserving filter types and ignoring object key order.
+            """
+            values = cls.settings(plan)
+            values["filters"] = values["filters"] or {}
+            for field in ("sub_pattern", "sub_repl"):
+                values[field] = values[field] or None
+            for field in ("interval_start", "interval_end"):
+                value = getattr(plan, field)
+                if value is not None and value.tzinfo is None:
+                    values[field] = timezone.make_aware(value).astimezone(UTC)
+            return dumps(values, option=orjson.OPT_SORT_KEYS)
+
+        wanted = signature(settings)
+        candidates = DownloadPlan.filter(
+            graph_id=settings.graph_id,
+            downloader_id=settings.downloader_id,
+            keyword=settings.keyword,
+            dir=settings.dir,
+        ).order_by("id")
+        for candidate in await candidates:
+            receipt = candidate.creation_receipt or {}
+            if (
+                signature(candidate) == wanted
+                and receipt.get("release_rule") == rule
+                and receipt.get("ingest_workflow_id") == workflow_id
+            ):
+                message = f"Identical download plan #{candidate.id} already exists."
+                return {
+                    "valid": False,
+                    "duplicate_plan_id": candidate.id,
+                    "issues": [{"path": "plan", "message": message}],
+                }
+        return {}
 
     @classmethod
     async def create_once(
@@ -3186,32 +3316,68 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             if values[field] is not None and values[field].tzinfo is not None:
                 values[field] = values[field].astimezone(UTC)
         workflow_id = body.ingestion.workflow_id if body.ingestion else None
+        # recover the server-issued rule even for an editor or MCP replay of the review
+        frozen = (
+            await AssistantToolCall.filter(
+                name="validate_download_plan",
+                status="complete",
+                turn__conversation__user_id=user.id,
+            )
+            .annotate(proposal_id=RawSQL("json_extract(result, '$.data.request_id')"))
+            .filter(proposal_id=str(body.request_id))
+            .first()
+        )
+        rule = None
+        if frozen:
+            preview = frozen.result["data"]
+            proposal = preview.get("plan") or {}
+            consent = preview.get("assistant_submission") or {}
+            if (
+                consent.get("status") == "ready"
+                and proposal.get("graph_id") == body.plan.graph_id
+                and proposal.get("keyword") == body.plan.keyword
+                and (proposal.get("filters") or {}) == (body.plan.filters or {})
+            ):
+                rule = consent.get("release_rule")
         # requests without ingestion keep their original receipt digest
         identity = values if workflow_id is None else {**values, "ingest": workflow_id}
-        digest = hashlib.sha256(
-            dumps(identity, option=orjson.OPT_SORT_KEYS)
-        ).hexdigest()
+        digest = json_digest(identity)
         receipt = await DownloadPlanCreation.get_or_none(key=key)
-        if receipt is not None and receipt.digest != digest:
-            raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_REQUEST_CONFLICT)
-        existing = await DownloadPlan.get_or_none(creation_key=key)
-        if receipt is not None and existing is None:
-            raise NotFoundException
-        if existing is not None:
-            if existing.creation_receipt["digest"] != digest:
+        existing = (
+            await DownloadPlan.get_or_none(id=receipt.plan_id)
+            if receipt
+            else await DownloadPlan.get_or_none(creation_key=key)
+        )
+        if receipt or existing:
+            recorded = (
+                receipt.digest if receipt else existing.creation_receipt["digest"]
+            )
+            # older clients included the retired override in some receipt digests
+            if recorded != digest and recorded != json_digest(
+                {**identity, "separate_plan": True}
+            ):
                 raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_REQUEST_CONFLICT)
-            return await cls.creation_result(existing, user, replayed=True)
+            if existing is None:
+                raise NotFoundException
+            result = await cls.creation_result(existing, user, replayed=True)
+            if existing.creation_key != key:
+                result["already_exists"] = True
+            return result
         validation = await cls.validate_creation(
-            DownloadPlanCheck(plan=body.plan, ingest_workflow_id=workflow_id), user
+            DownloadPlanCheck(plan=body.plan, ingest_workflow_id=workflow_id),
+            user,
+            check_duplicate=False,
         )
         validation["request_id"] = str(body.request_id)
         if not validation["valid"]:
             return {"created": False, **validation}
         if not body.confirmed:
+            if duplicate := await cls.duplicate_settings(body.plan, workflow_id, rule):
+                return {"created": False, **validation, **duplicate}
             return {"created": False, "confirmation_required": True, **validation}
         async with in_transaction():
             if origin := review_call_id or active_review_call_id:
-                # claim the writer before comparing decisions for changed preferences
+                # reserve the writer before comparing review decisions
                 review_query = AssistantToolCall.filter(
                     call_id=origin,
                     name="validate_download_plan",
@@ -3252,32 +3418,66 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 await AssistantReviewDecision.claim(user.id, body.request_id, True)
             ).approved:
                 return {"created": False, "outcome": "cancelled", **validation}
-            binding = None
-            if body.ingestion is not None and body.plan.transfer_lib_id:
-                # prepare the library before the new plan can queue its first attempt
-                binding = await MediaLibService.ensure_ingestion(
-                    body.plan.transfer_lib_id,
-                    body.ingestion.workflow_id,
-                    body.ingestion.revision,
-                    user,
-                )
-                validation["ingestion"] = binding
-                if binding["binding"] not in {"added", "reused"}:
-                    return {"created": False, **validation, "valid": False}
+        binding = None
         try:
             async with in_transaction():
-                plan = await DownloadPlan.create(
-                    **values,
-                    creation_key=key,
-                    creation_receipt={
-                        "digest": digest,
-                        "first_execution": {"status": "queued"},
-                        **({"ingest_workflow_id": workflow_id} if workflow_id else {}),
-                    },
+                # serialize all creation paths, including requests with different IDs
+                await DownloadPlanCreation.filter(key=key).update(
+                    updated_at=F("updated_at")
                 )
-                await DownloadPlanCreation.create(
-                    key=key, digest=digest, plan_id=plan.id
-                )
+                if not await User.exists(id=user.id, role=UserRole.ADMIN):
+                    raise ForbiddenException
+                if duplicate := await cls.duplicate_settings(
+                    body.plan, workflow_id, rule
+                ):
+                    return {"created": False, **validation, **duplicate}
+                if body.ingestion is not None and body.plan.transfer_lib_id:
+                    # prepare the library before queueing its first download
+                    binding = await MediaLibService.ensure_ingestion(
+                        body.plan.transfer_lib_id,
+                        body.ingestion.workflow_id,
+                        body.ingestion.revision,
+                        user,
+                    )
+                    validation["ingestion"] = binding
+                    if binding["binding"] not in {"added", "reused"}:
+                        return {"created": False, **validation, "valid": False}
+                try:
+                    async with in_transaction():
+                        plan = await DownloadPlan.create(
+                            **values,
+                            creation_key=key,
+                            creation_receipt={
+                                "digest": digest,
+                                **({"release_rule": rule} if rule else {}),
+                                "first_execution": {"status": "queued"},
+                                **(
+                                    {"ingest_workflow_id": workflow_id}
+                                    if workflow_id
+                                    else {}
+                                ),
+                            },
+                        )
+                        await DownloadPlanCreation.create(
+                            key=key, digest=digest, plan_id=plan.id
+                        )
+                except Exception:
+                    if binding is None:
+                        raise
+                    if not _binding_changed(binding, body.ingestion):
+                        return {
+                            **validation,
+                            "ingestion": binding,
+                            "created": False,
+                            "failed": True,
+                        }
+                    logger.exception("Plan creation failed after its ingestion binding")
+                    return {
+                        "created": False,
+                        **validation,
+                        "plan_error": "The library binding was kept but the plan "
+                        "was not created; retry with the same request_id.",
+                    }
         except Exception as error:
             if isinstance(error, IntegrityError) and (
                 await DownloadPlanCreation.filter(key=key).exists()
@@ -3287,26 +3487,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 return await cls._create_plan(
                     body, user, key, review_call_id, active_review_call_id
                 )
-            if binding and not _binding_changed(binding, body.ingestion):
-                return {
-                    **validation,
-                    "ingestion": binding,
-                    "created": False,
-                    "failed": True,
-                }
-            if binding is None:
-                # a rolled-back plan transaction has neither a plan nor a binding
-                await AssistantReviewDecision.finish(
-                    user.id, body.request_id, {"failed": True}
-                )
-                raise
-            logger.exception("Plan creation failed after its ingestion binding")
-            return {
-                "created": False,
-                **validation,
-                "plan_error": "The library binding was kept but the plan was not "
-                "created; retry with the same request_id.",
-            }
+            await AssistantReviewDecision.finish(
+                user.id, body.request_id, {"failed": True}
+            )
+            raise
         notify_download_changes()
         result = await cls.creation_result(plan, user)
         if binding is not None:
@@ -3348,15 +3532,23 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         """
         ADMIN_PREVIEW.require(user)
         key = hashlib.sha256(f"{user.id}:{request_id}".encode()).hexdigest()
-        plan = await DownloadPlan.get_or_none(creation_key=key)
+        receipt = await DownloadPlanCreation.get_or_none(key=key)
+        plan = (
+            await DownloadPlan.get_or_none(id=receipt.plan_id)
+            if receipt
+            else await DownloadPlan.get_or_none(creation_key=key)
+        )
         if plan is None:
-            if await DownloadPlanCreation.filter(key=key).exists():
+            if receipt:
                 raise NotFoundException
             return {"created": False}
-        return await cls.creation_result(plan, user, replayed=True)
+        result = await cls.creation_result(plan, user, replayed=True)
+        if plan.creation_key != key:
+            result["already_exists"] = True
+        return result
 
     @classmethod
-    def settings(cls, plan: DownloadPlan | DownloadPlanSettings) -> dict[str, Any]:
+    def settings(cls, plan: DownloadPlan | DownloadPlanUpsert) -> dict[str, Any]:
         """Read the editor settings that a plan change reviews and writes.
 
         Args:
@@ -3501,7 +3693,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             after = cls.settings(proposed)
             search = any(after[name] != before[name] for name in ("keyword", "filters"))
             checked = await cls.validate_creation(
-                DownloadPlanCheck(plan=proposed), user, search=search
+                DownloadPlanCheck(plan=proposed),
+                user,
+                search=search,
+                check_duplicate=False,
             )
             issues.extend(checked["issues"])
             if "transfer" in checked:
@@ -3925,6 +4120,14 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             await DownloadPlanReplacement.filter(new_plan_id=current.id).update(
                 first_execution=first
             )
+        receipt = writes.get("creation_receipt", current.creation_receipt) or {}
+        if receipt.get("release_rule") and any(
+            key in writes and writes[key] != getattr(current, key)
+            for key in ("keyword", "filters", "graph_id")
+        ):
+            writes["creation_receipt"] = {
+                k: v for k, v in receipt.items() if k != "release_rule"
+            }
         await DownloadPlan.filter(id=current.id).update(**writes)
 
     @classmethod
@@ -3936,6 +4139,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
         Returns:
             Download plan instance.
+
+        Raises:
+            BadRequestException: If an identical plan already exists on creation.
         """
         data = obj.model_dump(exclude={"id"})
         if obj.id:
@@ -3944,7 +4150,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 await cls._save_settings(await DownloadPlan.get(id=obj.id), data)
                 plan = await DownloadPlan.get(id=obj.id)
         else:
-            plan = await DownloadPlan.create(**data)
+            async with in_transaction():
+                # serialize legacy creates with the reviewed creation path
+                await DownloadPlan.filter(id=0).update(updated_at=F("updated_at"))
+                if await cls.duplicate_settings(obj):
+                    raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_ALREADY_EXISTS)
+                plan = await DownloadPlan.create(**data)
             # execute the plan immediately if it's active
             if not plan.inactive():
                 await execute_download_plan(plan)

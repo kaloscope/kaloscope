@@ -5,24 +5,38 @@ import unicodedata
 from dataclasses import dataclass
 from uuid import UUID
 
-from tortoise.expressions import Q
+from tortoise import timezone
+from tortoise.expressions import F, Q
 
 from app.core.flow.nodes.base import start_config
 from app.models.assistant import AssistantToolCall, AssistantTurn
-from app.models.user import UserInfo
+from app.models.download import DownloadPlan
+from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowGraphService
 from app.services.subscription_choices import (
+    compact,
     confirmation_question,
+    matches_release_rule,
     release_choices,
-    release_matches,
+    release_group,
 )
-from app.services.subscription_destinations import destination_questions, libraries
+from app.services.subscription_destinations import (
+    destination_questions,
+    libraries,
+    resolve_destination,
+)
 
 _CREATE = re.compile(
     r"^(?:请\s*)?(?:(?:帮我|给我|我要|我想要?|麻烦你?)\s*)?"
     r"(?:订阅|追更|追番|(?:新建|创建|添加|建立)(?:一[个条份])?(?:下载|订阅)计划)"
     r"|^(?:please\s+)?(?:subscribe(?:\s+me)?\s+to|(?:create|add|set up)\s+"
     r"(?:a\s+)?(?:download plan|subscription)(?:\s+for)?\b)",
+    re.I,
+)
+_TITLE_FIRST = re.compile(r"^[《「“]([^》」”]+)[》」”](.*)$", re.S)
+_AUTO_DOWNLOAD = re.compile(r"(?:有更新|更新后|每次更新).{0,10}自动.{0,6}(?:下|追)")
+_REVISION = re.compile(
+    r"改主意|按新条件|(?:改|换)(?:为|成)|(?:只要|仅限)|(?:change|instead|switch to)\b",
     re.I,
 )
 _HOLD = re.compile(
@@ -78,20 +92,6 @@ _UNRESTRICTED = re.compile(
 )
 
 
-def compact(value: str) -> str:
-    """Normalize a title or option label for a literal comparison.
-
-    Args:
-        value: Search keyword, option text or user-provided title.
-
-    Returns:
-        Case-folded text with punctuation and spaces omitted.
-    """
-    return "".join(
-        c for c in unicodedata.normalize("NFKC", value).casefold() if c.isalnum()
-    )
-
-
 def explicit_subscription(prompt: str) -> bool:
     """Recognize a direct creation request that the user did not defer.
 
@@ -104,7 +104,10 @@ def explicit_subscription(prompt: str) -> bool:
     text = prompt.strip()
     match = _CREATE.match(text)
     if not match:
-        return False
+        quoted = _TITLE_FIRST.match(text)
+        return bool(
+            quoted and _AUTO_DOWNLOAD.search(quoted[2]) and not _HOLD.search(quoted[2])
+        )
     # punctuation and words inside the requested title do not alter the order
     rest = re.sub(
         r'^[\s]*[「《“"\']([^」》”"\']+)[」》”"\']', "", text[match.end() :], count=1
@@ -149,6 +152,7 @@ class SubscriptionIntent:
     choices: list[tuple[str, str]]
     answered: bool
     confirmation: dict | None = None
+    revision: dict | None = None
 
 
 async def superseded_retry(current: AssistantTurn, ancestor: int) -> bool:
@@ -204,6 +208,7 @@ async def subscription_intent(turn: AssistantTurn) -> SubscriptionIntent | None:
     choices = []
     answered = False
     confirmation = None
+    revision = None
     while True:
         if current.retry_of:
             previous = await AssistantTurn.get_or_none(
@@ -219,13 +224,22 @@ async def subscription_intent(turn: AssistantTurn) -> SubscriptionIntent | None:
             current.prompt
         ):
             return SubscriptionIntent(
-                current.prompt, ids, choices, answered, confirmation
+                current.prompt, ids, choices, answered, confirmation, revision
             )
         else:
             is_card = current.request_id.startswith("answer-")
-            if not is_card and (
-                (answered and confirmation is None)
-                or not accepts_offer(current.prompt, preferences=True)
+            revises = (
+                not is_card
+                and not _HOLD.search(current.prompt)
+                and _REVISION.search(current.prompt)
+            )
+            if (
+                not is_card
+                and not revises
+                and (
+                    (answered and confirmation is None)
+                    or not accepts_offer(current.prompt, preferences=True)
+                )
             ):
                 return None
             previous = (
@@ -294,11 +308,87 @@ async def subscription_intent(turn: AssistantTurn) -> SubscriptionIntent | None:
                 choices.extend(values)
             else:
                 if await has_release_question(previous.id):
+                    if not revises:
+                        return None
+                    offer = (
+                        await AssistantToolCall.filter(
+                            turn_id=previous.id, name="ask_user", status="complete"
+                        )
+                        .order_by("-id")
+                        .first()
+                    )
+                    card = (offer.result or {}).get("data") or {}
+                    if card.get("state") not in {"pending", "deferred"} or not card.get(
+                        "subscription"
+                    ):
+                        return None
+                    revision = revision or card["subscription"]
+                elif not accepts_offer(current.prompt, preferences=True):
                     return None
                 choices.append(("", current.prompt))
             answered = True
         ids.append(previous.id)
         current = previous
+
+
+async def revised_subscription_plan(
+    intent: SubscriptionIntent, prompt: str, user: UserInfo
+) -> dict | None:
+    """Reopen a pending review when every correction identifies a supported field.
+
+    Args:
+        intent: Uninterrupted order carrying the previous server-issued review.
+        prompt: Latest user instructions.
+        user: Account resolving downloader and library destinations.
+
+    Returns:
+        A draft for fresh search and confirmation, or `None` for open-ended changes.
+    """
+    if not intent.revision or intent.confirmation:
+        return None
+    review = intent.revision
+    plan = {**review["plan"], "keyword": review["title"]}
+    changed = False
+    workflow_id = review.get("ingest_workflow_id")
+    for text in re.split(r"[，,。；;！!\n]", prompt):
+        clause = text.strip()
+        if not clause or re.fullmatch(
+            r"(?:我)?改主意了|(?:请)?按新条件(?:帮我)?(?:订好|订阅|创建)", clause
+        ):
+            continue
+        if _TERM.fullmatch(clause):
+            # the renewed release choice will be bound to actual search metadata
+            plan["filters"] = {
+                k: v
+                for k, v in (plan.get("filters") or {}).items()
+                if not _GROUP_FILTER.search(k)
+            }
+        elif directory := re.fullmatch(
+            r"(?:下载到|保存到|存到|download to)\s*(.+)", clause, re.I
+        ):
+            patch = await resolve_destination(
+                {"field": "directory", "options": []},
+                {"custom": directory[1].strip(), "selected": []},
+                plan,
+                user,
+            )
+            if not patch:
+                return None
+            plan.update(patch)
+        elif re.fullmatch(
+            r"(?:不用|不必|无需|不)(?:入库|转存)|仅下载|download only", clause, re.I
+        ):
+            plan.update(
+                transfer_lib_id=None,
+                transfer_method=None,
+                sub_pattern=None,
+                sub_repl=None,
+            )
+            workflow_id = None
+        else:
+            return None
+        changed = True
+    return {"plan": plan, "ingest_workflow_id": workflow_id} if changed else None
 
 
 def requested_title(prompt: str) -> str:
@@ -310,6 +400,8 @@ def requested_title(prompt: str) -> str:
     Returns:
         The requested title or an empty string for a context-dependent target.
     """
+    if quoted_first := _TITLE_FIRST.match(prompt.strip()):
+        return quoted_first[1].strip()
     rest = _CREATE.sub("", prompt.strip(), count=1).strip()
     quoted = re.match(r'^[「《“"\']([^」》”"\']+)[」》”"\']', rest)
     if quoted:
@@ -342,6 +434,8 @@ def required_preferences(intent: SubscriptionIntent) -> tuple[set[str], int | No
             cap = int(number.group(1))
         match = _TERM.search(value)
         if match or _TERM_TITLE.search(title):
+            if intent.revision and not title and value != intent.prompt:
+                terms.clear()
             selected = match.group(1) if match else value
             term = re.sub(
                 r"(?:发布|制作|翻译|压制|上传)的(?:资源|版本|作品|内容|字幕)$|的(?:资源|版本)$|[（(]推荐[）)]$",
@@ -408,7 +502,7 @@ def requested_transfer(intent: SubscriptionIntent, library: str) -> bool:
     return False
 
 
-def _filter_option(filters: dict, term: str) -> tuple[str, str] | None:
+def _filter_option(filters: dict, term: str) -> tuple[str, str | list[str]] | None:
     """Find a declared filter value matching a release restriction.
 
     Args:
@@ -421,7 +515,7 @@ def _filter_option(filters: dict, term: str) -> tuple[str, str] | None:
     wanted = compact(term)
     return next(
         (
-            (key, value)
+            (key, [value] if definition.get("type") == "checkbox" else value)
             for key, definition in filters.items()
             if isinstance(definition, dict)
             and isinstance(options := definition.get("options"), dict)
@@ -513,7 +607,10 @@ async def confirmed_subscription_plan(card: dict, user: UserInfo) -> dict | None
     for term in restrictions:
         matched = _filter_option(definitions, term)
         if matched:
-            filters[matched[0]] = matched[1]
+            key, value = matched
+            if isinstance(value, list):
+                value = list(dict.fromkeys([*filters.get(key, []), *value]))
+            filters[key] = value
         else:
             keywords.append(term)
     plan["filters"] = filters
@@ -522,6 +619,7 @@ async def confirmed_subscription_plan(card: dict, user: UserInfo) -> dict | None
         "plan": plan,
         "keywords": keywords,
         "observed": observed,
+        "restrictions": restrictions,
         "ingest_workflow_id": review.get("ingest_workflow_id")
         if plan.get("transfer_lib_id") == review["plan"].get("transfer_lib_id")
         else None,
@@ -582,6 +680,8 @@ async def submission_check(
             ),
         }
     term = next(iter(terms), "")
+    # a revised card starts from fresh title results so the new choice can be bound
+    revise_release = intent.revision is not None and not selected
     if (
         not selected
         and not term
@@ -599,13 +699,13 @@ async def submission_check(
         }
     expected = {compact(selected["plan"]["keyword"] if selected else title)}
     keywords = selected["keywords"] if selected else []
-    if term and not selected:
+    if term and not selected and not revise_release:
         graph = await FlowGraphService.get_accessible(plan["graph_id"], user)
         config = (await start_config(graph, "search"))["search"] or {}
         matched = _filter_option(config.get("filters") or {}, term)
         if matched:
             key, value = matched
-            if filters.get(key) not in (value, [value]):
+            if filters.get(key) != value:
                 return {
                     "status": "needs_settings",
                     "required_filter": {key: value},
@@ -641,29 +741,38 @@ async def submission_check(
             and (query.get("filters") or {}) == filters
         ):
             continue
+        if not selected and (
+            query.get("page_num", 1) != 1
+            or (
+                query.get("page_size", 5) < 5
+                and (data.get("has_more") or data.get("omitted_count"))
+            )
+        ):
+            # a one-result probe can hide editions already present on the first page
+            continue
         items = data.get("items") or []
         if data.get("status") != "ok" or not items:
             return {
                 "status": "no_matches",
                 "next": "No matches. Ask to revise or review a future-match plan.",
             }
+        rule = {
+            "title": title,
+            "observed": selected["observed"] if selected else [],
+            "terms": selected["restrictions"] if selected else keywords,
+            "confirmed": bool(selected),
+        }
         if (
             selected
-            and selected["observed"]
-            and not all(
-                release_matches(item, title, selected["observed"]) for item in items
-            )
-        ) or (
-            keywords
-            and not all(
-                compact(required)
-                in compact(
-                    " ".join(str(item.get(k) or "") for k in ("title", "uploader"))
-                )
+            and not rule["observed"]
+            and len(rule["terms"]) == 1
+            and any(
+                release_group(item, title).casefold() == rule["terms"][0].casefold()
                 for item in items
-                for required in keywords
             )
         ):
+            rule["observed"] = rule["terms"]
+        if not all(matches_release_rule(item, rule) for item in items):
             return {
                 "status": "unverified_term",
                 "next": "Results disagree with the term. Ask for another search.",
@@ -677,7 +786,12 @@ async def submission_check(
         releases = observed_releases
         if not selected:
             if term:
-                named = [r for r in releases if compact(r[0]) == compact(term)]
+                named = [
+                    r
+                    for r in releases
+                    if compact(r[0]) == compact(term)
+                    or compact("".join(r)) == compact(term.replace("的", ""))
+                ]
                 releases = named or (
                     [list(dict.fromkeys([*r, term])) for r in releases]
                     if releases
@@ -685,7 +799,7 @@ async def submission_check(
                 )
             else:
                 releases = [*releases, []]
-            chinese = bool(re.match(r"[\u3400-\u9fff]", intent.prompt.strip()))
+            chinese = bool(re.search(r"[\u3400-\u9fff]", intent.prompt))
             release = confirmation_question(title, releases, items, chinese=chinese)
             for option, restriction in zip(release["options"], releases, strict=True):
                 option["value"] = {
@@ -728,8 +842,23 @@ async def submission_check(
                     release["title"] += " · " + dest
             if not fixed:
                 questions.insert(0, release)
+            existing = []
+            if user.role == UserRole.ADMIN:
+                existing = (
+                    await DownloadPlan.filter(
+                        Q(keyword=title) | Q(keyword__istartswith=title + " "),
+                        Q(interval_end=None) | Q(interval_end__gt=timezone.now()),
+                        Q(total_limit=None) | Q(total_count__lt=F("total_limit")),
+                        graph_id=plan["graph_id"],
+                        downloader_id=plan["downloader_id"],
+                    )
+                    .order_by("id")
+                    .limit(5)
+                    .values_list("id", flat=True)
+                )
             return {
                 "status": "needs_confirmation",
+                **({"related_plan_ids": existing} if existing else {}),
                 "next": "Wait for the user to submit all subscription choices.",
                 "questions": questions,
                 "release": fixed,
@@ -737,6 +866,7 @@ async def submission_check(
             }
         return {
             "status": "ready",
+            **({"release_rule": rule} if rule["terms"] else {}),
             "next": "Create now with this request_id and confirmed=true.",
         }
     return {

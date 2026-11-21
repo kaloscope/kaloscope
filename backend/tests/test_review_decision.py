@@ -66,8 +66,8 @@ def test_plan_editor(monkeypatch):
             resume = asyncio.Event()
             validate = DownloadPlanService.validate_creation
 
-            async def paused(check, user):
-                validation = await validate(check, user)
+            async def paused(check, user, **kwargs):
+                validation = await validate(check, user, **kwargs)
                 validating.set()
                 await resume.wait()
                 return validation
