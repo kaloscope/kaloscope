@@ -199,12 +199,16 @@ def test_plan(tmp_path, monkeypatch, scenario):
                     )
                 elif scenario in {"delete", "cancel"}:
                     review = next(
-                        event.data
-                        for event in events
-                        if event.event == "tool_result"
-                        and event.data["name"] == "review_download_plan_change"
-                        and event.data["ok"]
+                        (
+                            event.data
+                            for event in events
+                            if event.event == "tool_result"
+                            and event.data["name"] == "review_download_plan_change"
+                            and event.data["ok"]
+                        ),
+                        None,
                     )
+                    assert review is not None, (successful, reply)
                     assert (
                         review["data"]["action"] == "delete" and review["data"]["valid"]
                     )

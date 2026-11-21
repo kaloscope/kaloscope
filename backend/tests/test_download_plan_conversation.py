@@ -12,6 +12,7 @@ from app.core.ai import history, tools
 from app.core.exceptions import ForbiddenException
 from app.core.flow.engine import FlowEngine
 from app.models.assistant import AssistantToolCall, AssistantTurn, ConversationCreate
+from app.models.assistant_questions import AnswerGroup
 from app.models.download import (
     DownloadPlan,
     DownloadPlanCheck,
@@ -23,6 +24,7 @@ from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
 from app.models.user import Permissions, PermType, UserPermission, UserRole
 from app.services import download as service
 from app.services.assistant import AssistantService
+from app.services.assistant_questions import answer_card
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.flow import FlowGraphService
 from app.services.mcp import MCPAccessTokenService
@@ -944,11 +946,8 @@ def test_conversation(monkeypatch, verbose):
                 graph.id, owner
             )
             assert options["defaults"]["downloader_id"] == downloader.id
-            assert (
-                options["defaults"]["total_limit"]
-                == options["defaults"]["batch_limit"]
-                == 1
-            )
+            assert options["defaults"]["total_limit"] is None
+            assert options["defaults"]["batch_limit"] == 1
             fixture.update(
                 graph_id=graph.id,
                 plan={
@@ -1010,12 +1009,46 @@ def test_conversation(monkeypatch, verbose):
             assert "category" not in execute.call_args_list[0].args[1]
             assert execute.call_args_list[1].args[1]["category"] == "movie"
 
+            assert not await DownloadPlan.exists()
+            question = all_results[-1]
+            assert question["name"] == "ask_user"
+            card = question["data"]
+            answers = [
+                {
+                    "id": q["id"],
+                    "selected": [
+                        q["options"][-1 if q["field"] == "release" else 0]["id"]
+                    ],
+                }
+                for q in card["questions"]
+            ]
+            accepted = await answer_card(
+                conversation["id"],
+                question["id"],
+                AnswerGroup.model_validate(
+                    {"version": card["version"], "items": answers}
+                ),
+                owner,
+            )
+            assert accepted["card"]["state"] == "answered"
+            submission = request("answer-" + question["id"], answer_to=question["id"])
+            applied = [
+                e
+                async for e in AssistantService.persistent_stream(
+                    conversation["id"], submission, owner
+                )
+            ]
+            assert any(
+                e.event == "tool_result"
+                and e.data["name"] == "create_download_plan"
+                and e.data["data"]["created"]
+                for e in applied
+            )
             assert await DownloadPlan.all().count() == 1
             plan = await DownloadPlan.first()
             assert plan.keyword == "Lantern" and plan.filters == {"category": "movie"}
-            assert plan.batch_limit == plan.total_limit == 1
+            assert plan.batch_limit == 1 and plan.total_limit is None
             assert plan.creation_receipt["first_execution"]["status"] == "queued"
-            assert all_results[-1]["data"]["replayed"]
             service.notify_download_changes.assert_called_once()
             assert await DownloadTask.all().count() == await FlowLog.all().count() == 0
             preview_turn = await AssistantTurn.get(request_id="step-0")

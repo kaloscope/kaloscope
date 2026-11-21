@@ -14,10 +14,11 @@ from app.models.assistant import AssistantToolCall, AssistantTurn, media_resourc
 from app.models.assistant_questions import AnswerGroup, AskUser, QuestionAnswer
 from app.models.download import DownloadPlan
 from app.models.user import UserInfo
-from app.services.assistant_sessions import AssistantSessionService
+from app.services.assistant_sessions import AssistantSessionService, resource_order
 from app.services.download import DownloadPlanService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
+from app.services.subscription_destinations import resolve_destination
 from app.utils.json import dumps
 
 
@@ -167,6 +168,7 @@ async def answer_card(
             q["id"] for q in data["questions"]
         }:
             return {"issue": "invalid"}
+        destination = {}
         pending = False
         summary = []
         for q in data["questions"]:
@@ -174,6 +176,20 @@ async def answer_card(
             parts, issue = validate_answer(q, answer)
             if issue:
                 return {"issue": issue, "id": q["id"]}
+            if data.get("subscription") and not answer.skipped:
+                if q.get("field") in {"directory", "library", "destination"}:
+                    patch = await resolve_destination(
+                        q, answer.model_dump(), data["subscription"]["plan"], user
+                    )
+                    if patch is None:
+                        return {"issue": q["field"], "id": q["id"]}
+                    destination.update(patch)
+                elif (
+                    q.get("field") == "settings"
+                    and answer.custom
+                    and answer.custom.strip() != q["options"][0]["label"]
+                ):
+                    return {"issue": "invalid", "id": q["id"]}
             if q["format"] == "plan" and parts:
                 target = next(o for o in q["options"] if o["label"] == parts[0])
                 plan = await DownloadPlan.get_or_none(id=int(target["id"]))
@@ -194,6 +210,17 @@ async def answer_card(
             "summary": summary,
             "answers": [item.model_dump() for item in body.items],
         }
+        if destination:
+            card["subscription"] = {**card["subscription"], "destination": destination}
+            if lib_id := destination.get("transfer_lib_id"):
+                resource = media_resource(lib_id)
+                if resource not in card["resources"]:
+                    card["resources"] = [*card["resources"], resource]
+                    await AssistantTurn.filter(id=turn.id).update(
+                        resource_ids=sorted(
+                            set(turn.resource_ids) | {resource}, key=resource_order
+                        )
+                    )
         await AssistantToolCall.filter(id=record.id).update(
             result={**record.result, "data": card}
         )

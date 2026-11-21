@@ -24,7 +24,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores.svelte';
-  import type { AssistantDestination, DownloadPlanCreation, DownloadPlanPreview, QuestionCard, Resp } from '$lib/types';
+  import type { AssistantDestination, DownloadPlanPreview, QuestionCard, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
@@ -54,7 +54,8 @@
   let planEditor: PlanEditor | undefined = $state();
   let planPreview: DownloadPlanPreview | null = $state(null);
   let planConversationId: number | undefined = $state();
-  let createdPlan: DownloadPlanCreation | null = $state(null);
+  let planCallId: string | undefined = $state();
+  let currentPlanRecord: AssistantReviewCard | undefined = $state();
   let viewportHeight: number | undefined = $state();
   let position: { x: number; y: number } | null = $state(null);
   let drag: { x: number; y: number; left: number; top: number } | null = null;
@@ -62,14 +63,21 @@
   const turns = $derived($assistant.turns);
 
   $effect(() => {
-    if (planConversationId !== $assistant.conversation?.id) {
-      planPreview = null;
-      createdPlan = null;
-    }
+    if (planConversationId !== $assistant.conversation?.id) planPreview = null;
   });
 
   const input = $derived($assistant.input);
   const lastTurn = $derived(turns.at(-1));
+  const latestPlan = $derived(
+    lastTurn?.status === 'complete'
+      ? lastTurn.tools.findLast(
+          (tool) =>
+            tool.name === 'validate_download_plan' ||
+            (tool.name === 'ask_user' && tool.result?.ok) ||
+            (tool.name === 'create_download_plan' && tool.result?.data?.created)
+        )
+      : undefined
+  );
   let dismissedQuestion = $state<string | null>(null);
   const questionTool = $derived(
     lastTurn?.status === 'complete'
@@ -343,12 +351,12 @@
   async function reviewPlan(tool: Tool): Promise<void> {
     if (!tool.result?.ok || !tool.result.data?.valid || tool.result.data.ingestion) return;
 
-    if (planPreview?.request_id !== tool.result.data.request_id) {
+    if (planPreview?.request_id !== tool.result.data.request_id || planCallId !== tool.id) {
       planPreview = null;
       await tick();
       planPreview = tool.result.data as unknown as DownloadPlanPreview;
       planConversationId = $assistant.conversation?.id;
-      createdPlan = null;
+      planCallId = tool.id;
       await tick();
     }
 
@@ -382,19 +390,19 @@
   }
 
   /**
-   * Identify finished lookups and checks whose results can be folded into the activity log.
+   * Choose which consecutive tool calls can share a collapsed activity entry.
    *
    * @param tool - Tool call as displayed in the conversation.
-   * @returns Whether the call can share a disclosure with adjacent calls.
+   * @returns A group key, or `null` for a call that needs its own visible status.
    */
-  function isRoutineCall(tool: Tool): boolean {
-    return (
-      tool.status === 'complete' &&
-      (/^(get|list|read)_/.test(tool.name) ||
-        ['probe_http_request', 'validate_workflow_template', 'validate_workflow', 'validate_download_task'].includes(
-          tool.name
-        ))
-    );
+  function activityGroup(tool: Tool): string | null {
+    if (tool.status !== 'complete') return null;
+    // keep search results and plan checks identifiable beside their previews
+    if (['search_indexer', 'validate_download_plan', 'discover_actions'].includes(tool.name)) return tool.name;
+    if (/^(get|list|read|validate|inspect|diagnose)_/.test(tool.name) || tool.name === 'probe_http_request') {
+      return 'lookup';
+    }
+    return null;
   }
 
   /**
@@ -412,7 +420,8 @@
       if (text.trim()) parts.push({ key: `text-${offset}`, text });
       offset = Math.max(offset, tool.offset);
       const previous = parts.at(-1);
-      if (previous && 'tools' in previous && isRoutineCall(tool) && isRoutineCall(previous.tools[0])) {
+      const group = activityGroup(tool);
+      if (group && previous && 'tools' in previous && group === activityGroup(previous.tools[0])) {
         previous.tools.push(tool);
       } else {
         parts.push({ key: tool.id, tools: [tool] });
@@ -600,6 +609,7 @@
         </li>
       {/if}
       {#each turns as turn (turn.id)}
+        {@const asksForChoices = turn.tools.some((tool) => tool.name === 'ask_user' && tool.result?.ok)}
         <li class="space-y-3">
           <div class="flex flex-col items-end gap-1 pl-8">
             <p class="sr-only">{$_('assistant.you')}</p>
@@ -621,6 +631,9 @@
             <p class="sr-only">{$_('assistant.title')}</p>
             {#each segments(turn) as segment (segment.key)}
               {#if 'tools' in segment}
+                {@const lastPlanRecord = segment.tools.findLast(
+                  (entry) => entry.name === 'validate_download_plan' && isAssistantReview(entry.result, asksForChoices)
+                )}
                 <AssistantActivity tools={segment.tools}>
                   {#snippet entry(tool, number)}
                     <AssistantTool
@@ -632,18 +645,28 @@
                 </AssistantActivity>
                 {#each segment.tools as operation (operation.id)}
                   {#if user.current?.role === 'admin' && turn.status === 'complete'}
-                    {#if isAssistantReview(operation.result)}
-                      <AssistantReviewCard
-                        id={operation.id}
-                        requestId={operation.result.data.request_id}
-                        tool={operation.result.name}
-                        onedit={operation.result.name === 'validate_download_plan' &&
-                        !operation.result.data.ingestion &&
-                        !$assistantCanvas &&
-                        !$assistantRestoring
-                          ? () => reviewPlan(operation)
-                          : undefined}
-                      />
+                    {#if isAssistantReview(operation.result, asksForChoices)}
+                      {@const review = {
+                        id: operation.id,
+                        requestId: operation.result.data.request_id,
+                        tool: operation.result.name,
+                        onview:
+                          operation.name === 'validate_download_plan' && currentPage !== 'download_plans'
+                            ? () => navigate('/downloads/plans', turn.id)
+                            : undefined,
+                        onedit:
+                          operation.name === 'validate_download_plan' &&
+                          !operation.result.data.ingestion &&
+                          !$assistantCanvas &&
+                          !$assistantRestoring
+                            ? () => reviewPlan(operation)
+                            : undefined
+                      }}
+                      {#if operation.name === 'validate_download_plan' && operation.id === latestPlan?.id}
+                        <AssistantReviewCard {...review} bind:this={currentPlanRecord} />
+                      {:else if operation.name !== 'validate_download_plan' || operation.id === lastPlanRecord?.id}
+                        <AssistantReviewCard {...review} />
+                      {/if}
                     {:else if operation.name === 'review_plan_replacement' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
                       <PlanReplacementCard id={operation.result.data.operation_id} />
                     {:else if operation.name === 'review_download_plan_change' && operation.result?.ok && typeof operation.result.data?.request_id === 'string'}
@@ -694,21 +717,6 @@
     </ol>
 
     <footer class="relative shrink-0 rounded-b-box px-2 pb-2">
-      {#if createdPlan && lastTurn}
-        <p class="mb-2 px-2 text-sm" role="status">
-          {$_('assistant.plan.created', createdPlan.plan_id)} ·
-          {$_(`assistant.plan.first.${createdPlan.first_execution.status}`)}
-          {#if currentPage !== 'download_plans'}
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              onclick={() => navigate('/downloads/plans', lastTurn.id)}
-            >
-              {$_('action.open', $_('assistant.pages.download_plans'))}
-            </button>
-          {/if}
-        </p>
-      {/if}
       {#if !following && turns.length}
         <button
           type="button"
@@ -771,6 +779,20 @@
             <p class="basis-full pb-0.5 text-base-content/70" role="status">{$_('assistant.navigation_cancelled')}</p>
           {/if}
         </section>
+      {/if}
+
+      {#if latestPlan?.name === 'validate_download_plan' && currentPlanRecord?.needsPlanDecision() && !card && !$assistant.busy && !$assistant.conversation?.busy && !$assistant.historyLoading && !$assistantRestoring && !$assistantCanvas}
+        <div
+          class="mb-1.5 flex items-center justify-between gap-2 rounded-field bg-base-content/5 py-1 ps-2.5 pe-1.5 text-xs"
+        >
+          <span class="min-w-0 font-medium">{$_('assistant.plan.awaiting')}</span>
+          <button
+            type="button"
+            class="btn shrink-0 btn-primary btn-xs"
+            aria-haspopup="dialog"
+            onclick={() => currentPlanRecord?.showPlanRecord()}>{$_('assistant.plan.inspect')}</button
+          >
+        </div>
       {/if}
 
       {#if $assistantCanvas}
@@ -946,8 +968,8 @@
     interval_start={toDatetimeLocal(planPreview.plan.interval_start)}
     interval_end={toDatetimeLocal(planPreview.plan.interval_end)}
     creationRequestId={planPreview.request_id}
-    oncreated={(result) => {
-      createdPlan = result;
+    reviewCallId={planCallId}
+    oncreated={() => {
       window.dispatchEvent(new Event('assistant-review-changed'));
       window.dispatchEvent(new Event('download-plan-created'));
     }}

@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from tortoise import timezone
-from tortoise.expressions import F
+from tortoise.expressions import F, Q
 from tortoise.transactions import in_transaction
 
 from app.core.ai.tools import (
@@ -168,7 +168,7 @@ async def _recorded(tool: str, key: str, user: UserInfo) -> dict | None:
 
 
 async def _newer(call: AssistantToolCall, preview: dict) -> bool:
-    """Locate a later review that supersedes this conversation's proposal.
+    """Check whether a later review or question supersedes the frozen settings.
 
     Args:
         call: Completed tool call with a loaded originating turn.
@@ -177,10 +177,17 @@ async def _newer(call: AssistantToolCall, preview: dict) -> bool:
     Returns:
         Whether another review now controls the same decision.
     """
-    names = MEDIA_REVIEW_TOOLS if call.name in MEDIA_REVIEW_TOOLS else {call.name}
-    rows = AssistantToolCall.filter(
-        turn__conversation_id=call.turn.conversation_id, id__gt=call.id, name__in=names
+    later = AssistantToolCall.filter(
+        turn__conversation_id=call.turn.conversation_id, id__gt=call.id
     )
+    if call.name == "validate_download_plan":
+        # preferences requested after this check must feed a fresh validation
+        return await later.filter(
+            Q(name=call.name)
+            | Q(name="ask_user", turn_id=call.turn_id, status="complete")
+        ).exists()
+    names = MEDIA_REVIEW_TOOLS if call.name in MEDIA_REVIEW_TOOLS else {call.name}
+    rows = later.filter(name__in=names)
     if call.name != "review_workflow_schedule" and call.name not in MEDIA_REVIEW_TOOLS:
         return await rows.exists()
     for row in await rows.only("turn_id", "name", "result"):
@@ -233,6 +240,7 @@ async def _apply(call: AssistantToolCall, preview: dict, user: UserInfo) -> dict
         return await DownloadPlanService.create_once(
             DownloadPlanCreate(**arguments, plan=preview["plan"], ingestion=binding),
             user,
+            review_call_id=call.call_id,
         )
     checked = DownloadTaskCheck.model_validate_json(call.arguments)
     return await DownloadTaskService.create_once(
@@ -313,6 +321,16 @@ async def assistant_review(
             return {**base, "status": "incomplete"}
         if await _newer(call, preview):
             return {**base, "status": "superseded"}
+        if call.name == "validate_download_plan" and (
+            preview.get("assistant_submission") or {}
+        ).get("status") in {
+            "needs_confirmation",
+            "needs_settings",
+            "unverified_term",
+            "needs_preferences",
+            "no_matches",
+        }:
+            return {**base, "status": "incomplete"}
         if not decision:
             return {**base, **(row.result if row else {"status": "reviewed"})}
         if not decision.approve:

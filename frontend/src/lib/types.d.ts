@@ -1617,6 +1617,7 @@ export type QuestionCard = {
   version: string;
   state: 'pending' | 'deferred' | 'answered';
   questions: AssistantQuestion[];
+  subscription?: Pick<DownloadPlanPreview, 'workflow_name' | 'plan'>;
   answers?: QuestionAnswer[];
   summary?: { id: string; title: string; values: string[]; skipped: boolean }[];
 };

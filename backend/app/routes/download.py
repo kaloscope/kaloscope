@@ -220,13 +220,19 @@ async def create_plan(request: Request, body: DownloadPlanCreate) -> HTTPRespons
     """Create once and queue the authorized first attempt without waiting for it.
 
     Args:
-        request: Authenticated administrator request.
+        request: Administrator request with an optional assistant review query.
         body: Stable request identity and final settings.
 
     Returns:
         Created or replayed plan, or field validation errors.
     """
-    return json(await DownloadPlanService.create_once(body, request.ctx.user))
+    return json(
+        await DownloadPlanService.create_once(
+            body,
+            request.ctx.user,
+            review_call_id=request.get_args(keep_blank_values=True).get("review"),
+        )
+    )
 
 
 @download.get("/plan/<id:int>")

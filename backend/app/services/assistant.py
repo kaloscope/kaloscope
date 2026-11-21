@@ -23,6 +23,10 @@ from openai import (
     LengthFinishReasonError,
     omit,
 )
+from openai.types.chat import (
+    ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCall,
+)
 from sanic.log import logger
 
 from app.core.ai.history import (
@@ -58,6 +62,14 @@ from app.models.assistant import (
 from app.models.user import UserInfo, UserRole
 from app.services.ai import AIProviderService
 from app.services.assistant_sessions import AssistantSessionService
+from app.services.subscription_choices import confirmation_outcome
+from app.services.subscription_destinations import bind_questions
+from app.services.subscription_intent import (
+    confirmed_subscription_plan,
+    deferred_subscription,
+    explicit_subscription,
+    subscription_intent,
+)
 from app.utils.json import dumps, loads
 
 
@@ -109,7 +121,7 @@ requested endpoints; template checks use fixtures. Media/download reads change n
 Resolve targets/defaults from page/tools. Answer reads directly.
 Need choices? discover_actions(questions), ask_user. Ambiguous plans: plan_ids.
 订阅/subscribe or download once: list_workflows(category=indexer), search_indexer.
-Review card collects approval. Create on acceptance; ask only for missing settings.
+Subscriptions: search, validate for release selection; create after the answer.
 Copy template/publish: discover_actions(workspace), inspect_workspace, review.
 New blank workflow: infer name/category/purpose; create_workflow_draft FIRST, then
 designer handoff. Use defaults, ask only missing inputs. Layout: columns
@@ -149,15 +161,37 @@ not runtime success. Warnings allow incomplete drafts; executed=false means no r
 Template validity covers fixtures only. Never invent outcomes/causes."""
 
 
-def allow_answer_tool(name: str) -> bool:
+def _planned_call(name: str, arguments: dict) -> ChatCompletionMessageFunctionToolCall:
+    """Build an application-issued action for the normal audited tool path.
+
+    Args:
+        name: Registered tool to execute.
+        arguments: Inputs derived from a stored review or validation.
+
+    Returns:
+        A fresh call with the same representation as an SDK tool call.
+    """
+    return ChatCompletionMessageFunctionToolCall.model_validate(
+        {
+            "id": uuid4().hex,
+            "type": "function",
+            "function": {"name": name, "arguments": dumps(arguments).decode()},
+        }
+    )
+
+
+def allow_answer_tool(name: str, subscription: bool = False) -> bool:
     """Allow clarification and previews after an answer without granting approval.
 
     Args:
         name: Tool name proposed during the answer turn.
+        subscription: Whether a subscription order authorizes this answer.
 
     Returns:
-        Whether the action only gathers information or prepares a review.
+        Whether the question continuation may invoke this action.
     """
+    if subscription and name in {"search_indexer", "create_download_plan"}:
+        return True
     return name in {
         "ask_user",
         "navigate",
@@ -454,7 +488,25 @@ class AssistantService:
         )
         current_context = turn.context
         # direct download requests need the search tools from the first turn
-        direct_download = bool(DOWNLOAD_REQUEST.match(turn.prompt.lstrip()))
+        intent = (
+            await subscription_intent(turn)
+            if answer_only and user.role == UserRole.ADMIN
+            else None
+        )
+        subscription_answer = intent is not None
+        confirmed = (
+            await confirmed_subscription_plan(intent.confirmation, user)
+            if intent and intent.confirmation
+            else None
+        )
+        direct_download = (
+            subscription_answer
+            or explicit_subscription(turn.prompt)
+            or bool(DOWNLOAD_REQUEST.match(turn.prompt.lstrip()))
+        )
+        pending_subscription = user.role == UserRole.ADMIN and (
+            subscription_answer or explicit_subscription(turn.prompt)
+        )
         workspace_focus = False
         batch_focus = "review_media_batch" in reviewed and not direct_download
         plan_authoring = (
@@ -561,6 +613,7 @@ class AssistantService:
 
         openai_options = provider.preset == AIProviderPreset.OPENAI
         thinking = provider.preset == AIProviderPreset.DEEPSEEK
+        response_model = turn.model["model_id"]
 
         for model_turn in range(MAX_MODEL_TURNS):
             finish_only = (
@@ -573,10 +626,31 @@ class AssistantService:
                 if finish_only
                 else []
             )
+            if pending_subscription and not confirmed and not finish_only:
+                ending = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Research the title, overlap and downloader, then call "
+                            "validate_download_plan. It asks release and destination "
+                            "choices together. Use preview defaults, no transfer and "
+                            "no total cap unless requested. Ask separately only "
+                            "for a blocker preventing validation."
+                        ),
+                    }
+                ]
             if answer_only:
                 schemas = [
-                    s for s in schemas if allow_answer_tool(s["function"]["name"])
+                    s
+                    for s in schemas
+                    if allow_answer_tool(s["function"]["name"], subscription_answer)
                 ]
+            if subscription_answer:
+                for schema in schemas:
+                    if schema["function"]["name"] == "search_indexer":
+                        schema["function"]["parameters"]["properties"].pop(
+                            "sources", None
+                        )
             request_schemas = [] if finish_only else schemas
 
             if context_size([*messages, *ending], request_schemas) > min(
@@ -638,140 +712,162 @@ class AssistantService:
             if not await AssistantSessionService.allowed(turn.resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
 
-            generation_output = output_budget
-            if canvas is not None or workflow_authoring:
-                _, generation_output = budgets(
-                    turn.model["model_id"], authoring=True, preset=provider.preset
-                )
-
-            reasoning_details = []
-            text_prefix = ""
-            text_started = False
-
-            # record the actual request boundary after compaction and catalog selection
-            logger.info(
-                "assistant.request build=%s turn=%s round=%s role=%s model=%s "
-                "catalog=%s tools=%s input_budget=%s output_budget=%s",
-                build_version(),
-                turn.id,
-                model_turn,
-                user.role,
-                turn.model["model_id"],
-                hashlib.sha256(dumps(request_schemas)).hexdigest()[:12],
-                ",".join(entry["function"]["name"] for entry in request_schemas),
-                input_budget,
-                generation_output,
-            )
-            async with client.chat.completions.stream(
-                model=turn.model["model_id"],
-                messages=request_messages,
-                tool_choice="none" if finish_only else omit,
-                tools=omit if finish_only else schemas,
-                max_completion_tokens=(generation_output or omit)
-                if openai_options
-                else omit,
-                max_tokens=omit if openai_options else (generation_output or omit),
-                stream_options={"include_usage": True} if openai_options else omit,
-                extra_body={"thinking": {"type": "enabled"}}
-                if provider.preset == AIProviderPreset.DEEPSEEK
-                else None,
-            ) as stream:
-                async for event in stream:
-                    if event.type == "chunk":
-                        # retain structured reasoning fragments in provider order
-                        for item in event.chunk.choices:
-                            reasoning_details.extend(
-                                getattr(item.delta, "reasoning_details", None) or []
-                            )
-                    elif event.type == "content.delta" and event.delta:
-                        delta = event.delta
-                        if not text_started:
-                            text_prefix += delta
-                            candidate = text_prefix.lstrip()
-                            markers = ("<tool_calls", "<function_calls", "<invoke")
-                            if candidate.startswith(NATIVE_CALL_MARKER) or any(
-                                candidate.startswith(marker)
-                                and len(candidate) > len(marker)
-                                and candidate[len(marker)] in "> \t\r\n"
-                                for marker in markers
-                            ):
-                                # protocol text is not an executable call
-                                raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-                            if any(
-                                marker.startswith(candidate)
-                                for marker in (*markers, NATIVE_CALL_MARKER)
-                            ):
-                                continue
-                            delta, text_prefix, text_started = text_prefix, "", True
-                        text_length += len(delta.encode("utf-16-le")) // 2
-                        yield AssistantEvent(event="text_delta", data={"text": delta})
-                    elif event.type == "refusal.delta":
-                        raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED)
-
-                completion = await stream.get_final_completion()
-
-            if text_prefix:
-                if text_prefix.lstrip() in (
-                    "<tool_calls",
-                    "<function_calls",
-                    "<invoke",
-                    NATIVE_CALL_MARKER,
-                ):
-                    raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-                text_length += len(text_prefix.encode("utf-16-le")) // 2
-                yield AssistantEvent(event="text_delta", data={"text": text_prefix})
-
-            if completion.usage is not None:
-                usage_reported = True
-                for key in usage:
-                    usage[key] += getattr(completion.usage, key, 0) or 0
-                turn.usage = dict(usage)
-                await AssistantSessionService.checkpoint(turn, usage=turn.usage)
-            if len(completion.choices) != 1:
-                raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-
-            choice = completion.choices[0]
-            logger.info(
-                "assistant.response turn=%s round=%s finish=%s",
-                turn.id,
-                model_turn,
-                choice.finish_reason,
-            )
-            message = choice.message
-            if message.refusal or choice.finish_reason == "content_filter":
-                raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED)
-            if choice.finish_reason == "length":
-                raise KaloscopeException(ErrorCode.AI_OUTPUT_TRUNCATED)
-
-            calls = message.tool_calls or []
-            if choice.finish_reason == "stop" and not calls:
-                if not message.content or not message.content.strip():
-                    raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-                yield AssistantEvent(
-                    event="done",
-                    data={
-                        "model": completion.model,
-                        "tool_calls": tool_count,
-                        "usage": usage if usage_reported else None,
+            search_plan = confirmed
+            planned_search = None
+            if confirmed and model_turn == 0:
+                # the selected plan supplies exact inputs without another planning round
+                plan = confirmed["plan"]
+                planned_search = _planned_call(
+                    "search_indexer",
+                    {
+                        "workflow_id": plan["graph_id"],
+                        "keyword": plan["keyword"],
+                        "filters": plan["filters"],
                     },
                 )
-                return
+                calls = [planned_search]
+                message = ChatCompletionMessage(role="assistant", tool_calls=calls)
+                reasoning_details = []
+            else:
+                generation_output = output_budget
+                if canvas is not None or workflow_authoring:
+                    _, generation_output = budgets(
+                        turn.model["model_id"], authoring=True, preset=provider.preset
+                    )
 
-            if choice.finish_reason != "tool_calls" or not calls:
-                raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-            if finish_only or len(calls) > MAX_BATCH_TOOL_CALLS:
-                raise KaloscopeException(ErrorCode.AI_ASSISTANT_LIMIT)
+                reasoning_details = []
+                text_prefix = ""
+                text_started = False
 
-            call_ids: set[str] = set()
-            for call in calls:
-                if (
-                    call.type != "function"
-                    or not call.id
-                    or len(call.id) > 128
-                    or call.id in call_ids
-                ):
+                # record the provider request after compaction and catalog selection
+                logger.info(
+                    "assistant.request build=%s turn=%s round=%s role=%s model=%s "
+                    "catalog=%s tools=%s input_budget=%s output_budget=%s",
+                    build_version(),
+                    turn.id,
+                    model_turn,
+                    user.role,
+                    turn.model["model_id"],
+                    hashlib.sha256(dumps(request_schemas)).hexdigest()[:12],
+                    ",".join(entry["function"]["name"] for entry in request_schemas),
+                    input_budget,
+                    generation_output,
+                )
+                async with client.chat.completions.stream(
+                    model=turn.model["model_id"],
+                    messages=request_messages,
+                    tool_choice="none" if finish_only else omit,
+                    tools=omit if finish_only else schemas,
+                    max_completion_tokens=(generation_output or omit)
+                    if openai_options
+                    else omit,
+                    max_tokens=omit if openai_options else (generation_output or omit),
+                    stream_options={"include_usage": True} if openai_options else omit,
+                    extra_body={"thinking": {"type": "enabled"}}
+                    if provider.preset == AIProviderPreset.DEEPSEEK
+                    else None,
+                ) as stream:
+                    async for event in stream:
+                        if event.type == "chunk":
+                            # retain structured reasoning fragments in provider order
+                            for item in event.chunk.choices:
+                                reasoning_details.extend(
+                                    getattr(item.delta, "reasoning_details", None) or []
+                                )
+                        elif event.type == "content.delta" and event.delta:
+                            delta = event.delta
+                            if not text_started:
+                                text_prefix += delta
+                                candidate = text_prefix.lstrip()
+                                markers = ("<tool_calls", "<function_calls", "<invoke")
+                                if candidate.startswith(NATIVE_CALL_MARKER) or any(
+                                    candidate.startswith(marker)
+                                    and len(candidate) > len(marker)
+                                    and candidate[len(marker)] in "> \t\r\n"
+                                    for marker in markers
+                                ):
+                                    # protocol text is not an executable call
+                                    raise KaloscopeException(
+                                        ErrorCode.AI_RESPONSE_INVALID
+                                    )
+                                if any(
+                                    marker.startswith(candidate)
+                                    for marker in (*markers, NATIVE_CALL_MARKER)
+                                ):
+                                    continue
+                                delta, text_prefix, text_started = text_prefix, "", True
+                            text_length += len(delta.encode("utf-16-le")) // 2
+                            yield AssistantEvent(
+                                event="text_delta", data={"text": delta}
+                            )
+                        elif event.type == "refusal.delta":
+                            raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED)
+
+                    completion = await stream.get_final_completion()
+
+                if text_prefix:
+                    if text_prefix.lstrip() in (
+                        "<tool_calls",
+                        "<function_calls",
+                        "<invoke",
+                        NATIVE_CALL_MARKER,
+                    ):
+                        raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
+                    text_length += len(text_prefix.encode("utf-16-le")) // 2
+                    yield AssistantEvent(event="text_delta", data={"text": text_prefix})
+
+                if completion.usage is not None:
+                    usage_reported = True
+                    for key in usage:
+                        usage[key] += getattr(completion.usage, key, 0) or 0
+                    turn.usage = dict(usage)
+                    await AssistantSessionService.checkpoint(turn, usage=turn.usage)
+                if len(completion.choices) != 1:
                     raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
-                call_ids.add(call.id)
+
+                response_model = completion.model
+                choice = completion.choices[0]
+                logger.info(
+                    "assistant.response turn=%s round=%s finish=%s",
+                    turn.id,
+                    model_turn,
+                    choice.finish_reason,
+                )
+                message = choice.message
+                if message.refusal or choice.finish_reason == "content_filter":
+                    raise KaloscopeException(ErrorCode.AI_OUTPUT_REFUSED)
+                if choice.finish_reason == "length":
+                    raise KaloscopeException(ErrorCode.AI_OUTPUT_TRUNCATED)
+
+                calls = message.tool_calls or []
+                if choice.finish_reason == "stop" and not calls:
+                    if not message.content or not message.content.strip():
+                        raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
+                    yield AssistantEvent(
+                        event="done",
+                        data={
+                            "model": response_model,
+                            "tool_calls": tool_count,
+                            "usage": usage if usage_reported else None,
+                        },
+                    )
+                    return
+
+                if choice.finish_reason != "tool_calls" or not calls:
+                    raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
+                if finish_only or len(calls) > MAX_BATCH_TOOL_CALLS:
+                    raise KaloscopeException(ErrorCode.AI_ASSISTANT_LIMIT)
+
+                call_ids: set[str] = set()
+                for call in calls:
+                    if (
+                        call.type != "function"
+                        or not call.id
+                        or len(call.id) > 128
+                        or call.id in call_ids
+                    ):
+                        raise KaloscopeException(ErrorCode.AI_RESPONSE_INVALID)
+                    call_ids.add(call.id)
 
             # a question suspends this turn before any sibling operation can run
             if question := next(
@@ -817,6 +913,9 @@ class AssistantService:
                 messages[-1].setdefault("reasoning_content", "")
             continuation.append(messages[-1])
 
+            follow_up = None
+            subscription_review = None
+            question_call = None
             for call in calls:
                 info = {"id": uuid4().hex, "name": call.function.name}
                 yield AssistantEvent(event="tool_start", data=info)
@@ -828,7 +927,27 @@ class AssistantService:
                     offset=text_length,
                 )
 
-                if answer_only and not allow_answer_tool(call.function.name):
+                navigate_away = False
+                if pending_subscription and call.function.name == "navigate":
+                    with suppress(ValueError, AttributeError):
+                        navigate_away = (
+                            loads(call.function.arguments).get("page")
+                            == "download_plans"
+                        )
+                if navigate_away:
+                    result = {
+                        "ok": False,
+                        "error": {
+                            "code": "bad_request",
+                            "guidance": (
+                                "Finish the subscription. Search and validate "
+                                "its exact settings, or ask for the missing input."
+                            ),
+                        },
+                    }
+                elif answer_only and not allow_answer_tool(
+                    call.function.name, subscription_answer
+                ):
                     result = {
                         "ok": False,
                         "error": {
@@ -848,6 +967,12 @@ class AssistantService:
                         call_id=info["id"],
                         canvas=canvas,
                         canvas_snapshot_id=canvas_snapshot_id,
+                        **(
+                            {"metadata_search": True}
+                            if subscription_answer
+                            and call.function.name == "search_indexer"
+                            else {}
+                        ),
                     )
                 if (
                     canvas
@@ -866,6 +991,12 @@ class AssistantService:
                     else "unlisted",
                     "ok" if result["ok"] else result["error"]["code"],
                 )
+                if call is question_call and result["ok"]:
+                    bind_questions(
+                        result["data"],
+                        subscription_review["questions"],
+                        subscription_review["review"],
+                    )
                 full_result = {**info, **result}
 
                 if (
@@ -1069,14 +1200,19 @@ class AssistantService:
                         and plan_authoring
                         and user.role == UserRole.ADMIN
                         and not workflow_authoring
-                        and domain in {"search", "downloads"}
+                        and (
+                            domain in {"search", "downloads"}
+                            or (subscription_answer and domain == "questions")
+                        )
                     ):
                         schemas = plan_schemas()
                         result["data"]["tools"] = sorted(
                             entry["function"]["name"]
                             for entry in schemas
                             if not answer_only
-                            or allow_answer_tool(entry["function"]["name"])
+                            or allow_answer_tool(
+                                entry["function"]["name"], subscription_answer
+                            )
                         )
                     else:
                         schemas = tool_schemas(user, domain=domain)
@@ -1084,7 +1220,7 @@ class AssistantService:
                             result["data"]["tools"] = [
                                 name
                                 for name in result["data"]["tools"]
-                                if allow_answer_tool(name)
+                                if allow_answer_tool(name, subscription_answer)
                             ]
 
                 # a result committed together with its effect is authoritative
@@ -1151,12 +1287,23 @@ class AssistantService:
                             "create_download_plan",
                             "get_download_plan",
                         }:
-                            resource_ids.append(result["data"]["workflow_id"])
+                            if graph_id := result["data"].get("workflow_id"):
+                                resource_ids.append(graph_id)
                             library_id = (result["data"].get("plan") or {}).get(
                                 "transfer_lib_id"
                             )
                             if library_id:
-                                resource_ids.append(f"media_lib:{library_id}")
+                                resource_ids.append(media_resource(library_id))
+                            submission = (
+                                result["data"].get("assistant_submission") or {}
+                            )
+                            resource_ids.extend(
+                                media_resource(o["value"])
+                                for q in submission.get("questions", [])
+                                if q["field"] in {"destination", "library"}
+                                for o in q["options"]
+                                if o["value"]
+                            )
 
                         if call.function.name in {
                             "validate_download_task",
@@ -1296,13 +1443,129 @@ class AssistantService:
                     }
                 )
                 continuation.append(messages[-1])
+                if call is planned_search:
+                    if (
+                        result["ok"]
+                        and (result.get("data") or {}).get("status") == "ok"
+                    ):
+                        follow_up = (
+                            "validate_download_plan",
+                            {
+                                "plan": search_plan["plan"],
+                                "ingest_workflow_id": search_plan["ingest_workflow_id"],
+                            },
+                        )
+                elif call.function.name == "validate_download_plan":
+                    data = result.get("data") or {}
+                    check = data.get("assistant_submission") or {}
+                    follow_up = None
+                    if (
+                        data.get("valid")
+                        and not check
+                        and deferred_subscription(turn.prompt)
+                    ):
+                        finish_requested = True
+                    elif not search_plan and check.get("status") == "needs_search":
+                        plan = data["plan"]
+                        search_plan = {
+                            "plan": plan,
+                            "ingest_workflow_id": (data.get("ingestion") or {}).get(
+                                "workflow_id"
+                            ),
+                        }
+                        follow_up = (
+                            "search_indexer",
+                            {
+                                "workflow_id": plan["graph_id"],
+                                "keyword": plan["keyword"],
+                                "filters": plan.get("filters") or {},
+                            },
+                        )
+                    elif not confirmed and check.get("status") == "needs_confirmation":
+                        questions = check["questions"]
+                        follow_up = (
+                            "ask_user",
+                            {
+                                "questions": [
+                                    {
+                                        "title": q["title"][:240],
+                                        "options": [
+                                            {
+                                                "label": o["label"][:240],
+                                                "detail": o["detail"][:240],
+                                            }
+                                            for o in q["options"]
+                                        ],
+                                    }
+                                    for q in questions
+                                ]
+                            },
+                        )
+                        subscription_review = {
+                            "questions": questions,
+                            "review": {
+                                "title": check["title"],
+                                "release": check["release"],
+                                "turn_id": turn.id,
+                                "workflow_name": data["workflow_name"],
+                                "plan": data["plan"],
+                                "ingest_workflow_id": (data.get("ingestion") or {}).get(
+                                    "workflow_id"
+                                ),
+                            },
+                        }
+                    elif check.get("status") == "ready":
+                        follow_up = (
+                            "create_download_plan",
+                            {"request_id": data["request_id"], "confirmed": True},
+                        )
+                elif call.function.name == "create_download_plan":
+                    if (result.get("data") or {}).get("created"):
+                        pending_subscription = False
+                        follow_up = None
+                    elif follow_up and follow_up[0] == "create_download_plan":
+                        follow_up = None
 
-            if finish_requested:
+                if call is calls[-1] and follow_up and tool_count < MAX_TOOL_CALLS:
+                    # record the required human decision or its authorized continuation
+                    name, arguments = follow_up
+                    scheduled = _planned_call(name, arguments)
+                    calls.append(scheduled)
+                    if name == "search_indexer":
+                        planned_search = scheduled
+                    if name == "ask_user":
+                        question_call = scheduled
+                    tool_count += 1
+                    exchange = {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [scheduled.model_dump(exclude_none=True)],
+                    }
+                    if thinking:
+                        exchange["reasoning_content"] = ""
+                    messages.append(exchange)
+                    continuation.append(exchange)
+                    follow_up = None
+
+            if confirmed:
+                yield AssistantEvent(
+                    event="text_delta",
+                    data={
+                        "text": confirmation_outcome(
+                            call.function.name,
+                            result,
+                            chinese=bool(
+                                re.match(r"[\u3400-\u9fff]", intent.prompt.strip())
+                            ),
+                        )
+                    },
+                )
+            if finish_requested or confirmed:
                 # the result supplies a card or device action for the user
                 yield AssistantEvent(
                     event="done",
                     data={
-                        "model": completion.model,
+                        "model": response_model,
                         "tool_calls": tool_count,
                         "usage": usage if usage_reported else None,
                     },

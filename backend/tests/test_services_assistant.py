@@ -16,6 +16,7 @@ from app.models.ai import AIProviderPreset
 from app.models.assistant import AssistantTurn
 from app.models.user import UserInfo, UserRole
 from app.services import assistant as service
+from app.services.subscription_intent import SubscriptionIntent
 
 TURN_IDS = count(1)
 
@@ -50,6 +51,7 @@ def make_turn(text="查看 AI 节点", *, context=None) -> AssistantTurn:
         SimpleNamespace(
             id=next(TURN_IDS),
             request_id="fixture",
+            retry_of=None,
             conversation_id=1,
             model={"provider_id": 1, "model_id": "test-model"},
             prompt=text,
@@ -1392,7 +1394,8 @@ def test_question_suspends_batch(monkeypatch):
     execute.assert_awaited_once()
 
 
-def test_answer_never_approves(monkeypatch):
+@pytest.mark.parametrize("subscription", [False, True])
+def test_answer_never_approves(monkeypatch, subscription):
     requests = []
 
     def handler(request):
@@ -1418,6 +1421,12 @@ def test_answer_never_approves(monkeypatch):
     monkeypatch.setattr(service, "execute_tool", execute)
     turn = make_turn("同意")
     turn.request_id = "answer-" + "a" * 32
+    order = SubscriptionIntent("帮我订阅《Lantern》", [turn.id], [], True)
+    monkeypatch.setattr(
+        service,
+        "subscription_intent",
+        AsyncMock(return_value=order if subscription else None),
+    )
 
     events = asyncio.run(collect(turn))
 

@@ -1181,7 +1181,8 @@
     "assistant_canvas_wait_save": "请确认保存结果后再离开画布",
     "assistant_canvas_already_saved": "草稿已保存，修改已保留",
     "assistant_canvas_already_reverted": "修改此前已撤回，未保存",
-    "download_plan_request_conflict": "该计划已按其他配置创建，请打开原预览查看结果"
+    "download_plan_request_conflict": "该计划已按其他配置创建，请打开原预览查看结果",
+    "assistant_review_unavailable": "这份预览已无法保存，请在助手中查看最新状态。"
   },
   "ai": {
     "custom": "自定义提供商",
@@ -1232,8 +1233,13 @@
       "skip": "跳过",
       "next": "下一个",
       "submit": "提交答案",
+      "confirm_subscription": "确认订阅",
+      "subscription_settings": "{0} · 每 {1} 小时检查 · 单次 {2} · 总上限 {3}",
       "submitted": "已提交答案",
       "skipped": "已跳过",
+      "directory": "请输入下载器上的完整目录路径。",
+      "library": "请选择可用媒体库，或填写唯一的库名或 #编号。",
+      "destination": "请填写完整下载路径、库名，或用「下载路径 | 库名」同时指定两者。",
       "empty": "请选择一项或填写自定义答案。",
       "plan": "请选择列出的计划，或填写唯一的计划 ID。",
       "datetime": "请填写日期、时间和时区偏移。",
@@ -1608,7 +1614,12 @@
       "leave_message": "助手修改将被撤回，此前未保存的手动编辑仍会提示保存"
     },
     "plan": {
-      "review": "检查计划",
+      "record": "下载计划详情",
+      "awaiting": "下载计划待确认",
+      "reviewed": "待确认",
+      "superseded": "此预览已失效",
+      "inspect": "核对计划",
+      "review": "编辑计划",
       "create": "创建计划",
       "recover": "恢复创建结果",
       "created": "已创建下载计划 #{0}",

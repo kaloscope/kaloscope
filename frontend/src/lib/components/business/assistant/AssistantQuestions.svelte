@@ -167,7 +167,11 @@
 {#if ready && heading && answer}
   <section class="flex max-h-[60dvh] flex-col px-2.5 pt-2.5 pb-1">
     <div class="min-h-0 overflow-y-auto">
-      <fieldset disabled={submitting || $assistant.busy || card.state === 'answered'} class="min-w-0">
+      <fieldset
+        disabled={submitting || $assistant.busy || card.state === 'answered'}
+        class="min-w-0"
+        aria-describedby={card.subscription ? `subscription-${callId}` : undefined}
+      >
         <legend bind:this={legend} tabindex="-1" class="mb-1 w-full px-1 outline-none">
           <span class="flex items-baseline justify-between gap-2">
             <span class="min-w-0 text-sm leading-snug font-semibold wrap-anywhere">
@@ -180,6 +184,17 @@
             </span>
           </span>
         </legend>
+        {#if card.subscription}
+          {@const plan = card.subscription.plan}
+          <p id={`subscription-${callId}`} class="mb-1 px-1 text-xs text-base-content/70">
+            {$_('assistant.question.subscription_settings', [
+              card.subscription.workflow_name,
+              plan.interval_num,
+              plan.batch_limit ?? $_('assistant.replacement.no_limit'),
+              plan.total_limit ?? $_('assistant.replacement.no_limit')
+            ])}
+          </p>
+        {/if}
         {#each heading.options as option (option.id)}
           {@const selected = answer.selected.includes(option.id)}
           <label
@@ -278,7 +293,9 @@
             card.state === 'answered'
               ? 'assistant.question.continue'
               : lastQuestion
-                ? 'assistant.question.submit'
+                ? card.subscription
+                  ? 'assistant.question.confirm_subscription'
+                  : 'assistant.question.submit'
                 : 'assistant.question.next'
           )}
           <iconify-icon

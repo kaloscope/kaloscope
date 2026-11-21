@@ -33,17 +33,24 @@ export type AssistantReview = {
 };
 
 /**
- * Identify an actionable preview that supplied its own stable request ID.
+ * Identify a standalone review, leaving release selection to its question card.
  * @param result - Checked server tool event.
+ * @param asksForChoices - Whether the same turn issued a question after preparing settings.
  * @returns Whether the panel can request a decision for this exact review.
  */
 export function isAssistantReview(
-  result?: AssistantToolResult
+  result?: AssistantToolResult,
+  asksForChoices = false
 ): result is AssistantToolResult & { name: ReviewTool; data: Fact & { request_id: string } } {
+  const status = record(result?.data?.assistant_submission).status;
   return (
     !!result?.ok &&
     result.data?.valid === true &&
     typeof result.data.request_id === 'string' &&
+    !(
+      result.name === 'validate_download_plan' &&
+      (status === 'needs_confirmation' || (asksForChoices && typeof status === 'string' && status !== 'ready'))
+    ) &&
     reviewTools.some((name) => name === result.name)
   );
 }

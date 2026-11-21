@@ -31,6 +31,7 @@ from tortoise.transactions import atomic, in_transaction
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
+from app.core.decorators import require_browser_admin
 from app.core.dl.access import ADMIN_CHANGE, ADMIN_PREVIEW
 from app.core.dl.config import (
     decrypt_config,
@@ -68,7 +69,7 @@ from app.core.exceptions import (
 from app.core.flow.nodes.base import start_config
 from app.core.flow.outputs import check_output, download_link_kind
 from app.core.renderer import SANDBOX_ENV, is_template
-from app.models.assistant import DOWNLOAD_PATHS
+from app.models.assistant import DOWNLOAD_PATHS, AssistantToolCall
 from app.models.download import (
     PLAN_SETTINGS,
     DownloadAdd,
@@ -112,6 +113,7 @@ from app.models.user import User, UserInfo, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
+from app.services.subscription_intent import prior_validations
 from app.utils.bittorrent import (
     decode_torrent,
     standardize_magnet,
@@ -2679,7 +2681,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "interval_start": None,
                 "interval_end": None,
                 "batch_limit": 1,
-                "total_limit": 1,
+                "total_limit": None,
                 "downloader_id": default_downloader,
                 "dir": directories[0],
                 "transfer_lib_id": None,
@@ -2694,7 +2696,16 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "resource submits it with those defaults. On selection, validate "
                 "the exact offered source and create_download_task immediately. "
                 "Show new transfer effects or changed settings before submission. "
-                "For subscriptions, aim for one user reply. Keep the requested title "
+                "For a new subscription, search the requested title and validate a "
+                "plan using explicit settings. Validation issues one required "
+                "question group covering release, download directory and library. "
+                "For an ongoing subscription default to total_limit=null. "
+                "Use preview defaults, omit sample and let validation issue the "
+                "card when the indexer and settings are known. An initial order never "
+                "approves a write. After the answer, search the confirmed keyword and "
+                "filters and validate the reviewed settings for creation. "
+                "Do not stop at navigation. "
+                "For preview/button approval wait. Keep the requested title "
                 "and preferences. In the first turn choose a suitable published "
                 "downloadable indexer for a preview; if several fit, recommend one "
                 "and offer alternatives in the same question. Search the title now. "
@@ -3066,12 +3077,21 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         return result
 
     @classmethod
-    async def create_once(cls, body: DownloadPlanCreate, user: UserInfo) -> dict:
+    async def create_once(
+        cls,
+        body: DownloadPlanCreate,
+        user: UserInfo,
+        *,
+        review_call_id: str | None = None,
+        active_review_call_id: str | None = None,
+    ) -> dict:
         """Persist one authorized plan and notify the existing download synchronizer.
 
         Args:
             body: Stable request ID, final editor settings and explicit confirmation.
             user: Current administrator; identity never comes from the request body.
+            review_call_id: Browser review that opened the native editor, if any.
+            active_review_call_id: Validated proposal from the current assistant turn.
 
         Returns:
             Validation errors, an unconfirmed preview, or the same plan on every
@@ -3083,8 +3103,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
         Raises:
             ForbiddenException: If the account cannot create plans.
-            BadRequestException: If one request ID is reused with different settings.
-            NotFoundException: If the original creation was deleted.
+            BadRequestException: If the review is stale or its request ID conflicts.
+            NotFoundException: If the creation was deleted or the review is unavailable.
         """
         ADMIN_CHANGE.require(user)
         key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
@@ -3092,7 +3112,13 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         async with lock:
             try:
                 with submission_lock(f"plan-create:{key}"), review_attempt():
-                    outcome = await cls._create_plan(body, user, key)
+                    if review_call_id is not None:
+                        await cls._check_editor_review(
+                            review_call_id, body.request_id, user, allow_replay=True
+                        )
+                    outcome = await cls._create_plan(
+                        body, user, key, review_call_id, active_review_call_id
+                    )
                     return await AssistantReviewDecision.finish(
                         user.id, body.request_id, outcome
                     )
@@ -3104,8 +3130,44 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 }
 
     @classmethod
+    async def _check_editor_review(
+        cls, call_id: str, request_id: UUID, user: UserInfo, *, allow_replay: bool
+    ) -> None:
+        """Require the browser editor's originating review to still authorize saving.
+
+        Args:
+            call_id: Server-issued assistant tool call that opened the editor.
+            request_id: Creation identity submitted with the edited settings.
+            user: Authenticated browser account.
+            allow_replay: Permit an applied card when checking for an existing plan.
+
+        Raises:
+            ForbiddenException: If the account lost its browser administrator grant.
+            NotFoundException: If the account has no valid review with this identity.
+            BadRequestException: If the request differs or the review cannot be saved.
+        """
+        from app.services.assistant_reviews import assistant_review
+
+        review = await assistant_review(call_id, user)
+        if (
+            review["tool"] != "validate_download_plan"
+            or review["request_id"] != str(request_id)
+            or not (
+                review["status"] == "reviewed"
+                or (allow_replay and review["status"] == "applied")
+                or (review["status"] == "failed" and review.get("retryable"))
+            )
+        ):
+            raise BadRequestException(ErrorCode.ASSISTANT_REVIEW_UNAVAILABLE)
+
+    @classmethod
     async def _create_plan(
-        cls, body: DownloadPlanCreate, user: UserInfo, key: str
+        cls,
+        body: DownloadPlanCreate,
+        user: UserInfo,
+        key: str,
+        review_call_id: str | None = None,
+        active_review_call_id: str | None = None,
     ) -> dict:
         """Create or replay a subscription under the account-scoped request lock.
 
@@ -3113,6 +3175,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             body: Reviewed settings and confirmation.
             user: Current administrator.
             key: Account-scoped receipt identity.
+            review_call_id: Originating browser review, when saving from chat.
+            active_review_call_id: Server-owned validation used by an assistant tool.
 
         Returns:
             The original subscription or its current creation outcome.
@@ -3146,6 +3210,44 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         if not body.confirmed:
             return {"created": False, "confirmation_required": True, **validation}
         async with in_transaction():
+            if origin := review_call_id or active_review_call_id:
+                # claim the writer before comparing decisions for changed preferences
+                review_query = AssistantToolCall.filter(
+                    call_id=origin,
+                    name="validate_download_plan",
+                    turn__conversation__user_id=user.id,
+                )
+                await review_query.update(updated_at=F("updated_at"))
+                review = await review_query.select_related("turn").first()
+                if review is None:
+                    raise NotFoundException
+                if review_call_id is not None:
+                    await cls._check_editor_review(
+                        review_call_id, body.request_id, user, allow_replay=False
+                    )
+                older = await prior_validations(review)
+                decisions = (
+                    await AssistantReviewDecision.filter(
+                        owner_id=user.id, request_id__in=older
+                    ).order_by("id")
+                    if older
+                    else []
+                )
+                for decision in decisions:
+                    if (decision.result or {}).get("retryable"):
+                        continue
+                    await require_browser_admin(user)
+                    applied = await cls.find_creation(decision.request_id, user)
+                    if applied["created"]:
+                        return applied
+                    old_state = (decision.result or {}).get("status") or "pending"
+                    outcome = old_state if decision.approved else "cancelled"
+                    return {
+                        "created": False,
+                        "outcome": outcome,
+                        "request_id": str(decision.request_id),
+                        "message": "Check the earlier subscription decision.",
+                    }
             if not (
                 await AssistantReviewDecision.claim(user.id, body.request_id, True)
             ).approved:
@@ -3182,7 +3284,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 or await DownloadPlan.filter(creation_key=key).exists()
             ):
                 # a concurrent request committed the durable identity first
-                return await cls._create_plan(body, user, key)
+                return await cls._create_plan(
+                    body, user, key, review_call_id, active_review_call_id
+                )
             if binding and not _binding_changed(binding, body.ingestion):
                 return {
                     **validation,

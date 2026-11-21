@@ -36,6 +36,7 @@
     sub_repl: string | null;
     onsave: (result: DownloadPlan) => void;
     creationRequestId: string;
+    reviewCallId: string;
     oncreated: (result: DownloadPlanCreation) => void;
   }>;
 </script>
@@ -71,6 +72,7 @@
     sub_repl = DEFAULT_SUB_REPL,
     onsave,
     creationRequestId = uuidv4(),
+    reviewCallId,
     oncreated
   }: PlanEditorProps = $props();
 
@@ -237,7 +239,12 @@
         attempted ??= { request_id: creationRequestId, plan: settings, confirmed: true };
         const { data } = recovery?.data.created
           ? recovery
-          : await api.post('download/plan/create', { json: attempted }).json<Resp<DownloadPlanCreateResult>>();
+          : await api
+              .post('download/plan/create', {
+                json: attempted,
+                searchParams: reviewCallId ? { review: reviewCallId } : undefined
+              })
+              .json<Resp<DownloadPlanCreateResult>>();
         if (!data.created) {
           issues = data.issues ?? [];
           attempted = null;

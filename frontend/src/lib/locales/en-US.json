@@ -1181,7 +1181,8 @@
     "assistant_canvas_wait_save": "Check the save result before leaving the canvas.",
     "assistant_canvas_already_saved": "The draft had already been saved, so the changes were kept.",
     "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved.",
-    "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it."
+    "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it.",
+    "assistant_review_unavailable": "This review can no longer be saved. Check its latest status in the assistant."
   },
   "ai": {
     "custom": "Custom Provider",
@@ -1232,8 +1233,13 @@
       "skip": "Skip",
       "next": "Next",
       "submit": "Submit answers",
+      "confirm_subscription": "Confirm subscription",
+      "subscription_settings": "{0} · Interval {1} h · Per check {2} · Total {3}",
       "submitted": "Submitted answers",
       "skipped": "Skipped",
+      "directory": "Enter a full directory path on the downloader.",
+      "library": "Choose an available library or enter a unique name or #ID.",
+      "destination": "Enter a full directory path, a library name, or directory | library.",
       "empty": "Choose an option or enter your own answer.",
       "plan": "Choose a listed plan or enter its unique ID.",
       "datetime": "Enter a date and time with its UTC offset.",
@@ -1608,7 +1614,12 @@
       "leave_message": "Assistant changes will be reverted. Earlier unsaved manual edits still prompt you to save."
     },
     "plan": {
-      "review": "Review Plan",
+      "record": "Download plan details",
+      "awaiting": "Download plan awaiting confirmation",
+      "reviewed": "Awaiting confirmation",
+      "superseded": "This preview has expired",
+      "inspect": "Review plan",
+      "review": "Edit plan",
       "create": "Create Plan",
       "recover": "Recover Creation Result",
       "created": "Download plan #{0} created",

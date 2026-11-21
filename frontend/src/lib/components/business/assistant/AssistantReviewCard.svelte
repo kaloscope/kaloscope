@@ -8,14 +8,27 @@
     type ReviewTool
   } from '$lib/assistant/reviews';
   import { assistant } from '$lib/assistant/session';
+  import Modal from '$lib/components/common/interaction/Modal.svelte';
+  import { icons } from '$lib/icons';
+  import { onDestroy } from 'svelte';
   import { _, dateTime } from '$lib/i18n';
 
-  const { id, requestId, tool, onedit }: { id: string; requestId: string; tool: ReviewTool; onedit?: () => void } =
-    $props();
+  const {
+    id,
+    requestId,
+    tool,
+    onedit,
+    onview
+  }: { id: string; requestId: string; tool: ReviewTool; onedit?: () => void; onview?: () => void } = $props();
+  let modal: Modal | undefined = $state();
   const card = createReviewCard<AssistantReview>({
     path: () => `assistant/reviews/${id}`,
     decision: (_receipt, approve) => ({ request_id: requestId, approve }),
-    events: ['assistant-review-changed'],
+    get events() {
+      return tool === 'validate_download_plan'
+        ? ['assistant-review-changed', 'download-plan-created']
+        : ['assistant-review-changed'];
+    },
     received(data, _previous, approve) {
       if (data.request_id !== requestId || data.tool !== tool || !data.preview) throw new Error('review_mismatch');
       if (approve !== undefined) {
@@ -59,6 +72,8 @@
   const outcome = $derived(receipt?.outcome);
   const statusText = $derived.by(() => {
     if (!receipt) return '';
+    if (tool === 'validate_download_plan' && (receipt.status === 'reviewed' || receipt.status === 'superseded'))
+      return $_('assistant.plan.' + receipt.status);
     const fallback = $_(
       'assistant.review.states.' + (receipt.status === 'failed' && receipt.retryable ? 'retryable' : receipt.status)
     );
@@ -87,6 +102,44 @@
       ? String(outcome.first_execution.status)
       : null
   );
+
+  const planName = $derived(
+    String(fields.find(([key]) => key === 'field.keyword')?.[1] || $_('assistant.pages.download_plans'))
+  );
+
+  /**
+   * Check whether the server still accepts a decision for this download plan.
+   * @returns Whether the composer should offer to review the plan.
+   */
+  export function needsPlanDecision(): boolean {
+    return tool === 'validate_download_plan' && !failed && pending;
+  }
+
+  /**
+   * Open the stored plan and refresh its receipt before enabling a decision.
+   */
+  export function showPlanRecord(): void {
+    if (!modal || modal.isOpen()) return;
+    void load();
+    modal.show();
+  }
+
+  /**
+   * Submit a decision for the receipt currently on screen.
+   * @param approve - Whether to create the plan or cancel the review.
+   */
+  async function decide(approve: boolean): Promise<void> {
+    if (!pending || busy || failed) return;
+    await load(approve);
+    if (
+      tool === 'validate_download_plan' &&
+      !failed &&
+      (receipt?.status === 'applied' || receipt?.status === 'cancelled')
+    )
+      modal?.close();
+  }
+
+  onDestroy(() => modal?.close());
 
   /**
    * Display one saved value from the immutable review.
@@ -127,87 +180,136 @@
   }
 </script>
 
-<section class="space-y-2 rounded-box border border-base-content/15 p-3 text-sm" aria-busy={busy}>
-  {#if receipt}
-    <h4 class="font-semibold">{$_('assistant.review.actions.' + action)}</h4>
-    <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-      {#each fields as [key, value] (key)}
-        <dt class="text-base-content/70">{$_(key)}</dt>
-        <dd class="break-words whitespace-pre-line">{display(value, key)}</dd>
-      {/each}
-    </dl>
-    {#if changes.length}
-      <dl class="space-y-1 border-t border-base-content/10 pt-2 text-xs">
-        {#each changes as change, i (i)}
-          <div>
-            <dt class="font-medium">
-              {['binding_order', 'interval_num', 'interval_unit', 'bootparams', 'repeatable', 'recoverable'].includes(
-                String(change.field)
-              )
-                ? $_('assistant.review.' + change.field)
-                : $_('field.' + change.field, {
-                    default: $_('metadata.fields.' + change.field, { default: String(change.field) })
-                  })}
-            </dt>
-            <dd class="break-words">
-              {display(change.before, String(change.field))} → {display(change.after, String(change.field))}
-            </dd>
-          </div>
+{#snippet details()}
+  <section
+    class={['space-y-2 text-sm', tool !== 'validate_download_plan' && 'rounded-box border border-base-content/15 p-3']}
+    aria-busy={busy}
+  >
+    {#if receipt}
+      {#if tool !== 'validate_download_plan'}<h4 class="font-semibold">
+          {$_('assistant.review.actions.' + action)}
+        </h4>{/if}
+      <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        {#each fields as [key, value] (key)}
+          <dt class="text-base-content/70">{$_(key)}</dt>
+          <dd class="break-words whitespace-pre-line">{display(value, key)}</dd>
         {/each}
       </dl>
-    {/if}
-    {#if impact}
-      <p class="text-xs font-medium">{$_('assistant.review.impact.' + impact)}</p>
-    {/if}
-    {#if receipt.preview.ingestion && typeof receipt.preview.ingestion === 'object' && 'binding' in receipt.preview.ingestion && receipt.preview.ingestion.binding === 'add'}
-      <p class="text-xs font-medium">{$_('assistant.review.impact.add_binding')}</p>
-    {/if}
-    {#if notes.length}
-      <details class="text-xs">
-        <summary class="cursor-pointer">{$_('assistant.review.notes')}</summary>
-        <ul class="mt-1 list-disc space-y-1 pl-4">
-          {#each notes as note, i (i)}<li class="break-words">{note}</li>{/each}
+      {#if changes.length}
+        <dl class="space-y-1 border-t border-base-content/10 pt-2 text-xs">
+          {#each changes as change, i (i)}
+            <div>
+              <dt class="font-medium">
+                {['binding_order', 'interval_num', 'interval_unit', 'bootparams', 'repeatable', 'recoverable'].includes(
+                  String(change.field)
+                )
+                  ? $_('assistant.review.' + change.field)
+                  : $_('field.' + change.field, {
+                      default: $_('metadata.fields.' + change.field, { default: String(change.field) })
+                    })}
+              </dt>
+              <dd class="break-words">
+                {display(change.before, String(change.field))} → {display(change.after, String(change.field))}
+              </dd>
+            </div>
+          {/each}
+        </dl>
+      {/if}
+      {#if impact}
+        <p class="text-xs font-medium">{$_('assistant.review.impact.' + impact)}</p>
+      {/if}
+      {#if receipt.preview.ingestion && typeof receipt.preview.ingestion === 'object' && 'binding' in receipt.preview.ingestion && receipt.preview.ingestion.binding === 'add'}
+        <p class="text-xs font-medium">{$_('assistant.review.impact.add_binding')}</p>
+      {/if}
+      {#if notes.length}
+        <details class="text-xs">
+          <summary class="cursor-pointer">{$_('assistant.review.notes')}</summary>
+          <ul class="mt-1 list-disc space-y-1 pl-4">
+            {#each notes as note, i (i)}<li class="break-words">{note}</li>{/each}
+          </ul>
+        </details>
+      {/if}
+      {#if outcome?.issues?.length}
+        <ul class="list-disc pl-4 text-xs">
+          {#each outcome.issues as issue, index (index)}<li>
+              {issue.path ? issue.path + ' · ' : ''}{issue.message}
+            </li>{/each}
         </ul>
-      </details>
-    {/if}
-    {#if outcome?.issues?.length}
-      <ul class="list-disc pl-4 text-xs">
-        {#each outcome.issues as issue, index (index)}<li>
-            {issue.path ? issue.path + ' · ' : ''}{issue.message}
-          </li>{/each}
-      </ul>
-    {/if}
-    <p role="status" class="text-xs text-base-content/75">
-      {statusText}{#if firstExecution}<span class="block"
-          >{$_('assistant.plan.first.' + firstExecution, { default: firstExecution })}</span
-        >{/if}
-    </p>
-  {:else if busy}<span class="loading loading-xs loading-spinner" role="status" aria-label={$_('media.loading')}
-    ></span>{/if}
-  {#if failed}<p class="text-xs" role="alert">{$_('assistant.request_failed')}</p>{/if}
-  <div class="flex flex-wrap justify-end gap-2">
-    {#if failed || receipt?.status === 'pending' || receipt?.status === 'partial' || receipt?.status === 'uncertain' || (receipt?.status === 'failed' && !receipt.retryable)}
-      <button type="button" class="btn btn-ghost btn-sm" disabled={busy || $assistant.busy} onclick={() => load()}
-        >{$_('action.reload')}</button
-      >
-    {:else if pending}
-      {#if onedit && receipt?.status === 'reviewed'}<button
+      {/if}
+      <p role="status" class="text-xs text-base-content/75">
+        {statusText}{#if firstExecution}<span class="block"
+            >{$_('assistant.plan.first.' + firstExecution, { default: firstExecution })}</span
+          >{/if}
+      </p>
+    {:else if busy}<span class="loading loading-xs loading-spinner" role="status" aria-label={$_('media.loading')}
+      ></span>{/if}
+    {#if failed}<p class="text-xs" role="alert">{$_('assistant.request_failed')}</p>{/if}
+    <div class="flex flex-wrap justify-end gap-2">
+      {#if failed || receipt?.status === 'pending' || receipt?.status === 'partial' || receipt?.status === 'uncertain' || (receipt?.status === 'failed' && !receipt.retryable)}
+        <button type="button" class="btn btn-ghost btn-sm" disabled={busy || $assistant.busy} onclick={() => load()}
+          >{$_('action.reload')}</button
+        >
+      {:else if onview && outcome?.created && receipt?.status === 'applied'}
+        <button
           type="button"
-          class="btn mr-auto btn-ghost btn-sm"
+          class="btn btn-ghost btn-sm"
+          onclick={() => {
+            modal?.close();
+            onview?.();
+          }}
+        >
+          {$_('action.open', $_('assistant.pages.download_plans'))}
+        </button>
+      {:else if pending}
+        {#if onedit && receipt?.status === 'reviewed'}
+          <button
+            type="button"
+            class="btn mr-auto btn-ghost btn-sm"
+            disabled={busy || $assistant.busy}
+            onclick={() => {
+              modal?.close();
+              onedit?.();
+            }}>{$_('assistant.plan.review')}</button
+          >
+        {/if}
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
           disabled={busy || $assistant.busy}
-          onclick={onedit}>{$_('assistant.plan.review')}</button
-        >{/if}
-      <button type="button" class="btn btn-ghost btn-sm" disabled={busy || $assistant.busy} onclick={() => load(false)}
-        >{$_('message.cancel')}</button
-      >
-      <button
-        type="button"
-        class="btn btn-sm"
-        class:btn-error={action === 'task_delete' || action === 'schedule_delete'}
-        class:btn-primary={action !== 'task_delete' && action !== 'schedule_delete'}
-        disabled={busy || $assistant.busy}
-        onclick={() => load(true)}>{$_('assistant.review.actions.' + action)}</button
-      >
-    {/if}
-  </div>
-</section>
+          onclick={() => decide(false)}>{$_('message.cancel')}</button
+        >
+        <button
+          type="button"
+          class="btn btn-sm"
+          class:btn-error={action === 'task_delete' || action === 'schedule_delete'}
+          class:btn-primary={action !== 'task_delete' && action !== 'schedule_delete'}
+          disabled={busy || $assistant.busy}
+          onclick={() => decide(true)}>{$_('assistant.review.actions.' + action)}</button
+        >
+      {/if}
+    </div>
+  </section>
+{/snippet}
+
+{#if tool === 'validate_download_plan'}
+  <button
+    type="button"
+    class="flex max-w-full items-center gap-1.5 rounded-field px-1 py-0.5 text-start text-xs leading-5 text-base-content/70 hover:bg-base-content/5 focus-visible:outline-2 focus-visible:outline-primary"
+    aria-haspopup="dialog"
+    onclick={showPlanRecord}
+  >
+    <iconify-icon icon={icons.document} width="0.875rem" class="shrink-0" aria-hidden="true"></iconify-icon>
+    <span class="min-w-0 truncate"
+      >{planName} · {failed
+        ? $_('assistant.request_failed')
+        : statusText || $_('media.loading')}{#if firstExecution && !failed}
+        · {$_('assistant.plan.first.' + firstExecution, { default: firstExecution })}{/if}</span
+    >
+    <iconify-icon icon={icons.chevronRight} width="0.75rem" class="shrink-0" aria-hidden="true"></iconify-icon>
+  </button>
+  <Modal bind:this={modal} shallow={false} title={$_('assistant.plan.record')}>
+    {@render details()}
+  </Modal>
+{:else}
+  {@render details()}
+{/if}

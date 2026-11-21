@@ -130,6 +130,13 @@ from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.services.plan_replacement import PlanReplacementService
+from app.services.subscription_intent import (
+    accepts_offer,
+    has_release_question,
+    submission_check,
+    subscription_intent,
+    superseded_retry,
+)
 from app.services.user import UserFavoriteService, UserService
 from app.services.workflow_authoring import (
     probe_http_request,
@@ -764,8 +771,8 @@ TOOLS = (
     ),
     AssistantTool(
         "create_download_plan",
-        "Set confirmed=true on acceptance. Changed keyword: proposal_id = prior "
-        "request_id or search call ID.",
+        "Create an ordered subscription with confirmed=true. Revised keyword: "
+        "proposal_id = prior request_id/search call ID.",
         PlanCreate,
     ),
     AssistantTool(
@@ -1457,6 +1464,7 @@ async def execute_tool(
     call_id: str,
     canvas: dict[str, Any] | None = None,
     canvas_snapshot_id: int | None = None,
+    metadata_search: bool = False,
 ) -> dict[str, Any]:
     """Validate and invoke a registered tool using the current account's services.
 
@@ -1468,6 +1476,7 @@ async def execute_tool(
         call_id: Server-generated call identifier for this conversation's tool call.
         canvas: Current turn's editable designer context, never historical context.
         canvas_snapshot_id: Latest successful canvas snapshot in this turn.
+        metadata_search: Limit a subscription clarification search to public metadata.
 
     Returns:
         Bounded JSON data or a sanitized recoverable tool error.
@@ -1514,6 +1523,11 @@ async def execute_tool(
                 case IngestionQuery():
                     result = await diagnose_ingestion(args, user)
                 case IndexerSearch():
+                    if metadata_search and args.sources:
+                        return tool_error(
+                            ErrorCode.BAD_REQUEST,
+                            "Use metadata-only search for a subscription.",
+                        )
                     result = await preview_indexer(args, user)
                 case PlanOptions():
                     result = await DownloadPlanService.authoring_options(
@@ -1521,6 +1535,21 @@ async def execute_tool(
                     )
                 case DownloadPlanCheck():
                     result = await DownloadPlanService.validate_creation(args, user)
+                    original = (
+                        await AssistantToolCall.filter(
+                            call_id=call_id, turn__conversation_id=conversation_id
+                        )
+                        .select_related("turn")
+                        .first()
+                    )
+                    if (
+                        result["valid"]
+                        and original
+                        and (intent := await subscription_intent(original.turn))
+                    ):
+                        result["assistant_submission"] = await submission_check(
+                            intent, result, user
+                        )
                 case PlanCreate():
                     result = await create_plan(args, conversation_id, call_id, user)
                 case PlanID():
@@ -2320,37 +2349,93 @@ async def create_plan(
         .order_by("-id")
         .limit(30)
     )
+    current = await AssistantTurn.get(id=call.turn_id, conversation_id=conversation_id)
+    logical = await AssistantTurn.get(id=turn_ids[-1], conversation_id=conversation_id)
+    intent = await subscription_intent(current)
+    is_answer = logical.request_id.startswith("answer-")
+    previous = (
+        await AssistantTurn.filter(conversation_id=conversation_id, id__lt=logical.id)
+        .order_by("-id")
+        .first()
+    )
     for index, record in enumerate(records):
         data = (record.result or {}).get("data") or {}
         if data.get("valid") and data.get("request_id") == str(args.request_id):
-            # an editor may already have created this reviewed proposal
             receipt = await DownloadPlanService.find_creation(args.request_id, user)
             if receipt["created"]:
                 return receipt
-
-            ready = False
-            if index == 0 and record.turn_id in turn_ids:
+            prepared_here = record.turn_id in turn_ids
+            previous_offer = bool(
+                previous
+                and previous.status == "complete"
+                and record.turn_id == previous.id
+            )
+            explicit_reply = (
+                not is_answer
+                and accepts_offer(logical.prompt)
+                and not await superseded_retry(current, logical.id)
+                and not (previous and await has_release_question(previous.id))
+            )
+            proposal = None
+            if (
+                index == 0
+                and prepared_here
+                and (explicit_reply or (intent and intent.answered))
+            ):
                 proposal = await _answered_plan_request(
-                    conversation_id, turn_ids[-1], data, args.proposal_id
+                    conversation_id, logical.id, data, args.proposal_id
                 )
-                ready = proposal is not None
-                if proposal and proposal != args.request_id:
-                    # the editor may already have submitted the original proposal
-                    receipt = await DownloadPlanService.find_creation(proposal, user)
-                    if receipt["created"]:
-                        return receipt
-            elif index == 0:
-                ready = await AssistantTurn.filter(
-                    id=record.turn_id, status="complete"
-                ).exists()
+            if proposal and proposal != args.request_id:
+                receipt = await DownloadPlanService.find_creation(proposal, user)
+                if receipt["created"]:
+                    return receipt
+
+            check = {}
+            if (
+                not index
+                and intent
+                and (prepared_here or (previous_offer and not is_answer))
+            ):
+                check = await submission_check(intent, data, user)
+            legacy = explicit_reply and (previous_offer or (proposal and prepared_here))
+            ready = check.get("status") == "ready"
+            if not index and legacy:
+                # explicit text can accept a manual preview without a search log
+                ready = (
+                    ready
+                    or not check
+                    or (
+                        check.get("status") in {"needs_search", "needs_settings"}
+                        and bool(proposal)
+                        and bool(intent)
+                        and (
+                            check.get("status") == "needs_search"
+                            or (
+                                args.proposal_id == str(proposal)
+                                and (original_title := check.get("requested_title"))
+                                and data["plan"]["keyword"]
+                                .casefold()
+                                .startswith(original_title.casefold() + " ")
+                                and not check.get("required_term")
+                            )
+                        )
+                        and not await AssistantToolCall.filter(
+                            turn_id__in=intent.turns, name="search_indexer"
+                        ).exists()
+                    )
+                )
+            if (data.get("ingestion") or {}).get("binding") == "add":
+                ready = bool(
+                    not index and explicit_reply and (previous_offer or proposal)
+                )
             if not ready:
                 return {
                     **data,
                     "created": False,
                     "confirmation_required": True,
-                    "message": (
-                        "Propose the latest settings and collect all remaining choices "
-                        "in one reply. Create when the user accepts or supplies them."
+                    "message": check.get(
+                        "next",
+                        "Review the settings or ask for the missing preferences.",
                     ),
                 }
 
@@ -2369,6 +2454,7 @@ async def create_plan(
                     confirmed=args.confirmed,
                 ),
                 user,
+                active_review_call_id=record.call_id,
             )
 
     raise NotFoundException

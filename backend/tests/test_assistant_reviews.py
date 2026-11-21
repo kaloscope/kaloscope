@@ -89,6 +89,81 @@ def test_subscription(approve):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("status", "state", "expected"),
+    [
+        ("complete", "pending", "superseded"),
+        ("complete", "answered", "superseded"),
+        ("complete", "deferred", "superseded"),
+        ("error", None, "reviewed"),
+    ],
+)
+def test_subscription_question(status, state, expected):
+    async def run():
+        async with database() as (owner, _):
+            _, _, settings = await fixture_plan()
+            turn, call, data = await proposal(owner, settings.plan)
+            await AssistantToolCall.create(
+                turn=turn,
+                call_id=uuid4().hex,
+                name="ask_user",
+                arguments="{}",
+                status=status,
+                result={"ok": state is not None, "data": {"state": state}},
+            )
+
+            assert (await assistant_review(call.call_id, owner))["status"] == expected
+            if expected == "superseded":
+                approve = PlanReviewDecision(
+                    request_id=UUID(data["request_id"]), approve=True
+                )
+                assert (await assistant_review(call.call_id, owner, approve))[
+                    "status"
+                ] == expected
+                assert not await DownloadPlan.exists()
+
+    asyncio.run(run())
+
+
+def test_subscription_history():
+    async def run():
+        async with database() as (owner, _):
+            _, _, settings = await fixture_plan()
+            turn, call, data = await proposal(owner, settings.plan)
+            later = await AssistantTurn.create(
+                conversation_id=turn.conversation_id,
+                request_id="other",
+                prompt="What does the interval mean?",
+                status="complete",
+            )
+            await AssistantToolCall.create(
+                turn=later,
+                call_id=uuid4().hex,
+                name="ask_user",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": {"state": "pending"}},
+            )
+            assert (await assistant_review(call.call_id, owner))["status"] == "reviewed"
+            approve = PlanReviewDecision(
+                request_id=UUID(data["request_id"]), approve=True
+            )
+            applied = await assistant_review(call.call_id, owner, approve)
+            await AssistantToolCall.create(
+                turn=turn,
+                call_id=uuid4().hex,
+                name="ask_user",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": {"state": "answered"}},
+            )
+            assert (await assistant_review(call.call_id, owner))["outcome"][
+                "plan_id"
+            ] == applied["outcome"]["plan_id"]
+
+    asyncio.run(run())
+
+
 def test_superseded():
     async def run():
         async with database() as (owner, _):
