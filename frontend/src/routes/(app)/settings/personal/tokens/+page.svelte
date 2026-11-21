@@ -3,9 +3,10 @@
   import { api } from '$lib/api';
   import { Badge, Button, Container, Empty, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
   import { createFormSchema, createLoading } from '$lib/helpers';
+  import { user } from '$lib/stores.svelte';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import type { MCPAccessToken, MCPAccessTokenCreate, MCPAccessTokenCreated, Resp } from '$lib/types';
+  import type { MCPAccessToken, MCPAccessTokenCreate, MCPAccessTokenCreated, MediaLib, Resp } from '$lib/types';
   import { isHTTPError } from 'ky';
   import { onDestroy, onMount, tick } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
@@ -24,6 +25,16 @@
   let name = $state('');
   let expiresInDays: MCPAccessTokenCreate['expires_in_days'] = $state(90);
   let scope: MCPAccessToken['scope'] = $state('read_only');
+  let domain = $state<MCPAccessToken['domain']>('all');
+  let restrictLibraries = $state(true);
+  let libraryIds: number[] = $state([]);
+  let libraries: MediaLib[] = $state([]);
+  let libraryState = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  let valid = $derived(
+    !!name.trim() &&
+      (domain !== 'system' || user.current?.role === 'admin') &&
+      (domain !== 'media' || !restrictLibraries || libraryIds.length > 0)
+  );
   let secret = $state('');
   let modal: Modal;
   let modalContent: HTMLDivElement;
@@ -59,6 +70,24 @@
     }
   }
 
+  /**
+   * Load libraries available to this account for a media grant.
+   *
+   * @returns A promise that settles after the list or its retry state is available.
+   */
+  async function loadLibraries(): Promise<void> {
+    if (libraryState === 'loading') return;
+    libraryState = 'loading';
+    try {
+      const { data } = await api.get('media/lib/list', { signal: requests.signal }).json<Resp<MediaLib[]>>();
+      libraries = data;
+      libraryIds = libraryIds.filter((id) => data.some((lib) => lib.id === id));
+      libraryState = 'ready';
+    } catch {
+      if (!requests.signal.aborted) libraryState = 'error';
+    }
+  }
+
   /** Clear the one-time credential and cancel unfinished creation or transition work. */
   function reset() {
     secret = '';
@@ -75,8 +104,20 @@
     name = '';
     expiresInDays = 90;
     scope = 'read_only';
+    domain = 'all';
+    restrictLibraries = true;
+    libraryIds = [];
     modal.show();
   }
+
+  $effect(() => {
+    if (
+      libraryState === 'idle' &&
+      ((domain === 'media' && restrictLibraries) ||
+        tokens.some((token) => token.domain === 'media' && token.library_ids?.length))
+    )
+      void loadLibraries();
+  });
 
   /**
    * Create a token and transition to its one-time credential in the open dialog.
@@ -84,7 +125,7 @@
    * @returns A promise that resolves after creation or an error alert.
    */
   async function create(): Promise<void> {
-    if ($creating !== null || !name.trim()) return;
+    if ($creating !== null || !valid) return;
 
     const controller = new AbortController();
     createRequest = controller;
@@ -92,6 +133,8 @@
 
     try {
       const payload: MCPAccessTokenCreate = { name: name.trim(), expires_in_days: expiresInDays, scope };
+      if (domain !== 'all') payload.domain = domain;
+      if (domain === 'media' && restrictLibraries) payload.library_ids = libraryIds;
       const { data } = await api
         .post('mcp/token/create', { json: payload, signal: controller.signal, retry: 0 })
         .json<Resp<MCPAccessTokenCreated>>();
@@ -246,6 +289,14 @@
                 {$_(`access_token.status.${token.status}`)}
               </Badge>
               <Badge>{$_(`access_token.${token.scope}`)}</Badge>
+              <Badge>{$_(`access_token.domains.${token.domain ?? 'all'}`)}</Badge>
+              {#if token.domain === 'media'}
+                <span class="text-xs text-base-content/70">
+                  {token.library_ids?.length
+                    ? token.library_ids.map((id) => libraries.find((lib) => lib.id === id)?.name ?? `#${id}`).join(', ')
+                    : $_('access_token.all_libraries')}
+                </span>
+              {/if}
             </div>
             <dl class="mt-3 grid gap-3 text-xs sm:grid-cols-3">
               <div>
@@ -383,10 +434,57 @@
               class="w-full"
             />
             <p class="mt-2 text-sm text-base-content/70">{$_(`access_token.${scope}_hint`)}</p>
+            <Label required preventDefault={false}><label for="{uid}-domain">{$_('access_token.domain')}</label></Label>
+            <Select
+              id="{uid}-domain"
+              name="domain"
+              required
+              options={[
+                'all',
+                'media',
+                'downloads',
+                'workflows',
+                ...(user.current?.role === 'admin' ? ['system'] : [])
+              ].map((value) => ({
+                value,
+                label: $_(`access_token.domains.${value}`)
+              }))}
+              bind:value={domain}
+              class="w-full"
+            />
+            {#if domain === 'media'}
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">{$_('access_token.libraries')}</legend>
+                <label class="flex items-center gap-2">
+                  <input type="checkbox" class="checkbox checkbox-sm" bind:checked={restrictLibraries} />
+                  {$_('access_token.selected_libraries')}
+                </label>
+                {#if !restrictLibraries}
+                  <p class="text-sm text-base-content/70">{$_('access_token.all_libraries')}</p>
+                {:else if libraryState === 'error'}
+                  <button type="button" class="btn justify-self-start btn-sm" onclick={loadLibraries}>
+                    {$_('action.retry')}
+                  </button>
+                {:else if libraryState !== 'ready'}
+                  <span class="loading loading-dots" aria-label={$_('access_token.libraries')}></span>
+                {:else if libraries.length}
+                  <div class="grid max-h-44 gap-1 overflow-y-auto pl-2">
+                    {#each libraries as lib (lib.id)}
+                      <label class="flex items-center gap-2 py-1">
+                        <input type="checkbox" class="checkbox checkbox-sm" value={lib.id} bind:group={libraryIds} />
+                        {lib.name}
+                      </label>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="text-sm text-base-content/70">{$_('access_token.no_libraries')}</p>
+                {/if}
+              </fieldset>
+            {/if}
           </fieldset>
           <div class="modal-action">
             <button type="button" class="btn" onclick={() => modal.close()}>{$_('message.cancel')}</button>
-            <button type="submit" class="btn btn-submit" disabled={$creating !== null || !name.trim()}>
+            <button type="submit" class="btn btn-submit" disabled={$creating !== null || !valid}>
               {$_('message.confirm')}
               {#if $creating}<span class="loading loading-xs loading-dots"></span>{/if}
             </button>

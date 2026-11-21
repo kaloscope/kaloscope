@@ -33,6 +33,8 @@ import {
 import { errorCode } from './errors';
 import { assistantDestination, workflowPath } from './navigation';
 import { consumeAssistantStream } from './stream';
+import { activeDeviceRequest } from './device';
+import { isAssistantReview } from './reviews';
 
 export { errorCode } from './errors';
 
@@ -49,6 +51,8 @@ export type AssistantTool = {
 
 export type AssistantTurn = {
   id: string;
+  request_id?: string;
+  is_answer_turn?: boolean;
   serverId?: number;
   prompt: string;
   context: AssistantPageContext | AssistantStoredContext | null;
@@ -150,6 +154,7 @@ let handoffTimer: ReturnType<typeof setTimeout> | undefined;
  * Clear account data and invalidate all late network callbacks.
  */
 function resetSession(): void {
+  get(activeDeviceRequest)?.finish(false);
   resetMediaBatchWatchers();
   resetAssistantCanvas();
   cancelStopRecovery();
@@ -325,6 +330,30 @@ function createdWorkflow(turn: AssistantTurn): number | null {
   const tool = turn.tools.filter((item) => item.name === 'create_workflow_draft' && item.status === 'complete').at(-1);
   const destination = tool?.result && assistantDestination(tool.result);
   return destination ? (destination.target.resource_id as number) : null;
+}
+
+/**
+ * Check whether a completed tool call has a standalone interaction in the panel.
+ * @param tool - Persisted or streamed tool call.
+ * @returns Whether the result can finish a turn with no accompanying text.
+ */
+function hasInteraction(tool: AssistantTool): boolean {
+  const result = tool.result;
+  if (!result?.ok || !result.data) return false;
+  if (isAssistantReview(result)) return true;
+  switch (result.name) {
+    case 'ask_user':
+      return Array.isArray(result.data.questions);
+    case 'review_workspace_change':
+    case 'review_plan_replacement':
+      return typeof result.data.operation_id === 'string';
+    case 'review_download_plan_change':
+      return typeof result.data.request_id === 'string';
+    case 'navigate':
+      return assistantDestination(result) !== null;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -803,9 +832,15 @@ export async function deleteAssistantConversations(ids: number[]): Promise<boole
  * @param route - Current pathname used to capture the active page.
  * @param retryId - Turn whose prompt is sent again with fresh context; only an incomplete turn is linked as a retry.
  * @param handoffPrompt - Fixed follow-up request that builds a newly created draft, leaving the composed input intact.
+ * @param answerTo - Accepted question whose selections supply a single continuation.
  * @returns A promise that resolves after completion, cancellation, or error.
  */
-export async function sendAssistant(route: string, retryId?: string, handoffPrompt?: string): Promise<void> {
+export async function sendAssistant(
+  route: string,
+  retryId?: string,
+  handoffPrompt?: string,
+  answerTo?: string
+): Promise<void> {
   const state = get(assistant);
   if (
     state.busy ||
@@ -842,7 +877,8 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
   conversationRevision += 1;
 
   const turn: AssistantTurn = {
-    id: uuidv4(),
+    id: answerTo ? `answer-${answerTo}` : uuidv4(),
+    is_answer_turn: !!answerTo || !!retry?.is_answer_turn || !!(retry?.request_id ?? retry?.id)?.startsWith('answer-'),
     prompt,
     context,
     content: '',
@@ -920,6 +956,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
       started = true;
       update((value) => {
         value.serverId = Number(event.data.turn_id);
+        if (typeof event.data.is_answer_turn === 'boolean') value.is_answer_turn = event.data.is_answer_turn;
       });
       return;
     }
@@ -962,6 +999,14 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
           if (tool.name === 'create_download_plan' && event.data.ok && event.data.data?.created) {
             window.dispatchEvent(new Event('download-plan-created'));
           }
+          if (
+            event.data.name === 'set_personal_preference' &&
+            event.data.ok &&
+            user.current?.preferences &&
+            event.data.data
+          ) {
+            Object.assign(user.current.preferences, event.data.data);
+          }
           // an applied or uncertain change refreshes the schedule page's current results
           if (tool.name === 'apply_workflow_schedule' && event.data.ok && event.data.data?.applied !== false) {
             window.dispatchEvent(new Event('workflow-job-changed'));
@@ -997,12 +1042,19 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         }
         case 'done':
           if (
-            (!value.content.trim() && createdWorkflow(value) === null) ||
+            (!value.content.trim() && createdWorkflow(value) === null && !value.tools.some(hasInteraction)) ||
             value.tools.some((tool) => tool.status === 'running')
           ) {
             throw new Error('assistant_stream_invalid');
           }
           value.status = 'complete';
+          if (
+            value.tools.some(
+              (entry) =>
+                isAssistantReview(entry.result) || (entry.name === 'review_download_plan_change' && entry.result?.ok)
+            )
+          )
+            window.dispatchEvent(new Event('assistant-review-changed'));
           break;
         case 'error':
           value.status = 'error';
@@ -1094,6 +1146,7 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         prompt,
         request_id: turn.id,
         context: submittedContext,
+        ...(answerTo ? { answer_to: answerTo } : {}),
         // a completed turn cannot be retried, so its prompt starts a fresh request
         ...(retry?.serverId && retry.status !== 'complete' ? { retry_of: retry.serverId } : {})
       },
@@ -1160,6 +1213,13 @@ export async function sendAssistant(route: string, retryId?: string, handoffProm
         current.conversation?.id === submittedConversationId
       ) {
         recoverStoppedConversation(submittedConversationId, turn.id);
+      } else if (
+        answerTo &&
+        submittedConversationId &&
+        current.conversation?.id === submittedConversationId &&
+        current.turns.some((item) => item.id === turn.id && item.status !== 'complete')
+      ) {
+        await loadAssistantConversation(submittedConversationId);
       } else {
         cancelStopRecovery();
         void loadAssistantConversations();

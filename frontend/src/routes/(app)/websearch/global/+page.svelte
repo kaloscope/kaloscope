@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { registerAssistantContext } from '$lib/assistant/context';
   import { page } from '$app/state';
   import { api } from '$lib/api';
   import { Container, DataView, Empty, HCell, Paginator, Search, SearchHit, markFavorites } from '$lib/components';
@@ -184,6 +185,14 @@
     query.page_size = Number(params.get('page_size')) || null;
     search();
   });
+  onMount(() =>
+    registerAssistantContext(() => ({
+      page_type: 'web_search',
+      route: '/websearch/global',
+      workflow_id: activeId && tabs[activeId] ? Number(activeId) : null,
+      keyword: (query.keyword ?? '').slice(0, 255)
+    }))
+  );
 </script>
 
 <Container rowGap="1rem">

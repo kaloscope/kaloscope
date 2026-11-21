@@ -8,6 +8,7 @@
   import { beforeNavigate, goto, replaceState } from '$app/navigation';
   import { page } from '$app/state';
   import { api, getCurrentRole } from '$lib/api';
+  import { activeDeviceRequest, type DeviceRequest } from '$lib/assistant/device';
   import { registerAssistantContext } from '$lib/assistant/context';
   import {
     alert,
@@ -584,34 +585,36 @@
    *
    * @param target - Video to open; defaults to the selected item or the work.
    * @param startTime - Saved position in seconds; omitted to play from the start.
+   * @returns Whether the player mounted on this device.
    */
-  function play(target = _media ?? media, startTime?: number) {
+  async function play(target = _media ?? media, startTime?: number): Promise<boolean> {
     if (!target) {
-      return;
+      return false;
     }
     playing = true;
-    tick().then(() => {
-      const chapters = [];
-      if (parts.length) {
-        for (const part of parts) {
-          chapters.push({
-            url: buildStreamUrl(part.path),
-            title: mediaTitle(part)
-          });
-        }
+    await tick();
+    if (!player) return false;
+    const chapters = [];
+    if (parts.length) {
+      for (const part of parts) {
+        chapters.push({
+          url: buildStreamUrl(part.path),
+          title: mediaTitle(part)
+        });
       }
-      player?.mount({
-        url: buildStreamUrl(target.path),
-        back: () => {
-          watchLoading = true;
-          playing = false;
-        },
-        title: mediaTitle(target),
-        startTime,
-        chapters: chapters,
-        danmakuServer: target.lib?.danmaku_server
-      });
+    }
+    await player.mount({
+      url: buildStreamUrl(target.path),
+      back: () => {
+        watchLoading = true;
+        playing = false;
+      },
+      title: mediaTitle(target),
+      startTime,
+      chapters: chapters,
+      danmakuServer: target.lib?.danmaku_server
     });
+    return playing && !!player;
   }
 
   /**
@@ -745,11 +748,62 @@
     })
   );
 
+  let handledDevice: DeviceRequest | null = null;
+  let failedDeviceItem = $state<number | null>(null);
+  $effect(() => {
+    const request = $activeDeviceRequest;
+    const item = media;
+    if (request && (request.ownerId !== user.current?.id || failedDeviceItem === request.itemId)) {
+      request.finish(false);
+      return;
+    }
+    if (
+      !request ||
+      handledDevice === request ||
+      request.ownerId !== user.current?.id ||
+      item?.id !== request.itemId ||
+      Number(page.params.item_id) !== request.itemId
+    )
+      return;
+    handledDevice = request;
+    void untrack(async () => {
+      try {
+        if (request.action === 'resume_reading' && item.media_type !== 'video') {
+          reading = true;
+          await loadContent(undefined, undefined, { resume: true });
+          const viewer = item.media_type === 'text' ? textViewer : imageViewer;
+          request.finish(
+            active &&
+              user.current?.id === request.ownerId &&
+              media?.id === request.itemId &&
+              !!readerDialog?.open &&
+              !!viewer &&
+              !readingError &&
+              !!captureProgress
+          );
+        } else if (request.action === 'play_video' && item.media_type === 'video') {
+          const history = await loadWatchHistory();
+          if ($activeDeviceRequest !== request || user.current?.id !== request.ownerId || media?.id !== item.id) {
+            request.finish(false);
+            return;
+          }
+          const target = history?.media ?? (parts.length ? parts[0] : item);
+          request.finish(await play(target, history?.position ?? 0));
+        } else {
+          request.finish(false);
+        }
+      } catch {
+        request.finish(false);
+      }
+    });
+  });
+
   // reload reused detail pages and cancel requests belonging to the previous item
   $effect(() => {
     const itemId = Number(page.params.item_id);
     return untrack(() => {
       active = true;
+      failedDeviceItem = null;
       const controller = new AbortController();
       media = null;
       meta = null;
@@ -786,13 +840,17 @@
           if (data.media_type === 'text') void loadTextChapters();
         })
         .catch((error) => {
-          if (!controller.signal.aborted) console.error(error);
+          if (!controller.signal.aborted) {
+            failedDeviceItem = itemId;
+            console.error(error);
+          }
         })
         .finally(() => {
           if (!controller.signal.aborted) loading.end();
         });
       return () => {
         active = false;
+        if ($activeDeviceRequest?.itemId === itemId) $activeDeviceRequest.finish(false);
         watchController?.abort();
         controller.abort();
         chaptersController?.abort();

@@ -71,6 +71,21 @@
     overscrollH.target = Math.min(pixels, 100);
   }
 
+  /**
+   * Return query parameters that can be restored from normal navigation.
+   * @param url - Application URL with user filters or a one-time approval link.
+   * @returns The durable query string including its leading question mark.
+   */
+  function rememberedSearch(
+    url: Pick<URL, 'href' | 'search'> & { searchParams: Pick<URLSearchParams, 'has'> }
+  ): string {
+    if (!url.searchParams.has('replacement') && !url.searchParams.has('operation')) return url.search;
+    const saved = new URL(url.href);
+    saved.searchParams.delete('replacement');
+    saved.searchParams.delete('operation');
+    return saved.search;
+  }
+
   beforeNavigate(({ from, to }) => {
     const fromUrl = from?.url;
     const toUrl = to?.url;
@@ -88,8 +103,9 @@
     positions.current = { ...positions.current, [fromPath]: position };
     // capture the URL parameters
     const _urlparams = { ...(urlparams.current ?? {}) };
-    if (fromUrl.search) {
-      _urlparams[fromPath] = fromUrl.search;
+    const savedSearch = rememberedSearch(fromUrl);
+    if (fromPath !== '/settings/agent-review' && savedSearch) {
+      _urlparams[fromPath] = savedSearch;
     } else {
       delete _urlparams[fromPath];
     }
@@ -105,9 +121,14 @@
       const searchParams = _urlparams[toPath];
       if (searchParams) {
         delete _urlparams[toPath];
-        if (searchParams !== toUrl.search) {
-          toUrl.search = searchParams;
-        }
+        const saved = rememberedSearch(new URL(toPath + searchParams, toUrl));
+        if (
+          saved &&
+          saved !== toUrl.search &&
+          toPath !== '/settings/agent-review' &&
+          !toUrl.searchParams.has('replacement')
+        )
+          toUrl.search = saved;
       }
     }
     urlparams.current = compactRecord(_urlparams);
@@ -123,14 +144,22 @@
     const mainPath = mainRoute?.path;
     const pageUrl = page.url;
     const pagePath = normalizePathname(pageUrl.pathname);
-    if (!historyBack && mainPath && mainPath !== pagePath) {
-      subroutes.current = { ...(subroutes.current ?? {}), [mainPath]: pagePath + pageUrl.search };
+    const remembered = { ...(subroutes.current ?? {}) };
+    // discard approval links persisted by older clients while keeping normal list filters
+    if (remembered['/settings']?.split('?')[0] === '/settings/agent-review') delete remembered['/settings'];
+    if (remembered['/downloads']?.startsWith('/downloads/plans?')) {
+      const downloadUrl = new URL(remembered['/downloads'], pageUrl.href);
+      remembered['/downloads'] = downloadUrl.pathname + rememberedSearch(downloadUrl);
     }
+    if (!historyBack && mainPath && mainPath !== pagePath && pagePath !== '/settings/agent-review') {
+      remembered[mainPath] = pagePath + rememberedSearch(pageUrl);
+    }
+    subroutes.current = compactRecord(remembered);
     // update the histories store after navigation
     const fromUrl = from?.url;
     const fromPath = fromUrl?.pathname && normalizePathname(fromUrl.pathname);
     if (historyBack && fromPath && fromPath !== pagePath) {
-      histories.current = { ...(histories.current ?? {}), [pagePath]: fromPath + fromUrl.search };
+      histories.current = { ...(histories.current ?? {}), [pagePath]: fromPath + rememberedSearch(fromUrl) };
     }
   });
 

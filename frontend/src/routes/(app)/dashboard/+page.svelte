@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { registerAssistantContext } from '$lib/assistant/context';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
   import {
@@ -479,6 +480,19 @@
     settled = true;
     restorePosition(window);
   });
+  onMount(() =>
+    registerAssistantContext(() => ({
+      page_type: 'dashboard',
+      route: '/dashboard',
+      watch_ids: showWatches ? latestWatches.slice(0, 8).map((w) => w.media!.id) : [],
+      read_ids: showReads
+        ? reads
+            .filter((r) => r.media)
+            .slice(0, 8)
+            .map((r) => r.media!.id)
+        : []
+    }))
+  );
 </script>
 
 <Container padding="1.25rem 0.75rem 2rem" rowGap="2.5rem" maxWidth="max(150vh,72rem)">
