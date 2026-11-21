@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { page } from '$app/state';
-  import PlanReplacementCard from '$lib/components/business/assistant/PlanReplacementCard.svelte';
   import { api } from '$lib/api';
   import { registerAssistantContext } from '$lib/assistant/context';
   import { downloadPlansPath } from '$lib/assistant/navigation';
@@ -24,13 +22,6 @@
   import type { AssistantPageContext, DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { onMount, tick, untrack } from 'svelte';
-
-  const replacementId = $derived.by(() => {
-    const id = page.url.searchParams.get('replacement');
-    return id && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id) && user.current?.role === 'admin'
-      ? id
-      : null;
-  });
 
   let plans: DownloadPlan[] = $state([]);
   let keyword: string = $state('');
@@ -151,92 +142,85 @@
   });
 </script>
 
-<div class="w-full min-w-0">
-  {#if replacementId}
-    {#key replacementId}
-      <div class="mx-auto my-3 w-full max-w-2xl px-4"><PlanReplacementCard id={replacementId} /></div>
-    {/key}
-  {/if}
-  <DataView dvh={!replacementId} loading={$loading} data={plans}>
-    {#snippet filters()}
-      <Select
-        filter
-        options={[{ value: '', label: $_('enum.all') }, ...graphs.map((d) => ({ value: d.id, label: d.name }))]}
-        bind:value={graph}
-        label={$_('field.graph')}
-        onchange={() => search()}
+<DataView dvh loading={$loading} data={plans}>
+  {#snippet filters()}
+    <Select
+      filter
+      options={[{ value: '', label: $_('enum.all') }, ...graphs.map((d) => ({ value: d.id, label: d.name }))]}
+      bind:value={graph}
+      label={$_('field.graph')}
+      onchange={() => search()}
+    />
+    <Search label={$_('field.keyword')} bind:value={keyword} onsearch={() => search()} />
+  {/snippet}
+  {#snippet actions()}
+    {#if user.current?.role === 'admin'}
+      <Button
+        size="md"
+        icon={icons.addCircle}
+        text={$_('action.add', $_('entity.plan'))}
+        onclick={() => creator?.showModal()}
       />
-      <Search label={$_('field.keyword')} bind:value={keyword} onsearch={() => search()} />
-    {/snippet}
-    {#snippet actions()}
-      {#if user.current?.role === 'admin'}
-        <Button
-          size="md"
-          icon={icons.addCircle}
-          text={$_('action.add', $_('entity.plan'))}
-          onclick={() => creator?.showModal()}
-        />
-      {/if}
-    {/snippet}
-    {#snippet header()}
-      <HCell width={['15%', '50%']} text={$_('field.graph')} sort={ordering.bind('graph__name')} />
-      <HCell width={['20%', '50%']} text={$_('field.keyword')} sort={ordering.bind('keyword')} />
-      <HCell width={['20%', null]} text={$_('field.interval')} sort={ordering.bind('interval_num')} />
-      <HCell width={['20%', null]} text={$_('field.last_exec')} sort={ordering.bind('last_exec')} />
-      <HCell width={['15%', null]} text={$_('field.total_count')} />
-      <HCell width={['10%', '4rem']} text={$_('field.status')} />
-      {#if user.current?.role === 'admin'}<HCell actions />{/if}
-    {/snippet}
-    {#snippet row(plan)}
-      <Cell>
-        <div class="truncate">
-          <div class="mb-2 truncate font-medium" title={plan.graph_name}>{plan.graph_name}</div>
-          <div class="truncate text-xs opacity-50">ID: {plan.id}</div>
-        </div>
-      </Cell>
-      <Cell text={plan.keyword} />
-      <Cell text={$_('field.every', `${plan.interval_num} ${$_('duration.hours').toLowerCase()}`)} />
-      <Cell>
-        <div>
-          <div>{$dateTime(plan.last_exec)}</div>
-          {#if plan.first_execution}
-            <p class="mt-1 text-xs text-base-content/60">{$_(`assistant.plan.first.${plan.first_execution.status}`)}</p>
-          {/if}
-        </div>
-      </Cell>
-      <Cell text={`${plan.total_count}${plan.total_limit ? ` / ${plan.total_limit}` : ''}`} />
-      <Cell>
-        <Status rate={plan.running ? 1 : null} class="px-2" />
-      </Cell>
-      {#if user.current?.role === 'admin'}<Cell
-          actions={[
-            {
-              icon: icons.edit,
-              text: $_('action.edit', $_('entity.plan')),
-              onclick: () => {
-                selected = plan;
-                tick().then(() => updater?.showModal());
-              }
-            },
-            {
-              icon: icons.delete,
-              text: $_('action.delete', $_('entity.plan')),
-              onclick: () => {
-                confirm({
-                  icon: icons.delete,
-                  title: `${$_('action.delete', $_('entity.plan'))} [${plan.id}]`,
-                  onconfirm: () => del(plan.id)
-                });
-              }
+    {/if}
+  {/snippet}
+  {#snippet header()}
+    <HCell width={['15%', '50%']} text={$_('field.graph')} sort={ordering.bind('graph__name')} />
+    <HCell width={['20%', '50%']} text={$_('field.keyword')} sort={ordering.bind('keyword')} />
+    <HCell width={['20%', null]} text={$_('field.interval')} sort={ordering.bind('interval_num')} />
+    <HCell width={['20%', null]} text={$_('field.last_exec')} sort={ordering.bind('last_exec')} />
+    <HCell width={['15%', null]} text={$_('field.total_count')} />
+    <HCell width={['10%', '4rem']} text={$_('field.status')} />
+    {#if user.current?.role === 'admin'}<HCell actions />{/if}
+  {/snippet}
+  {#snippet row(plan)}
+    <Cell>
+      <div class="truncate">
+        <div class="mb-2 truncate font-medium" title={plan.graph_name}>{plan.graph_name}</div>
+        <div class="truncate text-xs opacity-50">ID: {plan.id}</div>
+      </div>
+    </Cell>
+    <Cell text={plan.keyword} />
+    <Cell text={$_('field.every', `${plan.interval_num} ${$_('duration.hours').toLowerCase()}`)} />
+    <Cell>
+      <div>
+        <div>{$dateTime(plan.last_exec)}</div>
+        {#if plan.first_execution}
+          <p class="mt-1 text-xs text-base-content/60">{$_(`assistant.plan.first.${plan.first_execution.status}`)}</p>
+        {/if}
+      </div>
+    </Cell>
+    <Cell text={`${plan.total_count}${plan.total_limit ? ` / ${plan.total_limit}` : ''}`} />
+    <Cell>
+      <Status rate={plan.running ? 1 : null} class="px-2" />
+    </Cell>
+    {#if user.current?.role === 'admin'}<Cell
+        actions={[
+          {
+            icon: icons.edit,
+            text: $_('action.edit', $_('entity.plan')),
+            onclick: () => {
+              selected = plan;
+              tick().then(() => updater?.showModal());
             }
-          ]}
-        />{/if}
-    {/snippet}
-    {#snippet paginator(disabled)}
-      <Paginator {disabled} {...pagination} />
-    {/snippet}
-  </DataView>
-</div>
+          },
+          {
+            icon: icons.delete,
+            text: $_('action.delete', $_('entity.plan')),
+            onclick: () => {
+              confirm({
+                icon: icons.delete,
+                title: `${$_('action.delete', $_('entity.plan'))} [${plan.id}]`,
+                onconfirm: () => del(plan.id)
+              });
+            }
+          }
+        ]}
+      />{/if}
+  {/snippet}
+  {#snippet paginator(disabled)}
+    <Paginator {disabled} {...pagination} />
+  {/snippet}
+</DataView>
 
 {#if user.current?.role === 'admin'}
   <PlanEditor bind:this={creator} onsave={() => search()} />

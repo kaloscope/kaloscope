@@ -958,7 +958,7 @@ TOOLS = (
     ),
     AssistantTool(
         "review_workspace_change",
-        "Prepare browser approval. copy_template: target_id=template ID, "
+        "Show a review in chat. copy_template: target_id=template ID, "
         "name=new draft name.",
         AdminChange,
         admin=True,
@@ -977,7 +977,7 @@ TOOLS = (
     ),
     AssistantTool(
         "review_plan_replacement",
-        "Preview atomic rebuild; keep history and timing. User approves in app.",
+        "Preview atomic rebuild; keep history and timing. Confirm in chat.",
         ReplacementReview,
         admin=True,
     ),

@@ -161,9 +161,9 @@ Create a token under **Personal → Access Tokens**, then enter these settings i
 | MCP URL              | `http://127.0.0.1:8000/_api/mcp`, replaced with an instance address reachable by your client |
 | Authorization header | `Authorization: Bearer <token>`, replacing `<token>` with the full token                     |
 
-Tokens default to read-only. Choose all domains, media, downloads, workflows, or system when issuing a token. Media tokens can also be limited to selected libraries. Use `tools/list` to see the operations available to the current account and token. Running searches and changing favorites require the appropriate read-write grant.
+Tokens created on this page default to read-only. Choose read-write access when needed. Available tools and libraries follow the account’s permissions. Use `tools/list` to see the operations available to the current account and token. Running searches and changing favorites require the appropriate read-write grant.
 
-An external client can prepare a plan replacement, workflow publication, or library removal for an administrator. Open the returned in-app link under the same administrator account, review the impact, and confirm. The client can then read the receipt. The complete token appears once at creation. If your client has a **Bearer Token** field, enter the token itself.
+When an administrator asks the web assistant to rebuild a plan, publish a workflow, or remove a library, they review the impact and confirm in the same chat. MCP clients can preview these operations and use the returned operation ID to check their status. The complete token appears once at creation. If your client has a **Bearer Token** field, enter the token itself.
 
 ## Star History
 

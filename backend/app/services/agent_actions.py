@@ -78,7 +78,7 @@ def _visible_preview(preview: dict, user: UserInfo) -> dict:
     """Hide other domains' resource IDs from a workflow credential.
 
     Args:
-        preview: Complete impact shown on the trusted approval page.
+        preview: Complete impact shown to the administrator in the assistant panel.
         user: Account reading the preview through this channel.
 
     Returns:
@@ -368,7 +368,7 @@ def _receipt(row: AgentAdminReview, user: UserInfo) -> dict:
         user: Account and channel receiving the receipt.
 
     Returns:
-        Displayable operation and its trusted in-app location.
+        Operation ID, visible impact and current decision state.
     """
     return {
         "operation_id": str(row.operation_id),
@@ -378,7 +378,6 @@ def _receipt(row: AgentAdminReview, user: UserInfo) -> dict:
         "preview": _visible_preview(row.preview, user),
         "result": row.result,
         "expires_at": row.expires_at.isoformat(),
-        "review_path": f"/settings/agent-review?operation={row.operation_id}",
     }
 
 

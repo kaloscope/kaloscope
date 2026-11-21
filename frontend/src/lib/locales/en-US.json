@@ -320,18 +320,6 @@
     }
   },
   "access_token": {
-    "domain": "Tool domain",
-    "domains": {
-      "all": "All tools",
-      "media": "Media Libraries",
-      "downloads": "Download management",
-      "workflows": "Workflows",
-      "system": "System information"
-    },
-    "libraries": "Media libraries",
-    "selected_libraries": "Choose specific libraries",
-    "all_libraries": "All libraries available to this account",
-    "no_libraries": "No media libraries available",
     "description": "MCP access follows your account and token permissions",
     "create": "Create Token",
     "created": "Token Created",
@@ -1397,7 +1385,6 @@
     "admin_review": {
       "open_draft": "Open full workflow draft",
       "title": "Review operation",
-      "missing": "This link has no valid operation ID.",
       "cancel": "Cancel",
       "yes": "Yes",
       "no": "No",

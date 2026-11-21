@@ -358,7 +358,6 @@ class ReplacementResult(Result):
     before: dict[str, JSONType]
     after: dict[str, JSONType]
     operation_id: str | None = None
-    review_path: str | None = None
     new_plan_id: int | None = None
 
 

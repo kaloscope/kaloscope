@@ -1941,17 +1941,17 @@ def create_server() -> MCPServer:
         ctx: Context,
         change: Annotated[
             AdminChange,
-            Field(description="Single change for a separate in-app approval."),
+            Field(description="Administrative change to preview."),
         ],
     ) -> AdminReviewResult:
-        """Review a sensitive operation and return the trusted browser path.
+        """Preview a sensitive operation without executing it.
 
         Args:
             ctx: Authenticated administrator.
             change: Target and proposed values.
 
         Returns:
-            Frozen review, digest and account-owned location for approval.
+            Frozen impact and, for valid proposals, an ID for receipt lookups.
         """
         return AdminReviewResult.model_validate(
             await _read(review_action(change, _user(ctx)))
@@ -1970,7 +1970,7 @@ def create_server() -> MCPServer:
             bool, Field(description="Request an immediate eligible check.")
         ] = False,
     ) -> ReplacementResult:
-        """Prepare an atomic rebuild and open its review path in the signed-in app.
+        """Preview an atomic download plan rebuild without executing it.
 
         Args:
             ctx: Authenticated administrator.
@@ -1979,7 +1979,7 @@ def create_server() -> MCPServer:
             run_now: Request a first check now if eligible.
 
         Returns:
-            Frozen settings, scheduling policy and path for the user's decision.
+            Frozen settings, scheduling policy and a receipt ID for valid plans.
         """
         result = await _read(
             PlanReplacementService.review(
@@ -1989,10 +1989,6 @@ def create_server() -> MCPServer:
                 user=_user(ctx),
             )
         )
-        if result.get("operation_id"):
-            result["review_path"] = (
-                f"/downloads/plans?replacement={result['operation_id']}"
-            )
         return ReplacementResult.model_validate(result)
 
     @server.tool(annotations=READ_ONLY)

@@ -411,7 +411,8 @@ def test_workflow_reviews(tmp_path, monkeypatch):
                     )
                 )["structuredContent"]
                 key = reviewed["operation_id"]
-                assert reviewed["status"] == "pending" and reviewed["review_path"]
+                assert reviewed["status"] == "pending"
+                assert "review_path" not in reviewed
                 assert (
                     "bound_resources" not in reviewed["preview"]
                     and "download_plans" not in reviewed["preview"]
@@ -439,6 +440,7 @@ def test_workflow_reviews(tmp_path, monkeypatch):
                     )
                 )["structuredContent"]
                 assert receipt["status"] == "applied"
+                assert "review_path" not in receipt
                 assert (
                     "bound_resources" not in receipt["preview"]
                     and "download_plans" not in receipt["preview"]

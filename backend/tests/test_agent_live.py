@@ -129,6 +129,7 @@ def test_plan(tmp_path, monkeypatch, scenario):
                     assert (
                         not preview.is_error
                         and preview.structured_content["status"] == "pending"
+                        and "review_path" not in preview.structured_content
                     )
                     receipt = await client.call_tool(
                         "get_plan_replacement",
@@ -137,6 +138,7 @@ def test_plan(tmp_path, monkeypatch, scenario):
                     assert (
                         not receipt.is_error
                         and receipt.structured_content["plan_id"] == plan.id
+                        and "review_path" not in receipt.structured_content
                     )
                     print(f"MCP HTTP plan read passed ({len(catalog.tools)} tools)")
 

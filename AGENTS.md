@@ -5,6 +5,10 @@ shown. Read any more specific `AGENTS.md` before editing a subtree.
 
 ## Working approach
 
+- **Change the frontend UI only when the user explicitly requests or approves the specific change.** This includes
+  pages, layout, styling, controls, copy, visible defaults, navigation, and interaction behavior, including changes made
+  through shared components or backend responses. If assistant, MCP, or backend work calls for an additional UI change,
+  describe the affected screen and proposed behavior and get approval before implementing it.
 - Start with `git status --short --branch` and inspect the relevant implementation, callers, and tests. Preserve existing
   user changes and keep the diff limited to the requested work.
 - Reuse existing domain modules, utilities, dependencies, and development environments. Make only the changes and small
@@ -166,7 +170,9 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
 - Reuse the domain service's request ID, revision, and receipt for browser approvals.
   `assistant_reviews.py` handles subscriptions, downloads, schedules, and media changes. Existing plan edits use
   `assistant_plan_review.py`. Rebuilds use `plan_replacement.py`, and other administrator reviews use `agent_actions.py`.
-  Recheck the owner and role on every read and decision. Reserve the SQLite writer before reading a decision for update.
+  Keep confirmation for plan rebuilds and administrator actions inside the assistant panel. MCP previews return an
+  operation ID for status checks. Recheck the owner and role on every read and decision. Reserve the SQLite writer
+  before reading a decision for update.
   Distinguish a retryable failure before execution from an uncertain outcome after dispatch.
 - Validate these changes across chat, authenticated HTTP, and Streamable HTTP MCP. From `backend`, run
   `KALOSCOPE_LIVE_AGENT=1 poetry run pytest tests/test_agent*_live.py -q` for the opt-in model evaluations. They read the

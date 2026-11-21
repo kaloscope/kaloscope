@@ -320,18 +320,6 @@
     }
   },
   "access_token": {
-    "domain": "工具范围",
-    "domains": {
-      "all": "全部工具",
-      "media": "媒体库",
-      "downloads": "下载管理",
-      "workflows": "工作流",
-      "system": "系统信息"
-    },
-    "libraries": "媒体库范围",
-    "selected_libraries": "选择指定媒体库",
-    "all_libraries": "该账号可访问的全部媒体库",
-    "no_libraries": "该账号没有可选媒体库",
     "description": "用于 MCP 接入，访问范围受当前账号和令牌权限限制",
     "create": "创建令牌",
     "created": "令牌已创建",
@@ -1397,7 +1385,6 @@
     "admin_review": {
       "open_draft": "查看完整工作流草稿",
       "title": "操作确认",
-      "missing": "此链接缺少有效的操作编号。",
       "cancel": "取消",
       "yes": "是",
       "no": "否",
