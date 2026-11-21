@@ -103,7 +103,15 @@ def test_grants():
     read_names = {tool["function"]["name"] for tool in tools.tool_schemas(reader)}
     admin_names = {tool["function"]["name"] for tool in tools.tool_schemas(ADMIN)}
 
+    search = next(
+        t["function"]
+        for t in tools.tool_schemas(reader)
+        if t["function"]["name"] == "search_indexer"
+    )
+    assert "sources" not in search["parameters"]["properties"]
     assert read_names == {
+        "discover_actions",
+        "search_indexer",
         "list_workflows",
         "list_workflow_jobs",
         "get_workflow",
@@ -117,13 +125,13 @@ def test_grants():
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
-        "list_download_tasks",
-        "get_download_task",
         "get_download_plan",
         "list_download_plans",
         "navigate",
     }
     assert admin_names - read_names == {
+        "list_download_tasks",
+        "get_download_task",
         "validate_workflow",
         "preview_workflow_draft",
         "create_workflow_draft",
@@ -133,6 +141,63 @@ def test_grants():
 
     # creation accepts metadata only; generated content goes through canvas edits
     assert set(tools.WorkflowCreate.model_fields) == {"name", "category", "description"}
+
+
+@pytest.mark.parametrize("domain", list(tools.DOMAIN_TOOLS))
+def test_domain_catalog(domain):
+    for principal in (ADMIN, cast(UserInfo, SimpleNamespace(role=UserRole.USER))):
+        offered = {
+            item["function"]["name"]
+            for item in tools.tool_schemas(principal, domain=domain)
+        }
+        report = asyncio.run(
+            tools.execute_tool(
+                "discover_actions",
+                json.dumps({"domain": domain}),
+                principal,
+                conversation_id=1,
+                call_id="discover",
+            )
+        )
+        assert report["ok"]
+        assert set(report["data"]["tools"]) == offered - {
+            "navigate",
+            "discover_actions",
+            "ask_user",
+        } | ({"ask_user"} if domain == "questions" else set())
+    assert fixed_size(domain=domain) <= 24796
+
+
+def test_workspace_catalog():
+    names = {
+        tool["function"]["name"] for tool in tools.tool_schemas(ADMIN, workspace=True)
+    }
+    assert {
+        "discover_actions",
+        "inspect_workspace",
+        "review_workspace_change",
+        "get_media_batch",
+        "cancel_media_batch",
+    } <= names
+    assert fixed_size(workspace=True) <= 24796
+
+
+def test_batch_delete_mode():
+    for focused in (True, False):
+        schemas = tools.tool_schemas(ADMIN, media_change=True, batch=focused)
+        batch = next(
+            s["function"]
+            for s in schemas
+            if s["function"]["name"] == "review_media_batch"
+        )
+        assert "delete_files" in batch["parameters"]["properties"]
+    change = {"library_id": 1, "operation": "delete", "item_ids": [1]}
+    with pytest.raises(ValueError, match="delete_files"):
+        tools.BatchReview.model_validate(change)
+    assert (
+        tools.BatchReview.model_validate({**change, "delete_files": False}).delete_files
+        is False
+    )
 
 
 def test_compact_schemas():

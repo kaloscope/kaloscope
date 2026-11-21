@@ -444,6 +444,13 @@ def test_indexer_login_access(application):
                 routes.indexer_logout, request(reader, body={}), id=indexer.id
             )
             assert logout.status == 204
+            await FlowGraph.filter(id=indexer.id).update(
+                definition={"nodes": [], "edges": []}
+            )
+            logout = await call_route(
+                routes.indexer_logout, request(reader, body={}), id=indexer.id
+            )
+            assert logout.status == 204
             assert not await FlowVariable.filter(graph_id=indexer.id).exists()
             assert await GlobalCookie.all().count() == 0
 

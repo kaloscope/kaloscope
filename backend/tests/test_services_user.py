@@ -211,7 +211,11 @@ def test_history_record(monkeypatch, rel_type, days):
                 last_activity=now,
             )
             entry = HistoryEntry(
-                rel_type=rel_type, rel_id=1, keyword="Query", position=10, percentage=20
+                rel_type=rel_type,
+                rel_id=0 if rel_type == HistoryType.SEARCH else 1,
+                keyword="Query",
+                position=10,
+                percentage=20,
             )
             first = await UserHistoryService.record(session, entry)
             if days == 0:
@@ -306,6 +310,9 @@ def test_preferences_http(monkeypatch, preferences):
                 ("search_records", True),
                 ("watch_records", "3"),
                 ("read_records", -2),
+                ("vibration", "true"),
+                ("recent_reads", 1),
+                ("homepage", "/unknown"),
             ):
                 response = await client.post(
                     "/_api/user/update_pref", json={"key": key, "value": value}
@@ -314,6 +321,11 @@ def test_preferences_http(monkeypatch, preferences):
             await user.refresh_from_db()
             assert user.preferences == preferences
 
+            denied = await client.post(
+                "/_api/user/update_pref",
+                json={"key": "homepage", "value": "/downloads"},
+            )
+            assert denied.status_code == 403
             for key, value in (
                 ("read_records", 90),
                 ("watch_records", 0),
@@ -377,3 +389,20 @@ def test_preferences_http(monkeypatch, preferences):
             assert UserService.DEFAULT_PREFERENCES["recent_reads"] is True
 
     asyncio.run(run())
+
+
+def test_legacy_display_preferences():
+    stored = {
+        "homepage": "/downloads",
+        "recent_reads": {},
+        "vibration": "true",
+        "watch_records": 7,
+    }
+    prefs = UserService.preferences_for(stored, UserRole.USER)
+
+    assert prefs["homepage"] == "/dashboard"
+    assert prefs["recent_reads"] is True and prefs["vibration"] is False
+    assert prefs["watch_records"] == 7
+    assert (
+        UserService.preferences_for(stored, UserRole.ADMIN)["homepage"] == "/downloads"
+    )

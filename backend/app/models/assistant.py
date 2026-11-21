@@ -313,8 +313,50 @@ class DownloadPlansContext(ContextModel):
     filters: DownloadPlanFilters = Field(default_factory=DownloadPlanFilters)
 
 
+class DeviceReceipt(ContextModel):
+    """Record whether the registered destination opened on the requesting device."""
+
+    opened: bool
+
+
+class DashboardContext(ContextModel):
+    """Reference only the reading and video works currently visible on the dashboard."""
+
+    page_type: Literal["dashboard"]
+    route: Literal["/dashboard"]
+    watch_ids: list[ResourceID] = Field(default_factory=list, max_length=8)
+    read_ids: list[ResourceID] = Field(default_factory=list, max_length=8)
+
+
+class WebSearchContext(ContextModel):
+    """Identify a search page without its login data, resource URLs or credentials."""
+
+    page_type: Literal["web_search"]
+    route: str = Field(max_length=120)
+    workflow_id: ResourceID | None = None
+    keyword: str = Field(default="", max_length=255)
+
+    @model_validator(mode="after")
+    def check_route(self) -> Self:
+        """Match the captured search route with its selected indexer.
+
+        Returns:
+            The verified search context.
+
+        Raises:
+            ValueError: If the route does not match the indexer.
+        """
+        if self.route != "/websearch/global" and (
+            self.workflow_id is None or self.route != f"/websearch/{self.workflow_id}"
+        ):
+            raise ValueError("Invalid search page")
+        return self
+
+
 type AssistantPageContext = Annotated[
-    WorkflowListContext
+    DashboardContext
+    | WebSearchContext
+    | WorkflowListContext
     | WorkflowDesignerContext
     | MediaLibraryContext
     | MediaItemContext
@@ -476,6 +518,7 @@ class AssistantTurnRequest(ContextModel):
     prompt: str = Field(min_length=1, max_length=32768)
     context: AssistantPageContext | None = None
     retry_of: ResourceID | None = None
+    answer_to: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
     @model_validator(mode="after")
     def validate_content(self) -> Self:
@@ -487,6 +530,14 @@ class AssistantTurnRequest(ContextModel):
         Raises:
             ValueError: If the prompt or page snapshot exceeds request boundaries.
         """
+        if self.answer_to and (
+            self.retry_of or self.request_id != f"answer-{self.answer_to}"
+        ):
+            raise ValueError(
+                "A question continuation requires its original request identity"
+            )
+        if self.request_id.startswith("answer-") and not self.answer_to:
+            raise ValueError("An answer request must reference its question")
         if not self.prompt.strip() or len(self.prompt.encode()) > MAX_PROMPT_BYTES:
             raise ValueError("Provide a bounded nonblank prompt")
 

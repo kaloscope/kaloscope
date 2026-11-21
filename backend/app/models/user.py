@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum, auto
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self, get_args
 
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt, model_validator
 from sanic.request.form import File
@@ -80,6 +80,7 @@ class UserFavorite(TortoiseModel):
 
     class Meta:
         table = "user_favorite"
+        unique_together = (("user", "indexer", "rsrc_id"),)
         ordering = ["-created_at"]
 
     class PydanticMeta:
@@ -169,11 +170,41 @@ class UserAvatar(BaseModel, RequestFilesMixin):
     avatar: File | None = None
 
 
+DisplayKey = Literal[
+    "homepage", "vibration", "recent_reads", "recent_watches", "recent_searches"
+]
+DISPLAY_KEYS = get_args(DisplayKey)
+
+
+class DisplayPreference(BaseModel, extra="forbid", strict=True):
+    """Change one reversible display preference of the signed-in account."""
+
+    key: DisplayKey
+    value: (
+        bool
+        | Literal["/dashboard", "/websearch", "/medialibs", "/downloads", "/settings"]
+    )
+
+    @model_validator(mode="after")
+    def validate_kind(self) -> Self:
+        """Match a homepage path or a display toggle to its setting.
+
+        Returns:
+            Validated personal preference.
+
+        Raises:
+            ValueError: If the value has the wrong shape for this key.
+        """
+        if (self.key == "homepage") != isinstance(self.value, str):
+            raise ValueError("Use a homepage path or a boolean toggle")
+        return self
+
+
 class UserPreference(KVPair):
     @model_validator(mode="before")
     @classmethod
-    def check_retention(cls, data: Any) -> Any:
-        """Validate history retention before value coercion.
+    def validate_setting(cls, data: Any) -> Any:
+        """Validate display and retention settings before value coercion.
 
         Args:
             data: Submitted preference data.
@@ -182,8 +213,10 @@ class UserPreference(KVPair):
             Unchanged data for normal preference validation.
 
         Raises:
-            ValueError: If history retention is not an integer of at least -1.
+            ValueError: If a display setting or retention period is invalid.
         """
+        if isinstance(data, dict) and data.get("key") in DISPLAY_KEYS:
+            DisplayPreference.model_validate(data)
         if isinstance(data, dict) and data.get("key") in (
             "search_records",
             "watch_records",
@@ -200,6 +233,22 @@ class FavoriteQuery(Pageable):
     rsrc_ids: list[PositiveInt | Annotated[str, Field(min_length=1)]] | None = Field(
         min_length=1, max_length=999, default=None
     )
+
+
+class IndexerFavoritesQuery(BaseModel, extra="forbid"):
+    """Read a bounded page of personal favorites visible to the current account."""
+
+    workflow_id: PositiveInt | None = None
+    page: int = Field(default=1, ge=1)
+
+
+class IndexerFavoriteChange(BaseModel, extra="forbid"):
+    """Set a search resource's personal favorite state."""
+
+    workflow_id: PositiveInt
+    resource_id: str = Field(min_length=1, max_length=255)
+    favorite: bool
+    title: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class TextLocator(BaseModel, extra="forbid", strict=True):

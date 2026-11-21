@@ -1473,6 +1473,24 @@ def test_page_selection(monkeypatch):
             )
             assert denied["error"]["code"] == "permission_denied"
 
+            admin.perms = Permissions()
+            for plan_id in (kept.id, kept.id + 1000):
+                inaccessible = {
+                    **context,
+                    "selected_plan": {"plan_id": plan_id, "workflow_id": graph.id},
+                }
+                refused, _ = await converse(
+                    conversation["id"],
+                    admin,
+                    "Show plan",
+                    context=inaccessible,
+                    key=f"hidden-{plan_id}",
+                )
+                assert (
+                    refused.event == "error"
+                    and refused.data["code"] == "permission_denied"
+                )
+
             refused = await tools.execute_tool(
                 "review_download_plan_change",
                 dumps({"action": "delete", "plan_id": kept.id}).decode(),

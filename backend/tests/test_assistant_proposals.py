@@ -852,11 +852,13 @@ def test_authorization(case):
             assert record.status == "pending"
             assert record.attempts == 0
             assert env.graph.draft_version == 0
-            assert not [
+            # a batch stop affects media work only; canvas decisions stay browser-owned
+            decision_names = {
                 name
                 for name in tools.available_tools(env.owner)
                 if any(word in name for word in ("confirm", "save", "cancel"))
-            ]
+            }
+            assert decision_names == {"cancel_media_batch"}
 
     asyncio.run(run())
 

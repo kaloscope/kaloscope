@@ -8,15 +8,24 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from mcp.server import MCPServer
+from mcp.server.context import ServerRequestContext
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
+from mcp.types import (
+    CallToolResult,
+    InputRequiredResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    ToolAnnotations,
+)
 from pydantic import BaseModel, Field
 from sanic import HTTPResponse, Request, Sanic, raw
+from starlette.requests import Request as ASGIRequest
 
 from app.core.ai.queries import download_plans, trial_run
 from app.core.constants import MCP_PATH
+from app.core.dl.access import DOWNLOAD_GRANTS
 from app.core.exceptions import (
     ErrorCode,
     ForbiddenException,
@@ -24,7 +33,8 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.flow.reference import get_workflow_reference as read_workflow_reference
-from app.models.assistant import DownloadPlanOrdering
+from app.models.agent_actions import AdminChange, WorkspaceQuery
+from app.models.assistant import MEDIA_PATH, DownloadPlanOrdering
 from app.models.base import Pageable
 from app.models.download import (
     DownloadPlanApply,
@@ -56,13 +66,19 @@ from app.models.flow import (
     ScheduleChange,
 )
 from app.models.mcp import (
+    AdminReviewResult,
     DownloadResult,
     DownloadTaskResult,
+    FavoritesPage,
+    FavoriteStateResult,
     IndexerSearchResult,
+    IngestionDiagnosis,
     ItemsResult,
     LibraryIngestionResult,
     LibraryStatus,
+    MCPTokenDomain,
     MCPTokenScope,
+    MCPUserInfo,
     MediaBatchResult,
     MediaBatchReviewResult,
     MediaChangeApplyResult,
@@ -73,6 +89,7 @@ from app.models.mcp import (
     MediaScanReviewResult,
     NodeTypesResult,
     PageResult,
+    PersonalPreferences,
     PlanChangeApplyResult,
     PlanChangeReviewResult,
     PlanCreationResult,
@@ -80,6 +97,7 @@ from app.models.mcp import (
     PlanOptionsResult,
     PlanValidationResult,
     ProviderResult,
+    ReplacementResult,
     ScheduleApplyResult,
     ScheduleReviewResult,
     TaskActionApplyResult,
@@ -92,6 +110,7 @@ from app.models.mcp import (
     WorkflowReference,
     WorkflowResult,
     WorkflowRunResult,
+    WorkspaceFacts,
 )
 from app.models.media import (
     LibraryConfig,
@@ -101,15 +120,28 @@ from app.models.media import (
     MediaQuery,
     MediaRescrape,
 )
-from app.models.user import UserInfo
+from app.models.user import (
+    DisplayPreference,
+    IndexerFavoriteChange,
+    IndexerFavoritesQuery,
+)
 from app.models.workflow_authoring import (
     HTTPProbe,
     HTTPProbeResult,
     TemplateResult,
     TemplateValidation,
 )
+from app.services.agent_actions import (
+    WORKFLOW_REVIEW_ACTIONS,
+    WORKSPACE_TOPICS,
+    review_action,
+)
+from app.services.agent_actions import (
+    inspect_workspace as workspace_facts,
+)
 from app.services.ai import AIProviderService
 from app.services.download import DownloadPlanService, DownloadTaskService
+from app.services.download_diagnostics import IngestionQuery, diagnose_ingestion
 from app.services.flow import (
     FlowGraphService,
     FlowJobService,
@@ -119,6 +151,8 @@ from app.services.flow import (
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService, _require_admin
+from app.services.plan_replacement import PlanReplacementService
+from app.services.user import UserFavoriteService, UserService
 from app.services.workflow_authoring import (
     probe_http_request as probe_request,
 )
@@ -150,12 +184,14 @@ READ_ONLY = ToolAnnotations(
 
 _READ_TOOLS = frozenset(
     {
-        "get_download_plan_options",
-        "validate_download_plan",
-        "get_download_plan",
-        "list_download_plans",
-        "get_library_ingestion",
-        "validate_download_task",
+        "inspect_workspace",
+        "review_workspace_change",
+        *(
+            name
+            for name, grant in DOWNLOAD_GRANTS.items()
+            if not grant.read_write and name != "get_download_task"
+        ),
+        "list_indexer_favorites",
         "list_workflows",
         "get_workflow",
         "list_node_types",
@@ -165,18 +201,15 @@ _READ_TOOLS = frozenset(
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
-        "list_download_tasks",
         "list_workflow_jobs",
         "list_ai_providers",
+        "get_personal_preferences",
         "validate_workflow",
         "preview_workflow_draft",
         "list_workflow_drafts",
         "get_workflow_draft",
         "review_workflow_schedule",
-        "review_download_plan_change",
-        "review_download_task_action",
         "review_library_scan",
-        "review_media_rescrape",
         "review_library_config",
         "review_media_batch",
         "get_media_batch",
@@ -185,21 +218,22 @@ _READ_TOOLS = frozenset(
 
 _WRITE_TOOLS = frozenset(
     {
-        "search_indexer",
-        "create_download_plan",
-        "create_download_task",
+        *(name for name, grant in DOWNLOAD_GRANTS.items() if grant.read_write),
         "create_workflow_draft",
+        "set_indexer_favorite",
         "save_workflow_draft",
+        "set_personal_preference",
         "restore_workflow_draft",
         "probe_http_request",
+        "review_media_rescrape",
         "run_workflow",
         "apply_workflow_schedule",
-        "apply_download_plan_change",
-        "apply_download_task_action",
         "apply_media_change",
         "cancel_media_batch",
     }
 )
+
+_REGISTERED_TOOLS = _READ_TOOLS | _WRITE_TOOLS
 
 DRAFT_WRITE = ToolAnnotations(
     read_only_hint=False,
@@ -209,8 +243,150 @@ DRAFT_WRITE = ToolAnnotations(
 )
 
 
+# single-domain credentials expose only the explicitly named operations
+_DOMAIN_TOOLS = {
+    MCPTokenDomain.MEDIA: {
+        "list_media_libraries",
+        "list_media_items",
+        "get_media_item",
+        "review_media_batch",
+        "get_media_batch",
+        "apply_media_change",
+        "cancel_media_batch",
+    },
+    MCPTokenDomain.DOWNLOADS: {
+        "search_indexer",
+        "diagnose_download_ingestion",
+        "get_download_plan",
+        "list_download_plans",
+        "list_download_tasks",
+        "review_download_task_action",
+        "apply_download_task_action",
+        "review_download_plan_change",
+        "apply_download_plan_change",
+        "review_plan_replacement",
+        "get_plan_replacement",
+    },
+    MCPTokenDomain.WORKFLOWS: {
+        "validate_workflow_template",
+        "inspect_workspace",
+        "review_workspace_change",
+        "list_workflows",
+        "get_workflow",
+        "list_node_types",
+        "get_workflow_reference",
+        "get_workflow_logs",
+        "validate_workflow",
+        "preview_workflow_draft",
+        "create_workflow_draft",
+        "save_workflow_draft",
+        "restore_workflow_draft",
+        "list_workflow_drafts",
+        "get_workflow_draft",
+        "list_workflow_jobs",
+        "review_workflow_schedule",
+        "apply_workflow_schedule",
+    },
+    MCPTokenDomain.SYSTEM: {"list_ai_providers", "inspect_workspace"},
+}
+
+
+# non-admin users may search only their granted indexers and manage personal data
+_USER_TOOLS = {
+    *(name for name, grant in DOWNLOAD_GRANTS.items() if grant.role is None),
+    "list_workflows",
+    "get_workflow",
+    "get_workflow_logs",
+    "list_workflow_jobs",
+    "get_workflow_reference",
+    "list_node_types",
+    "validate_workflow_template",
+    "list_media_libraries",
+    "list_media_items",
+    "get_media_item",
+    "list_indexer_favorites",
+    "set_indexer_favorite",
+    "get_personal_preferences",
+    "set_personal_preference",
+}
+
+
 class ScopedMCPServer(MCPServer):
     """Enforce explicit server-owned tool grants independently of annotations."""
+
+    async def _handle_list_tools(
+        self, ctx: ServerRequestContext, params: PaginatedRequestParams | None
+    ) -> ListToolsResult:
+        """List the catalog available to this HTTP client's domain grant.
+
+        Args:
+            ctx: Verified SDK request context.
+            params: SDK pagination request.
+
+        Returns:
+            Catalog limited by the current account, domain and execution grant.
+        """
+        user = _principal(getattr(ctx, "request", None))
+        if user is None:
+            return ListToolsResult(tools=[])
+        result = await super()._handle_list_tools(ctx, params)
+        domain = user.mcp_domain
+        result.tools = [
+            tool
+            for tool in result.tools
+            if tool.name in _REGISTERED_TOOLS
+            and (
+                domain == MCPTokenDomain.ALL
+                or tool.name in _DOMAIN_TOOLS.get(domain, ())
+            )
+            and (
+                tool.name not in _WRITE_TOOLS
+                or user.mcp_scope == MCPTokenScope.READ_WRITE
+            )
+            and (user.role == "admin" or tool.name in _USER_TOOLS)
+        ]
+        for index, tool in enumerate(result.tools):
+            if domain in WORKSPACE_TOPICS and tool.name in {
+                "inspect_workspace",
+                "review_workspace_change",
+            }:
+                if tool.name == "inspect_workspace":
+                    model, field, values = (
+                        "WorkspaceQuery",
+                        "topic",
+                        WORKSPACE_TOPICS[domain],
+                    )
+                else:
+                    model, field, values = (
+                        "AdminChange",
+                        "action",
+                        WORKFLOW_REVIEW_ACTIONS,
+                    )
+                scoped = tool.model_copy(deep=True)
+                scoped.input_schema["$defs"][model]["properties"][field]["enum"] = (
+                    sorted(values)
+                )
+            elif domain == MCPTokenDomain.MEDIA and tool.name == "apply_media_change":
+                scoped = tool.model_copy(deep=True)
+                definitions = scoped.input_schema["$defs"]
+                change = definitions["MediaChangeApply"]["properties"]
+                change["change"] = {"$ref": "#/$defs/MediaBatch"}
+                # rebuild the nested definitions from the one supported operation
+                batch = MediaBatch.model_json_schema()
+                scoped.input_schema["$defs"] = {
+                    "MediaChangeApply": definitions["MediaChangeApply"],
+                    **batch.pop("$defs", {}),
+                    "MediaBatch": batch,
+                }
+            elif user.role != "admin" and tool.name == "search_indexer":
+                scoped = tool.model_copy(deep=True)
+                del scoped.input_schema["$defs"]["IndexerSearch"]["properties"][
+                    "sources"
+                ]
+            else:
+                continue
+            result.tools[index] = scoped
+        return result
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: Context | None = None
@@ -228,19 +404,52 @@ class ScopedMCPServer(MCPServer):
         Raises:
             ToolError: If the tool lacks a registered grant or the token cannot use it.
         """
-        if name not in _READ_TOOLS | _WRITE_TOOLS:
+        user = _user(context)
+        if name not in _REGISTERED_TOOLS:
             raise ToolError("This tool has no registered access grant.")
-        if name in _WRITE_TOOLS:
-            user = _user(context) if context is not None else None
-            if getattr(user, "mcp_scope", None) != MCPTokenScope.READ_WRITE:
-                raise ToolError(
-                    "This MCP access token only permits read-only tools. "
-                    "Use a read-write token for write operations."
-                )
+        domain = user.mcp_domain
+        if domain != MCPTokenDomain.ALL and name not in _DOMAIN_TOOLS.get(domain, ()):
+            raise ToolError("This tool is outside the token's domain grant.")
+        if domain == MCPTokenDomain.MEDIA and name == "apply_media_change":
+            application = arguments.get("application")
+            change = (
+                application.get("change") if isinstance(application, dict) else None
+            )
+            if not isinstance(change, dict) or change.get("action") != "batch":
+                raise ToolError("This token permits only media file batch operations.")
+        if name in _WRITE_TOOLS and user.mcp_scope != MCPTokenScope.READ_WRITE:
+            raise ToolError(
+                "This MCP access token only permits read-only tools. "
+                "Use a read-write token for write operations."
+            )
+        if user.role != "admin" and name not in _USER_TOOLS:
+            raise ToolError(
+                "This account is not allowed to access or edit this resource. "
+                "Ask an administrator to review account access."
+            )
         return await super().call_tool(name, arguments, context)
 
 
-def _user(ctx: Context) -> UserInfo:
+def _principal(request: ASGIRequest | None) -> MCPUserInfo | None:
+    """Return the verified MCP identity attached by the HTTP middleware.
+
+    Args:
+        request: HTTP request carrying the token grant, if any.
+
+    Returns:
+        The verified identity, or `None` when discovery must be empty.
+    """
+    user = getattr(getattr(request, "state", None), "user", None)
+    if (
+        isinstance(user, MCPUserInfo)
+        and isinstance(user.mcp_domain, MCPTokenDomain)
+        and isinstance(user.mcp_scope, MCPTokenScope)
+    ):
+        return user
+    return None
+
+
+def _user(ctx: Context | None) -> MCPUserInfo:
     """Read the account authenticated by the enclosing Sanic request.
 
     Args:
@@ -252,8 +461,13 @@ def _user(ctx: Context) -> UserInfo:
     Raises:
         ToolError: If the tool was invoked outside an authenticated HTTP request.
     """
-    request = ctx.request_context.request
-    if request is None or (user := getattr(request.state, "user", None)) is None:
+    try:
+        user = _principal(
+            getattr(getattr(ctx, "request_context", None), "request", None)
+        )
+    except ValueError:
+        user = None
+    if user is None:
         raise ToolError(
             "An authenticated Kaloscope HTTP request is required. Authenticate the "
             "MCP client with a valid Kaloscope MCP access token before retrying."
@@ -298,7 +512,7 @@ async def _read(operation: Awaitable[Any]) -> Any:
                 "again. Do not overwrite or retry with a guessed version."
             ) from None
         raise ToolError(
-            f"{exc.message}: Correct the input or validate the proposed draft "
+            f"{exc.message}: Correct the input and review the latest state "
             "before retrying."
         ) from None
 
@@ -464,7 +678,8 @@ def create_server() -> MCPServer:
         changed inputs; empty results require revision or explicit agreement to wait.
 
         Args:
-            ctx: Administrator context with a read-write token.
+            ctx: Account authorized for the indexer, with a read-write token.
+                Sealed download sources additionally require an administrator.
             search: Selected indexer and explicit keyword, filters and page.
 
         Returns:
@@ -539,6 +754,78 @@ def create_server() -> MCPServer:
         """
         return PlanCreationResult.model_validate(
             await _read(DownloadPlanService.create_once(creation, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def list_indexer_favorites(
+        ctx: Context,
+        query: Annotated[
+            IndexerFavoritesQuery,
+            Field(description="Select a page of the account's saved search results."),
+        ],
+    ) -> FavoritesPage:
+        """List this account's saved search resources on its accessible indexers.
+
+        Args:
+            ctx: Authenticated caller.
+            query: Optional workflow and one-based page.
+
+        Returns:
+            Bounded personal favorites, total count and next page.
+        """
+        return FavoritesPage.model_validate(
+            await _read(UserFavoriteService.summaries(query, _user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        )
+    )
+    async def set_indexer_favorite(
+        ctx: Context,
+        change: Annotated[
+            IndexerFavoriteChange,
+            Field(
+                description="Select a result and whether it belongs in your favorites."
+            ),
+        ],
+    ) -> FavoriteStateResult:
+        """Save or remove a selected search resource in this account's favorites.
+
+        Args:
+            ctx: Account with a read-write token.
+            change: Source indexer, resource identity and desired personal state.
+
+        Returns:
+            The resulting favorite state for this resource.
+        """
+        return FavoriteStateResult.model_validate(
+            await _read(UserFavoriteService.set_selected(change, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def diagnose_download_ingestion(
+        ctx: Context,
+        query: Annotated[
+            IngestionQuery,
+            Field(description="Select one plan, check, or task to trace."),
+        ],
+    ) -> IngestionDiagnosis:
+        """Trace a plan check or download to stored transfer and index records.
+
+        Args:
+            ctx: Authenticated administrator.
+            query: One plan, attempt or task identity and a page.
+
+        Returns:
+            Available records and exact links. Missing evidence remains unknown.
+        """
+        return IngestionDiagnosis.model_validate(
+            await _read(diagnose_ingestion(query, _user(ctx)))
         )
 
     @server.tool(annotations=READ_ONLY)
@@ -1364,7 +1651,14 @@ def create_server() -> MCPServer:
         watcher = request.state.app.ctx.lib_watcher
 
         return ItemsResult[LibraryStatus](
-            items=await _read(MediaLibService.list_libraries(user, watcher))
+            items=await _read(
+                MediaLibService.list_libraries(
+                    user,
+                    watcher,
+                    include_bindings=getattr(user, "mcp_domain", MCPTokenDomain.ALL)
+                    != MCPTokenDomain.MEDIA,
+                )
+            )
         )
 
     @server.tool(annotations=READ_ONLY)
@@ -1445,15 +1739,16 @@ def create_server() -> MCPServer:
             current local metadata. Check `metadata_state` and `metadata_issues`:
             fallback fields can exist even when a source is missing or invalid.
             Reading items also include `role` and `metadata_task`; null task means
-            no tracked task. This read does not start playback, indexing, or scraping.
+            no tracked task. The relative `app_path` opens the details on the
+            caller's device; playback and reading run there.
 
         Raises:
             ToolError: If library access is denied or the item or its parent is
                 unavailable. Follow the returned recovery guidance before retrying.
         """
-        return MediaDetails.model_validate(
-            await _read(MediaItemService.get_details(item_id, _user(ctx)))
-        )
+        details = await _read(MediaItemService.get_details(item_id, _user(ctx)))
+        details["app_path"] = f"{MEDIA_PATH}/{details['lib']['id']}/{details['id']}"
+        return MediaDetails.model_validate(details)
 
     @server.tool(annotations=READ_ONLY)
     async def list_download_tasks(
@@ -1491,8 +1786,7 @@ def create_server() -> MCPServer:
 
         Returns:
             `total` matching tasks and the requested `items` page using stored status.
-            Visibility matches the download page's shared task list; results are not
-            restricted to tasks created by the authenticated account.
+            Administrators can read the instance-wide task list.
             Sizes are in bytes, speeds in bytes per second, and `percentage` is from
             0 to 100; null means unknown. Progress can describe an intermediate phase;
             use `state` to determine completion. `ratio` is progress display text and
@@ -1501,7 +1795,7 @@ def create_server() -> MCPServer:
             review_download_task_action. Source links, file lists, and downloader
             credentials are excluded.
         """
-        _user(ctx)
+        user = _user(ctx)
         query = DownloadQuery(
             name=name,
             state=state,
@@ -1513,6 +1807,7 @@ def create_server() -> MCPServer:
             await _read(
                 DownloadTaskService.list_tasks(
                     query,
+                    user,
                     include=(
                         "id",
                         "name",
@@ -1600,6 +1895,105 @@ def create_server() -> MCPServer:
         )
 
     @server.tool(annotations=READ_ONLY)
+    async def inspect_workspace(
+        ctx: Context,
+        query: Annotated[
+            WorkspaceQuery, Field(description="Topic, page and optional receipt ID.")
+        ],
+    ) -> WorkspaceFacts:
+        """Read operational summaries, template revisions and administrator receipts.
+
+        Args:
+            ctx: Authenticated administrator.
+            query: Topic and bounded page.
+
+        Returns:
+            Backend-observed facts for the selected topic.
+        """
+        return WorkspaceFacts.model_validate(
+            {"topic": query.topic, **await _read(workspace_facts(query, _user(ctx)))}
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def review_workspace_change(
+        ctx: Context,
+        change: Annotated[
+            AdminChange,
+            Field(description="Single change for a separate in-app approval."),
+        ],
+    ) -> AdminReviewResult:
+        """Review a sensitive operation and return the trusted browser path.
+
+        Args:
+            ctx: Authenticated administrator.
+            change: Target and proposed values.
+
+        Returns:
+            Frozen review, digest and account-owned location for approval.
+        """
+        return AdminReviewResult.model_validate(
+            await _read(review_action(change, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def review_plan_replacement(
+        ctx: Context,
+        plan_id: Annotated[
+            _ResourceID, Field(description="Original download plan ID.")
+        ],
+        keep_history: Annotated[
+            bool, Field(description="Preserve deduplication and counts.")
+        ] = True,
+        run_now: Annotated[
+            bool, Field(description="Request an immediate eligible check.")
+        ] = False,
+    ) -> ReplacementResult:
+        """Prepare an atomic rebuild and open its review path in the signed-in app.
+
+        Args:
+            ctx: Authenticated administrator.
+            plan_id: Plan to rebuild.
+            keep_history: Retain its history and count.
+            run_now: Request a first check now if eligible.
+
+        Returns:
+            Frozen settings, scheduling policy and path for the user's decision.
+        """
+        result = await _read(
+            PlanReplacementService.review(
+                plan_id,
+                keep_history=keep_history,
+                run_now=run_now,
+                user=_user(ctx),
+            )
+        )
+        if result.get("operation_id"):
+            result["review_path"] = (
+                f"/downloads/plans?replacement={result['operation_id']}"
+            )
+        return ReplacementResult.model_validate(result)
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_plan_replacement(
+        ctx: Context,
+        operation_id: Annotated[
+            UUID, Field(description="Operation ID from a replacement review.")
+        ],
+    ) -> ReplacementResult:
+        """Read a replacement receipt including any committed plan ID.
+
+        Args:
+            ctx: Authenticated administrator.
+            operation_id: Review owned by the calling account.
+
+        Returns:
+            Current decision and execution state.
+        """
+        return ReplacementResult.model_validate(
+            await _read(PlanReplacementService.status(str(operation_id), _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
     async def review_download_plan_change(
         ctx: Context,
         change: Annotated[
@@ -1681,7 +2075,7 @@ def create_server() -> MCPServer:
         short bullets, not raw JSON. Wait for confirmation.
 
         Args:
-            ctx: Authenticated request context; deletion requires an administrator.
+            ctx: Administrator request context.
             change: Target task, action and whether deletion removes files.
 
         Returns:
@@ -1716,8 +2110,7 @@ def create_server() -> MCPServer:
         """Dispatch a reviewed task action at most once and return at once.
 
         Args:
-            ctx: Context with a read-write token; deletion requires an
-                administrator.
+            ctx: Administrator context with a read-write token.
             application: The reviewed request and the user's confirmation.
 
         Returns:
@@ -1759,9 +2152,9 @@ def create_server() -> MCPServer:
 
     @server.tool(
         annotations=ToolAnnotations(
-            read_only_hint=True,
-            destructive_hint=False,
-            idempotent_hint=True,
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=False,
             open_world_hint=True,
         )
     )
@@ -1896,7 +2289,7 @@ def create_server() -> MCPServer:
         async def read() -> dict:
             user = _user(ctx)
             _require_admin(user)
-            details = await MediaBatchService.details(batch_id)
+            details = await MediaBatchService.details(batch_id, user=user)
             await MediaLibService.get_accessible(details["library_id"], user)
             page = await MediaBatchService.entries(
                 batch_id, Pageable(page_num=page_num, page_size=page_size), status
@@ -1973,7 +2366,7 @@ def create_server() -> MCPServer:
         async def stop() -> dict:
             user = _user(ctx)
             _require_admin(user)
-            details = await MediaBatchService.details(batch_id)
+            details = await MediaBatchService.details(batch_id, user=user)
             await MediaLibService.get_accessible(details["library_id"], user)
             details = await MediaBatchService.cancel(batch_id)
             page = await MediaBatchService.entries(
@@ -2036,6 +2429,47 @@ def create_server() -> MCPServer:
         )
         return PageResult[WorkflowJob].model_validate(
             await _read(FlowJobService.list_jobs(query, _user(ctx)))
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    async def get_personal_preferences(ctx: Context) -> PersonalPreferences:
+        """Read the authenticated user's home page, vibration and dashboard preferences.
+
+        Args:
+            ctx: Authenticated account context.
+
+        Returns:
+            Effective display settings for this account.
+        """
+        return PersonalPreferences.model_validate(
+            await _read(UserService.display_preferences(_user(ctx)))
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        )
+    )
+    async def set_personal_preference(
+        ctx: Context,
+        change: Annotated[
+            DisplayPreference, Field(description="Display setting and its new value.")
+        ],
+    ) -> PersonalPreferences:
+        """Change one reversible display preference of the authenticated user.
+
+        Args:
+            ctx: Account context with a read-write token.
+            change: New value for the requested setting.
+
+        Returns:
+            Effective display settings after applying the change.
+        """
+        return PersonalPreferences.model_validate(
+            await _read(UserService.display_preferences(_user(ctx), change))
         )
 
     @server.tool(annotations=READ_ONLY)

@@ -1465,7 +1465,9 @@ def test_superseded(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("scope", ["same_turn", "next_turn", "other_library"])
+@pytest.mark.parametrize(
+    "scope", ["same_turn", "unfinished_turn", "next_turn", "other_library"]
+)
 def test_listing_after_review(monkeypatch, tmp_path, scope):
     async def run():
         async with media(monkeypatch, tmp_path) as env:
@@ -1475,7 +1477,7 @@ def test_listing_after_review(monkeypatch, tmp_path, scope):
             turn = await AssistantTurn.create(
                 conversation_id=conversation["id"],
                 request_id="scan",
-                status="complete",
+                status="running" if scope == "unfinished_turn" else "complete",
                 prompt="Preview scanning this library.",
             )
             scan = await scan_review(env.owner, 60)
@@ -1517,6 +1519,9 @@ def test_listing_after_review(monkeypatch, tmp_path, scope):
                 assert confirmed["outcome"] == "scanned"
             else:
                 assert confirmed["confirmation_required"] and not confirmed["applied"]
+                assert ("newer review" in confirmed["message"]) == (
+                    scope != "unfinished_turn"
+                )
 
     asyncio.run(run())
 
@@ -1649,7 +1654,7 @@ def test_mcp(monkeypatch, tmp_path):
                 app,
                 "review_media_rescrape",
                 {"change": {"item_id": 500}},
-                token="admin",
+                token=write,
             )
             change = {
                 "action": "rescrape",
@@ -1657,7 +1662,7 @@ def test_mcp(monkeypatch, tmp_path):
                 "candidate": listed["structuredContent"]["candidates"][0]["key"],
             }
             preview = await call(
-                app, "review_media_rescrape", {"change": change}, token="admin"
+                app, "review_media_rescrape", {"change": change}, token=write
             )
             details = preview["structuredContent"]
 

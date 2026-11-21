@@ -78,6 +78,9 @@ class ErrorCode(StrEnum):
     EXPORT_ITEMS_FAILED = auto()
     IMPORT_ITEMS_FAILED = auto()
     FILE_NOT_EXISTS = auto()
+    MEDIA_SOURCE_UNAVAILABLE = auto()
+    MEDIA_LIMIT_EXCEEDED = auto()
+    INVALID_METADATA = auto()
 
 
 class KaloscopeException(SanicException):

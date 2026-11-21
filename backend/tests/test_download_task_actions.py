@@ -325,7 +325,7 @@ def test_listing(monkeypatch):
             details = await tools.execute_tool(
                 "get_download_task",
                 dumps({"task_id": 25}).decode(),
-                env.reader,
+                env.owner,
                 conversation_id=1,
                 call_id="details",
             )
@@ -341,12 +341,8 @@ def test_listing(monkeypatch):
             }
             assert items[21]["actions"] == ["pause", "delete"]
             assert items[22]["actions"] == ["resume", "delete"]
-            # deletion stays administrator-only; other actions stay shared
-            assert [item["actions"] for item in shared["data"]["items"]] == [
-                [action for action in item["actions"] if action != "delete"]
-                for item in listed["data"]["items"]
-            ]
-            assert details["data"]["actions"] == ["retry"]
+            assert shared["error"]["code"] == "forbidden"
+            assert details["data"]["actions"] == ["retry", "delete"]
             assert listed["data"]["downloaders"] == [{"id": 3, "name": "Seedbox"}]
             for private in PRIVATE:
                 assert private not in dumps([listed, details]).decode()
@@ -1013,22 +1009,25 @@ def test_opposite_replay(monkeypatch):
 def test_permissions(monkeypatch):
     async def run():
         async with downloads(monkeypatch) as env:
-            # existing pause, resume and retry controls stay open to users
-            reader_review, paused = await act(env.reader, task_id=21, action="pause")
-            hidden = await review(env.reader, task_id=22, action="resume")
             env.reader.perms = Permissions(media_lib_ids=[60])
+            for task_id, action in [
+                (21, "pause"),
+                (22, "resume"),
+                (25, "retry"),
+                (23, "delete"),
+            ]:
+                with pytest.raises(ForbiddenException):
+                    await review(env.reader, task_id=task_id, action=action)
+            normal_review = await review(env.owner, task_id=21, action="pause")
             with pytest.raises(ForbiddenException):
-                await review(env.reader, task_id=23, action="delete")
+                await apply(env.reader, normal_review, task_id=21, action="pause")
+            assert not env.remote.requests
             admin_review = await review(env.owner, task_id=23, action="delete")
             demoted = SimpleNamespace(id=env.owner.id, role=UserRole.USER, perms=None)
             with pytest.raises(ForbiddenException):
                 await apply(demoted, admin_review, task_id=23, action="delete")
             _, deleted = await act(env.owner, task_id=23, action="delete")
 
-            assert (
-                reader_review["actions"] == ["pause"] and paused["outcome"] == "changed"
-            )
-            assert "transfer_lib_name" not in hidden
             assert admin_review["transfer_lib_name"] == "Movies"
             assert admin_review["transfer_lib_id"] == 60
             assert deleted["outcome"] == "deleted"
@@ -1482,7 +1481,7 @@ def test_page_selection(monkeypatch):
                 conversation_id=conversation["id"],
                 call_id="review",
             )
-            allowed = await tools.execute_tool(
+            resume = await tools.execute_tool(
                 "review_download_task_action",
                 dumps({"task_id": 22, "action": "resume"}).decode(),
                 owner,
@@ -1490,8 +1489,7 @@ def test_page_selection(monkeypatch):
                 call_id="review",
             )
             assert denied["error"]["code"] == "permission_denied"
-            assert refused["error"]["code"] == "permission_denied"
-            assert allowed["data"]["valid"]
+            assert resume["error"]["code"] == refused["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -1511,7 +1509,7 @@ def test_mcp(monkeypatch):
                 pause = {"task_id": 21, "action": "pause"}
 
                 reviewed = await call(
-                    app, "review_download_task_action", {"change": pause}
+                    app, "review_download_task_action", {"change": pause}, token="admin"
                 )
                 data = reviewed["structuredContent"]
                 arguments = {
@@ -1534,17 +1532,24 @@ def test_mcp(monkeypatch):
                     )["token"]
                     for user in (reader, admin)
                 }
-                applied = await call(
+                blocked = await call(
                     app,
                     "apply_download_task_action",
                     arguments,
                     token=tokens[reader.id],
                 )
+                assert blocked["isError"]
+                applied = await call(
+                    app,
+                    "apply_download_task_action",
+                    arguments,
+                    token=tokens[admin.id],
+                )
                 replay = await call(
                     app,
                     "apply_download_task_action",
                     arguments,
-                    token=tokens[reader.id],
+                    token=tokens[admin.id],
                 )
 
                 delete = {"task_id": 23, "action": "delete", "delete_files": True}

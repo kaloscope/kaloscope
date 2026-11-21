@@ -50,6 +50,7 @@ flow = Blueprint("flow", url_prefix="/flow")
 
 
 @flow.get("/repo/list")
+@authorize(role=UserRole.ADMIN)
 async def list_repositories(_) -> HTTPResponse:
     """List the flow repositories.
 
@@ -104,6 +105,7 @@ async def delete_repositories(_, body: IDs) -> HTTPResponse:
 
 
 @flow.get("/tmpl/list")
+@authorize(role=UserRole.ADMIN)
 @validate(query=TmplQuery)
 async def list_templates(_, query: TmplQuery) -> HTTPResponse:
     """List the flow templates.
@@ -167,6 +169,7 @@ async def copy_template(_, id: int, body: GraphBasics) -> HTTPResponse:
 
 
 @flow.get("/graph/name")
+@authorize(role=UserRole.ADMIN)
 @validate(query=GraphQuery)
 async def gen_graph_name(_, query: GraphQuery) -> HTTPResponse:
     """Generate a unique name for the flow graph.
@@ -538,7 +541,7 @@ async def indexer_logout(request: Request, id: int) -> HTTPResponse:
     await FlowVariable.filter(graph_id=id, key=AUTH_KEY).delete()
     # delete the auth cookie
     config = await start_config(id, "auth")
-    cookie = config.get("auth", {}).get("cookie")
+    cookie = (config.get("auth") or {}).get("cookie")
     if isinstance(cookie, dict) and (domain := cookie.get("domain")):
         path = cookie.get("path")
         name = cookie.get("name")
@@ -556,6 +559,7 @@ async def indexer_logout(request: Request, id: int) -> HTTPResponse:
 
 
 @flow.post("/indexer/<id:int>/favorite")
+@authorize()
 @validate(json=IndexerResource)
 async def favorite_resource(
     request: Request, id: int, body: IndexerResource
@@ -572,11 +576,12 @@ async def favorite_resource(
     """
     if body.rsrc is not None:
         user: UserInfo = request.ctx.user
-        await UserFavoriteService.favorite(user.id, id, body)
+        await UserFavoriteService.set_resource(id, body, user)
     return empty()
 
 
 @flow.post("/indexer/<id:int>/unfavorite")
+@authorize()
 @validate(json=IndexerResource)
 async def unfavorite_resource(
     request: Request, id: int, body: IndexerResource
@@ -592,7 +597,9 @@ async def unfavorite_resource(
         Empty response on success.
     """
     user: UserInfo = request.ctx.user
-    await UserFavoriteService.unfavorite(user.id, id, body)
+    await UserFavoriteService.set_resource(
+        id, IndexerResource(rsrc_id=body.rsrc_id), user
+    )
     return empty()
 
 

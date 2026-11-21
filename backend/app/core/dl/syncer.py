@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from filelock import FileLock
+from filelock import Timeout as LockTimeout
 from sanic import Sanic, SanicException
 from sanic.log import logger
 from tortoise import timezone
-from tortoise.expressions import F, Q, RawSQL
+from tortoise.expressions import F, Q, RawSQL, Subquery
+from tortoise.queryset import QuerySet
 from tortoise.transactions import in_transaction
 
 from app.core.config import KaloscopeConfig
@@ -43,7 +45,10 @@ from app.models.base import TortoiseModel
 from app.models.download import (
     Downloader,
     DownloadPlan,
+    DownloadPlanAttempt,
+    DownloadPlanDispatch,
     DownloadPlanHistory,
+    DownloadPlanReplacement,
     DownloadState,
     DownloadTask,
     OfflineDownloadErrorKind,
@@ -1202,6 +1207,33 @@ async def transfer_files(
     if not lib:
         return True
 
+    try:
+        complete = await _transfer_to_library(task, files, lib, job_id)
+    except Exception:
+        await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).update(
+            last_transfer_failed=True
+        )
+        raise
+    await DownloadTask.filter(id=task.id, transfer_lib_id=lib.id).update(
+        last_transfer_failed=not complete
+    )
+    return complete
+
+
+async def _transfer_to_library(
+    task: DownloadTask, files: list[str], lib: MediaLib, job_id: str | None
+) -> bool:
+    """Publish files and record destinations under the library lock.
+
+    Args:
+        task: Task owning the files.
+        files: Download-relative input paths.
+        lib: Target library.
+        job_id: Offline job identifier when available.
+
+    Returns:
+        Whether every requested file was transferred.
+    """
     src_dir = Path(task.dir)
     dst_dir = Path(lib.dir).absolute()
     transfer_id = (
@@ -1322,6 +1354,21 @@ async def transfer_files(
         )
 
 
+def runnable_plan(plan_id: int) -> QuerySet[DownloadPlan]:
+    """Select the original plan only while no authorized replacement blocks it.
+
+    Args:
+        plan_id: Generation that owns the check or submission.
+
+    Returns:
+        A predicate evaluated atomically by the eventual write.
+    """
+    replacing = DownloadPlanReplacement.filter(
+        status__in=["approved", "uncertain"]
+    ).values("plan_id")
+    return DownloadPlan.filter(id=plan_id).exclude(id__in=Subquery(replacing))
+
+
 async def check_download_plans(*, first_only: bool = False):
     """Run due plans and recover first attempts queued by confirmed creation.
 
@@ -1330,11 +1377,19 @@ async def check_download_plans(*, first_only: bool = False):
             Normal hourly checks also process these attempts after a restart.
     """
 
+    from app.services.plan_replacement import PlanReplacementService
+
+    await recover_plan_submissions()
+    await PlanReplacementService.recover()
+
     # get all plans whose graph is published and interval has elapsed
     now = f"julianday('{timezone.now().isoformat(sep=' ')}')"
     last = "julianday(IFNULL(last_exec, download_plan.created_at))"
     pending = Q(creation_key__not_isnull=True, last_exec=None)
-    due = pending if first_only else pending | Q(elapsed_hours__gte=F("interval_num"))
+    replacement = Q(replacement_due__lte=timezone.now())
+    due = pending | replacement
+    if not first_only:
+        due |= Q(replacement_due=None, elapsed_hours__gte=F("interval_num"))
     eligible = DownloadPlan.annotate(
         elapsed_hours=RawSQL(f"({now} - {last}) * 24")
     ).filter(
@@ -1377,50 +1432,214 @@ async def check_download_plans(*, first_only: bool = False):
             plan = await eligible.filter(id=candidate.id).first()
             if plan is None or plan.inactive() or plan.downloader_id != downloader_id:
                 continue
-            initial = plan.creation_key is not None and plan.last_exec is None
+            replacing = await DownloadPlanReplacement.filter(
+                plan_id=plan.id, status__in=["approved", "uncertain"]
+            ).exists()
+            if replacing:
+                continue
+            initial = plan.replacement_due is not None or (
+                plan.creation_key is not None and plan.last_exec is None
+            )
             receipt = plan.creation_receipt or {}
             if initial:
                 receipt = {**receipt, "first_execution": {"status": "unconfirmed"}}
-                claimed = await DownloadPlan.filter(id=plan.id, last_exec=None).update(
-                    last_exec=timezone.now(), creation_receipt=receipt
+                claim = (
+                    {"replacement_due": plan.replacement_due}
+                    if plan.replacement_due is not None
+                    else {"last_exec": None}
                 )
+                async with in_transaction():
+                    claimed = (
+                        await runnable_plan(plan.id)
+                        .filter(**claim)
+                        .update(
+                            last_exec=timezone.now(),
+                            replacement_due=None,
+                            creation_receipt=receipt,
+                        )
+                    )
+                    if claimed and plan.replacement_due is not None:
+                        await DownloadPlanReplacement.filter(
+                            new_plan_id=plan.id
+                        ).update(first_execution=receipt["first_execution"])
                 if not claimed:
                     continue
             driver = drivers[downloader_id]
             if driver is None:
+                await DownloadPlanAttempt.create(
+                    plan_id=plan.id,
+                    workflow_id=plan.graph_id,
+                    status="driver_offline",
+                    errors=1,
+                )
                 if initial:
-                    await DownloadPlan.filter(id=plan.id).update(
-                        creation_receipt={
-                            **receipt,
-                            "first_execution": {
-                                "status": "failed",
-                                "added": 0,
-                                "errors": 1,
-                            },
-                        }
+                    await record_plan_first_execution(
+                        plan, receipt, {"status": "failed", "added": 0, "errors": 1}
                     )
                 continue
             try:
                 outcome = await execute_download_plan(plan, driver)
                 if initial:
-                    await DownloadPlan.filter(id=plan.id).update(
-                        creation_receipt={**receipt, "first_execution": outcome}
-                    )
+                    await record_plan_first_execution(plan, receipt, outcome)
             except Exception:
                 logger.error(
                     "Failed to execute download plan: %s", plan.id, exc_info=True
                 )
                 if initial:
-                    await DownloadPlan.filter(id=plan.id).update(
-                        creation_receipt={
-                            **receipt,
-                            "first_execution": {"status": "unconfirmed"},
-                        }
+                    await record_plan_first_execution(
+                        plan, receipt, {"status": "unconfirmed"}
                     )
     finally:
         for driver in drivers.values():
             if driver is not None:
                 await driver.close()
+
+
+async def record_plan_first_execution(
+    plan: DownloadPlan, receipt: dict, outcome: dict
+) -> None:
+    """Persist first-check facts on the plan and any independent replacement receipt.
+
+    Args:
+        plan: Subscription whose check was claimed.
+        receipt: Creation metadata captured by its scheduler.
+        outcome: Settled or uncertain first-check facts.
+    """
+    async with in_transaction():
+        await DownloadPlan.filter(id=plan.id).update(
+            creation_receipt={**receipt, "first_execution": outcome}
+        )
+        if plan.replacement_due is not None:
+            await DownloadPlanReplacement.filter(new_plan_id=plan.id).update(
+                first_execution=outcome
+            )
+
+
+async def submit_plan_item(
+    plan: DownloadPlan,
+    driver: DownloaderDriver,
+    request: DownloadRequest,
+    magnet: MagnetLink,
+    attempt_id: int,
+) -> str:
+    """Claim and account for one plan result before releasing its dispatch lock.
+
+    Args:
+        plan: Generation that collected the result.
+        driver: Configured download driver.
+        request: Prepared download request.
+        magnet: Content identity used for deduplication.
+        attempt_id: Recorded subscription check that requested this task.
+
+    Returns:
+        `added`, `uncertain`, `pending`, `failed` or `stopped`.
+
+    Raises:
+        RuntimeError: If a legacy deletion removed the plan during submission.
+    """
+    from app.services.download import DownloadTaskService
+
+    key = hashlib.sha256(
+        f"plan:{plan.id}:{magnet.info_hash}:{magnet.info_hash_v2}".encode()
+    ).hexdigest()
+    try:
+        with submission_lock(f"plan-item:{plan.id}"):
+            async with in_transaction():
+                # reserve a SQLite writer before reading or creating the dispatch
+                if await DownloadPlanReplacement.filter(
+                    plan_id=plan.id, status__in=["approved", "uncertain", "applied"]
+                ).update(updated_at=F("updated_at")):
+                    return "stopped"
+                if await DownloadPlanDispatch.filter(key=key).exists():
+                    return "pending"
+                dispatch = await DownloadPlanDispatch.create(
+                    plan_id=plan.id,
+                    key=key,
+                    info_hash=magnet.info_hash,
+                    info_hash_v2=magnet.info_hash_v2,
+                )
+            try:
+                task = await DownloadTaskService.add_request(
+                    plan.downloader_id,
+                    driver,
+                    request,
+                    creation={"creation_key": key, "plan_attempt_id": attempt_id},
+                    dispatch=dispatch,
+                )
+            except Exception:
+                task = await DownloadTask.get_or_none(creation_key=key)
+                if task is None:
+                    await dispatch.refresh_from_db(fields=["task_id"])
+                    if dispatch.task_id is not None:
+                        await settle_plan_submission(dispatch, None)
+                        return "uncertain"
+                    await dispatch.delete()
+                    logger.exception(
+                        "Failed to submit plan %s task with hashes v1=%s, v2=%s",
+                        plan.id,
+                        magnet.info_hash,
+                        magnet.info_hash_v2,
+                    )
+                    return "failed"
+            if not await DownloadPlan.exists(id=plan.id):
+                await dispatch.delete()
+                raise RuntimeError("The plan was deleted during submission.")
+            await settle_plan_submission(dispatch, task)
+            return (
+                "uncertain"
+                if task.state
+                in {DownloadState.SUBMIT_UNKNOWN, DownloadState.SUBMITTING}
+                else "added"
+            )
+    except LockTimeout:
+        return "stopped"
+
+
+async def settle_plan_submission(
+    dispatch: DownloadPlanDispatch, task: DownloadTask | None
+) -> None:
+    """Record one submitted item and retain a claim while its result is unknown.
+
+    Args:
+        dispatch: Claim exclusively owned by this worker.
+        task: Persisted task, or `None` when a previously associated task was removed.
+    """
+    async with in_transaction():
+        if await DownloadPlanDispatch.filter(id=dispatch.id, counted=False).update(
+            counted=True
+        ) and await DownloadPlan.exists(id=dispatch.plan_id):
+            await DownloadPlanHistory.get_or_create(
+                plan_id=dispatch.plan_id,
+                info_hash=dispatch.info_hash,
+                info_hash_v2=dispatch.info_hash_v2,
+            )
+            await DownloadPlan.filter(id=dispatch.plan_id).update(
+                total_count=F("total_count") + 1
+            )
+        if task is None or task.state not in {
+            DownloadState.SUBMIT_UNKNOWN,
+            DownloadState.SUBMITTING,
+        }:
+            await dispatch.delete()
+
+
+async def recover_plan_submissions() -> None:
+    """Reconcile persisted item claims without submitting them again."""
+    for dispatch in await DownloadPlanDispatch.all():
+        try:
+            with submission_lock(f"plan-item:{dispatch.plan_id}"):
+                dispatch = await DownloadPlanDispatch.get_or_none(id=dispatch.id)
+                if not dispatch:
+                    continue
+                task = await DownloadTask.get_or_none(creation_key=dispatch.key)
+                if (
+                    task is not None or dispatch.task_id is not None
+                ) and await DownloadPlan.exists(id=dispatch.plan_id):
+                    await settle_plan_submission(dispatch, task)
+                else:
+                    await dispatch.delete()
+        except LockTimeout:
+            continue
 
 
 async def execute_download_plan(
@@ -1437,13 +1656,41 @@ async def execute_download_plan(
         Attempt counts and a completion/partial/failure state. Added tasks are
         local submissions, not completed downloads; uncertain submissions are explicit.
     """
+    attempt = await DownloadPlanAttempt.create(
+        plan_id=plan.id, workflow_id=plan.graph_id
+    )
+    try:
+        outcome = await _run_plan_attempt(plan, driver, attempt)
+    except (Exception, asyncio.CancelledError):
+        await DownloadPlanAttempt.filter(id=attempt.id).update(status="unconfirmed")
+        raise
+    await DownloadPlanAttempt.filter(id=attempt.id).update(
+        status=outcome["status"],
+        results_seen=attempt.results_seen,
+        submitted=outcome["added"],
+        errors=outcome["errors"],
+        uncertain=outcome["uncertain"],
+    )
+    return outcome
+
+
+async def _run_plan_attempt(
+    plan: DownloadPlan, driver: DownloaderDriver | None, attempt: DownloadPlanAttempt
+) -> dict:
+    """Search and submit new results attributed to the recorded check.
+
+    Args:
+        plan: Subscription configuration captured for this run.
+        driver: Selected download driver or `None` to load it.
+        attempt: Durable identifier shared by this run and its new tasks.
+
+    Returns:
+        Submitted, failed and uncertain counts and the aggregate status.
+    """
     # load the driver if not provided
     if driver is None:
         downloader = await Downloader.get(id=plan.downloader_id)
         driver = load_driver(decrypt_config(downloader.config))
-
-    # import locally because `DownloadPlanService` imports this function
-    from app.services.download import DownloadTaskService
 
     # get the flow engine instance
     engine: FlowEngine = Sanic.get_app().ctx.flow_engine
@@ -1463,13 +1710,16 @@ async def execute_download_plan(
             filter["info_hash"] = magnet.info_hash
         if magnet.info_hash_v2 is not None:
             filter["info_hash_v2"] = magnet.info_hash_v2
-        await DownloadPlanHistory.get_or_create(
-            defaults={
-                "info_hash": magnet.info_hash,
-                "info_hash_v2": magnet.info_hash_v2,
-            },
-            **filter,
-        )
+        async with in_transaction():
+            if not await runnable_plan(plan.id).update(updated_at=F("updated_at")):
+                return
+            await DownloadPlanHistory.get_or_create(
+                defaults={
+                    "info_hash": magnet.info_hash,
+                    "info_hash_v2": magnet.info_hash_v2,
+                },
+                **filter,
+            )
 
     async def _extract_hashes(
         model: type[TortoiseModel],
@@ -1523,19 +1773,20 @@ async def execute_download_plan(
         # execute the graph workflow with up to 3 retries
         items = []
         retries = 3
-        for attempt in range(retries):
+        for retry in range(retries):
             try:
                 result = await engine.execute(
                     graph_id=plan.graph_id, bootparams=bootparams
                 )
                 if isinstance(result, dict) and isinstance(result.get("items"), list):
                     items = result["items"]
+                    attempt.results_seen += len(items)
                     if not items:
                         return None
                     break
                 raise ValueError("invalid graph execution result")
             except Exception:
-                if attempt == retries - 1:
+                if retry == retries - 1:
                     errors += 1
                     logger.error(
                         "Failed to execute graph for plan %s after %d attempts",
@@ -1544,7 +1795,7 @@ async def execute_download_plan(
                         exc_info=True,
                     )
                     return None
-                await asyncio.sleep(2**attempt * 5)
+                await asyncio.sleep(2**retry * 5)
 
         errors += sum(
             not isinstance(item, dict) or not isinstance(item.get("link"), str)
@@ -1650,58 +1901,51 @@ async def execute_download_plan(
 
     # add download tasks for each valid magnet link
     task_count = 0
+    stopped = False
     for magnet in magnet_links:
         # check if the total limit of the plan has been reached
         if plan.total_limit and plan.total_count + task_count >= plan.total_limit:
             break
 
         # add the download task via driver
-        try:
-            request = DownloadRequest(
-                directory=plan.dir,
-                identity=DownloadIdentity(
-                    info_hash=magnet.info_hash,
-                    info_hash_v2=magnet.info_hash_v2,
-                ),
-                link=magnet.link,
-                torrent=(
-                    magnet.torrent
-                    if DownloadSource.TORRENT in driver.source_types
-                    else None
-                ),
-                transfer_library_id=plan.transfer_lib_id,
-                transfer_method=plan.transfer_method,
-                sub_pattern=plan.sub_pattern,
-                sub_repl=plan.sub_repl,
-            )
-            task = await DownloadTaskService.add_request(
-                plan.downloader_id,
-                driver,
-                request,
-            )
-            if task.state in {DownloadState.SUBMIT_UNKNOWN, DownloadState.SUBMITTING}:
-                uncertain += 1
-        except Exception:
+        request = DownloadRequest(
+            directory=plan.dir,
+            identity=DownloadIdentity(
+                info_hash=magnet.info_hash,
+                info_hash_v2=magnet.info_hash_v2,
+            ),
+            link=magnet.link,
+            torrent=(
+                magnet.torrent
+                if DownloadSource.TORRENT in driver.source_types
+                else None
+            ),
+            transfer_library_id=plan.transfer_lib_id,
+            transfer_method=plan.transfer_method,
+            sub_pattern=plan.sub_pattern,
+            sub_repl=plan.sub_repl,
+        )
+        outcome = await submit_plan_item(plan, driver, request, magnet, attempt.id)
+        if outcome == "stopped":
+            stopped = True
+            break
+        if outcome == "failed":
             errors += 1
-            logger.error(
-                "Failed to add download task for plan %s, hashes: v1=%s, v2=%s",
-                plan.id,
-                magnet.info_hash,
-                magnet.info_hash_v2,
-                exc_info=True,
-            )
             continue
+        if outcome == "pending":
+            uncertain += 1
+            continue
+        if outcome == "uncertain":
+            uncertain += 1
 
         task_count += 1
-        await _record_history(magnet)
 
-    # update the plan's total_count and last_exec
-    await DownloadPlan.filter(id=plan.id).update(
-        total_count=plan.total_count + task_count, last_exec=timezone.now()
-    )
+    # the count commits with each item, including on interruption
+    if not stopped:
+        stopped = not await runnable_plan(plan.id).update(last_exec=timezone.now())
     return {
         "status": "unconfirmed"
-        if uncertain
+        if uncertain or stopped
         else "partial"
         if errors and task_count
         else "failed"

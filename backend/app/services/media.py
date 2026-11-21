@@ -57,7 +57,7 @@ from app.core.media.organizer import (
     recover_organizing,
 )
 from app.core.renderer import SANDBOX_ENV, render
-from app.models.download import DownloadTask
+from app.models.download import DownloadPlan, DownloadTask
 from app.models.flow import (
     FlowGraph,
     FlowInstance,
@@ -1827,12 +1827,33 @@ def _binding_fact(row: FlowTrigger, lib_type: LibType) -> dict[str, Any]:
     }
 
 
+def accessible_library_ids(user: UserInfo) -> set[int] | None:
+    """Intersect the account's current library permissions with its token grant.
+
+    Args:
+        user: Authenticated browser account or MCP identity.
+
+    Returns:
+        Allowed library IDs, or `None` for unrestricted administrator access.
+    """
+    granted = getattr(user, "mcp_library_ids", None)
+    if user.role == UserRole.ADMIN:
+        return set(granted) if granted is not None else None
+    account = set(user.perms.media_lib_ids if user.perms else ())
+    return account if granted is None else account.intersection(granted)
+
+
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
     """The service class for all media library related operations."""
 
     @classmethod
     async def list_libraries(
-        cls, user: UserInfo, watcher: LibWatcher, *, stored_bindings: bool = False
+        cls,
+        user: UserInfo,
+        watcher: LibWatcher,
+        *,
+        stored_bindings: bool = False,
+        include_bindings: bool = True,
     ) -> list[dict[str, Any]]:
         """List accessible libraries with their triggers and current scan status.
 
@@ -1842,13 +1863,14 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             stored_bindings: Whether administrators also receive bindings to
                 unpublished workflows, flagged by `published`, so the library editor
                 can save them back. Others keep the executable bindings only.
+            include_bindings: Whether this caller may read workflow references.
 
         Returns:
             Libraries visible to the account, without starting a scan.
         """
         queries = []
-        if user.role != UserRole.ADMIN:
-            queries.append(Q(id__in=user.perms.media_lib_ids if user.perms else []))
+        if (allowed := accessible_library_ids(user)) is not None:
+            queries.append(Q(id__in=allowed))
         libraries = await cls.dump_list(MediaLib.filter(*queries))
         scanning = {
             lib_id
@@ -1859,8 +1881,12 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         }
         unpublished = stored_bindings and user.role == UserRole.ADMIN
         for lib in libraries:
-            lib["triggers"] = await FlowTriggerService.get_triggers(
-                GraphCategory.INGEST, lib["id"], unpublished=unpublished
+            lib["triggers"] = (
+                await FlowTriggerService.get_triggers(
+                    GraphCategory.INGEST, lib["id"], unpublished=unpublished
+                )
+                if include_bindings
+                else []
             )
             lib["scanning"] = watcher.is_scanning(lib["dir"]) or lib["id"] in scanning
         return libraries
@@ -1880,12 +1906,14 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             NotFoundException: If the library does not exist.
             ForbiddenException: If the user cannot access the library.
         """
+        if (
+            granted := getattr(user, "mcp_library_ids", None)
+        ) is not None and id not in granted:
+            raise NotFoundException
         library = await MediaLib.get_or_none(id=id)
         if library is None:
             raise NotFoundException
-        if user.role != UserRole.ADMIN and (
-            user.perms is None or id not in user.perms.media_lib_ids
-        ):
+        if (allowed := accessible_library_ids(user)) is not None and id not in allowed:
             raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
         return library
 
@@ -2200,15 +2228,69 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         return lib
 
     @classmethod
-    async def delete(cls, id: int):
+    async def deletion_preview(cls, id: int) -> dict:
+        """Summarize the library and indexed records affected by its removal.
+
+        Args:
+            id: Library whose files will remain on disk.
+
+        Returns:
+            Human-readable impact and a digest of the affected record identities.
+
+        Raises:
+            NotFoundException: If the library no longer exists.
+        """
+        lib = await MediaLib.get_or_none(id=id)
+        if lib is None:
+            raise NotFoundException
+        affected = {
+            "item_count": MediaItem.filter(lib_id=id),
+            "plan_count": DownloadPlan.filter(transfer_lib_id=id),
+            "task_count": DownloadTask.filter(transfer_lib_id=id),
+            "binding_count": FlowTrigger.filter(
+                category=GraphCategory.INGEST, rel_id=id
+            ),
+            "permission_count": UserPermission.filter(
+                rel_type=PermType.MEDIA_LIB, rel_id=id
+            ),
+        }
+        digest = hashlib.sha256(str(lib.updated_at).encode())
+        counts = {}
+        for key, query in affected.items():
+            ids = await query.order_by("id").values_list("id", flat=True)
+            counts[key] = len(ids)
+            digest.update(key.encode())
+            for value in ids:
+                digest.update(value.to_bytes(8, "big"))
+        return {
+            "library_id": id,
+            "name": lib.name,
+            "directory": lib.dir,
+            "revision": digest.hexdigest(),
+            "delete_files": False,
+            **counts,
+        }
+
+    @classmethod
+    async def delete(cls, id: int, *, expected: dict | None = None):
         """Delete a media library after active writers finish.
 
         Args:
             id: Media library ID.
+            expected: Optional previously approved deletion impact.
+
+        Raises:
+            ContentError: If the affected records changed after approval.
         """
-        lib = await MediaLib.get(id=id)
+        lib = await MediaLib.get_or_none(id=id)
+        if lib is None:
+            if expected is not None:
+                raise ContentError("content_changed")
+            raise NotFoundException
         # wait for active filesystem writers before discarding their journals
         async with library_lock(lib.dir), in_transaction("default"):
+            if expected is not None and await cls.deletion_preview(id) != expected:
+                raise ContentError("content_changed")
             await MediaLib.filter(id=id).delete()
             await FlowTrigger.filter(category=GraphCategory.INGEST, rel_id=id).delete()
             await UserPermission.filter(rel_type=PermType.MEDIA_LIB, rel_id=id).delete()
@@ -2242,8 +2324,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             | Q(parent__visible=True, lib_id=F("parent__lib_id")),
             Q(path=query.path) if query.path else Q(parent_id__isnull=True),
         ]
-        if user.role != UserRole.ADMIN:
-            queries.append(Q(lib_id__in=user.perms.media_lib_ids if user.perms else []))
+        if (allowed := accessible_library_ids(user)) is not None:
+            queries.append(Q(lib_id__in=allowed))
         if query.lib_id:
             queries.append(Q(lib_id=query.lib_id))
         if query.keyword:
@@ -3354,7 +3436,12 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
     @classmethod
     async def save_metadata(
-        cls, id: int, data: dict, *, overwrite: bool = False
+        cls,
+        id: int,
+        data: dict,
+        *,
+        overwrite: bool = False,
+        expected: ReadingMetadata | None = None,
     ) -> bool:
         """Persist and execute an OPF or ComicInfo save for the current reading item.
 
@@ -3362,6 +3449,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             id: Existing reading item ID, including a comic collection or chapter.
             data: Complete candidate, without paths or fields from old metadata.
             overwrite: False for automatic creation; True after manual confirmation.
+            expected: Original metadata required for a reviewed partial edit.
 
         Returns:
             Whether metadata was published, rather than skipped for valid local data.
@@ -3396,12 +3484,18 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             current = await MediaItem.get_or_none(id=id).select_related("lib", "parent")
             if current is None or _source_identity(item) != _source_identity(current):
                 raise ContentError("content_changed")
+            if expected is not None:
+                present, _, issue = await to_thread(
+                    _read_metadata, current, with_cover=False
+                )
+                if issue or present.data != expected:
+                    raise ContentError("content_changed")
             async with in_transaction():
                 for pending in await MediaEvent.filter(
                     lib_id=current.lib_id, event_type="metadata"
                 ):
                     if (pending.payload or {}).get("item_id") == id:
-                        if not overwrite:
+                        if not overwrite or expected is not None:
                             raise ContentError("content_not_ready")
                         await pending.delete()
                 event = await MediaEvent.create(
@@ -3829,14 +3923,15 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             NotFoundException: If the item or its valid visible parent is missing.
             ForbiddenException: If the user cannot access the library.
         """
-        item = await MediaItem.get_or_none(id=id, visible=True).select_related(
-            "lib", "parent"
-        )
+        candidates = MediaItem.filter(id=id, visible=True)
+        if getattr(user, "mcp_library_ids", None) is not None:
+            candidates = candidates.filter(cls.path_filter(user))
+        item = await candidates.select_related("lib", "parent").first()
         if item is None:
             raise NotFoundException
-        if user.role != UserRole.ADMIN and (
-            user.perms is None or item.lib_id not in user.perms.media_lib_ids
-        ):
+        if (
+            allowed := accessible_library_ids(user)
+        ) is not None and item.lib_id not in allowed:
             raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
         if item.parent_id is not None and (
             item.parent is None
@@ -3856,9 +3951,8 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
         Returns:
             An empty filter for administrators, otherwise a filter on granted libraries.
         """
-        if user.role == UserRole.ADMIN:
-            return Q()
-        return Q(lib_id__in=user.perms.media_lib_ids if user.perms else [])
+        allowed = accessible_library_ids(user)
+        return Q() if allowed is None else Q(lib_id__in=allowed)
 
     @classmethod
     async def get_by_path(cls, path: str, user: UserInfo) -> MediaItem:

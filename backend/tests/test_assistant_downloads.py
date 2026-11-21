@@ -269,7 +269,7 @@ def test_error_pages(network):
 
             while offset is not None:
                 result = await call(
-                    {"task_id": task.id, "offset": offset}, READER, "get_download_task"
+                    {"task_id": task.id, "offset": offset}, ADMIN, "get_download_task"
                 )
                 assert result["ok"] is True
                 data = result["data"]
@@ -308,14 +308,15 @@ def test_task_details():
     asyncio.run(run())
 
 
-def test_shared_visibility():
+def test_permissions():
     async def run():
         async with downloads():
             admin = await call({"page_size": 25})
             reader = await call({"page_size": 25}, READER)
 
-            assert reader["ok"] is True
-            assert reader["data"] == admin["data"]
+            details = await call({"task_id": 1}, READER, "get_download_task")
+            assert admin["ok"]
+            assert reader["error"]["code"] == details["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -374,8 +375,7 @@ def test_navigation():
         )
 
         assert active["data"]["path"] == "/downloads/downloading"
-        assert completed["data"]["path"] == "/downloads/completed"
-        assert completed["data"]["library_id"] is None
+        assert completed["error"]["code"] == "permission_denied"
         assert task["error"]["code"] == "bad_request"
 
     asyncio.run(run())

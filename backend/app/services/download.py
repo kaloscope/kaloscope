@@ -24,13 +24,14 @@ from sanic import Sanic
 from sanic.log import logger
 from tortoise import timezone
 from tortoise.exceptions import IntegrityError
-from tortoise.expressions import Q
+from tortoise.expressions import F, Q
 from tortoise.functions import Count, Sum
 from tortoise.queryset import QuerySet
 from tortoise.transactions import atomic, in_transaction
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import ENCODING
+from app.core.dl.access import ADMIN_CHANGE, ADMIN_PREVIEW
 from app.core.dl.config import (
     decrypt_config,
     encrypt_config,
@@ -79,8 +80,11 @@ from app.models.download import (
     DownloadPlanChange,
     DownloadPlanCheck,
     DownloadPlanCreate,
+    DownloadPlanCreation,
+    DownloadPlanDispatch,
     DownloadPlanQuery,
     DownloadPlanReceipt,
+    DownloadPlanReplacement,
     DownloadPlanSettings,
     DownloadPlanUpsert,
     DownloadQuery,
@@ -91,9 +95,11 @@ from app.models.download import (
     DownloadTaskActionApply,
     DownloadTaskCheck,
     DownloadTaskCreate,
+    DownloadTaskCreation,
     DownloadTaskReceipt,
     DownloadTaskSettings,
     IndexerSearch,
+    IngestionBinding,
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
     PlanAction,
@@ -101,7 +107,8 @@ from app.models.download import (
 )
 from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.media import LibType, MediaLib
-from app.models.user import UserInfo, UserRole
+from app.models.review_decision import AssistantReviewDecision, review_attempt
+from app.models.user import User, UserInfo, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
@@ -432,6 +439,23 @@ TASK_UNCERTAIN = (
 )
 
 
+def _binding_changed(binding: dict | None, original: IngestionBinding | None) -> bool:
+    """Identify an addition made since the binding was reviewed.
+
+    Args:
+        binding: Current binding returned by the confirmed operation.
+        original: Reviewed revision before this request or an earlier attempt.
+
+    Returns:
+        Whether the reviewed setup acquired a binding that must be preserved.
+    """
+    return bool(
+        binding
+        and original
+        and (binding["binding"] == "added" or binding["revision"] != original.revision)
+    )
+
+
 def _maybe_sent(error: Exception, driver: DownloaderDriver, method: Method) -> bool:
     """Check whether a failed RPC request may have reached the downloader.
 
@@ -630,17 +654,22 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
     @classmethod
     async def list_tasks(
-        cls, query: DownloadQuery, *, include: tuple[str, ...] = ()
+        cls, query: DownloadQuery, user: UserInfo, *, include: tuple[str, ...] = ()
     ) -> dict[str, Any]:
         """List persisted download states without polling or controlling a driver.
 
         Args:
             query: Pagination, name, state, and downloader filters.
+            user: Account requesting the shared task list.
             include: Serialized fields to include; an empty tuple keeps all fields.
 
         Returns:
-            A task page using the application's shared download visibility.
+            Matching tasks visible to the administrator.
+
+        Raises:
+            ForbiddenException: If the account cannot read shared tasks.
         """
+        ADMIN_PREVIEW.require(user)
         queries = []
         if query.name:
             queries.append(Q(name__icontains=query.name))
@@ -926,7 +955,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 indexer, library or workflow.
             NotFoundException: If the indexer, library or workflow is missing.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_PREVIEW.require(user)
         selection = settings.resource
         graph = await FlowGraphService.get_accessible(selection.workflow_id, user)
         issues = []
@@ -1201,18 +1230,25 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             user: Current account used to recheck source permissions.
 
         Returns:
-            Replayed task, a conflict, or `None` before a task is persisted.
+            Replayed task, its original ID after deletion, a conflict, or `None`
+            before a task is persisted.
         """
+        receipt = await DownloadTaskCreation.get_or_none(key=key)
         task = await DownloadTask.get_or_none(creation_key=key)
-        if task is None:
+        if receipt is None and task is None:
             return None
-        if (task.creation_receipt or {}).get("digest") != digest:
+        stored_digest = (
+            receipt.digest if receipt else (task.creation_receipt or {}).get("digest")
+        )
+        if stored_digest != digest:
             return {
                 "created": False,
                 "conflict": True,
                 "message": "This request ID already submitted different settings; "
                 "validate again for a new request.",
             }
+        if task is None:
+            return receipt.removed_result()
         return await cls._task_result(task, user, replayed=True)
 
     @classmethod
@@ -1236,7 +1272,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         Raises:
             ForbiddenException: If the account cannot submit downloads.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_CHANGE.require(user)
         key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
         source = await open_source(body.resource)
         # requests without a transfer rule keep their original receipt digest
@@ -1260,8 +1296,12 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         lock = _REQUEST_LOCKS.setdefault(key, asyncio.Lock())
         async with lock:
             try:
-                with submission_lock(f"one-time:{key}"):
-                    return await cls._create_locked(body, user, key, digest)
+                with submission_lock(f"one-time:{key}"), review_attempt():
+                    return await AssistantReviewDecision.finish(
+                        user.id,
+                        body.request_id,
+                        await cls._create_locked(body, user, key, digest),
+                    )
             except LockTimeout:
                 if replay := await cls._replay_request(key, digest, user):
                     return replay
@@ -1322,18 +1362,23 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 return {"created": False, "valid": False, "issues": issues, **result}
             if not body.confirmed:
                 return {"created": False, "confirmation_required": True, **result}
-            binding = None
-            if body.ingestion is not None and body.transfer_lib_id:
-                # prepare the library before the download can complete
-                binding = await MediaLibService.ensure_ingestion(
-                    body.transfer_lib_id,
-                    body.ingestion.workflow_id,
-                    body.ingestion.revision,
-                    user,
-                )
-                result["ingestion"] = binding
-                if binding["binding"] not in {"added", "reused"}:
-                    return {"created": False, "valid": False, **result}
+            async with in_transaction():
+                if not (
+                    await AssistantReviewDecision.claim(user.id, body.request_id, True)
+                ).approved:
+                    return {"created": False, "outcome": "cancelled", **result}
+                binding = None
+                if body.ingestion is not None and body.transfer_lib_id:
+                    # prepare the library before the download can complete
+                    binding = await MediaLibService.ensure_ingestion(
+                        body.transfer_lib_id,
+                        body.ingestion.workflow_id,
+                        body.ingestion.revision,
+                        user,
+                    )
+                    result["ingestion"] = binding
+                    if binding["binding"] not in {"added", "reused"}:
+                        return {"created": False, "valid": False, **result}
             creation = {
                 "creation_key": key,
                 "creation_receipt": {
@@ -1351,12 +1396,25 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 if replay := await cls._replay_request(key, digest, user):
                     return {**result, **replay}
                 same = await cls._same_content(request.identity)
-                return {"created": False, "existing_download": same, **result}
+                if _binding_changed(binding, body.ingestion):
+                    return {
+                        "created": False,
+                        "existing_download": same,
+                        **result,
+                        "submit_error": "The binding was kept. Another request "
+                        "claimed the download.",
+                    }
+                return {
+                    "created": False,
+                    "failed": True,
+                    "existing_download": same,
+                    **result,
+                }
             except Exception:
                 if task := await DownloadTask.get_or_none(creation_key=key):
                     # the durable claim survives ambiguous responses and save errors
                     notify_download_changes()
-                elif binding is not None:
+                elif _binding_changed(binding, body.ingestion):
                     logger.exception("Download submission failed after its binding")
                     return {
                         "created": False,
@@ -1365,6 +1423,13 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                         "download was not submitted; retry with the same request_id.",
                     }
                 else:
+                    # a missing task and tombstone prove that dispatch was never sent
+                    if not await DownloadTaskCreation.exists(key=key):
+                        if binding:
+                            return {**result, "created": False, "failed": True}
+                        await AssistantReviewDecision.finish(
+                            user.id, body.request_id, {"failed": True}
+                        )
                     raise
             result.update(await cls._task_result(task, user))
             if binding is not None:
@@ -1374,6 +1439,39 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             if driver is not None:
                 await driver.close()
 
+    @staticmethod
+    async def _remember_submission(task: DownloadTask):
+        """Reserve the reviewed request in the task creation transaction.
+
+        Args:
+            task: Staged download, with a receipt for a reviewed one-time request.
+        """
+        if task.creation_receipt:
+            await DownloadTaskCreation.create(
+                key=task.creation_key,
+                digest=task.creation_receipt["digest"],
+                task_id=task.id,
+            )
+
+    @staticmethod
+    async def _discard_failed_submission(task: DownloadTask):
+        """Release a definite failure so the original request can be retried.
+
+        Args:
+            task: Staged download whose submission failed before any remote effect.
+        """
+        async with in_transaction():
+            if task.creation_receipt:
+                await DownloadTaskCreation.filter(
+                    key=task.creation_key, task_id=task.id
+                ).delete()
+            elif task.creation_key:
+                # recovery must not count a submission known to have failed
+                await DownloadPlanDispatch.filter(
+                    key=task.creation_key, task_id=task.id, counted=False
+                ).update(task_id=None)
+            await DownloadTask.filter(id=task.id).delete()
+
     @classmethod
     async def add_request(
         cls,
@@ -1382,6 +1480,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         request: DownloadRequest,
         *,
         creation: dict[str, Any] | None = None,
+        dispatch: DownloadPlanDispatch | None = None,
     ) -> DownloadTask:
         """Submit a normalized download request and notify synchronization.
 
@@ -1393,7 +1492,8 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             driver: Driver used for submission.
             request: Normalized download request.
             creation: Request identity fields stored with the task; `None` for
-                editor and plan submissions.
+                ordinary editor submissions.
+            dispatch: Optional plan claim bound before contacting the driver.
 
         Returns:
             Persisted download task.
@@ -1408,24 +1508,30 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             )
             with lock:
                 return await cls._add_draft(
-                    downloader_id, driver, draft, creation=creation
+                    downloader_id, driver, draft, creation=creation, dispatch=dispatch
                 )
 
         task = None
         if creation:
             # commit the request claim before RPC can have any remote effect
-            task = await DownloadTask.create(
-                **cls._task_values(downloader_id, request),
-                magnet_link=request.link,
-                state=DownloadState.SUBMIT_UNKNOWN,
-                **creation,
-            )
+            async with in_transaction():
+                task = await DownloadTask.create(
+                    **cls._task_values(downloader_id, request),
+                    magnet_link=request.link,
+                    state=DownloadState.SUBMIT_UNKNOWN,
+                    **creation,
+                )
+                await cls._remember_submission(task)
+                if dispatch is not None:
+                    await DownloadPlanDispatch.filter(id=dispatch.id).update(
+                        task_id=task.id
+                    )
         try:
             snapshot = await driver.add(request)
         except Exception as error:
             method = "add_torrent" if request.torrent else "add_link"
             if task is not None and not _maybe_sent(error, driver, method):
-                await task.delete()
+                await cls._discard_failed_submission(task)
             raise
 
         # save the download directory
@@ -1458,6 +1564,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         draft: DownloadDraft,
         *,
         creation: dict[str, Any] | None = None,
+        dispatch: DownloadPlanDispatch | None = None,
     ) -> DownloadTask:
         """Persist a driver draft and notify recovery before remote submission.
 
@@ -1467,6 +1574,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             draft: Task and optional offline-job persistence draft.
             creation: Request identity fields stored with the task before the
                 remote submission can become uncertain.
+            dispatch: Optional plan claim to bind before contacting the driver.
 
         Returns:
             Persisted task updated with its submission snapshot.
@@ -1486,6 +1594,11 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 using_db=connection,
                 **(creation or {}),
             )
+            await cls._remember_submission(task)
+            if dispatch is not None:
+                await DownloadPlanDispatch.filter(id=dispatch.id).update(
+                    task_id=task.id
+                )
             if draft.job is not None:
                 job = draft.job
                 await OfflineDownloadJob.create(
@@ -1506,7 +1619,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             )
         except Exception:
             # remove the pre-submission task when the driver reports a definite failure
-            await DownloadTask.filter(id=task.id).delete()
+            await cls._discard_failed_submission(task)
             notify_download_changes()
             raise
         if snapshot.state is None:
@@ -1694,16 +1807,15 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
         Args:
             capabilities: Driver actions for the task's current state.
-            user: Current account; only administrators delete tasks.
+            user: Account requesting shared task controls.
 
         Returns:
             Pause, resume, retry and delete actions in that order.
         """
+        if not ADMIN_CHANGE.allows(user):
+            return []
         return [
-            action
-            for action in TaskAction
-            if DownloadAction(action) in capabilities
-            and (action != TaskAction.DELETE or user.role == UserRole.ADMIN)
+            action for action in TaskAction if DownloadAction(action) in capabilities
         ]
 
     @classmethod
@@ -1712,7 +1824,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
 
         Args:
             task: Stored task.
-            user: Current account; only administrators delete tasks.
+            user: Account requesting shared task controls.
 
         Returns:
             Permitted actions, the owning downloader and driver, an offline job
@@ -1870,11 +1982,10 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             The review, the stored task and its current downloader actions.
 
         Raises:
-            ForbiddenException: If a non-administrator asks to delete a task.
+            ForbiddenException: If the account cannot manage shared tasks.
             NotFoundException: If the task does not exist.
         """
-        if change.action == TaskAction.DELETE and user.role != UserRole.ADMIN:
-            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        ADMIN_PREVIEW.require(user)
         task = await DownloadTask.get_or_none(id=change.task_id)
         if task is None:
             raise NotFoundException
@@ -1935,7 +2046,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             `request_id` for this exact review.
 
         Raises:
-            ForbiddenException: If a non-administrator asks to delete a task.
+            ForbiddenException: If the account cannot manage shared tasks.
             NotFoundException: If the task does not exist.
         """
         result, _, _ = await cls._review_action(change, user)
@@ -1963,10 +2074,9 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             to have applied, or an `uncertain` outcome to inspect rather than repeat.
 
         Raises:
-            ForbiddenException: If a non-administrator asks to delete a task.
+            ForbiddenException: If the account cannot manage shared tasks.
         """
-        if body.change.action == TaskAction.DELETE and user.role != UserRole.ADMIN:
-            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        ADMIN_CHANGE.require(user)
         nonce = body.request_id.bytes[:8]
         if (
             cls.action_request(user.id, body.change, body.revision, nonce)
@@ -1982,14 +2092,19 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
         lock = _TASK_LOCKS.setdefault(key, asyncio.Lock())
         async with lock:
             try:
-                with submission_lock(f"task-action:{key}"):
+                with submission_lock(f"task-action:{key}"), review_attempt():
                     task = asyncio.ensure_future(cls._apply_locked(body, key, user))
                     try:
-                        return await asyncio.shield(task)
+                        outcome = await asyncio.shield(task)
                     except asyncio.CancelledError:
-                        # a cancelled caller never leaves a dispatch unrecorded
-                        await task
+                        # persist the result before the request lock is released
+                        await AssistantReviewDecision.finish(
+                            user.id, body.request_id, await task
+                        )
                         raise
+                    return await AssistantReviewDecision.finish(
+                        user.id, body.request_id, outcome
+                    )
             except LockTimeout:
                 receipt = await DownloadTaskReceipt.get_or_none(key=key)
                 if receipt is not None and receipt.result is not None:
@@ -2039,10 +2154,9 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
             the task as it is now, or `None` once deleted.
 
         Raises:
-            ForbiddenException: If a non-administrator replays a deletion.
+            ForbiddenException: If the account cannot read a shared task receipt.
         """
-        if receipt.action == TaskAction.DELETE and user.role != UserRole.ADMIN:
-            raise ForbiddenException(ErrorCode.PERMISSION_DENIED)
+        ADMIN_PREVIEW.require(user)
         task = await DownloadTask.get_or_none(id=receipt.task_id)
         return loads(
             dumps(
@@ -2116,6 +2230,10 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                 "applied": False,
                 "confirmation_required": True,
             }
+        if not (
+            await AssistantReviewDecision.claim(user.id, body.request_id, True)
+        ).approved:
+            return {"applied": False, "outcome": "cancelled", **base}
         failed = {
             "applied": False,
             **base,
@@ -2148,6 +2266,7 @@ class DownloadTaskService(BaseService[DownloadTask], model=DownloadTask):
                     # a kept claim replays this failure instead of dispatching
                     result = {
                         **failed,
+                        "retryable": False,
                         "message": "The action was not applied; review again.",
                     }
             else:
@@ -2348,7 +2467,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
         Args:
             body: Selected indexer and explicit, bounded search inputs.
-            user: Current administrator with workflow access.
+            user: Account with permission to search the published indexer.
 
         Returns:
             Bounded metadata, reported pagination and validation issues. This runs
@@ -2359,17 +2478,21 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             pagination follows the site's page length.
 
         Raises:
-            ForbiddenException: If the account cannot author plans or read the indexer.
+            ForbiddenException: If the indexer is inaccessible or the account
+                cannot request download sources.
             NotFoundException: If the indexer does not exist.
         """
-        FlowGraphService.require_editor(user)
+        if body.sources:
+            ADMIN_CHANGE.require(user)
         graph = await FlowGraphService.get_accessible(body.workflow_id, user)
         result = {
             "workflow_id": graph.id,
             "workflow_name": graph.name,
             "query": body.model_dump(mode="json", exclude={"workflow_id"}),
         }
-        issues = await cls._search_issues(graph, body.keyword, body.filters)
+        issues = await cls._search_issues(
+            graph, body.keyword, body.filters, downloadable=body.sources
+        )
         if issues:
             return {
                 **result,
@@ -2392,17 +2515,20 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     "credentials in chat."
                 ),
             }
+        params = {
+            **(body.filters or {}),
+            "$start": "search_start",
+            "keyword": body.keyword,
+            "page_num": body.page_num,
+            "page_size": body.page_size,
+        }
+        if user.role != UserRole.ADMIN:
+            params = await FlowGraphService.caller_params(graph, params)
         try:
             async with asyncio.timeout(10):
                 output = await app.ctx.flow_engine.execute(
                     graph.id,
-                    {
-                        **(body.filters or {}),
-                        "$start": "search_start",
-                        "keyword": body.keyword,
-                        "page_num": body.page_num,
-                        "page_size": body.page_size,
-                    },
+                    params,
                     repeatable=True,
                     recoverable=False,
                     asynchronous=False,
@@ -2501,7 +2627,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             Published settings, downloader capabilities and recent directories.
             Credentials, driver probes and search execution are excluded.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_PREVIEW.require(user)
         graph = await FlowGraphService.get_accessible(workflow_id, user)
         page = await Downloader.page(
             page_num=page_num, page_size=min(page_size, 50), ordering="priority"
@@ -2603,7 +2729,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
     @classmethod
     async def _search_issues(
-        cls, graph: FlowGraph, keyword: str, filters: dict | None
+        cls,
+        graph: FlowGraph,
+        keyword: str,
+        filters: dict | None,
+        *,
+        downloadable: bool = True,
     ) -> list[dict[str, str]]:
         """Check published search inputs for both preview and plan creation.
 
@@ -2611,6 +2742,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             graph: Permission-checked indexer.
             keyword: Explicit search keyword.
             filters: Declared filter values, without reserved boot parameters.
+            downloadable: Whether the operation needs a download-capable indexer.
 
         Returns:
             Located configuration and input issues.
@@ -2628,11 +2760,13 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 }
             )
         search = (await start_config(graph, "search"))["search"]
-        if search is None or graph.only_preview():
+        if search is None or (downloadable and graph.only_preview()):
             issues.append(
                 {
                     "path": "graph_id",
-                    "message": "Published indexer needs a downloadable search entry.",
+                    "message": "Published indexer needs a downloadable search entry."
+                    if downloadable
+                    else "Published indexer needs a search entry.",
                 }
             )
         keyword_config = (search or {}).get("keyword") or {}
@@ -2705,7 +2839,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
     @classmethod
     async def validate_creation(
-        cls, body: DownloadPlanCheck, user: UserInfo, *, search: bool = True
+        cls, body: DownloadPlanCheck, user: UserInfo | User, *, search: bool = True
     ) -> dict:
         """Check a plan against the published indexer without executing it.
 
@@ -2724,7 +2858,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             ForbiddenException: If the account cannot create plans or read resources.
             NotFoundException: If the selected workflow does not exist.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_PREVIEW.require(user)
         plan = body.plan
         graph = await FlowGraphService.get_accessible(plan.graph_id, user)
         issues = []
@@ -2950,9 +3084,39 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         Raises:
             ForbiddenException: If the account cannot create plans.
             BadRequestException: If one request ID is reused with different settings.
+            NotFoundException: If the original creation was deleted.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_CHANGE.require(user)
         key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        lock = _REQUEST_LOCKS.setdefault("plan:" + key, asyncio.Lock())
+        async with lock:
+            try:
+                with submission_lock(f"plan-create:{key}"), review_attempt():
+                    outcome = await cls._create_plan(body, user, key)
+                    return await AssistantReviewDecision.finish(
+                        user.id, body.request_id, outcome
+                    )
+            except LockTimeout:
+                return {
+                    "created": False,
+                    "pending": True,
+                    "request_id": str(body.request_id),
+                }
+
+    @classmethod
+    async def _create_plan(
+        cls, body: DownloadPlanCreate, user: UserInfo, key: str
+    ) -> dict:
+        """Create or replay a subscription under the account-scoped request lock.
+
+        Args:
+            body: Reviewed settings and confirmation.
+            user: Current administrator.
+            key: Account-scoped receipt identity.
+
+        Returns:
+            The original subscription or its current creation outcome.
+        """
         values = body.plan.model_dump(exclude={"id"})
         for field in ("interval_start", "interval_end"):
             if values[field] is not None and values[field].tzinfo is not None:
@@ -2963,7 +3127,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         digest = hashlib.sha256(
             dumps(identity, option=orjson.OPT_SORT_KEYS)
         ).hexdigest()
+        receipt = await DownloadPlanCreation.get_or_none(key=key)
+        if receipt is not None and receipt.digest != digest:
+            raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_REQUEST_CONFLICT)
         existing = await DownloadPlan.get_or_none(creation_key=key)
+        if receipt is not None and existing is None:
+            raise NotFoundException
         if existing is not None:
             if existing.creation_receipt["digest"] != digest:
                 raise BadRequestException(ErrorCode.DOWNLOAD_PLAN_REQUEST_CONFLICT)
@@ -2976,36 +3145,56 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             return {"created": False, **validation}
         if not body.confirmed:
             return {"created": False, "confirmation_required": True, **validation}
-        binding = None
-        if body.ingestion is not None and body.plan.transfer_lib_id:
-            # prepare the library before the new plan can queue its first attempt
-            binding = await MediaLibService.ensure_ingestion(
-                body.plan.transfer_lib_id,
-                body.ingestion.workflow_id,
-                body.ingestion.revision,
-                user,
-            )
-            validation["ingestion"] = binding
-            if binding["binding"] not in {"added", "reused"}:
-                return {"created": False, **validation, "valid": False}
+        async with in_transaction():
+            if not (
+                await AssistantReviewDecision.claim(user.id, body.request_id, True)
+            ).approved:
+                return {"created": False, "outcome": "cancelled", **validation}
+            binding = None
+            if body.ingestion is not None and body.plan.transfer_lib_id:
+                # prepare the library before the new plan can queue its first attempt
+                binding = await MediaLibService.ensure_ingestion(
+                    body.plan.transfer_lib_id,
+                    body.ingestion.workflow_id,
+                    body.ingestion.revision,
+                    user,
+                )
+                validation["ingestion"] = binding
+                if binding["binding"] not in {"added", "reused"}:
+                    return {"created": False, **validation, "valid": False}
         try:
-            plan = await DownloadPlan.create(
-                **values,
-                creation_key=key,
-                creation_receipt={
-                    "digest": digest,
-                    "first_execution": {"status": "queued"},
-                    **({"ingest_workflow_id": workflow_id} if workflow_id else {}),
-                },
-            )
+            async with in_transaction():
+                plan = await DownloadPlan.create(
+                    **values,
+                    creation_key=key,
+                    creation_receipt={
+                        "digest": digest,
+                        "first_execution": {"status": "queued"},
+                        **({"ingest_workflow_id": workflow_id} if workflow_id else {}),
+                    },
+                )
+                await DownloadPlanCreation.create(
+                    key=key, digest=digest, plan_id=plan.id
+                )
         except Exception as error:
-            if (
-                isinstance(error, IntegrityError)
-                and await DownloadPlan.filter(creation_key=key).exists()
+            if isinstance(error, IntegrityError) and (
+                await DownloadPlanCreation.filter(key=key).exists()
+                or await DownloadPlan.filter(creation_key=key).exists()
             ):
                 # a concurrent request committed the durable identity first
-                return await cls.create_once(body, user)
+                return await cls._create_plan(body, user, key)
+            if binding and not _binding_changed(binding, body.ingestion):
+                return {
+                    **validation,
+                    "ingestion": binding,
+                    "created": False,
+                    "failed": True,
+                }
             if binding is None:
+                # a rolled-back plan transaction has neither a plan nor a binding
+                await AssistantReviewDecision.finish(
+                    user.id, body.request_id, {"failed": True}
+                )
                 raise
             logger.exception("Plan creation failed after its ingestion binding")
             return {
@@ -3049,11 +3238,16 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
         Returns:
             The existing plan, or `created: false` when no creation was committed.
+
+        Raises:
+            NotFoundException: If the original creation was deleted.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_PREVIEW.require(user)
         key = hashlib.sha256(f"{user.id}:{request_id}".encode()).hexdigest()
         plan = await DownloadPlan.get_or_none(creation_key=key)
         if plan is None:
+            if await DownloadPlanCreation.filter(key=key).exists():
+                raise NotFoundException
             return {"created": False}
         return await cls.creation_result(plan, user, replayed=True)
 
@@ -3161,7 +3355,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             ForbiddenException: If the account cannot manage the plan's resources.
             NotFoundException: If the plan, or a library it names, does not exist.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_PREVIEW.require(user)
         plan = await DownloadPlan.get_or_none(id=change.plan_id)
         if plan is None:
             raise NotFoundException
@@ -3268,8 +3462,13 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 )
             else:
                 timing.update(
-                    interval_elapses_at=(plan.last_exec or plan.created_at)
-                    + timedelta(hours=proposed.interval_num),
+                    interval_elapses_at=plan.revised_first_due(
+                        proposed.interval_num, proposed.interval_start
+                    )
+                    or (
+                        (plan.last_exec or plan.created_at)
+                        + timedelta(hours=proposed.interval_num)
+                    ),
                     rule="Hourly checks start an attempt while schedule is active "
                     "once interval_num hours have passed since the last attempt; "
                     "not an exact time.",
@@ -3371,6 +3570,19 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         result, _, _ = await cls._review_change(change, user)
         return result
 
+    @staticmethod
+    def change_key(user_id: int, request_id: UUID) -> str:
+        """Identify an account's one-time update or deletion decision.
+
+        Args:
+            user_id: Reviewing account.
+            request_id: Identity of the original review.
+
+        Returns:
+            Durable receipt key shared by every decision surface.
+        """
+        return hashlib.sha256(f"{user_id}:{request_id}".encode()).hexdigest()
+
     @classmethod
     async def apply_change(cls, body: DownloadPlanApply, user: UserInfo) -> dict:
         """Apply a confirmed plan review once without starting an attempt.
@@ -3393,7 +3605,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             ForbiddenException: If the account cannot manage the plan's resources.
             NotFoundException: If a library the change names no longer exists.
         """
-        FlowGraphService.require_editor(user)
+        ADMIN_CHANGE.require(user)
         nonce = body.request_id.bytes[:8]
         if (
             cls.change_request(user.id, body.change, body.revision, nonce)
@@ -3405,7 +3617,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 "message": "This request_id was reviewed for another change or "
                 "revision; review the change again.",
             }
-        key = hashlib.sha256(f"{user.id}:{body.request_id}".encode()).hexdigest()
+        key = cls.change_key(user.id, body.request_id)
         lock = _PLAN_LOCKS.setdefault(key, asyncio.Lock())
         async with lock:
             try:
@@ -3520,6 +3732,9 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         try:
             async with in_transaction():
                 # an editor or another review may have changed it since the check
+                await DownloadPlan.filter(id=plan.id).update(updated_at=F("updated_at"))
+                if not await User.exists(id=user.id, role=UserRole.ADMIN):
+                    raise ForbiddenException
                 current = await DownloadPlan.get_or_none(id=plan.id)
                 if current is None:
                     return absent
@@ -3530,7 +3745,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     state = None
                 else:
                     # counters and the last attempt advance independently
-                    await DownloadPlan.filter(id=plan.id).update(**writes)
+                    await cls._save_settings(current, writes)
                     state = await cls.plan_state(await DownloadPlan.get(id=plan.id))
                 result = {
                     "applied": True,
@@ -3548,6 +3763,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     graph_id=base["workflow_id"],
                     result=result,
                 )
+        except ForbiddenException:
+            raise
         except Exception:
             logger.exception("Failed to apply a download plan change")
             try:
@@ -3570,6 +3787,42 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             }
         return {**result, "replayed": False}
 
+    @staticmethod
+    async def _save_settings(current: DownloadPlan, writes: dict):
+        """Persist settings and a pending replacement's first check together.
+
+        Args:
+            current: Stored plan read after reserving the transaction's writer.
+            writes: Validated changes from the editor or a confirmed review.
+        """
+        due = current.revised_first_due(
+            writes.get("interval_num", current.interval_num),
+            writes.get("interval_start", current.interval_start),
+        )
+        if due != current.replacement_due:
+            end = writes.get("interval_end", current.interval_end)
+            if end is not None and end.tzinfo is None:
+                end = end.replace(tzinfo=UTC)
+            limit = writes.get("total_limit", current.total_limit)
+            if limit is not None and current.total_count >= limit:
+                first = {"status": "blocked", "reason": "limit_reached"}
+            elif end is not None and due > end:
+                first = {"status": "blocked", "reason": "outside_window"}
+            else:
+                first = {"status": "scheduled" if due > timezone.now() else "queued"}
+            writes = {
+                **writes,
+                "replacement_due": due,
+                "creation_receipt": {
+                    **(current.creation_receipt or {}),
+                    "first_execution": first,
+                },
+            }
+            await DownloadPlanReplacement.filter(new_plan_id=current.id).update(
+                first_execution=first
+            )
+        await DownloadPlan.filter(id=current.id).update(**writes)
+
     @classmethod
     async def upsert(cls, obj: DownloadPlanUpsert) -> DownloadPlan:
         """Create or update a download plan.
@@ -3582,8 +3835,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         """
         data = obj.model_dump(exclude={"id"})
         if obj.id:
-            await DownloadPlan.filter(id=obj.id).update(**data)
-            plan = await DownloadPlan.get(id=obj.id)
+            async with in_transaction():
+                await DownloadPlan.filter(id=obj.id).update(updated_at=F("updated_at"))
+                await cls._save_settings(await DownloadPlan.get(id=obj.id), data)
+                plan = await DownloadPlan.get(id=obj.id)
         else:
             plan = await DownloadPlan.create(**data)
             # execute the plan immediately if it's active

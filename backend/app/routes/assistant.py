@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
 from typing import Any
+from uuid import UUID
 
 from sanic import Blueprint, HTTPResponse, Request, json
 from sanic.exceptions import ServerError
@@ -17,11 +18,19 @@ from app.models.assistant import (
     ConversationCreate,
     ConversationDelete,
     ConversationRename,
+    DeviceReceipt,
     ProposalConfirm,
     ProposalDecision,
 )
+from app.models.assistant_questions import AnswerGroup
+from app.models.download import PlanReviewDecision, ReplacementDecision
+from app.models.user import UserRole
+from app.services.agent_actions import action_status, decide_action
 from app.services.assistant import AssistantService
+from app.services.assistant_plan_review import plan_review
 from app.services.assistant_proposals import AssistantProposalService
+from app.services.assistant_questions import answer_card
+from app.services.assistant_reviews import assistant_review
 from app.services.assistant_sessions import AssistantSessionService
 from app.utils.json import dumps
 
@@ -293,6 +302,52 @@ async def persistent_chat(
     )
 
 
+@assistant.post("/conversations/<conversation_id:int>/device/<call_id:str>")
+@authorize()
+@validate(json=DeviceReceipt)
+async def record_device(
+    request: Request, conversation_id: int, call_id: str, body: DeviceReceipt
+) -> HTTPResponse:
+    """Record an owned client-reported navigation outcome without changing media.
+
+    Args:
+        request: Authenticated current device.
+        conversation_id: Conversation offering the action.
+        call_id: Immutable navigation tool call.
+        body: Device-reported outcome.
+
+    Returns:
+        The latest outcome, retaining a previously confirmed opening.
+    """
+    return private_json(
+        await AssistantSessionService.record_device_result(
+            conversation_id, call_id, body.opened, request.ctx.user
+        )
+    )
+
+
+@assistant.post("/conversations/<conversation_id:int>/questions/<call_id:str>/answer")
+@authorize()
+@validate(json=AnswerGroup)
+async def submit_answers(
+    request: Request, conversation_id: int, call_id: str, body: AnswerGroup
+) -> HTTPResponse:
+    """Record a question response without approving or applying a business change.
+
+    Args:
+        request: Authenticated request.
+        conversation_id: Owned conversation.
+        call_id: Displayed interaction identity.
+        body: Answers and the displayed version.
+
+    Returns:
+        A recorded selection or a field-specific validation issue.
+    """
+    return private_json(
+        await answer_card(conversation_id, call_id, body, request.ctx.user)
+    )
+
+
 PROPOSAL = "/conversations/<conversation_id:int>/proposals/<proposal_id:int>"
 
 
@@ -386,3 +441,107 @@ async def cancel_proposal(
             conversation_id, proposal_id, body, request.ctx.user
         )
     )
+
+
+@assistant.get("/operations/<key:uuid>")
+@authorize(role=UserRole.ADMIN)
+async def get_operation(request: Request, key: UUID) -> HTTPResponse:
+    """Read the review owned by the browser account.
+
+    Args:
+        request: Administrator session.
+        key: Durable operation identity.
+
+    Returns:
+        Current preview, decision status and any result.
+    """
+    return private_json(await action_status(key, request.ctx.user))
+
+
+@assistant.post("/operations/<key:uuid>/decision")
+@authorize(role=UserRole.ADMIN)
+@validate(json=ReplacementDecision)
+async def decide_operation(
+    request: Request, key: UUID, body: ReplacementDecision
+) -> HTTPResponse:
+    """Approve or cancel the exact review displayed in the browser.
+
+    Args:
+        request: Administrator session.
+        key: Durable operation identity.
+        body: The displayed digest and explicit decision.
+
+    Returns:
+        Current persisted outcome.
+    """
+    return private_json(
+        await decide_action(key, body.digest, body.approve, request.ctx.user)
+    )
+
+
+@assistant.get("/plan-reviews/<call_id:str>")
+@authorize(role=UserRole.ADMIN)
+async def read_plan_review(request: Request, call_id: str) -> HTTPResponse:
+    """Read the current decision for an owned assistant review.
+
+    Args:
+        request: Authenticated administrator session.
+        call_id: Original server-assigned tool call.
+
+    Returns:
+        Its stored preview and decision state.
+    """
+    return private_json(await plan_review(call_id, request.ctx.user))
+
+
+@assistant.post("/plan-reviews/<call_id:str>/decision")
+@authorize(role=UserRole.ADMIN)
+@validate(json=PlanReviewDecision)
+async def decide_plan_review(
+    request: Request, call_id: str, body: PlanReviewDecision
+) -> HTTPResponse:
+    """Record a browser decision for an owned subscription update or deletion.
+
+    Args:
+        request: Authenticated administrator session.
+        call_id: Original server-assigned tool call.
+        body: Exact request and explicit user decision.
+
+    Returns:
+        Current decision state, including a previously committed decision.
+    """
+    return private_json(await plan_review(call_id, request.ctx.user, body))
+
+
+@assistant.get("/reviews/<call_id:str>")
+@authorize(role=UserRole.ADMIN)
+async def get_review(request: Request, call_id: str) -> HTTPResponse:
+    """Read the trusted status of a chat proposal.
+
+    Args:
+        request: Authenticated browser session.
+        call_id: Server-issued review identity.
+
+    Returns:
+        The account-owned preview and durable outcome.
+    """
+    return private_json(await assistant_review(call_id, request.ctx.user))
+
+
+@assistant.post("/reviews/<call_id:str>/decision")
+@authorize(role=UserRole.ADMIN)
+@validate(json=PlanReviewDecision)
+async def decide_review(
+    request: Request, call_id: str, body: PlanReviewDecision
+) -> HTTPResponse:
+    """Decide the exact settings originally displayed by a chat tool.
+
+    Args:
+        request: Authenticated browser session.
+        call_id: Server-issued review identity.
+        body: Displayed request ID and explicit decision.
+
+    Returns:
+        The authoritative outcome or any existing decision.
+    """
+    return private_json(await assistant_review(call_id, request.ctx.user, body))

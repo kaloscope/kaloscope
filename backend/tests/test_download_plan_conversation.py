@@ -20,7 +20,7 @@ from app.models.download import (
 )
 from app.models.flow import FlowGraph, FlowJob, FlowLog, FlowVariable
 from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
-from app.models.user import Permissions, UserRole
+from app.models.user import Permissions, PermType, UserPermission, UserRole
 from app.services import download as service
 from app.services.assistant import AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
@@ -445,20 +445,81 @@ def test_login_and_permissions(monkeypatch):
             assert denied["status"] == "login_required"
             execute.assert_not_called()
             other.role, other.perms = UserRole.USER, Permissions(indexer_ids=[graph.id])
+            assert (await service.DownloadPlanService.search_indexer(body, other))[
+                "status"
+            ] == "login_required"
             with pytest.raises(ForbiddenException):
-                await service.DownloadPlanService.search_indexer(body, other)
+                await service.DownloadPlanService.search_indexer(
+                    body.model_copy(update={"sources": True}), other
+                )
             auth = await FlowVariable.create(
                 graph_id=graph.id,
                 key="$auth",
                 value={"name": "test", "token": "never-expose"},
             )
-            result = await service.DownloadPlanService.search_indexer(body, owner)
+            result = await tools.preview_indexer(body, other)
             assert result["status"] == "ok" and "never-expose" not in str(result)
+            assert "subscription" not in result and "subscription_note" not in result
+            other.perms = Permissions()
+            with pytest.raises(ForbiddenException):
+                await service.DownloadPlanService.search_indexer(body, other)
             auth.expires = 1
             await auth.save()
             assert (await service.DownloadPlanService.search_indexer(body, owner))[
                 "status"
             ] == "login_required"
+
+    asyncio.run(run())
+
+
+def test_preview_search_permissions(monkeypatch):
+    execute = engine_fixture(
+        monkeypatch,
+        {"items": [{"id": "r1", "title": "Lantern", "link": "test-source"}]},
+    )
+    options = AsyncMock()
+    monkeypatch.setattr(service.DownloadPlanService, "authoring_options", options)
+
+    async def run():
+        async with database() as (owner, reader):
+            graph, _, _ = await fixture_plan()
+            graph.definition["nodes"][0]["data"]["config"] += "\nonly_preview: true\n"
+            await graph.save()
+            reader.role, reader.perms = (
+                UserRole.USER,
+                Permissions(indexer_ids=[graph.id]),
+            )
+            values = {
+                "workflow_id": graph.id,
+                "keyword": "Lantern",
+                "filters": {"category": "movie"},
+            }
+            result = await tools.execute_tool(
+                "search_indexer",
+                dumps(values).decode(),
+                reader,
+                conversation_id=1,
+                call_id="search",
+            )
+            assert result["data"]["items"] == [{"id": "r1", "title": "Lantern"}]
+            assert "subscription" not in result["data"]
+            assert execute.await_args.args[1] == {
+                "$start": "search_start",
+                "keyword": "Lantern",
+                "category": "movie",
+                "page_num": 1,
+                "page_size": 5,
+            }
+            options.assert_not_awaited()
+            for account, settings in (
+                (reader, {"filters": {"undeclared": 1}}),
+                (owner, {"sources": True}),
+            ):
+                rejected = await service.DownloadPlanService.search_indexer(
+                    IndexerSearch(**{**values, **settings}), account
+                )
+                assert rejected["status"] == "invalid_input"
+            execute.assert_awaited_once()
 
     asyncio.run(run())
 
@@ -723,6 +784,22 @@ def test_mcp_search(monkeypatch):
                 "isError"
             ]
 
+            await UserPermission.create(
+                user_id=app.shared_ctx.sessions["reader"].id,
+                rel_type=PermType.INDEXER,
+                rel_id=graph.id,
+            )
+            read_only = await call(app, "search_indexer", args, token="reader")
+            assert read_only["isError"] and "read-only" in str(read_only)
+            visible = await call(app, "search_indexer", args, token=tokens["reader"])
+            assert visible["structuredContent"]["status"] == "ok"
+            blocked = await call(
+                app,
+                "search_indexer",
+                {"search": {**args["search"], "sources": True}},
+                token=tokens["reader"],
+            )
+            assert blocked["isError"]
             result = await call(app, "search_indexer", args, token=tokens["admin"])
             assert not result.get("isError"), result
             assert result["structuredContent"]["status"] == "ok"

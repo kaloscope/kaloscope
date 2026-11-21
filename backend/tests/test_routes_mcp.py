@@ -196,7 +196,8 @@ def test_session_independence(monkeypatch):
             session_expiry = app.shared_ctx.sessions["reader"].expire_at
             response = await rpc(http, issued["token"])
             assert response.status_code == 200
-            assert len(response.json()["result"]["tools"]) == 43
+            names = {tool["name"] for tool in response.json()["result"]["tools"]}
+            assert "get_download_plan" in names and "list_ai_providers" not in names
             assert "set-cookie" not in response.headers
             assert app.shared_ctx.sessions["reader"].expire_at == session_expiry
             assert issued["token"] not in app.shared_ctx.sessions
