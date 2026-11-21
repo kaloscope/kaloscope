@@ -80,6 +80,7 @@ from app.models.download import (
     DownloaderUpsert,
     DownloadPlan,
     DownloadPlanApply,
+    DownloadPlanAttempt,
     DownloadPlanChange,
     DownloadPlanCheck,
     DownloadPlanCreate,
@@ -2430,7 +2431,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
 
         Returns:
             The exact permission-filtered total and dumped plans with their indexer
-            name, `running` flag, `schedule` state and any recorded first attempt.
+            name, schedule, first receipt and latest recorded check with its time.
             Scheduling comes from stored settings and never proves that an attempt
             ran or succeeded.
         """
@@ -2445,17 +2446,45 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             queries.append(Q(graph_id=query.graph_id))
         if query.keyword:
             queries.append(Q(keyword__icontains=query.keyword))
-        page = await DownloadPlan.page(*queries, **query.page_params)
+        # the plan_id index supports one newest-attempt lookup per plan
+        latest = (
+            "FROM download_plan_attempt WHERE plan_id = download_plan.id "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        annotations = {"latest_attempt_id": RawSQL(f"(SELECT id {latest})")}
+        params = query.page_params
+        if query.ordering in {"last_exec", "-last_exec"}:
+            annotations["attempt_time"] = RawSQL(
+                f"COALESCE((SELECT created_at {latest}), download_plan.last_exec)"
+            )
+            params["ordering"] = query.ordering.replace("last_exec", "attempt_time")
+        page = await DownloadPlan.page(*queries, annotations=annotations, **params)
         result = await cls.dump_page(page)
-        # attach the graph name and running status for each plan
         graph_ids = {plan.graph_id for plan in page.items}
         graphs = {g.id: g for g in await FlowGraph.filter(id__in=graph_ids)}
+        latest_ids = [
+            record.latest_attempt_id
+            for record in page.items
+            if record.latest_attempt_id is not None
+        ]
+        attempts = {
+            attempt.plan_id: attempt
+            for attempt in await DownloadPlanAttempt.filter(id__in=latest_ids)
+        }
         for plan, record in zip(result["items"], page.items, strict=True):
             graph = graphs.get(plan["graph_id"])
             plan["graph_name"] = graph.name if graph else None
             published = graph.state != GraphState.DRAFT if graph else False
             plan["running"] = published and not plan["inactive"]
             plan["schedule"] = record.schedule_state(published)
+            if attempt := attempts.get(record.id):
+                plan["last_execution"] = {
+                    "started_at": attempt.created_at.isoformat(),
+                    "stage": attempt.stage(),
+                    "added": attempt.submitted,
+                    "errors": attempt.errors,
+                    "uncertain": attempt.uncertain,
+                }
             if record.creation_receipt:
                 first = record.creation_receipt["first_execution"]
                 plan["first_execution"] = (
@@ -3113,7 +3142,10 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         if first_execution["status"] == "queued" and (
             plan.inactive() or graph.state == GraphState.DRAFT
         ):
-            first_execution = {"status": "waiting"}
+            first_execution = {
+                "status": "waiting",
+                "stage": plan.schedule_state(graph.state != GraphState.DRAFT),
+            }
         data = await cls.dump(plan)
         data.update(
             graph_name=graph.name,
@@ -3214,6 +3246,7 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         *,
         review_call_id: str | None = None,
         active_review_call_id: str | None = None,
+        notify: bool = True,
     ) -> dict:
         """Persist one authorized plan and notify the existing download synchronizer.
 
@@ -3222,6 +3255,8 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
             user: Current administrator; identity never comes from the request body.
             review_call_id: Browser review that opened the native editor, if any.
             active_review_call_id: Validated proposal from the current assistant turn.
+            notify: Wake the scheduler after creation. An enclosing transaction
+                must pass `False` and wake it after its own commit.
 
         Returns:
             Validation errors, an unconfirmed preview, or the same plan on every
@@ -3249,9 +3284,12 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                     outcome = await cls._create_plan(
                         body, user, key, review_call_id, active_review_call_id
                     )
-                    return await AssistantReviewDecision.finish(
+                    result = await AssistantReviewDecision.finish(
                         user.id, body.request_id, outcome
                     )
+                    if notify and result.get("created") and not result.get("replayed"):
+                        notify_download_changes()
+                    return result
             except LockTimeout:
                 return {
                     "created": False,
@@ -3491,7 +3529,6 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
                 user.id, body.request_id, {"failed": True}
             )
             raise
-        notify_download_changes()
         result = await cls.creation_result(plan, user)
         if binding is not None:
             result["ingestion"] = binding

@@ -165,10 +165,10 @@ class TortoiseModel(Model):
             Paginated list.
         """
         queryset = cls.filter(*args, **kwargs)
-        if ordering:
-            queryset = queryset.order_by(ordering)
         if annotations:
             queryset = queryset.annotate(**annotations)
+        if ordering:
+            queryset = queryset.order_by(ordering)
         # return all if page_num is 0
         if page_num == 0:
             items = await queryset

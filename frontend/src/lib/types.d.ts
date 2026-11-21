@@ -1049,6 +1049,10 @@ export type DownloadTask = {
   sub_repl: string | null;
 };
 
+/** Recorded facts for one check, separate from the plan's scheduling timestamp. */
+export type PlanExecution = { stage: string; added?: number; errors?: number; uncertain?: number };
+export type FirstPlanExecution = Partial<PlanExecution> & { status: string };
+
 /**
  * A plan for scheduling automated downloads.
  */
@@ -1072,7 +1076,8 @@ export type DownloadPlan = {
   running: boolean;
   // stored scheduling state from the plan list, not an execution result
   schedule?: 'active' | 'indexer_unpublished' | 'not_started' | 'ended' | 'limit_reached';
-  first_execution?: { status: string; added?: number; errors?: number; uncertain?: number };
+  first_execution?: FirstPlanExecution;
+  last_execution?: PlanExecution & { started_at: string };
 
   // transfer options
   transfer_lib_id: number | null;
@@ -1158,7 +1163,7 @@ export type DownloadPlanCreation = {
   workflow_id: number;
   plan: DownloadPlan;
   replayed?: boolean;
-  first_execution: { status: string; added?: number; errors?: number; uncertain?: number };
+  first_execution: FirstPlanExecution;
 };
 
 /** Validation errors leave the editor available for corrections. */

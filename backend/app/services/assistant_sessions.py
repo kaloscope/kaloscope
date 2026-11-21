@@ -34,6 +34,7 @@ from app.models.flow import FlowJob, GraphDocument
 from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
+from app.services.subscription_choices import first_check_pending, first_check_summary
 from app.utils.json import dumps
 
 # retain ownership while a reasoning model has no public text to checkpoint
@@ -390,6 +391,39 @@ class AssistantSessionService:
         proposals = await AssistantProposalService.latest(conversation_id, visible)
         for item in items:
             for tool in item["tools"]:
+                data = (tool.get("result") or {}).get("data") or {}
+                if (
+                    item["status"] == "complete"
+                    and user.role == UserRole.ADMIN
+                    and tool["name"] == "create_download_plan"
+                    and data.get("created")
+                    and data.get("follow_first_check")
+                ):
+                    # recover results that arrived after the conversation closed
+                    from app.services.download import DownloadPlanService
+
+                    try:
+                        first = (
+                            await DownloadPlanService.get_creation(
+                                data["plan_id"], user
+                            )
+                        )["first_execution"]
+                    except (NotFoundException, ForbiddenException):
+                        continue
+                    if not first_check_pending(first):
+                        chinese = data.get("follow_language") == "zh"
+                        item["content"] += (
+                            "" if chinese else " "
+                        ) + first_check_summary(first, chinese=chinese)
+                        tool["result"] = {
+                            **tool["result"],
+                            "data": {
+                                **data,
+                                "first_execution": first,
+                                "follow_first_check": False,
+                                "show_first_check": False,
+                            },
+                        }
                 if tool["id"] in proposals:
                     tool["proposal"] = proposals[tool["id"]]
 

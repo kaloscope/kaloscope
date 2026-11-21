@@ -1,4 +1,5 @@
 <script lang="ts">
+  import FirstCheckResult from './FirstCheckResult.svelte';
   import { createReviewCard } from '$lib/assistant/review-card.svelte';
   import {
     reviewChanges,
@@ -16,10 +17,18 @@
   const {
     id,
     requestId,
+    createdInChat = false,
     tool,
     onedit,
     onview
-  }: { id: string; requestId: string; tool: ReviewTool; onedit?: () => void; onview?: () => void } = $props();
+  }: {
+    id: string;
+    requestId: string;
+    createdInChat?: boolean;
+    tool: ReviewTool;
+    onedit?: () => void;
+    onview?: () => void;
+  } = $props();
   let modal: Modal | undefined = $state();
   const card = createReviewCard<AssistantReview>({
     path: () => `assistant/reviews/${id}`,
@@ -101,12 +110,6 @@
           : 'media_change';
     return $_(`assistant.${domain}.${outcome.outcome}`, { values: { 0: target }, default: fallback });
   });
-  const firstExecution = $derived(
-    outcome?.first_execution && typeof outcome.first_execution === 'object' && 'status' in outcome.first_execution
-      ? String(outcome.first_execution.status)
-      : null
-  );
-
   const planName = $derived(
     String(fields.find(([key]) => key === 'field.keyword')?.[1] || $_('assistant.pages.download_plans'))
   );
@@ -244,9 +247,7 @@
         </ul>
       {/if}
       <p role="status" class="text-xs text-base-content/75">
-        {statusText}{#if firstExecution}<span class="block"
-            >{$_('assistant.plan.first.' + firstExecution, { default: firstExecution })}</span
-          >{/if}
+        {statusText}
       </p>
     {:else if busy}<span class="loading loading-xs loading-spinner" role="status" aria-label={$_('media.loading')}
       ></span>{/if}
@@ -307,13 +308,13 @@
   >
     <iconify-icon icon={icons.document} width="0.875rem" class="shrink-0" aria-hidden="true"></iconify-icon>
     <span class="min-w-0 truncate"
-      >{planName} · {failed
-        ? $_('assistant.request_failed')
-        : statusText || $_('media.loading')}{#if firstExecution && !failed}
-        · {$_('assistant.plan.first.' + firstExecution, { default: firstExecution })}{/if}</span
+      >{planName} · {failed ? $_('assistant.request_failed') : statusText || $_('media.loading')}</span
     >
     <iconify-icon icon={icons.chevronRight} width="0.75rem" class="shrink-0" aria-hidden="true"></iconify-icon>
   </button>
+  {#if !createdInChat && outcome?.created && !outcome.already_exists && typeof outcome.plan_id === 'number'}
+    <FirstCheckResult planId={outcome.plan_id} />
+  {/if}
   <Modal bind:this={modal} shallow={false} title={$_('assistant.plan.record')}>
     {@render details()}
   </Modal>

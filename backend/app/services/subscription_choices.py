@@ -2,6 +2,9 @@
 
 import re
 import unicodedata
+from typing import Literal
+
+from app.core.renderer import t2s
 
 _TAG = re.compile(r"^[\[【]([^\]】\r\n]{1,48})[\]】]")
 _STAR_GROUP = re.compile(r"^([^★☆]{1,40}(?:字幕组|字幕組|字幕社))[★☆]")
@@ -32,6 +35,20 @@ def compact(value: str) -> str:
     )
 
 
+def contains_title(name: str, title: str) -> bool:
+    """Match a requested media title across simplified and traditional Chinese.
+
+    Args:
+        name: Indexer text that may contain the title.
+        title: Requested title in its original spelling.
+
+    Returns:
+        Whether the normalized text contains the nonempty normalized title.
+    """
+    key = compact(t2s(title))
+    return bool(key) and key in compact(t2s(name))
+
+
 def release_group(item: dict, title: str) -> str:
     """Read the credited group from release tags or the indexer's uploader field.
 
@@ -49,7 +66,7 @@ def release_group(item: dict, title: str) -> str:
         not group
         or _METADATA.fullmatch(group)
         or _EDITION.fullmatch(tag[0])
-        or title.casefold() in group.casefold()
+        or contains_title(group, title)
     ):
         group = str(item.get("uploader") or "").strip()
     return group if len(group) <= 48 and any(c.isalpha() for c in group) else ""
@@ -76,31 +93,52 @@ def release_matches(item: dict, title: str, terms: list[str]) -> bool:
     )
 
 
-def matches_release_rule(item: dict, rule: dict) -> bool:
-    """Apply the recorded release criteria to one current indexer result.
+def release_mismatch(item: dict, rule: dict) -> Literal["title", "release"] | None:
+    """Identify the first confirmed restriction a search result fails.
 
     Args:
         item: Metadata returned alongside the candidate link.
         rule: Verified title, credited release tags and literal restrictions.
 
     Returns:
-        Whether the available metadata satisfies every restriction.
+        The mismatched field, or `None` when all restrictions match.
     """
     if rule["confirmed"] and rule["terms"]:
         name = str(item.get("title") or "")
-        if compact(rule["title"]) not in compact(name):
-            return False
+        if not contains_title(name, rule["title"]):
+            return "title"
         if rule["observed"]:
-            return release_matches(item, rule["title"], rule["observed"])
+            return (
+                None
+                if release_matches(item, rule["title"], rule["observed"])
+                else "release"
+            )
         # custom values must identify the credited group or an actual edition tag
         labels = {compact(release_group(item, rule["title"]))}
         labels.update(
             compact(tag)
             for tag in (*_EDITION.findall(name), *_RESOLUTION.findall(name))
         )
-        return all(compact(term) in labels for term in rule["terms"])
-    metadata = compact(" ".join(str(item.get(k) or "") for k in ("title", "uploader")))
-    return all(compact(term) in metadata for term in rule["terms"])
+        matched = all(compact(term) in labels for term in rule["terms"])
+    else:
+        metadata = compact(
+            " ".join(str(item.get(k) or "") for k in ("title", "uploader"))
+        )
+        matched = all(compact(term) in metadata for term in rule["terms"])
+    return None if matched else "release"
+
+
+def matches_release_rule(item: dict, rule: dict) -> bool:
+    """Apply the stored release restrictions to a background download candidate.
+
+    Args:
+        item: Indexer metadata for a candidate download.
+        rule: Release criteria stored in the plan receipt.
+
+    Returns:
+        Whether the result satisfies every restriction.
+    """
+    return release_mismatch(item, rule) is None
 
 
 def release_choices(items: list[dict], title: str) -> list[list[str]]:
@@ -196,6 +234,81 @@ def confirmation_question(
     }
 
 
+def first_check_pending(first: dict) -> bool:
+    """Check whether a first-attempt receipt can still acquire a final result.
+
+    Args:
+        first: Stored or permission-checked first execution receipt.
+
+    Returns:
+        Whether the assistant should read the receipt again.
+    """
+    return (
+        first.get("status") in {"queued", "waiting", "scheduled"}
+        or first.get("stage") == "checking"
+    )
+
+
+def first_check_summary(first: dict, *, chinese: bool) -> str:
+    """Describe the confirmed first submission count or its recorded uncertainty.
+
+    Args:
+        first: The first check's own receipt, independent of later runs.
+        chinese: Whether to write the result in Chinese.
+
+    Returns:
+        The factual follow-up sentence for the assistant reply.
+    """
+    added = first.get("added")
+    stage = first.get("stage") or first.get("status")
+    if stage == "unconfirmed" and added:
+        return (
+            f"首轮已记录 {added} 个下载任务，下载器实际接收数尚无法确认。"
+            if chinese
+            else (
+                f"The first check recorded {added} local tasks. "
+                "The downloader has not confirmed the count."
+            )
+        )
+    if stage in {"unconfirmed", "unavailable"} or added is None:
+        return (
+            "首轮实际提交数尚无法确认。"
+            if chinese
+            else "The first submission count is unknown."
+        )
+    detail = {
+        "no_search_results": ("没有搜到资源", "the search returned no results"),
+        "no_new_tasks": (
+            "匹配资源已在计划历史或下载任务中",
+            "matching resources were already recorded",
+        ),
+        "release_filtered": (
+            "没有符合发布条件的新资源",
+            "no new resources met the release conditions",
+        ),
+        "driver_offline": ("无法连接下载器", "the downloader was unavailable"),
+        "search_failed": ("索引器搜索失败", "the indexer search failed"),
+        "invalid_link": (
+            "资源缺少有效下载链接",
+            "the results had no valid download links",
+        ),
+        "submit_failed": ("向下载器提交失败", "submission to the downloader failed"),
+        "failed": ("检查发生错误", "the check encountered errors"),
+        "partial": (
+            f"另有 {first.get('errors', 0)} 项错误",
+            f"{first.get('errors', 0)} errors were recorded",
+        ),
+    }.get(stage)
+    if added == 0 and not detail:
+        detail = ("记录中没有更具体的原因", "the receipt has no more specific reason")
+    if chinese:
+        return f"首轮已提交 {added} 个下载" + (f"，{detail[0]}。" if detail else "。")
+    noun = "download" if added == 1 else "downloads"
+    return f"The first check submitted {added} {noun}." + (
+        f" {detail[1].capitalize()}." if detail else ""
+    )
+
+
 def confirmation_outcome(tool: str, result: dict, *, chinese: bool) -> str:
     """Report the final tool receipt after the user confirms a subscription.
 
@@ -229,25 +342,38 @@ def confirmation_outcome(tool: str, result: dict, *, chinese: bool) -> str:
                     if chinese
                     else f"Matching download plan #{plan_id} already exists."
                 )
-            status = (data.get("first_execution") or {}).get("status")
-            if status == "queued":
-                message += (
-                    "首次检查已排队。" if chinese else " The first check is queued."
-                )
-            elif status == "waiting":
-                message += (
-                    "首次检查正在等待运行条件。"
-                    if chinese
-                    else " The first check is waiting to run."
-                )
-            return message
+            if data.get("already_exists") or data.get("follow_first_check"):
+                return message
+            summary = first_check_summary(
+                data.get("first_execution") or {}, chinese=chinese
+            )
+            return message + ("" if chinese else " ") + summary
+        if data.get("valid") is False:
+            return (
+                "已确认的计划参数已失效，未创建下载计划。"
+                if chinese
+                else "The confirmed settings are no longer valid. No plan was created."
+            )
+        if data.get("outcome") == "cancelled":
+            return (
+                "此订阅已取消，未创建下载计划。"
+                if chinese
+                else "The subscription was cancelled. No plan was created."
+            )
         return (
             "尚未收到创建成功的回执，请查看此操作的状态。"
             if chinese
             else "Creation has not been confirmed. Check the status of this action."
         )
-    check = (data.get("assistant_submission") or {}).get("status")
-    if check == "unverified_term":
+    submission = data.get("assistant_submission") or {}
+    check = submission.get("status")
+    if check == "unverified_term" and submission.get("mismatch") == "title":
+        reason = (
+            "部分搜索结果的片名与订阅片名不一致。"
+            if chinese
+            else "At least one search result did not match the requested title."
+        )
+    elif check == "unverified_term":
         reason = (
             "搜索结果与所选字幕组或版本不一致。"
             if chinese

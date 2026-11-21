@@ -332,7 +332,7 @@ async def record_device(
 async def submit_answers(
     request: Request, conversation_id: int, call_id: str, body: AnswerGroup
 ) -> HTTPResponse:
-    """Record a question response without approving or applying a business change.
+    """Record answers and create a subscription confirmed by its bound card.
 
     Args:
         request: Authenticated request.

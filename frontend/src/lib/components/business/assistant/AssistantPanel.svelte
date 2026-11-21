@@ -30,6 +30,7 @@
   import { onMount, tick, untrack } from 'svelte';
   import AssistantActivity from './AssistantActivity.svelte';
   import AssistantHistory from './AssistantHistory.svelte';
+  import FirstCheckResult from './FirstCheckResult.svelte';
   import AssistantChanges from './AssistantChanges.svelte';
   import AssistantQuestions from './AssistantQuestions.svelte';
   import AssistantMarkdown from './AssistantMarkdown.svelte';
@@ -154,6 +155,37 @@
   const handoff = $derived(
     $assistantHandoff?.conversationId === $assistant.conversation?.id ? $assistantHandoff : null
   );
+
+  /**
+   * Find creations whose first result still belongs in this reply.
+   * @param turn - Current or restored turn, including older creation receipts.
+   * @returns Distinct plan IDs to follow independently of subsequent checks.
+   */
+  function followedPlans(turn: AssistantTurn): number[] {
+    const ids: number[] = [];
+    for (const tool of turn.tools) {
+      const data = tool.result?.data;
+      if (
+        tool.name !== 'create_download_plan' ||
+        !tool.result?.ok ||
+        !data?.created ||
+        data.already_exists ||
+        typeof data.plan_id !== 'number'
+      )
+        continue;
+      const receipt = data.first_execution;
+      const olderPending =
+        data.follow_first_check === undefined &&
+        receipt &&
+        typeof receipt === 'object' &&
+        'status' in receipt &&
+        ['queued', 'waiting', 'unconfirmed'].includes(String(receipt.status));
+      if ((data.follow_first_check || data.show_first_check || olderPending) && !ids.includes(data.plan_id)) {
+        ids.push(data.plan_id);
+      }
+    }
+    return ids;
+  }
 
   /**
    * Keep a dragged panel inside the visible viewport, including after resizing.
@@ -658,6 +690,9 @@
                     {#if isAssistantReview(operation.result, asksForChoices)}
                       {@const review = {
                         id: operation.id,
+                        createdInChat: turn.tools.some(
+                          (tool) => tool.name === 'create_download_plan' && tool.result?.data?.created
+                        ),
                         requestId: operation.result.data.request_id,
                         tool: operation.result.name,
                         onview:
@@ -692,6 +727,11 @@
                 <AssistantMarkdown source={segment.text} />
               {/if}
             {/each}
+            {#if turn.status !== 'streaming' && user.current?.role === 'admin'}
+              {#each followedPlans(turn) as planId (planId)}
+                <FirstCheckResult {planId} />
+              {/each}
+            {/if}
             {#if turn.status === 'streaming'}
               <p class="flex h-6 items-center gap-2 text-xs text-base-content/60">
                 <span class="loading loading-xs loading-dots" aria-hidden="true"></span>

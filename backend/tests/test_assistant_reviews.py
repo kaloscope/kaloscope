@@ -282,7 +282,7 @@ def test_future_subscription():
             assert (
                 first["outcome"]["first_execution"]
                 == refreshed["outcome"]["first_execution"]
-                == {"status": "waiting"}
+                == {"status": "waiting", "stage": "not_started"}
             )
 
     asyncio.run(run())

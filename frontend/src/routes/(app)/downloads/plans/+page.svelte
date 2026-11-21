@@ -20,6 +20,7 @@
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores.svelte';
   import type { AssistantPageContext, DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
+  import { describePlanExecution } from '$lib/utils/plan-execution';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { onMount, tick, untrack } from 'svelte';
 
@@ -39,6 +40,7 @@
 
   // retain the filters of the displayed results, independently of unsubmitted input
   let displayed: PlanFilters | null = null;
+  let listRequest: AbortController | null = null;
 
   /**
    * Search for download plans.
@@ -46,20 +48,27 @@
    * @param page - Page number.
    * @param size - Page size.
    * @param base - Filters to reuse instead of the current inputs.
+   * @param quiet - Refresh visible results without interrupting the user.
    */
   function search(
     page: number = 1,
     size: number = pagination.size,
-    base: Omit<PlanFilters, 'page_num' | 'page_size'> | null = null
+    base: Omit<PlanFilters, 'page_num' | 'page_size'> | null = null,
+    quiet = false
   ) {
     const filters = {
       ...(base ?? { workflow_id: graph || null, keyword, ordering: $ordering }),
       page_num: page,
       page_size: size
     };
-    loading.start();
+    listRequest?.abort();
+    const current = new AbortController();
+    listRequest = current;
+    if (!quiet) loading.start();
     api
       .get('download/plan/list', {
+        signal: current.signal,
+        context: { silentErrors: quiet },
         searchParams: {
           page_num: page,
           page_size: size,
@@ -70,13 +79,20 @@
       })
       .json<Resp<Page<DownloadPlan>>>()
       .then(({ data }) => {
+        if (current.signal.aborted) return;
         pagination.current = page;
         pagination.size = size;
         pagination.total = data.total;
         plans = data.items;
         displayed = filters;
       })
-      .finally(() => loading.end());
+      .catch(() => {})
+      .finally(() => {
+        if (listRequest === current) {
+          listRequest = null;
+          loading.end();
+        }
+      });
   }
 
   /**
@@ -109,6 +125,23 @@
     };
     window.addEventListener('download-plan-created', refresh);
     window.addEventListener('download-plan-changed', changed);
+    let timer: ReturnType<typeof setTimeout>;
+    /**
+     * Refresh the results on screen without applying unsubmitted filters.
+     */
+    function poll(): void {
+      if (!document.hidden && !listRequest && displayed) {
+        const { page_num, page_size, ...base } = displayed;
+        search(page_num, page_size, base, true);
+      }
+      const pending = plans.some((plan) =>
+        plan.last_execution
+          ? plan.last_execution.stage === 'completion_unknown'
+          : plan.running && plan.first_execution?.status === 'queued'
+      );
+      timer = setTimeout(poll, pending ? 3000 : 30000);
+    }
+    timer = setTimeout(poll, 3000);
     const unregister = registerAssistantContext(() => {
       if (!displayed) return null;
       const current = plans.find((plan) => plan.id === selected?.id);
@@ -137,6 +170,8 @@
     return () => {
       window.removeEventListener('download-plan-created', refresh);
       window.removeEventListener('download-plan-changed', changed);
+      clearTimeout(timer);
+      listRequest?.abort();
       unregister();
     };
   });
@@ -183,9 +218,11 @@
     <Cell text={$_('field.every', `${plan.interval_num} ${$_('duration.hours').toLowerCase()}`)} />
     <Cell>
       <div>
-        <div>{$dateTime(plan.last_exec)}</div>
-        {#if plan.first_execution}
-          <p class="mt-1 text-xs text-base-content/60">{$_(`assistant.plan.first.${plan.first_execution.status}`)}</p>
+        <div>{$dateTime(plan.last_execution?.started_at ?? plan.last_exec)}</div>
+        {#if plan.last_execution}
+          <p class="mt-1 text-xs text-base-content/60">{describePlanExecution(plan.last_execution, $_)}</p>
+        {:else if plan.last_exec}
+          <p class="mt-1 text-xs text-base-content/60">{$_('assistant.plan.execution.unavailable')}</p>
         {/if}
       </div>
     </Cell>

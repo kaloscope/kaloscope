@@ -8,11 +8,11 @@ from collections import Counter
 from datetime import datetime, timedelta
 from functools import cached_property
 from multiprocessing.managers import DictProxy
-from multiprocessing.synchronize import Event, Lock
+from multiprocessing.synchronize import Event
 from pathlib import Path
 from typing import Any, cast
 
-from filelock import FileLock
+from filelock import AsyncFileLock, FileLock
 from filelock import Timeout as LockTimeout
 from sanic import Sanic, SanicException
 from sanic.log import logger
@@ -127,36 +127,10 @@ class DLSyncer:
             app: The Sanic application instance.
         """
         self._app = app
-        self._task = None
+        self._plan_checks: set[asyncio.Task] = set()
         self._last_sync_tasks = datetime.now()
         self._last_check_plans = datetime.now()
         self._drivers: dict[int, tuple[str, DownloaderDriver]] = {}
-        # ensure that only one instance is running
-        if self._syncer_lock.acquire(block=False):
-            try:
-                if not self._syncer_flag.is_set():
-                    self._task = self._DL_SYNCER
-                    self._syncer_flag.set()
-            finally:
-                self._syncer_lock.release()
-
-    @cached_property
-    def _syncer_lock(self) -> Lock:
-        """Get shared synchronizer ownership lock.
-
-        Returns:
-            Process-shared ownership lock.
-        """
-        return self._app.shared_ctx.dl_syncer_lock
-
-    @cached_property
-    def _syncer_flag(self) -> Event:
-        """Get shared synchronizer ownership flag.
-
-        Returns:
-            Process-shared ownership flag.
-        """
-        return self._app.shared_ctx.dl_syncer_flag
 
     @cached_property
     def _sync_fast(self) -> Event:
@@ -213,21 +187,39 @@ class DLSyncer:
         self._sync_requested.set()
 
     async def start(self):
-        """Start the download synchronizer."""
-        if self._task:
-            self._app.add_task(self.interval(), name=self._task)
+        """Start a worker that waits for exclusive download synchronization."""
+        self._app.add_task(self._run_as_owner(), name=self._DL_SYNCER)
 
     async def shutdown(self):
-        """Shutdown the download synchronizer."""
-        try:
-            if self._task:
-                await self._app.cancel_task(self._task)
-        finally:
+        """Stop this worker's synchronization or its pending takeover."""
+        await self._app.cancel_task(self._DL_SYNCER)
+
+    async def _run_as_owner(self):
+        """Hold the workspace lock through synchronization and driver cleanup.
+
+        Waiting workers take over after a graceful reload or process exit.
+        Each takeover scans durable pending first checks on its first iteration.
+        """
+        lock = AsyncFileLock(
+            Path(KaloscopeConfig.get_workspace("temp")) / "download_syncer.lock",
+            poll_interval=1,
+            fallback_to_soft=False,
+        )
+        async with lock:
             try:
-                await self._close_drivers()
+                await self.interval()
             finally:
-                if self._task:
-                    self._syncer_flag.clear()
+                checks = list(self._plan_checks)
+                try:
+                    if checks:
+                        await asyncio.wait(
+                            checks, timeout=self._app.config.GRACEFUL_SHUTDOWN_TIMEOUT
+                        )
+                finally:
+                    for task in checks:
+                        task.cancel()
+                    await asyncio.gather(*checks, return_exceptions=True)
+                    await self._close_drivers()
 
     async def _driver_for(self, downloader: Downloader) -> DownloaderDriver:
         """Get a driver cached for the current encrypted configuration.
@@ -490,12 +482,16 @@ class DLSyncer:
                     refresh = False
 
                 # check the download plans every hour
-                hours = (now - self._last_check_plans).total_seconds() / 3600
-                if hours >= 1:
-                    self._last_check_plans = now
-                    self._app.add_task(check_download_plans())
-                elif check_new_plans:
-                    self._app.add_task(check_download_plans(first_only=True))
+                hourly = now - self._last_check_plans >= timedelta(hours=1)
+                if hourly or check_new_plans:
+                    if hourly:
+                        self._last_check_plans = now
+                    task = self._app.add_task(
+                        check_download_plans(first_only=not hourly)
+                    )
+                    if task is not None:
+                        self._plan_checks.add(task)
+                        task.add_done_callback(self._plan_checks.discard)
 
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
@@ -1444,7 +1440,10 @@ async def check_download_plans(*, first_only: bool = False):
             )
             receipt = plan.creation_receipt or {}
             if initial:
-                receipt = {**receipt, "first_execution": {"status": "unconfirmed"}}
+                receipt = {
+                    **receipt,
+                    "first_execution": {"status": "unconfirmed", "stage": "checking"},
+                }
                 claim = (
                     {"replacement_due": plan.replacement_due}
                     if plan.replacement_due is not None
@@ -1476,19 +1475,33 @@ async def check_download_plans(*, first_only: bool = False):
                 )
                 if initial:
                     await record_plan_first_execution(
-                        plan, {"status": "failed", "added": 0, "errors": 1}
+                        plan,
+                        {
+                            "status": "failed",
+                            "stage": "driver_offline",
+                            "added": 0,
+                            "errors": 1,
+                        },
                     )
                 continue
             try:
                 outcome = await execute_download_plan(plan, driver)
                 if initial:
                     await record_plan_first_execution(plan, outcome)
+            except asyncio.CancelledError:
+                if initial:
+                    await record_plan_first_execution(
+                        plan, {"status": "unconfirmed", "stage": "unconfirmed"}
+                    )
+                raise
             except Exception:
                 logger.error(
                     "Failed to execute download plan: %s", plan.id, exc_info=True
                 )
                 if initial:
-                    await record_plan_first_execution(plan, {"status": "unconfirmed"})
+                    await record_plan_first_execution(
+                        plan, {"status": "unconfirmed", "stage": "unconfirmed"}
+                    )
     finally:
         for driver in drivers.values():
             if driver is not None:
@@ -1685,14 +1698,26 @@ async def execute_download_plan(
     except (Exception, asyncio.CancelledError):
         await DownloadPlanAttempt.filter(id=attempt.id).update(status="unconfirmed")
         raise
-    await DownloadPlanAttempt.filter(id=attempt.id).update(
-        status=outcome["status"],
-        results_seen=attempt.results_seen,
-        submitted=outcome["added"],
-        errors=outcome["errors"],
-        uncertain=outcome["uncertain"],
+    failure_stage = outcome.pop("failure_stage", None)
+    attempt.status = (
+        (failure_stage or "failed")
+        if outcome["status"] == "failed"
+        else outcome["status"]
     )
-    return outcome
+    attempt.submitted = outcome["added"]
+    attempt.errors = outcome["errors"]
+    attempt.uncertain = outcome["uncertain"]
+    await attempt.save(
+        update_fields=[
+            "status",
+            "results_seen",
+            "submitted",
+            "errors",
+            "uncertain",
+            "updated_at",
+        ]
+    )
+    return {**outcome, "stage": attempt.stage()}
 
 
 async def _run_plan_attempt(
@@ -1721,6 +1746,7 @@ async def _run_plan_attempt(
     seen_hashes: set[str] = set()
     release_rule = (plan.creation_receipt or {}).get("release_rule")
     skipped_release = 0
+    failures = set()
     errors = 0
     uncertain = 0
 
@@ -1813,6 +1839,7 @@ async def _run_plan_attempt(
                 raise ValueError("invalid graph execution result")
             except Exception:
                 if retry == retries - 1:
+                    failures.add("search_failed")
                     errors += 1
                     logger.error(
                         "Failed to execute graph for plan %s after %d attempts",
@@ -1823,16 +1850,15 @@ async def _run_plan_attempt(
                     return None
                 await asyncio.sleep(2**retry * 5)
 
-        errors += sum(
-            not isinstance(item, dict) or not isinstance(item.get("link"), str)
-            for item in items
-        )
-        # detect non-paginated API by checking for duplicate links on page > 1
         rows = [
             item
             for item in items
             if isinstance(item, dict) and isinstance(item.get("link"), str)
         ]
+        if invalid := len(items) - len(rows):
+            failures.add("invalid_link")
+            errors += invalid
+        # detect non-paginated API by checking for duplicate links on page > 1
         links = {item["link"] for item in rows}
         accepted = []
         for item in rows:
@@ -1854,6 +1880,7 @@ async def _run_plan_attempt(
             # check if the link is a valid magnet/hash
             magnet = await standardize_magnet(link)
             if magnet is None:
+                failures.add("invalid_link")
                 errors += 1
                 continue
             if magnet.info_hash:
@@ -1930,6 +1957,7 @@ async def _run_plan_attempt(
                 break
             page_num += 1
         except Exception:
+            failures.add("search_failed")
             errors += 1
             logger.error(
                 "Failed to get magnet links for plan %s on page %d",
@@ -1972,6 +2000,7 @@ async def _run_plan_attempt(
         if outcome == "duplicate":
             continue
         if outcome == "failed":
+            failures.add("submit_failed")
             errors += 1
             continue
         if outcome == "pending":
@@ -1995,6 +2024,7 @@ async def _run_plan_attempt(
         else "release_filtered"
         if skipped_release and not task_count
         else "completed",
+        **({"failure_stage": next(iter(failures))} if len(failures) == 1 else {}),
         **({"skipped_release": skipped_release} if skipped_release else {}),
         "added": task_count,
         "errors": errors,

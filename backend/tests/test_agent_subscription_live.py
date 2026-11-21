@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app.core.constants import SESSION_ID
+from app.core.dl import syncer
 from app.core.dl.config import encrypt_config
 from app.core.dl.driver import DownloaderDriver, DownloadSource
 from app.core.exceptions import error_handler
@@ -28,6 +29,7 @@ from tests.test_agent_live import official_provider
 from tests.test_agent_live import pytestmark as pytestmark
 from tests.test_download_plan_authoring import fixture_plan
 from tests.test_mcp import application, call
+from tests.test_services_download import DraftDriver
 
 
 def tool_results(response):
@@ -146,7 +148,22 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                 "default_download_directory",
                 lambda: Path("/synthetic/downloads"),
             )
-            notify = Mock()
+            checks = []
+            if scenario == "simple":
+                destination = DraftDriver()
+                destination.supports_version = False
+                destination.close = AsyncMock()
+                monkeypatch.setattr(syncer, "load_driver", lambda _: destination)
+
+            def wake():
+                if scenario == "simple" and not checks:
+                    checks.append(
+                        asyncio.create_task(
+                            syncer.check_download_plans(first_only=True)
+                        )
+                    )
+
+            notify = Mock(side_effect=wake)
             monkeypatch.setattr(download, "notify_download_changes", notify)
             catalogue = [
                 ("tea", "【喵萌奶茶屋】 Lantern [07][简日双语]"),
@@ -154,7 +171,10 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                 ("ani", "[ANi] Lantern [07][简繁内封]"),
             ]
 
-            def search_metadata(_, query, **kwargs):
+            def search_metadata(graph_id, bootparams, **kwargs):
+                query = bootparams
+                if query.get("page_num", 1) > 1:
+                    return {"items": []}
                 words = query.get("keyword", "").casefold().split()
                 items = [
                     {
@@ -229,6 +249,10 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                     },
                 )
                 results = tool_results(stream)
+                assert (
+                    "search_indexer" in [item["name"] for item in results]
+                    and search.await_count >= 1
+                )
                 if scenario != "preview":
                     cards = [
                         item
@@ -282,6 +306,7 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                         else:
                             option = options[0]
                         answers.append({"id": q["id"], "selected": [option["id"]]})
+                    search.reset_mock()
                     answer = await browser.post(
                         endpoint + f"/questions/{card['id']}/answer",
                         json={
@@ -291,8 +316,13 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                     )
                     answer.raise_for_status()
                     assert answer.json()["data"]["card"]["state"] == "answered"
-                    assert not await DownloadPlan.all().exists()
-                    search.reset_mock()
+                    submission = answer.json()["data"]["card"]["subscription"][
+                        "submission"
+                    ]
+                    assert (
+                        submission["created"]
+                        and submission["plan_id"] == (await DownloadPlan.get()).id
+                    )
                     continuation = await browser.post(
                         endpoint + "/chat",
                         json={
@@ -306,28 +336,22 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                     results = tool_results(continuation)
                 names = [item["name"] for item in results if item["ok"]]
                 print(f"DeepSeek {model['model_id']} {scenario} tools: {names}")
-                assert "search_indexer" in names and search.await_count >= 1
-                reviews = [
-                    item
-                    for item in results
-                    if item["name"] == "validate_download_plan"
-                    and item["ok"]
-                    and item["data"]["valid"]
-                ]
-                assert reviews, [
-                    {
-                        "name": item["name"],
-                        "plan": (item.get("data") or {}).get("plan"),
-                        "issues": (item.get("data") or {}).get("issues"),
-                        "status": (item.get("data") or {}).get("status"),
-                    }
-                    for item in results
-                    if item["name"] in {"search_indexer", "validate_download_plan"}
-                ]
-                review = reviews[-1]
+                if scenario == "preview":
+                    review = next(
+                        item
+                        for item in reversed(results)
+                        if item["name"] == "validate_download_plan"
+                        and item["ok"]
+                        and item["data"]["valid"]
+                    )
+                    review_id = review["id"]
+                else:
+                    assert names == ["create_download_plan"]
+                    review_id = submission["review_id"]
                 stored = await AssistantToolCall.get(
-                    call_id=review["id"], turn__conversation_id=chat_id
+                    call_id=review_id, turn__conversation_id=chat_id
                 )
+                review = stored.result
                 request_id = review["data"]["request_id"]
                 assert stored.result["data"]["request_id"] == request_id
                 if scenario == "preview":
@@ -353,7 +377,12 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                         and item["ok"]
                     ]
                     assert (await DownloadPlan.all().get()).id == created[-1]["plan_id"]
-                    notify.assert_called_once()
+                    if scenario == "simple":
+                        await asyncio.gather(*checks)
+                        assert len(checks) == 1
+                        assert "首轮已提交 1 个下载" in continuation.text
+                    else:
+                        notify.assert_called_once()
 
                 plan = await check_receipt(
                     app,
@@ -379,14 +408,15 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                     assert (plan.filters or {}) == (
                         {} if scenario == "preview" else {"uploader": "tea"}
                     )
-                assert any(
-                    entry.args[1]["keyword"] == plan.keyword
-                    and all(
-                        entry.args[1].get(k) == v
-                        for k, v in (plan.filters or {}).items()
+                if scenario == "simple":
+                    assert search.await_count >= 1
+                    assert all(
+                        entry.kwargs["bootparams"]["keyword"] == plan.keyword
+                        and entry.kwargs["bootparams"]["uploader"] == "tea"
+                        for entry in search.await_args_list
                     )
-                    for entry in search.await_args_list
-                )
+                elif scenario != "preview":
+                    search.assert_not_awaited()
                 if scenario in {"simple", "edition"}:
                     assert plan.transfer_lib_id == library.id
                     assert plan.transfer_method == "hardlink"
@@ -404,9 +434,18 @@ def test_subscription(tmp_path, monkeypatch, scenario):
                         2,
                         10 if scenario == "preview" else 20,
                     )
-                assert plan.creation_receipt["first_execution"]["status"] == "queued"
-                notify.assert_called_once()
-                driver.add.assert_not_awaited()
-                assert not await DownloadTask.all().exists()
+                if scenario == "simple":
+                    assert (
+                        plan.creation_receipt["first_execution"]["stage"]
+                        == "tasks_submitted"
+                    )
+                    assert await DownloadTask.all().count() == 1
+                else:
+                    assert (
+                        plan.creation_receipt["first_execution"]["status"] == "queued"
+                    )
+                    notify.assert_called_once()
+                    driver.add.assert_not_awaited()
+                    assert not await DownloadTask.all().exists()
 
     asyncio.run(run())

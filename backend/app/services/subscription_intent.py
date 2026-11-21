@@ -16,9 +16,9 @@ from app.services.flow import FlowGraphService
 from app.services.subscription_choices import (
     compact,
     confirmation_question,
-    matches_release_rule,
+    contains_title,
     release_choices,
-    release_group,
+    release_mismatch,
 )
 from app.services.subscription_destinations import (
     destination_questions,
@@ -542,6 +542,8 @@ def _release_answer(
     observed = []
     if answer["custom"].strip():
         value = answer["custom"].strip()
+        if _HOLD.search(value) or value.casefold() in {"不", "否", "no", "取消"}:
+            return None, []
         group = re.sub(
             _LIMIT.pattern + r"(?:\s*个(?:资源)?|\s+resources?)?", "", value, flags=re.I
         ).strip(" ，,；;、。.")
@@ -556,7 +558,14 @@ def _release_answer(
                 restrictions = observed = option.get("value", option)["terms"]
                 break
         if cap := _LIMIT.search(value):
-            plan["total_limit"] = int(cap[1])
+            limit = int(cap[1])
+            if (
+                not 0
+                < limit
+                <= DownloadPlan._meta.fields_map["total_limit"].constraints["le"]
+            ):
+                return None, []
+            plan["total_limit"] = limit
         if not restrictions and not _UNRESTRICTED.fullmatch(group):
             return None, []
     else:
@@ -626,10 +635,53 @@ async def confirmed_subscription_plan(card: dict, user: UserInfo) -> dict | None
     }
 
 
+def confirmed_submission(card: dict, selected: dict | None, validation: dict) -> dict:
+    """Authorize the resolved card settings and freeze its background release rule.
+
+    Args:
+        card: Server-issued answered subscription card.
+        selected: Settings resolved from its options and submitted custom values.
+        validation: Local domain validation of the candidate plan.
+
+    Returns:
+        Creation readiness or the settings that still require approval.
+    """
+    plan = validation["plan"]
+    if not selected:
+        return {
+            "status": "needs_preferences",
+            "next": "Complete the required subscription choices.",
+        }
+    if {**plan, "filters": plan.get("filters") or {}} != selected["plan"] or (
+        validation.get("ingestion") or {}
+    ).get("workflow_id") != selected["ingest_workflow_id"]:
+        return {
+            "status": "needs_settings",
+            **selected,
+            "next": "Use the exact settings confirmed on the card.",
+        }
+    if (validation.get("ingestion") or {}).get("binding") == "add":
+        return {
+            "status": "needs_approval",
+            "next": "Show the new library-wide binding for explicit approval.",
+        }
+    rule = {
+        "title": card["subscription"]["title"],
+        "observed": selected["observed"],
+        "terms": selected["restrictions"],
+        "confirmed": True,
+    }
+    return {
+        "status": "ready",
+        **({"release_rule": rule} if rule["terms"] else {}),
+        "next": "Create with the confirmed settings.",
+    }
+
+
 async def submission_check(
     intent: SubscriptionIntent, validation: dict, user: UserInfo
 ) -> dict:
-    """Verify the persistent settings and exact metadata search for this order.
+    """Check confirmed parameters or use recorded previews to prepare a question.
 
     Args:
         intent: Original order and the user's answered preferences.
@@ -640,7 +692,10 @@ async def submission_check(
         Readiness or the concrete missing settings for the next tool step.
     """
     plan = validation["plan"]
-    if plan.get("transfer_lib_id") and not intent.confirmation:
+    if intent.confirmation:
+        selected = await confirmed_subscription_plan(intent.confirmation, user)
+        return confirmed_submission(intent.confirmation, selected, validation)
+    if plan.get("transfer_lib_id"):
         library = await libraries(user).filter(id=plan["transfer_lib_id"]).first()
         if not library or not requested_transfer(intent, library.name):
             return {
@@ -650,28 +705,8 @@ async def submission_check(
     keyword = plan["keyword"]
     filters = plan.get("filters") or {}
     title = requested_title(intent.prompt)
-    selected = (
-        await confirmed_subscription_plan(intent.confirmation, user)
-        if intent.confirmation
-        else None
-    )
     terms, cap = required_preferences(intent)
-    if intent.confirmation and not selected:
-        return {
-            "status": "needs_preferences",
-            "next": "Ask which release group or edition the user wants.",
-        }
-    if selected:
-        expected_plan = selected["plan"]
-        if {**plan, "filters": filters} != expected_plan or (
-            validation.get("ingestion") or {}
-        ).get("workflow_id") != selected["ingest_workflow_id"]:
-            return {
-                "status": "needs_settings",
-                **selected,
-                "next": "Search and validate the exact confirmed settings.",
-            }
-    elif len(terms) > 1:
+    if len(terms) > 1:
         return {
             "status": "needs_preferences",
             "next": (
@@ -681,25 +716,21 @@ async def submission_check(
         }
     term = next(iter(terms), "")
     # a revised card starts from fresh title results so the new choice can be bound
-    revise_release = intent.revision is not None and not selected
-    if (
-        not selected
-        and not term
-        and any(_GROUP_FILTER.search(key) and filters[key] for key in filters)
-    ):
+    revise_release = intent.revision is not None
+    if not term and any(_GROUP_FILTER.search(key) and filters[key] for key in filters):
         return {
             "status": "needs_settings",
             "next": "Remove the guessed group filter, then search and validate.",
         }
-    if not selected and cap is not None and plan.get("total_limit") != cap:
+    if cap is not None and plan.get("total_limit") != cap:
         return {
             "status": "needs_settings",
             "total_limit": cap,
             "next": "Set this total_limit, then validate.",
         }
-    expected = {compact(selected["plan"]["keyword"] if selected else title)}
-    keywords = selected["keywords"] if selected else []
-    if term and not selected and not revise_release:
+    expected = {compact(title)}
+    keywords = []
+    if term and not revise_release:
         graph = await FlowGraphService.get_accessible(plan["graph_id"], user)
         config = (await start_config(graph, "search"))["search"] or {}
         matched = _filter_option(config.get("filters") or {}, term)
@@ -724,10 +755,6 @@ async def submission_check(
     searches = AssistantToolCall.filter(
         turn_id__in=intent.turns, name="search_indexer", status="complete"
     )
-    if selected:
-        searches = searches.filter(
-            turn_id__gt=intent.confirmation["subscription"]["turn_id"]
-        )
     rows = await searches.order_by("-id")
     for row in rows:
         result = row.result or {}
@@ -741,12 +768,9 @@ async def submission_check(
             and (query.get("filters") or {}) == filters
         ):
             continue
-        if not selected and (
-            query.get("page_num", 1) != 1
-            or (
-                query.get("page_size", 5) < 5
-                and (data.get("has_more") or data.get("omitted_count"))
-            )
+        if query.get("page_num", 1) != 1 or (
+            query.get("page_size", 5) < 5
+            and (data.get("has_more") or data.get("omitted_count"))
         ):
             # a one-result probe can hide editions already present on the first page
             continue
@@ -758,116 +782,105 @@ async def submission_check(
             }
         rule = {
             "title": title,
-            "observed": selected["observed"] if selected else [],
-            "terms": selected["restrictions"] if selected else keywords,
-            "confirmed": bool(selected),
+            "observed": [],
+            "terms": keywords,
+            "confirmed": False,
         }
-        if (
-            selected
-            and not rule["observed"]
-            and len(rule["terms"]) == 1
-            and any(
-                release_group(item, title).casefold() == rule["terms"][0].casefold()
-                for item in items
-            )
-        ):
-            rule["observed"] = rule["terms"]
-        if not all(matches_release_rule(item, rule) for item in items):
-            return {
-                "status": "unverified_term",
-                "next": "Results disagree with the term. Ask for another search.",
-            }
+        for item in items:
+            if mismatch := release_mismatch(item, rule):
+                return {
+                    "status": "unverified_term",
+                    "mismatch": mismatch,
+                    "next": f"Check the {mismatch} before searching again.",
+                }
         if (validation.get("ingestion") or {}).get("binding") == "add":
             return {
                 "status": "needs_approval",
                 "next": "Show the new library-wide binding for explicit approval.",
             }
-        observed_releases = release_choices(items, title)
+        title_items = [
+            item
+            for item in items
+            if contains_title(str(item.get("title") or ""), title)
+        ]
+        observed_releases = release_choices(title_items, title)
         releases = observed_releases
-        if not selected:
-            if term:
-                named = [
-                    r
-                    for r in releases
-                    if compact(r[0]) == compact(term)
-                    or compact("".join(r)) == compact(term.replace("的", ""))
-                ]
-                releases = named or (
-                    [list(dict.fromkeys([*r, term])) for r in releases]
-                    if releases
-                    else [[term]]
-                )
-            else:
-                releases = [*releases, []]
-            chinese = bool(re.search(r"[\u3400-\u9fff]", intent.prompt))
-            release = confirmation_question(title, releases, items, chinese=chinese)
-            for option, restriction in zip(release["options"], releases, strict=True):
-                option["value"] = {
-                    "terms": restriction,
-                    "observed": restriction in observed_releases,
-                }
-            release["field"] = "release"
-            prompt = " ".join([intent.prompt, *(v for _, v in intent.choices)])
-            questions = await destination_questions(plan, prompt, user, chinese=chinese)
-            fixed = (
-                release["options"][0]["value"] if term and len(releases) == 1 else None
+        if term:
+            named = [
+                r
+                for r in releases
+                if compact(r[0]) == compact(term)
+                or compact("".join(r)) == compact(term.replace("的", ""))
+            ]
+            releases = named or (
+                [list(dict.fromkeys([*r, term])) for r in releases]
+                if releases
+                else [[term]]
+            )
+        else:
+            releases = [*releases, []]
+        chinese = bool(re.search(r"[\u3400-\u9fff]", intent.prompt))
+        release = confirmation_question(title, releases, title_items, chinese=chinese)
+        for option, restriction in zip(release["options"], releases, strict=True):
+            option["value"] = {
+                "terms": restriction,
+                "observed": restriction in observed_releases,
+            }
+        release["field"] = "release"
+        prompt = " ".join([intent.prompt, *(v for _, v in intent.choices)])
+        questions = await destination_questions(plan, prompt, user, chinese=chinese)
+        fixed = release["options"][0]["value"] if term and len(releases) == 1 else None
+        if fixed:
+            for q in questions:
+                q["title"] = f"{' · '.join(fixed['terms'])} · {q['title']}"
+        if not questions:
+            dest = plan["dir"] + (
+                " → " + library.name + " · " + plan["transfer_method"]
+                if plan.get("transfer_lib_id")
+                else (" · 不入库" if chinese else " · download only")
             )
             if fixed:
-                for q in questions:
-                    q["title"] = f"{' · '.join(fixed['terms'])} · {q['title']}"
-            if not questions:
-                dest = plan["dir"] + (
-                    " → " + library.name + " · " + plan["transfer_method"]
-                    if plan.get("transfer_lib_id")
-                    else (" · 不入库" if chinese else " · download only")
+                detail = " · ".join([*fixed["terms"], dest])
+                questions.append(
+                    {
+                        "field": "settings",
+                        "title": title,
+                        "options": [
+                            {
+                                "label": "按这些设置订阅"
+                                if chinese
+                                else "Subscribe with these settings",
+                                "detail": detail,
+                                "value": True,
+                            }
+                        ],
+                    }
                 )
-                if fixed:
-                    detail = " · ".join([*fixed["terms"], dest])
-                    questions.append(
-                        {
-                            "field": "settings",
-                            "title": title,
-                            "options": [
-                                {
-                                    "label": "按这些设置订阅"
-                                    if chinese
-                                    else "Subscribe with these settings",
-                                    "detail": detail,
-                                    "value": True,
-                                }
-                            ],
-                        }
-                    )
-                else:
-                    release["title"] += " · " + dest
-            if not fixed:
-                questions.insert(0, release)
-            existing = []
-            if user.role == UserRole.ADMIN:
-                existing = (
-                    await DownloadPlan.filter(
-                        Q(keyword=title) | Q(keyword__istartswith=title + " "),
-                        Q(interval_end=None) | Q(interval_end__gt=timezone.now()),
-                        Q(total_limit=None) | Q(total_count__lt=F("total_limit")),
-                        graph_id=plan["graph_id"],
-                        downloader_id=plan["downloader_id"],
-                    )
-                    .order_by("id")
-                    .limit(5)
-                    .values_list("id", flat=True)
+            else:
+                release["title"] += " · " + dest
+        if not fixed:
+            questions.insert(0, release)
+        existing = []
+        if user.role == UserRole.ADMIN:
+            existing = (
+                await DownloadPlan.filter(
+                    Q(keyword=title) | Q(keyword__istartswith=title + " "),
+                    Q(interval_end=None) | Q(interval_end__gt=timezone.now()),
+                    Q(total_limit=None) | Q(total_count__lt=F("total_limit")),
+                    graph_id=plan["graph_id"],
+                    downloader_id=plan["downloader_id"],
                 )
-            return {
-                "status": "needs_confirmation",
-                **({"related_plan_ids": existing} if existing else {}),
-                "next": "Wait for the user to submit all subscription choices.",
-                "questions": questions,
-                "release": fixed,
-                "title": title,
-            }
+                .order_by("id")
+                .limit(5)
+                .values_list("id", flat=True)
+            )
         return {
-            "status": "ready",
-            **({"release_rule": rule} if rule["terms"] else {}),
-            "next": "Create now with this request_id and confirmed=true.",
+            "status": "needs_confirmation",
+            **({"related_plan_ids": existing} if existing else {}),
+            "next": "Wait for the user to submit all subscription choices.",
+            "questions": questions,
+            "release": fixed,
+            "title": title,
         }
     return {
         "status": "needs_search",

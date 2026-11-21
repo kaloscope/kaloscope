@@ -170,8 +170,6 @@ async def init_shared_ctx(app: Sanic):
     shared.lib_scanning_paths = sync_manager.list()
     shared.lib_observing_paths = sync_manager.list()
     # shared objects for the download synchronizer
-    shared.dl_syncer_lock = multiprocessing.Lock()
-    shared.dl_syncer_flag = multiprocessing.Event()
     shared.dl_sync_fast = multiprocessing.Event()
     shared.dl_sync_requested = multiprocessing.Event()
     shared.dl_task_actions = sync_manager.dict()

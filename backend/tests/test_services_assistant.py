@@ -96,7 +96,12 @@ def stored_context(monkeypatch):
     monkeypatch.setattr(
         service.AssistantToolCall,
         "filter",
-        lambda **_: SimpleNamespace(update=AsyncMock()),
+        lambda **_: SimpleNamespace(
+            update=AsyncMock(),
+            select_related=lambda *_: SimpleNamespace(
+                first=AsyncMock(return_value=None)
+            ),
+        ),
     )
 
 

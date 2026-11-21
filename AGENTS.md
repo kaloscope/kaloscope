@@ -162,11 +162,12 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
   questions, and retries carry no execution grant. Keep device actions tied to a validated target and browser acknowledgement.
 - For administrator subscriptions, use one ordinary `ask_user` group. Offer release choices from actual search results and
   collect unresolved downloader directories and library destinations in the same group. The generic card's final submit
-  confirms the subscription. Keep server-owned option bindings and resolve custom library names or IDs within the
-  caller's current grants. Skipping a required question defers creation.
+  creates the subscription in the answer transaction. Keep server-owned option bindings and resolve custom library names
+  or IDs within the caller's current grants. Skipping a required question defers creation.
 - Apply answers by question and option ID to the frozen plan. Recheck the exact keyword, filters, and transfer settings
-  before creating. Use the shared creation receipt for HTTP and MCP retries. Keep earlier single-question cards readable
-  and supersede a preliminary validation when a later question revises it.
+  locally before creating. Never rerun the indexer or match release titles at submission. The background scheduler
+  runs the first check and the assistant follows its recorded outcome. Use the shared creation receipt for HTTP and MCP
+  retries. Keep earlier single-question cards readable and supersede a preliminary validation when a later question revises it.
 - Reuse the domain service's request ID, revision, and receipt for browser approvals.
   `assistant_reviews.py` handles subscriptions, downloads, schedules, and media changes. Existing plan edits use
   `assistant_plan_review.py`. Rebuilds use `plan_replacement.py`, and other administrator reviews use `agent_actions.py`.

@@ -3,9 +3,11 @@
 import hashlib
 import re
 from datetime import datetime
+from uuid import uuid4
 
 from tortoise.transactions import in_transaction
 
+from app.core.decorators import require_browser_admin
 from app.core.exceptions import (
     BadRequestException,
     ForbiddenException,
@@ -13,13 +15,18 @@ from app.core.exceptions import (
 )
 from app.models.assistant import AssistantToolCall, AssistantTurn, media_resource
 from app.models.assistant_questions import AnswerGroup, AskUser, QuestionAnswer
-from app.models.download import DownloadPlan
+from app.models.download import DownloadPlan, DownloadPlanCheck, DownloadPlanCreate
 from app.models.user import UserInfo
+from app.services import download
 from app.services.assistant_sessions import AssistantSessionService, resource_order
 from app.services.download import DownloadPlanService
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
 from app.services.subscription_destinations import resolve_destination
+from app.services.subscription_intent import (
+    confirmed_submission,
+    confirmed_subscription_plan,
+)
 from app.utils.json import dumps
 
 
@@ -144,10 +151,97 @@ def validate_answer(q: dict, answer: QuestionAnswer) -> tuple[list[str], str | N
     return (parts, None) if parts else ([], "empty")
 
 
+async def _submit_subscription(card: dict, turn: AssistantTurn, user: UserInfo) -> dict:
+    """Apply an answered subscription and record its final local parameter check.
+
+    Args:
+        card: Server-issued card with all required choices resolved.
+        turn: Locked question turn in the owner's conversation.
+        user: Signed-in administrator submitting the answers.
+
+    Returns:
+        The domain outcome or the field that needs a corrected answer.
+    """
+    selected = await confirmed_subscription_plan(card, user)
+    if not selected:
+        release = next(
+            (
+                q["id"]
+                for q in card["questions"]
+                if q.get("field", "release") == "release"
+            ),
+            None,
+        )
+        return {"issue": "invalid", **({"id": release} if release else {})}
+    check = DownloadPlanCheck(
+        plan=selected["plan"], ingest_workflow_id=selected["ingest_workflow_id"]
+    )
+    preview = await DownloadPlanService.validate_creation(
+        check, user, check_duplicate=False
+    )
+    consent = confirmed_submission(card, selected, preview)
+    preview["assistant_submission"] = consent
+    review_id = uuid4().hex
+    await AssistantToolCall.create(
+        turn_id=turn.id,
+        name="validate_download_plan",
+        call_id=review_id,
+        arguments=check.model_dump_json(),
+        offset=len(turn.content or ""),
+        status="complete",
+        result={
+            "id": review_id,
+            "name": "validate_download_plan",
+            "ok": True,
+            "data": preview,
+        },
+    )
+    if not preview["valid"] or consent["status"] != "ready":
+        return {
+            "created": False,
+            "valid": False,
+            "issues": preview["issues"],
+            "review_id": review_id,
+            "request_id": preview["request_id"],
+        }
+    binding = preview.get("ingestion")
+    result = await DownloadPlanService.create_once(
+        DownloadPlanCreate(
+            request_id=preview["request_id"],
+            plan=check.plan,
+            ingestion={key: binding[key] for key in ("workflow_id", "revision")}
+            if binding
+            else None,
+            confirmed=True,
+        ),
+        user,
+        active_review_call_id=review_id,
+        notify=False,
+    )
+    return {
+        **{
+            key: result[key]
+            for key in (
+                "created",
+                "replayed",
+                "plan_id",
+                "duplicate_plan_id",
+                "already_exists",
+                "outcome",
+                "valid",
+                "issues",
+            )
+            if key in result
+        },
+        "request_id": preview["request_id"],
+        "review_id": review_id,
+    }
+
+
 async def answer_card(
     conversation_id: int, call_id: str, body: AnswerGroup, user: UserInfo
 ) -> dict:
-    """Record the owner's answers once and return field errors without running tools.
+    """Record the owner's answers and commit an explicitly confirmed subscription.
 
     Args:
         conversation_id: Conversation that issued the questions.
@@ -167,6 +261,8 @@ async def answer_card(
             conversation_id, call_id, "ask_user", user
         )
         data = record.result["data"]
+        if data.get("subscription"):
+            await require_browser_admin(user)
         if body.version != data["version"]:
             return {"issue": "expired"}
         if data["state"] == "answered":
@@ -179,6 +275,16 @@ async def answer_card(
             .first()
         )
         if latest.id != turn.id or turn.status != "complete":
+            return {"issue": "expired"}
+        if (
+            data.get("subscription")
+            and await AssistantToolCall.filter(
+                turn_id=turn.id,
+                id__gt=record.id,
+                name__in=["ask_user", "validate_download_plan"],
+                status="complete",
+            ).exists()
+        ):
             return {"issue": "expired"}
         answers = {item.id: item for item in body.items}
         if len(answers) != len(body.items) or set(answers) != {
@@ -235,19 +341,28 @@ async def answer_card(
         }
         if destination:
             card["subscription"] = {**card["subscription"], "destination": destination}
+        submission = None
+        if card.get("subscription") and not pending:
+            submission = await _submit_subscription(card, turn, user)
+            if "issue" in submission:
+                return submission
+            card["subscription"] = {**card["subscription"], "submission": submission}
+        if card.get("subscription"):
+            resources = {"admin:downloads", *card["resources"]}
             if lib_id := destination.get("transfer_lib_id"):
-                resource = media_resource(lib_id)
-                if resource not in card["resources"]:
-                    card["resources"] = [*card["resources"], resource]
-                    await AssistantTurn.filter(id=turn.id).update(
-                        resource_ids=sorted(
-                            set(turn.resource_ids) | {resource}, key=resource_order
-                        )
-                    )
+                resources.add(media_resource(lib_id))
+            card["resources"] = sorted(resources, key=resource_order)
+            await AssistantTurn.filter(id=turn.id).update(
+                resource_ids=sorted(
+                    set(turn.resource_ids) | resources, key=resource_order
+                )
+            )
         await AssistantToolCall.filter(id=record.id).update(
             result={**record.result, "data": card}
         )
-        return {"card": card}
+    if submission and submission.get("created") and not submission.get("replayed"):
+        download.notify_download_changes()
+    return {"card": card}
 
 
 async def continuation_prompt(

@@ -272,6 +272,35 @@ class DownloadPlanAttempt(TortoiseModel):
     errors = IntField(default=0)
     uncertain = IntField(default=0)
 
+    def outcome_status(self) -> str:
+        """Return the coarse status used by existing diagnostics clients.
+
+        Returns:
+            The recorded state with detailed error causes grouped under `failed`.
+        """
+        return (
+            "failed"
+            if self.status in {"search_failed", "submit_failed", "invalid_link"}
+            else self.status
+        )
+
+    def stage(self, *, detailed: bool = True) -> str:
+        """Describe what the recorded check actually established.
+
+        Args:
+            detailed: Include specific failure causes instead of the legacy stage.
+
+        Returns:
+            The recorded cause or the outcome derived from search and submission.
+        """
+        if self.status == "started":
+            return "completion_unknown"
+        if self.status != "completed":
+            return self.status if detailed else self.outcome_status()
+        if self.submitted:
+            return "tasks_submitted"
+        return "no_new_tasks" if self.results_seen else "no_search_results"
+
     class Meta:
         table = "download_plan_attempt"
 

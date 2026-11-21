@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 from datetime import UTC, timedelta
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -28,6 +29,7 @@ from app.models.download import (
     DownloadDir,
     Downloader,
     DownloadPlan,
+    DownloadPlanAttempt,
     DownloadPlanCheck,
     DownloadPlanCreate,
     DownloadPlanCreation,
@@ -416,6 +418,91 @@ def test_first_attempt(monkeypatch, status):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("search_in_progress", [False, True])
+def test_worker_handoff(monkeypatch, search_in_progress):
+    async def run():
+        async with application() as app:
+            app.asgi = True
+            app.shared_ctx.dl_task_actions = {}
+            app.shared_ctx.dl_sync_requested = Event()
+            app.shared_ctx.dl_sync_fast = Event()
+            searching = asyncio.Event()
+            release_search = asyncio.Event()
+
+            async def search(**_kwargs):
+                searching.set()
+                await release_search.wait()
+                return {"items": [{"link": "a" * 40}]}
+
+            app.ctx.flow_engine = SimpleNamespace(execute=search)
+            monkeypatch.setattr(syncer.Sanic, "get_app", lambda: app)
+            monkeypatch.setattr(
+                service, "notify_download_changes", syncer.notify_download_changes
+            )
+            driver = DraftDriver()
+            driver.supports_version = False
+            driver.sync = AsyncMock(return_value=[])
+            driver.close = AsyncMock()
+            monkeypatch.setattr(syncer, "load_driver", lambda _: driver)
+            admin = app.shared_ctx.sessions["admin"]
+            _, _, body = await fixture_plan()
+
+            old = syncer.DLSyncer(app)
+            new = syncer.DLSyncer(app)
+            # the two workers share a test event loop and need separate Sanic task names
+            old._DL_SYNCER = "old-worker"
+            entered = asyncio.Event()
+            exiting = asyncio.Event()
+            interval = old.interval
+
+            async def hold_old_worker():
+                entered.set()
+                try:
+                    if search_in_progress:
+                        await interval()
+                    else:
+                        await asyncio.Future()
+                finally:
+                    exiting.set()
+
+            monkeypatch.setattr(old, "interval", hold_old_worker)
+            await old.start()
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                await new.start()
+                try:
+                    created = await service.DownloadPlanService.create_once(body, admin)
+                    if search_in_progress:
+                        await asyncio.wait_for(searching.wait(), 5)
+                    else:
+                        assert created["first_execution"] == {"status": "queued"}
+                        assert app.shared_ctx.dl_sync_requested.is_set()
+                        assert not await DownloadPlanAttempt.all().exists()
+                        app.shared_ctx.dl_sync_requested.clear()
+                    stopping = asyncio.create_task(old.shutdown())
+                    await asyncio.wait_for(exiting.wait(), 5)
+                    release_search.set()
+                    await stopping
+
+                    async with asyncio.timeout(5):
+                        while True:
+                            receipt = await service.DownloadPlanService.get_creation(
+                                created["plan_id"], admin
+                            )
+                            if receipt["first_execution"]["status"] == "completed":
+                                break
+                            await asyncio.sleep(0.02)
+                    assert receipt["first_execution"]["added"] == 1
+                    assert await DownloadPlanAttempt.all().count() == 1
+                    assert await DownloadTask.all().count() == 1
+                finally:
+                    await new.shutdown()
+            finally:
+                await old.shutdown()
+
+    asyncio.run(run())
+
+
 def test_future_attempt(monkeypatch):
     async def run():
         async with database() as (owner, _):
@@ -626,6 +713,7 @@ def test_driver_failure(monkeypatch):
             )
             assert receipt["first_execution"] == {
                 "status": "failed",
+                "stage": "driver_offline",
                 "added": 0,
                 "errors": 1,
             }
@@ -1035,6 +1123,53 @@ def test_list_permissions(monkeypatch):
     asyncio.run(run())
 
 
+def test_last_check_order():
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan()
+            first = await service.DownloadPlanService.create_once(body, owner)
+            other_body = body.model_copy(
+                update={
+                    "request_id": uuid4(),
+                    "plan": body.plan.model_copy(update={"keyword": "Harbor"}),
+                }
+            )
+            other = await service.DownloadPlanService.create_once(other_body, owner)
+            for creation in [first, other]:
+                await DownloadPlanAttempt.create(
+                    plan_id=creation["plan_id"],
+                    workflow_id=creation["workflow_id"],
+                    status="completed",
+                    submitted=2,
+                    results_seen=2,
+                )
+            newest = await DownloadPlanAttempt.create(
+                plan_id=first["plan_id"],
+                workflow_id=first["workflow_id"],
+                status="driver_offline",
+                errors=1,
+            )
+            for sort, expected in [("-last_exec", first), ("last_exec", other)]:
+                page = await service.DownloadPlanService.list_plans(
+                    DownloadPlanQuery(page_size=1, ordering=sort), owner
+                )
+                row = page["items"][0]
+                assert row["id"] == expected["plan_id"]
+                if sort == "-last_exec":
+                    assert row["last_execution"] == {
+                        "started_at": newest.created_at.isoformat(),
+                        "stage": "driver_offline",
+                        "added": 0,
+                        "errors": 1,
+                        "uncertain": 0,
+                    }
+                else:
+                    assert row["last_execution"]["stage"] == "tasks_submitted"
+                    assert row["last_execution"]["added"] == 2
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "pages,expected,added",
     [
@@ -1073,6 +1208,14 @@ def test_rejected_search_links(monkeypatch, pages, expected, added):
                 )
                 result = await syncer.execute_download_plan(plan, DraftDriver())
             assert result["status"] == expected
+            assert (
+                result["stage"]
+                == {
+                    "failed": "invalid_link",
+                    "partial": "partial",
+                    "completed": "no_search_results",
+                }[expected]
+            )
             assert result["added"] == added
             assert result["errors"] == (0 if expected == "completed" else 1)
 

@@ -145,30 +145,6 @@ async def task_evidence(task: DownloadTask, page: int = 1) -> dict:
     return result
 
 
-def attempt_stage(attempt: DownloadPlanAttempt) -> str:
-    """Describe the most advanced outcome recorded by one subscription check.
-
-    Args:
-        attempt: Recorded search, errors and task submission counters.
-
-    Returns:
-        An evidence-based stage, including interrupted or incomplete checks.
-    """
-    if attempt.status == "started":
-        return "completion_unknown"
-    if attempt.status in {
-        "unconfirmed",
-        "driver_offline",
-        "release_filtered",
-        "partial",
-        "failed",
-    }:
-        return attempt.status
-    if attempt.submitted:
-        return "tasks_submitted"
-    return "no_new_tasks" if attempt.results_seen else "no_search_results"
-
-
 async def diagnose_ingestion(query: IngestionQuery, user: UserInfo) -> dict:
     """Trace persisted evidence for a subscription, check, or download.
 
@@ -204,9 +180,9 @@ async def diagnose_ingestion(query: IngestionQuery, user: UserInfo) -> dict:
         return {
             "plan_id": attempt.plan_id,
             "attempt_id": attempt.id,
-            "stage": attempt_stage(attempt),
+            "stage": attempt.stage(detailed=False),
             "started_at": attempt.created_at.isoformat(),
-            "status": attempt.status,
+            "status": attempt.outcome_status(),
             "results_seen": attempt.results_seen,
             "submitted": attempt.submitted,
             "errors": attempt.errors,
@@ -250,8 +226,8 @@ async def diagnose_ingestion(query: IngestionQuery, user: UserInfo) -> dict:
                 "id": attempt.id,
                 "workflow_id": attempt.workflow_id,
                 "started_at": attempt.created_at.isoformat(),
-                "status": attempt.status,
-                "stage": attempt_stage(attempt),
+                "status": attempt.outcome_status(),
+                "stage": attempt.stage(detailed=False),
                 "submitted": attempt.submitted,
             }
             for attempt in entries

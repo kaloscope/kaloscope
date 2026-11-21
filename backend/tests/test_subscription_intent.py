@@ -1,12 +1,14 @@
 """Test user authorization and persistent filters for assistant subscriptions."""
 
 import asyncio
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
 from app.core.ai.tools import execute_tool
-from app.core.exceptions import BadRequestException
+from app.core.dl import syncer
+from app.core.exceptions import BadRequestException, ForbiddenException
 from app.models.assistant import (
     AssistantConversation,
     AssistantToolCall,
@@ -14,15 +16,21 @@ from app.models.assistant import (
     ConversationCreate,
 )
 from app.models.assistant_questions import AnswerGroup
-from app.models.download import DownloadPlan
+from app.models.download import Downloader, DownloadPlan, DownloadPlanQuery
 from app.models.media import MediaLib
 from app.models.review_decision import AssistantReviewDecision
+from app.models.user import User
 from app.services import download
+from app.services.ai import AIProviderService
 from app.services.assistant import AssistantService
 from app.services.assistant_questions import answer_card, continuation_prompt
 from app.services.assistant_reviews import assistant_review
 from app.services.assistant_sessions import AssistantSessionService as Sessions
-from app.services.subscription_choices import release_choices, release_matches
+from app.services.subscription_choices import (
+    matches_release_rule,
+    release_choices,
+    release_matches,
+)
 from app.services.subscription_intent import (
     SubscriptionIntent,
     accepts_offer,
@@ -36,6 +44,7 @@ from tests.test_download_plan_authoring import fixture_plan
 from tests.test_download_plan_authoring import isolate as isolate
 from tests.test_download_plan_conversation import engine_fixture
 from tests.test_services_assistant import call_delta, chunk, configure, response
+from tests.test_services_download import DraftDriver
 
 TITLE = "学生会也有洞"
 TERM = "喵萌奶茶屋"
@@ -94,6 +103,28 @@ def test_release_tags():
         ["Tea"],
         ["悠哈璃羽字幕社", "简体内嵌", "1080p"],
     ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_release_title_scripts(reverse):
+    title = "一觉醒来就有了最强装备跟太空船"
+    published = "一覺醒來就有了最強裝備跟太空船"
+    if reverse:
+        title, published = published, title
+    rule = {
+        "title": title,
+        "terms": ["ANi", "CHT"],
+        "observed": ["ANi", "CHT"],
+        "confirmed": True,
+    }
+    release = {"title": f"[ANi] {published} - 07 [CHT]", "uploader": "ANi"}
+
+    assert matches_release_rule(release, rule)
+    assert not matches_release_rule({"title": f"[ANi] {published} - 07 [CHS]"}, rule)
+    assert not matches_release_rule(
+        {"title": f"[Other] {published} - 07 [CHT]", "uploader": "ANi"}, rule
+    )
+    assert not matches_release_rule({"title": "[ANi] 另一部太空船 - 07 [CHT]"}, rule)
 
 
 async def saved(turn, call_id, name, data):
@@ -343,7 +374,18 @@ def test_answer_scope(case):
 
 @pytest.mark.parametrize(
     "choice",
-    ["edition", "unrestricted", "custom", "mixed", "mixed_native", "empty", "deferred"],
+    [
+        "edition",
+        "unrestricted",
+        "custom",
+        "mixed",
+        "mixed_native",
+        "wrong_media",
+        "empty",
+        "deferred",
+        "duplicate",
+        "stale_downloader",
+    ],
 )
 def test_runtime_confirmation(monkeypatch, choice):
     fixture = {}
@@ -387,6 +429,11 @@ def test_runtime_confirmation(monkeypatch, choice):
             "total": 3,
         },
     )
+    if choice == "wrong_media":
+        search.return_value["items"].append(
+            {"id": "other", "title": "[ANi] Another Show"}
+        )
+        search.return_value["total"] += 1
 
     async def run():
         async with database() as (owner, _):
@@ -494,34 +541,143 @@ def test_runtime_confirmation(monkeypatch, choice):
                 download.notify_download_changes.assert_not_called()
                 return
             choices = {o["label"]: o["id"] for o in question["options"]}
-            selected = (
-                {"custom": "喵萌奶茶屋"}
-                if choice == "custom"
-                else {
-                    "selected": [
-                        choices[
-                            "不限字幕组或版本"
-                            if choice == "unrestricted"
-                            else "悠哈璃羽字幕社 · 简繁内封"
-                        ]
-                    ]
+            if choice in {"custom", "empty"}:
+                selected = {
+                    "custom": "喵萌奶茶屋" if choice == "custom" else "星夜字幕社"
                 }
-            )
-            answered = await answer(**selected)
-            assert await answer(**selected) == answered
-            assert not await DownloadPlan.all().exists()
-            download.notify_download_changes.assert_not_called()
-            if choice in {"edition", "custom", "empty"}:
-                items = search.return_value["items"]
-                items = (
-                    [items[-1]]
-                    if choice == "edition"
-                    else [items[0]]
-                    if choice == "custom"
-                    else []
+            else:
+                label = (
+                    "不限字幕组或版本"
+                    if choice in {"unrestricted", "duplicate"}
+                    else "悠哈璃羽字幕社 · 简繁内封"
                 )
-                search.return_value = {"items": items, "total": len(items)}
+                selected = {"selected": [choices[label]]}
             search.reset_mock()
+            driver = DraftDriver()
+            driver.supports_version = False
+            driver.close = AsyncMock()
+            monkeypatch.setattr(syncer, "load_driver", lambda _: driver)
+            await User.filter(id=owner.id).update(role="user")
+            with pytest.raises(ForbiddenException):
+                await answer(**selected)
+            await User.filter(id=owner.id).update(role="admin")
+            assert await answer(custom="取消") == {
+                "issue": "invalid",
+                "id": question["id"],
+            }
+            assert not await DownloadPlan.exists()
+
+            if choice == "custom":
+                for cap in (0, 10**30):
+                    assert await answer(custom=f"喵萌奶茶屋，总上限{cap}") == {
+                        "issue": "invalid",
+                        "id": question["id"],
+                    }
+            if choice == "duplicate":
+                existing = await download.DownloadPlanService.create_once(body, owner)
+                download.notify_download_changes.reset_mock()
+            if choice == "stale_downloader":
+                await Downloader.filter(id=body.plan.downloader_id).delete()
+            if choice in {"duplicate", "stale_downloader"}:
+                answered = await answer(**selected)
+                submission = answered["card"]["subscription"]["submission"]
+                assert not submission["created"] and not submission["valid"]
+                assert await answer(**selected) == answered
+                events = [
+                    event
+                    async for event in AssistantService.persistent_stream(
+                        conv["id"],
+                        request(f"answer-{card_id}", answer_to=card_id),
+                        owner,
+                    )
+                ]
+                assert events[-1].event == "done"
+                summary = "".join(
+                    e.data["text"] for e in events if e.event == "text_delta"
+                )
+                if choice == "duplicate":
+                    assert submission["duplicate_plan_id"] == existing["plan_id"]
+                    assert await DownloadPlan.all().count() == 1
+                    assert "未重复创建" in summary
+                else:
+                    assert not await DownloadPlan.exists() and "参数已失效" in summary
+                search.assert_not_awaited()
+                download.notify_download_changes.assert_not_called()
+                return
+
+            answered, replay = await asyncio.gather(
+                answer(**selected), answer(**selected)
+            )
+            assert replay == answered
+            plan = await DownloadPlan.get()
+            submission = answered["card"]["subscription"]["submission"]
+            assert submission["created"] and submission["plan_id"] == plan.id
+            assert (await assistant_review(submission["review_id"], owner))[
+                "status"
+            ] == "applied"
+            download.notify_download_changes.assert_called_once()
+            search.assert_not_awaited()
+            assert plan.creation_receipt["first_execution"] == {"status": "queued"}
+            expected = {
+                "unrestricted": "Lantern",
+                "custom": "Lantern 喵萌奶茶屋",
+                "mixed_native": "Lantern 简繁内封",
+                "empty": "Lantern 星夜字幕社",
+            }.get(choice, "Lantern 悠哈璃羽字幕社 简繁内封")
+            assert plan.keyword == expected
+            if choice == "mixed_native":
+                assert plan.filters == {"uploader": "uha"}
+            if choice in {"custom", "edition"}:
+                assert plan.transfer_lib_id == library.id
+                assert plan.transfer_method == "hardlink"
+                assert (plan.sub_pattern, plan.sub_repl) == ("^(.+/)?", "{{title}}/")
+            else:
+                assert (plan.sub_pattern, plan.sub_repl) == (None, None)
+            assert plan.batch_limit == body.plan.batch_limit
+            assert plan.dir == (
+                "/downloads/自填" if choice == "custom" else body.plan.dir
+            )
+            assert plan.total_limit == body.plan.total_limit
+
+            work = []
+            if choice != "edition":
+                rows = {
+                    "unrestricted": [{"link": "a" * 40}],
+                    "mixed": [
+                        {
+                            "title": "[悠哈璃羽字幕社] Lantern [简繁内封]",
+                            "link": "a" * 40,
+                        },
+                        {"title": "[Other] Lantern", "link": "b" * 40},
+                    ],
+                    "mixed_native": [
+                        {
+                            "title": "[悠哈璃羽字幕社] Lantern [简繁内封]",
+                            "link": "a" * 40,
+                        }
+                    ],
+                    "wrong_media": [
+                        {
+                            "title": "[悠哈璃羽字幕社] Another Show [简繁内封]",
+                            "link": "a" * 40,
+                        }
+                    ],
+                }.get(choice, [])
+                search.side_effect = [{"items": rows}, {"items": []}]
+                work.append(
+                    asyncio.create_task(syncer.check_download_plans(first_only=True))
+                )
+
+            if choice == "edition":
+                monkeypatch.setattr(
+                    AIProviderService,
+                    "resolve_model",
+                    AsyncMock(
+                        side_effect=AssertionError(
+                            "Receipt reporting must work offline."
+                        )
+                    ),
+                )
             events = [
                 e
                 async for e in AssistantService.persistent_stream(
@@ -529,83 +685,76 @@ def test_runtime_confirmation(monkeypatch, choice):
                 )
             ]
             assert events[-1].event == "done", events[-1]
-            actions = [e.data["name"] for e in events if e.event == "tool_result"]
-            assert actions[:2] == ["search_indexer", "validate_download_plan"]
+            assert [e.data["name"] for e in events if e.event == "tool_result"] == [
+                "create_download_plan"
+            ]
             summary = "".join(e.data["text"] for e in events if e.event == "text_delta")
-            search.assert_awaited_once()
-            if choice in {"empty", "mixed", "mixed_native"}:
-                assert "未创建下载计划" in summary and "Plan created." not in summary
-                assert not await DownloadPlan.all().exists()
-                download.notify_download_changes.assert_not_called()
-                review_id = next(
-                    e.data["id"]
-                    for e in events
-                    if e.event == "tool_result"
-                    and e.data["name"] == "validate_download_plan"
+            await asyncio.gather(*work)
+            assert f"已创建下载计划 #{plan.id}" in summary
+            if work:
+                assert search.await_count >= 1
+                assert all(
+                    call.kwargs["bootparams"]["keyword"] == expected
+                    for call in search.await_args_list
                 )
-                assert (await assistant_review(review_id, owner))[
-                    "status"
-                ] == "incomplete"
-            else:
-                assert actions == [
-                    "search_indexer",
-                    "validate_download_plan",
-                    "create_download_plan",
-                ]
-                plan = await DownloadPlan.get()
-                assert (
-                    f"已创建下载计划 #{plan.id}" in summary
-                    and "首次检查已排队" in summary
-                )
-                expected = {
-                    "unrestricted": "Lantern",
-                    "custom": "Lantern 喵萌奶茶屋",
-                    "edition": "Lantern 悠哈璃羽字幕社 简繁内封",
-                }[choice]
-                assert plan.keyword == search.await_args.args[1]["keyword"] == expected
-                if choice in {"custom", "edition"}:
-                    assert plan.transfer_lib_id == library.id
-                    assert plan.transfer_method == "hardlink"
-                    assert (plan.sub_pattern, plan.sub_repl) == (
-                        "^(.+/)?",
-                        "{{title}}/",
-                    )
+                await plan.refresh_from_db()
+                outcome = plan.creation_receipt["first_execution"]
+                if choice in {"unrestricted", "mixed", "mixed_native"}:
+                    assert "首轮已提交 1 个下载" in summary and outcome["added"] == 1
                 else:
-                    assert (plan.sub_pattern, plan.sub_repl) == (None, None)
-                assert plan.batch_limit == body.plan.batch_limit
-                assert plan.dir == (
-                    "/downloads/自填" if choice == "custom" else body.plan.dir
-                )
-                assert plan.total_limit == body.plan.total_limit
-                assert plan.creation_receipt["first_execution"]["status"] == "queued"
-                download.notify_download_changes.assert_called_once()
-                if choice == "edition":
-                    from app.core.dl.syncer import execute_download_plan
-                    from tests.test_services_download import DraftDriver
-
-                    search.side_effect = [
-                        {
-                            "items": [
-                                {
-                                    "title": (
-                                        "[Other] Lantern [简体内嵌] "
-                                        "(悠哈璃羽字幕社 简繁内封)"
-                                    ),
-                                    "link": "a" * 40,
-                                },
-                                {
-                                    "title": "[悠哈璃羽字幕社] Lantern [简繁内封]",
-                                    "link": "b" * 40,
-                                },
-                            ]
-                        },
-                        {"items": []},
-                    ]
-                    outcome = await execute_download_plan(plan, DraftDriver())
-                    assert outcome["added"] == outcome["skipped_release"] == 1
-                    assert await download.DownloadTask.all().values_list(
-                        "info_hash", flat=True
-                    ) == ["b" * 40]
+                    assert "首轮已提交 0 个下载" in summary and outcome["added"] == 0
+                    assert outcome["stage"] == (
+                        "release_filtered"
+                        if choice == "wrong_media"
+                        else "no_search_results"
+                    )
+                    assert (
+                        "发布条件" if choice == "wrong_media" else "没有搜到资源"
+                    ) in summary
+            else:
+                search.assert_not_awaited()
+            if choice == "edition":
+                search.side_effect = [
+                    {
+                        "items": [
+                            {
+                                "title": (
+                                    "[Other] Lantern [简体内嵌] "
+                                    "(悠哈璃羽字幕社 简繁内封)"
+                                ),
+                                "link": "a" * 40,
+                            },
+                            {
+                                "title": "[悠哈璃羽字幕社] Lantern [简繁内封]",
+                                "link": "b" * 40,
+                            },
+                        ]
+                    },
+                    {"items": []},
+                ]
+                await syncer.check_download_plans(first_only=True)
+                await plan.refresh_from_db()
+                outcome = plan.creation_receipt["first_execution"]
+                assert outcome["added"] == outcome["skipped_release"] == 1
+                assert await download.DownloadTask.all().values_list(
+                    "info_hash", flat=True
+                ) == ["b" * 40]
+                search.side_effect = [{"items": []}]
+                await syncer.execute_download_plan(plan, driver)
+                item = (
+                    await download.DownloadPlanService.list_plans(
+                        DownloadPlanQuery(), owner
+                    )
+                )["items"][0]
+                assert item["last_execution"]["stage"] == "no_search_results"
+                assert item["last_execution"]["added"] == 0
+                for _ in range(2):
+                    restored = (await Sessions.turns(conv["id"], owner))["items"][-1]
+                    assert restored["content"].count("首轮已提交 1 个下载") == 1
+                    assert (
+                        restored["tools"][-1]["result"]["data"]["follow_first_check"]
+                        is False
+                    )
 
     asyncio.run(run())
 

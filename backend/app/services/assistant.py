@@ -28,6 +28,7 @@ from openai.types.chat import (
     ChatCompletionMessageFunctionToolCall,
 )
 from sanic.log import logger
+from tortoise.exceptions import OperationalError
 
 from app.core.ai.history import (
     CLOUD_INPUT_TOKENS,
@@ -47,6 +48,7 @@ from app.core.ai.tools import (
     media_resources,
     tool_schemas,
 )
+from app.core.decorators import require_browser_admin
 from app.core.exceptions import ErrorCode, KaloscopeException
 from app.core.flow.reference import SELF_CONTAINED_RECIPES
 from app.core.network import NetworkTransport
@@ -62,7 +64,8 @@ from app.models.assistant import (
 from app.models.user import UserInfo, UserRole
 from app.services.ai import AIProviderService
 from app.services.assistant_sessions import AssistantSessionService
-from app.services.subscription_choices import confirmation_outcome
+from app.services.download import DownloadPlanService
+from app.services.subscription_choices import confirmation_outcome, first_check_pending
 from app.services.subscription_destinations import bind_questions
 from app.services.subscription_intent import (
     confirmed_subscription_plan,
@@ -202,6 +205,27 @@ def allow_answer_tool(name: str, subscription: bool = False) -> bool:
     } or name.startswith(("list_", "get_", "read_", "review_", "validate_"))
 
 
+async def follow_first_check(data: dict, user: UserInfo) -> None:
+    """Read a new subscription's first receipt without rerunning the check.
+
+    Args:
+        data: Successful tool result to enrich before recording and streaming it.
+        user: Caller for the permission-checked receipt.
+    """
+    # keep slow indexers and future schedules from holding the conversation open
+    for delay in (0.25, 0.5, 1, 2):
+        first = data.get("first_execution") or {}
+        if first.get("status") != "queued" and first.get("stage") != "checking":
+            break
+        await asyncio.sleep(delay)
+        try:
+            latest = await DownloadPlanService.get_creation(data["plan_id"], user)
+        except (KaloscopeException, OperationalError):
+            break
+        data["first_execution"] = latest["first_execution"]
+    data["follow_first_check"] = first_check_pending(data.get("first_execution") or {})
+
+
 class _BoundedStream(httpx.AsyncByteStream):
     """Cap upstream bytes before the SDK parses or accumulates stream events."""
 
@@ -312,14 +336,17 @@ class AssistantService:
         Yields:
             Start, text, tool, and terminal events; errors contain stable codes only.
         """
-        answer_only = turn.request_id.startswith("answer-") or (
-            getattr(turn, "retry_of", None) is not None
-            and await AssistantTurn.filter(
-                id=turn.retry_of,
-                conversation_id=turn.conversation_id,
-                request_id__startswith="answer-",
-            ).exists()
-        )
+        answer_request = turn.request_id
+        if getattr(turn, "retry_of", None) is not None:
+            answer_request = (
+                await AssistantTurn.filter(
+                    id=turn.retry_of, conversation_id=turn.conversation_id
+                )
+                .first()
+                .values_list("request_id", flat=True)
+                or ""
+            )
+        answer_only = answer_request.startswith("answer-")
         yield AssistantEvent(
             event="start",
             data={
@@ -335,6 +362,34 @@ class AssistantService:
                     raise KaloscopeException(
                         ErrorCode.PERMISSION_DENIED, status_code=403
                     )
+
+                if answer_only:
+                    card = (
+                        await AssistantToolCall.filter(
+                            call_id=answer_request.removeprefix("answer-"),
+                            name="ask_user",
+                            status="complete",
+                            turn__conversation_id=turn.conversation_id,
+                            turn__conversation__user_id=user.id,
+                        )
+                        .select_related("turn")
+                        .first()
+                    )
+                    if card:
+                        details = (card.result or {}).get("data") or {}
+                        submission = (details.get("subscription") or {}).get(
+                            "submission"
+                        )
+                        if (
+                            details.get("state") == "answered"
+                            and submission is not None
+                        ):
+                            await require_browser_admin(user)
+                            async for event in cls._report_subscription(
+                                turn, submission, card.turn.prompt, user
+                            ):
+                                yield event
+                            return
 
                 model = AIModelSelection.model_validate(turn.model)
                 provider = await AIProviderService.resolve_model(model)
@@ -384,6 +439,56 @@ class AssistantService:
                         yield event
         except Exception as error:
             yield AssistantEvent(event="error", data={"code": _error_code(error)})
+
+    @classmethod
+    async def _report_subscription(
+        cls, turn: AssistantTurn, submission: dict, prompt: str, user: UserInfo
+    ) -> AsyncGenerator[AssistantEvent]:
+        """Report the committed card outcome and follow its first background check.
+
+        Args:
+            turn: Answer continuation that owns the report.
+            submission: Receipt committed with the signed-in user's card answers.
+            prompt: Original subscription order used to select the report language.
+            user: Current account authorized to read the plan.
+
+        Yields:
+            An audited receipt, its localized summary and the terminal event.
+        """
+        chinese = bool(re.search(r"[\u3400-\u9fff]", prompt))
+        data = dict(submission)
+        if data.get("created"):
+            data = {
+                **await DownloadPlanService.get_creation(data["plan_id"], user),
+                **submission,
+            }
+            data["follow_first_check"] = first_check_pending(data["first_execution"])
+            data["follow_language"] = "zh" if chinese else "en"
+        info = {"id": uuid4().hex, "name": "create_download_plan"}
+        result = {**info, "ok": True, "data": data}
+        record = await AssistantToolCall.create(
+            turn_id=turn.id,
+            call_id=info["id"],
+            name=info["name"],
+            status="complete",
+            arguments=dumps(
+                {"request_id": submission.get("request_id"), "confirmed": True}
+            ).decode(),
+            result=result,
+        )
+        yield AssistantEvent(event="tool_start", data=info)
+        if data.get("follow_first_check"):
+            await follow_first_check(data, user)
+            await record.save(update_fields=["result"])
+        yield AssistantEvent(event="tool_result", data=result)
+        yield AssistantEvent(
+            event="text_delta",
+            data={"text": confirmation_outcome(info["name"], result, chinese=chinese)},
+        )
+        yield AssistantEvent(
+            event="done",
+            data={"model": turn.model["model_id"], "tool_calls": 1, "usage": None},
+        )
 
     @classmethod
     async def persistent_stream(
@@ -492,6 +597,10 @@ class AssistantService:
         intent = (
             await subscription_intent(turn) if user.role == UserRole.ADMIN else None
         )
+        reply_in_chinese = bool(
+            re.search(r"[\u3400-\u9fff]", intent.prompt if intent else turn.prompt)
+        )
+        tracked_plans: set[int] = set()
         target_id = None
         if answer_only:
             with suppress(TypeError, ValueError, AttributeError):
@@ -751,9 +860,22 @@ class AssistantService:
             if not await AssistantSessionService.allowed(turn.resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
 
-            search_plan = confirmed or revised_plan
+            search_plan = revised_plan
             planned_search = None
-            if search_plan and model_turn == 0:
+            if confirmed and model_turn == 0:
+                # older answered cards have no submission receipt yet
+                calls = [
+                    _planned_call(
+                        "validate_download_plan",
+                        {
+                            "plan": confirmed["plan"],
+                            "ingest_workflow_id": confirmed["ingest_workflow_id"],
+                        },
+                    )
+                ]
+                message = ChatCompletionMessage(role="assistant", tool_calls=calls)
+                reasoning_details = []
+            elif search_plan and model_turn == 0:
                 # the selected plan supplies exact inputs without another planning round
                 plan = search_plan["plan"]
                 planned_search = _planned_call(
@@ -1061,6 +1183,20 @@ class AssistantService:
                         subscription_review["questions"],
                         subscription_review["review"],
                     )
+                if (
+                    call.function.name == "create_download_plan"
+                    and result["ok"]
+                    and result["data"].get("created")
+                    and not result["data"].get("already_exists")
+                    and result["data"]["plan_id"] not in tracked_plans
+                ):
+                    data = result["data"]
+                    tracked_plans.add(data["plan_id"])
+                    if not confirmed:
+                        data["show_first_check"] = True
+                    if first_check_pending(data.get("first_execution") or {}):
+                        data["follow_first_check"] = True
+                        data["follow_language"] = "zh" if reply_in_chinese else "en"
                 full_result = {**info, **result}
 
                 if (
@@ -1498,6 +1634,15 @@ class AssistantService:
                     pass
 
                 await AssistantSessionService.record_resources(turn, resource_ids)
+                if call.function.name == "create_download_plan" and (
+                    result.get("data") or {}
+                ).get("follow_first_check"):
+                    # persist the creation before waiting for its first check
+                    await follow_first_check(result["data"], user)
+                    if not result["data"]["follow_first_check"]:
+                        await AssistantToolCall.filter(
+                            turn_id=turn.id, call_id=info["id"]
+                        ).update(result=full_result)
                 yield AssistantEvent(event="tool_result", data={**info, **result})
                 messages.append(
                     {
@@ -1546,7 +1691,11 @@ class AssistantService:
                         and deferred_subscription(turn.prompt)
                     ):
                         finish_requested = True
-                    elif not search_plan and check.get("status") == "needs_search":
+                    elif (
+                        not confirmed
+                        and not search_plan
+                        and check.get("status") == "needs_search"
+                    ):
                         plan = data["plan"]
                         search_plan = {
                             "plan": plan,
@@ -1634,9 +1783,7 @@ class AssistantService:
                     event="text_delta",
                     data={
                         "text": confirmation_outcome(
-                            call.function.name,
-                            result,
-                            chinese=bool(re.search(r"[\u3400-\u9fff]", intent.prompt)),
+                            call.function.name, result, chinese=reply_in_chinese
                         )
                     },
                 )
