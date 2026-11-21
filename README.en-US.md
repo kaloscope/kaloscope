@@ -49,7 +49,15 @@ v1.0.0 brings AI into workflow creation and everyday media management. Describe 
 - Watch changes appear on the node canvas, then save the draft or revert them; you decide when to publish
 - Manage download tasks and plans, workflow schedules, library scans, rescraping, and ingestion settings through conversation
 
-Download, schedule, plan, and media changes are previewed for confirmation before they run. Available actions follow your account permissions.
+Available actions depend on your account permissions.
+
+- Administrators can ask “Subscribe me to [title].” The assistant searches actual releases and asks for the remaining choices in one question card. Select or enter a release group, downloader directory, and target library, or choose “Download only.” The card asks about the directory and library separately when each has multiple choices. Ongoing subscriptions default to hourly checks, one resource per check, and no total cap.
+- On the last question, select “Confirm subscription.” The assistant searches again with the chosen release restrictions, validates the settings, and returns the plan ID and first-check status. Skipping a required choice defers creation. Choosing “Any release group or edition” can download multiple releases of an episode. Ask for a preview to review the settings first.
+- Rebuild a download plan by name or ID. By default, the new plan retains its deduplication history and download count. Existing tasks and files stay in place.
+- When plans share a name or settings are missing, choose an option, enter a custom value, or skip the question. If you ask for a plan preview, open it with the review button above the message box. Click a plan in the conversation history to see its settings and current status. Publishing and deleting have separate confirmation buttons.
+- Users can search permitted indexers, save and look up their own favorites, open a video, or resume reading on the current device.
+- Administrators can trace ingestion through plan runs, downloads, and transfers, inspect a media batch, or stop its remaining work. Older records may lack a link to the originating plan.
+- Administrators can also copy a template into a draft, review a workflow's publication impact, create or remove a library, edit an item's title, and inspect downloader health, transcodes, and log-level summaries.
 
 <img src="screenshots/ai-assistant.png" alt="Request changes from the AI assistant and review the result on the workflow canvas" width="1382" height="849" />
 
@@ -153,7 +161,9 @@ Create a token under **Personal → Access Tokens**, then enter these settings i
 | MCP URL              | `http://127.0.0.1:8000/_api/mcp`, replaced with an instance address reachable by your client |
 | Authorization header | `Authorization: Bearer <token>`, replacing `<token>` with the full token                     |
 
-Tokens default to read-only access. Choose read-write access to edit drafts, run workflow trials, or apply changes; account permissions still apply. The full token is shown only once at creation. If your client has a **Bearer Token** field, enter only the token itself.
+Tokens default to read-only. Choose all domains, media, downloads, workflows, or system when issuing a token. Media tokens can also be limited to selected libraries. Use `tools/list` to see the operations available to the current account and token. Running searches and changing favorites require the appropriate read-write grant.
+
+An external client can prepare a plan replacement, workflow publication, or library removal for an administrator. Open the returned in-app link under the same administrator account, review the impact, and confirm. The client can then read the receipt. The complete token appears once at creation. If your client has a **Bearer Token** field, enter the token itself.
 
 ## Star History
 

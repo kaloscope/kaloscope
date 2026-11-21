@@ -148,6 +148,31 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
   `test_floor_catalog` in `backend/tests/test_core_ai_tools.py` caps fixed text at 24,796 bytes per catalog state.
   Measure growth with `fixed_size(...)` and offset it instead of loosening assertions.
 
+### Assistant interactions and MCP scopes
+
+- Use `discover_actions` for role-aware tool discovery and keep newly unlocked schemas inside the catalog budget.
+  Download grants live in `backend/app/core/dl/access.py`. Keep MCP discovery, call-time checks,
+  scoped tool schemas, and historical resource checks consistent when adding actions. Require a verified token for both
+  discovery and execution. Previews that run an external workflow, including media rescraping, require a read-write token.
+- Use `ask_user` and the signed-in conversation's answer endpoint for missing values. Options, custom text, skipped
+  questions, and retries carry no execution grant. Keep device actions tied to a validated target and browser acknowledgement.
+- For administrator subscriptions, use one ordinary `ask_user` group. Offer release choices from actual search results and
+  collect unresolved downloader directories and library destinations in the same group. The generic card's final submit
+  confirms the subscription. Keep server-owned option bindings and resolve custom library names or IDs within the
+  caller's current grants. Skipping a required question defers creation.
+- Apply answers by question and option ID to the frozen plan. Recheck the exact keyword, filters, and transfer settings
+  before creating. Use the shared creation receipt for HTTP and MCP retries. Keep earlier single-question cards readable
+  and supersede a preliminary validation when a later question revises it.
+- Reuse the domain service's request ID, revision, and receipt for browser approvals.
+  `assistant_reviews.py` handles subscriptions, downloads, schedules, and media changes. Existing plan edits use
+  `assistant_plan_review.py`. Rebuilds use `plan_replacement.py`, and other administrator reviews use `agent_actions.py`.
+  Recheck the owner and role on every read and decision. Reserve the SQLite writer before reading a decision for update.
+  Distinguish a retryable failure before execution from an uncertain outcome after dispatch.
+- Validate these changes across chat, authenticated HTTP, and Streamable HTTP MCP. From `backend`, run
+  `KALOSCOPE_LIVE_AGENT=1 poetry run pytest tests/test_agent*_live.py -q` for the opt-in model evaluations. They read the
+  enabled official DeepSeek provider from the local workspace and use temporary databases, synthetic media, and loopback
+  servers. Keep credentials out of traces and committed fixtures. Model tests use the provider's metered API.
+
 ### Models and migrations
 
 - Keep ORM and Pydantic request models in the relevant `backend/app/models` domain module. Reuse `TortoiseModel`,
