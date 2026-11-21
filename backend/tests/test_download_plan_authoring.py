@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 from datetime import UTC, timedelta
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -28,8 +29,10 @@ from app.models.download import (
     DownloadDir,
     Downloader,
     DownloadPlan,
+    DownloadPlanAttempt,
     DownloadPlanCheck,
     DownloadPlanCreate,
+    DownloadPlanCreation,
     DownloadPlanHistory,
     DownloadPlanQuery,
     DownloadTask,
@@ -44,7 +47,7 @@ from app.services import download as service
 from app.services.assistant import SYSTEM_PROMPT, AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.mcp import MCPAccessTokenService
-from app.utils.json import dumps, loads
+from app.utils.json import dumps, json_digest, loads
 from tests.test_assistant_persistence import MODEL, completion_client, database, request
 from tests.test_mcp import application, call
 from tests.test_services_assistant import call_delta, chunk, configure, response
@@ -415,6 +418,91 @@ def test_first_attempt(monkeypatch, status):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("search_in_progress", [False, True])
+def test_worker_handoff(monkeypatch, search_in_progress):
+    async def run():
+        async with application() as app:
+            app.asgi = True
+            app.shared_ctx.dl_task_actions = {}
+            app.shared_ctx.dl_sync_requested = Event()
+            app.shared_ctx.dl_sync_fast = Event()
+            searching = asyncio.Event()
+            release_search = asyncio.Event()
+
+            async def search(**_kwargs):
+                searching.set()
+                await release_search.wait()
+                return {"items": [{"link": "a" * 40}]}
+
+            app.ctx.flow_engine = SimpleNamespace(execute=search)
+            monkeypatch.setattr(syncer.Sanic, "get_app", lambda: app)
+            monkeypatch.setattr(
+                service, "notify_download_changes", syncer.notify_download_changes
+            )
+            driver = DraftDriver()
+            driver.supports_version = False
+            driver.sync = AsyncMock(return_value=[])
+            driver.close = AsyncMock()
+            monkeypatch.setattr(syncer, "load_driver", lambda _: driver)
+            admin = app.shared_ctx.sessions["admin"]
+            _, _, body = await fixture_plan()
+
+            old = syncer.DLSyncer(app)
+            new = syncer.DLSyncer(app)
+            # the two workers share a test event loop and need separate Sanic task names
+            old._DL_SYNCER = "old-worker"
+            entered = asyncio.Event()
+            exiting = asyncio.Event()
+            interval = old.interval
+
+            async def hold_old_worker():
+                entered.set()
+                try:
+                    if search_in_progress:
+                        await interval()
+                    else:
+                        await asyncio.Future()
+                finally:
+                    exiting.set()
+
+            monkeypatch.setattr(old, "interval", hold_old_worker)
+            await old.start()
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                await new.start()
+                try:
+                    created = await service.DownloadPlanService.create_once(body, admin)
+                    if search_in_progress:
+                        await asyncio.wait_for(searching.wait(), 5)
+                    else:
+                        assert created["first_execution"] == {"status": "queued"}
+                        assert app.shared_ctx.dl_sync_requested.is_set()
+                        assert not await DownloadPlanAttempt.all().exists()
+                        app.shared_ctx.dl_sync_requested.clear()
+                    stopping = asyncio.create_task(old.shutdown())
+                    await asyncio.wait_for(exiting.wait(), 5)
+                    release_search.set()
+                    await stopping
+
+                    async with asyncio.timeout(5):
+                        while True:
+                            receipt = await service.DownloadPlanService.get_creation(
+                                created["plan_id"], admin
+                            )
+                            if receipt["first_execution"]["status"] == "completed":
+                                break
+                            await asyncio.sleep(0.02)
+                    assert receipt["first_execution"]["added"] == 1
+                    assert await DownloadPlanAttempt.all().count() == 1
+                    assert await DownloadTask.all().count() == 1
+                finally:
+                    await new.shutdown()
+            finally:
+                await old.shutdown()
+
+    asyncio.run(run())
+
+
 def test_future_attempt(monkeypatch):
     async def run():
         async with database() as (owner, _):
@@ -525,6 +613,24 @@ def test_mcp():
             )
             assert replay["structuredContent"]["replayed"]
 
+            validation = await call(
+                app,
+                "validate_download_plan",
+                {"validation": {"plan": args["plan"]}},
+                token="admin",
+            )
+            duplicate = await call(
+                app,
+                "create_download_plan",
+                {"creation": {**args, "request_id": str(uuid4())}},
+                token=tokens["admin"],
+            )
+            for result in (validation, duplicate):
+                assert not result.get("isError"), result
+                assert not result["structuredContent"]["valid"]
+                assert result["structuredContent"]["duplicate_plan_id"] == plan_id
+            assert not duplicate["structuredContent"]["created"]
+
             permission = await UserPermission.create(
                 user_id=app.shared_ctx.sessions["reader"].id,
                 rel_type=PermType.INDEXER,
@@ -607,6 +713,7 @@ def test_driver_failure(monkeypatch):
             )
             assert receipt["first_execution"] == {
                 "status": "failed",
+                "stage": "driver_offline",
                 "added": 0,
                 "errors": 1,
             }
@@ -1016,6 +1123,53 @@ def test_list_permissions(monkeypatch):
     asyncio.run(run())
 
 
+def test_last_check_order():
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan()
+            first = await service.DownloadPlanService.create_once(body, owner)
+            other_body = body.model_copy(
+                update={
+                    "request_id": uuid4(),
+                    "plan": body.plan.model_copy(update={"keyword": "Harbor"}),
+                }
+            )
+            other = await service.DownloadPlanService.create_once(other_body, owner)
+            for creation in [first, other]:
+                await DownloadPlanAttempt.create(
+                    plan_id=creation["plan_id"],
+                    workflow_id=creation["workflow_id"],
+                    status="completed",
+                    submitted=2,
+                    results_seen=2,
+                )
+            newest = await DownloadPlanAttempt.create(
+                plan_id=first["plan_id"],
+                workflow_id=first["workflow_id"],
+                status="driver_offline",
+                errors=1,
+            )
+            for sort, expected in [("-last_exec", first), ("last_exec", other)]:
+                page = await service.DownloadPlanService.list_plans(
+                    DownloadPlanQuery(page_size=1, ordering=sort), owner
+                )
+                row = page["items"][0]
+                assert row["id"] == expected["plan_id"]
+                if sort == "-last_exec":
+                    assert row["last_execution"] == {
+                        "started_at": newest.created_at.isoformat(),
+                        "stage": "driver_offline",
+                        "added": 0,
+                        "errors": 1,
+                        "uncertain": 0,
+                    }
+                else:
+                    assert row["last_execution"]["stage"] == "tasks_submitted"
+                    assert row["last_execution"]["added"] == 2
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "pages,expected,added",
     [
@@ -1054,7 +1208,210 @@ def test_rejected_search_links(monkeypatch, pages, expected, added):
                 )
                 result = await syncer.execute_download_plan(plan, DraftDriver())
             assert result["status"] == expected
+            assert (
+                result["stage"]
+                == {
+                    "failed": "invalid_link",
+                    "partial": "partial",
+                    "completed": "no_search_results",
+                }[expected]
+            )
             assert result["added"] == added
             assert result["errors"] == (0 if expected == "completed" else 1)
+
+    asyncio.run(run())
+
+
+def test_matching_subscriptions():
+    async def run():
+        async with database() as (owner, _):
+            _, _, first = await fixture_plan()
+            second = first.model_copy(update={"request_id": uuid4()})
+            receipts = await asyncio.gather(
+                *(
+                    service.DownloadPlanService.create_once(body, owner)
+                    for body in (first, second)
+                )
+            )
+            created, refused = sorted(receipts, key=lambda r: not r["created"])
+            assert created["created"] and not refused["created"]
+            assert (
+                not refused["valid"]
+                and refused["duplicate_plan_id"] == created["plan_id"]
+            )
+            for body, result in zip((first, second), receipts, strict=True):
+                replay = await service.DownloadPlanService.create_once(body, owner)
+                assert replay["created"] == result["created"]
+                if replay["created"]:
+                    assert (
+                        replay["plan_id"] == created["plan_id"] and replay["replayed"]
+                    )
+            await DownloadPlan.all().update(total_count=first.plan.total_limit)
+            legacy_payload = DownloadPlanCreate.model_validate(
+                {**first.model_dump(), "request_id": uuid4(), "separate_plan": True}
+            )
+            validation = await service.DownloadPlanService.validate_creation(
+                DownloadPlanCheck(plan=first.plan), owner
+            )
+            assert (
+                validation["duplicate_plan_id"] == created["plan_id"]
+                and not validation["valid"]
+            )
+            assert not (
+                await service.DownloadPlanService.create_once(legacy_payload, owner)
+            )["created"]
+            with pytest.raises(
+                BadRequestException, match="download_plan_already_exists"
+            ):
+                await service.DownloadPlanService.upsert(first.plan)
+            assert not await DownloadPlanCreation.exists(
+                key=service.DownloadPlanService.change_key(
+                    owner.id, legacy_payload.request_id
+                )
+            )
+            assert (
+                await DownloadPlan.all().count()
+                == await DownloadPlanCreation.all().count()
+                == 1
+            )
+            service.notify_download_changes.assert_called_once()
+            assert (
+                "separate_plan"
+                not in DownloadPlanCreate.model_json_schema()["properties"]
+            )
+
+    asyncio.run(run())
+
+
+def test_aliases_across_pages(monkeypatch):
+    from tests.test_download_plan_conversation import engine_fixture
+
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan(batch_limit=2, total_limit=2)
+            result = await service.DownloadPlanService.create_once(body, owner)
+            plan = await DownloadPlan.get(id=result["plan_id"])
+            magnet = "magnet:?xt=urn:btih:" + "a" * 40
+            pages = [[magnet, magnet + "&dn=Lantern"], ["A" * 40], []]
+            engine = engine_fixture(monkeypatch, {})
+            engine.side_effect = [
+                {"items": [{"link": link} for link in links]} for links in pages
+            ]
+            outcome = await syncer.execute_download_plan(plan, DraftDriver())
+            await plan.refresh_from_db()
+            assert outcome["added"] == plan.total_count == 1
+            assert outcome["status"] == "completed"
+            assert not plan.inactive()
+            assert (
+                await DownloadPlanHistory.all().count()
+                == await DownloadTask.all().count()
+                == 1
+            )
+
+    asyncio.run(run())
+
+
+def test_reviewed_legacy_plan():
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan()
+            legacy = await DownloadPlan.create(**body.plan.model_dump(exclude={"id"}))
+            conversation = await AssistantConversation.create(
+                user_id=owner.id, title="review"
+            )
+            turn = await AssistantTurn.create(
+                conversation=conversation,
+                request_id="order",
+                prompt="Subscribe to Lantern",
+                status="complete",
+            )
+            rule = {
+                "title": "Lantern",
+                "confirmed": True,
+                "terms": ["ANi"],
+                "observed": ["ANi"],
+            }
+            checked = await service.DownloadPlanService.validate_creation(
+                DownloadPlanCheck(plan=body.plan), owner, check_duplicate=False
+            )
+            assert checked["valid"]
+            checked.update(
+                request_id=str(body.request_id),
+                assistant_submission={
+                    "status": "ready",
+                    "release_rule": rule,
+                    "related_plan_ids": [legacy.id],
+                },
+            )
+            await AssistantToolCall.create(
+                turn=turn,
+                call_id=uuid4().hex,
+                name="validate_download_plan",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": checked},
+            )
+            result = await service.DownloadPlanService.create_once(body, owner)
+            assert result["created"] and result["plan_id"] != legacy.id
+            await legacy.refresh_from_db()
+            assert legacy.creation_receipt is None
+            assert (await DownloadPlan.get(id=result["plan_id"])).creation_receipt[
+                "release_rule"
+            ] == rule
+            assert await DownloadPlan.all().count() == 2
+            service.notify_download_changes.assert_called_once()
+
+    asyncio.run(run())
+
+
+def test_duplicate_editor_values():
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan(
+                filters={}, interval_start="2099-01-01T08:00:00+08:00"
+            )
+            created = await service.DownloadPlanService.create_once(body, owner)
+            same = body.plan.model_copy(
+                update={
+                    "interval_start": body.plan.interval_start.astimezone(UTC),
+                    "filters": None,
+                    "sub_pattern": "",
+                    "sub_repl": "",
+                }
+            )
+            duplicate = await service.DownloadPlanService.create_once(
+                body.model_copy(update={"request_id": uuid4(), "plan": same}), owner
+            )
+            assert not duplicate["created"]
+            assert duplicate["duplicate_plan_id"] == created["plan_id"]
+
+            different = same.model_copy(update={"batch_limit": same.batch_limit + 1})
+            other = await service.DownloadPlanService.create_once(
+                body.model_copy(update={"request_id": uuid4(), "plan": different}),
+                owner,
+            )
+            assert other["created"] and other["plan_id"] != created["plan_id"]
+
+    asyncio.run(run())
+
+
+def test_legacy_creation_replay():
+    async def run():
+        async with database() as (owner, _):
+            _, _, body = await fixture_plan()
+            created = await service.DownloadPlanService.create_once(body, owner)
+            old_digest = json_digest(
+                {**body.plan.model_dump(exclude={"id"}), "separate_plan": True}
+            )
+            await DownloadPlanCreation.filter(plan_id=created["plan_id"]).update(
+                digest=old_digest
+            )
+            replay = await service.DownloadPlanService.create_once(body, owner)
+            assert (
+                replay["created"]
+                and replay["replayed"]
+                and replay["plan_id"] == created["plan_id"]
+            )
+            service.notify_download_changes.assert_called_once()
 
     asyncio.run(run())

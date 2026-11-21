@@ -372,7 +372,14 @@ def test_hide_items(tmp_path, missing):
                 Path(episodes[0].path).unlink()
             change = deletion(lib, item_ids=[episodes[0].id], delete_files=False)
 
-            review = await MediaBatchService.review(change, ADMIN)
+            response = await tools.execute_tool(
+                "review_media_batch",
+                change.model_dump_json(exclude_unset=True),
+                ADMIN,
+                conversation_id=1,
+                call_id="keep-files",
+            )
+            review = response["data"]
             details = await MediaBatchService.details(review["batch_id"])
             result = await confirm(review, change)
             hidden = await MediaItem.get(id=episodes[0].id)

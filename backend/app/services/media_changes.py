@@ -54,6 +54,7 @@ from app.models.media import (
     MediaMetadata,
     MediaRescrape,
 )
+from app.models.review_decision import AssistantReviewDecision, review_attempt
 from app.models.user import UserInfo, UserRole
 from app.services.base import BaseService
 from app.services.flow import FlowTriggerService
@@ -1324,7 +1325,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             raise
 
         base["library_name"] = lib.name
-        refused = await cls._checked(body, review, base)
+        refused = await cls._checked(body, review, base, user, claim=False)
         if refused is not None:
             return refused
 
@@ -1334,7 +1335,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 current, _, writes, bindings = await cls._review_config(
                     change, user, preview=False
                 )
-                refused = await cls._checked(body, current, base)
+                refused = await cls._checked(body, current, base, user)
                 if refused is not None:
                     return refused
 
@@ -1369,6 +1370,8 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                     claimed=True,
                     result=result,
                 )
+        except ForbiddenException:
+            raise
         except Exception:
             logger.exception("Failed to save a library configuration")
             try:
@@ -1413,6 +1416,11 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             ForbiddenException: If the account cannot change media.
         """
         _require_admin(user)
+        if (
+            isinstance(body.change, MediaBatch)
+            and getattr(user, "mcp_library_ids", None) is not None
+        ):
+            await MediaLibService.get_accessible(body.change.library_id, user)
         nonce = body.request_id.bytes[:8]
         if (
             cls.change_request(user.id, body.change, body.revision, nonce)
@@ -1510,7 +1518,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
         """
         async with lock:
             try:
-                with submission_lock(f"media-change:{key}"):
+                with submission_lock(f"media-change:{key}"), review_attempt():
                     receipt = await MediaChangeReceipt.get_or_none(key=key)
                     if receipt is not None and receipt.claimed:
                         # holding both locks proves no other call is applying it
@@ -1524,18 +1532,20 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                         )
 
                     if isinstance(body.change, LibraryScan):
-                        return await cls._apply_scan(body, body.change, key, user)
-
-                    if isinstance(body.change, LibraryConfig):
-                        # different reviews of one library must recheck in sequence
+                        outcome = await cls._apply_scan(body, body.change, key, user)
+                    elif isinstance(body.change, LibraryConfig):
                         with submission_lock(f"media-library:{body.change.library_id}"):
-                            return await cls._apply_config(body, body.change, key, user)
-
-                    # different reviews of the same item must recheck in sequence
-                    with submission_lock(f"media-item:{body.change.item_id}"):
-                        return await cls._apply_rescrape(
-                            body, body.change, key, user, receipt
-                        )
+                            outcome = await cls._apply_config(
+                                body, body.change, key, user
+                            )
+                    else:
+                        with submission_lock(f"media-item:{body.change.item_id}"):
+                            outcome = await cls._apply_rescrape(
+                                body, body.change, key, user, receipt
+                            )
+                    return await AssistantReviewDecision.finish(
+                        user.id, body.request_id, outcome
+                    )
             except LockTimeout:
                 return await cls._pending(key, user)
 
@@ -1639,7 +1649,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             raise
 
         base["library_name"] = lib.name
-        stale = await cls._checked(body, review, base)
+        stale = await cls._checked(body, review, base, user)
         if stale is not None:
             return stale
 
@@ -1756,7 +1766,7 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             "issues": target["issues"] + preview["issues"],
             **preview,
         }
-        stale = await cls._checked(body, review, base)
+        stale = await cls._checked(body, review, base, user)
         if stale is not None:
             return stale
 
@@ -1844,7 +1854,13 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
 
     @classmethod
     async def _checked(
-        cls, body: MediaChangeApply, review: dict[str, Any], base: dict[str, Any]
+        cls,
+        body: MediaChangeApply,
+        review: dict[str, Any],
+        base: dict[str, Any],
+        user: UserInfo,
+        *,
+        claim: bool = True,
     ) -> dict[str, Any] | None:
         """Refuse a request whose inputs changed, are invalid or lack approval.
 
@@ -1852,6 +1868,8 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             body: Confirmed request.
             review: Review recomputed from current state.
             base: Facts shared by every outcome.
+            user: Authenticated administrator who owns the reviewed request.
+            claim: Reserve approval when the domain is ready to make its change.
 
         Returns:
             A refusal, or `None` when the request may be applied.
@@ -1882,6 +1900,13 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
                 "confirmation_required": True,
             }
 
+        if (
+            claim
+            and not (
+                await AssistantReviewDecision.claim(user.id, body.request_id, True)
+            ).approved
+        ):
+            return {"applied": False, "outcome": "cancelled", **base}
         return None
 
     @staticmethod
@@ -1929,7 +1954,12 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             # a kept claim replays this failure instead of applying again
             logger.exception("Failed to release a media change claim")
             return await cls._record(
-                key, {**cls._failed(base, error), "message": "Nothing was changed."}
+                key,
+                {
+                    **cls._failed(base, error),
+                    "retryable": False,
+                    "message": "Nothing was changed.",
+                },
             )
 
     @staticmethod

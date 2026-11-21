@@ -5,6 +5,7 @@ from typing import Any, Literal
 from sanic import Sanic
 
 from app.core.ai.documents import graph_summary, value_summary
+from app.core.dl.access import ADMIN_PREVIEW
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import NotFoundException
 from app.core.flow.outputs import check_output
@@ -793,7 +794,7 @@ async def download_tasks(
 ) -> dict:
     """Page stored download tasks like the active and completed download pages.
 
-    Visibility matches the shared download pages. Values come from the database,
+    Visibility matches the administrator download pages. Values come from the database,
     so no downloader is polled or controlled.
 
     Args:
@@ -808,6 +809,9 @@ async def download_tasks(
         the account may review. Error lengths indicate when a detail read can
         retrieve stored error text. Sizes, speeds, raw status and update times
         remain available through the detail tool.
+
+    Raises:
+        ForbiddenException: If the account cannot read shared tasks.
     """
     if scope == "active":
         query.states = [state for state in DownloadState if state != "completed"]
@@ -815,7 +819,9 @@ async def download_tasks(
         query.states = [DownloadState.COMPLETED]
 
     # the service adds `error_kind` from offline jobs after serializing stored fields
-    page = await DownloadTaskService.list_tasks(query, include=DOWNLOAD_STORED_FIELDS)
+    page = await DownloadTaskService.list_tasks(
+        query, user, include=DOWNLOAD_STORED_FIELDS
+    )
     items = []
     for task in page["items"]:
         item = {
@@ -936,8 +942,10 @@ async def download_task_details(
         visibility and stored status as list queries.
 
     Raises:
+        ForbiddenException: If the account cannot read shared tasks.
         NotFoundException: If the task no longer exists.
     """
+    ADMIN_PREVIEW.require(user)
     task = await DownloadTask.get_or_none(id=task_id)
     if task is None:
         raise NotFoundException

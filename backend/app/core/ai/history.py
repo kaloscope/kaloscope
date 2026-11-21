@@ -429,6 +429,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
         checkpoints = []
         probes = []
         previews = {}
+        media_reviews = {}
 
         for index, message in enumerate(result):
             content = message.get("content") or ""
@@ -443,6 +444,33 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
 
             for fact in checkpoint["tools"]:
                 deduplicate_reference(fact)
+                data = fact.get("data") or {}
+                request_id = data.get("request_id")
+                if fact.get("ok") and request_id:
+                    if fact.get("name") in {
+                        "review_library_scan",
+                        "review_media_rescrape",
+                        "review_library_config",
+                        "review_media_batch",
+                    }:
+                        media_reviews[request_id] = fact
+                    elif (
+                        fact.get("name") == "apply_media_change"
+                        and data.get("confirmation_required")
+                        and request_id in media_reviews
+                    ):
+                        # a premature apply repeats the preview in this same turn
+                        review = media_reviews[request_id]
+                        repeated = [
+                            key
+                            for key, value in data.items()
+                            if isinstance(value, (dict, list))
+                            and value == review["data"].get(key)
+                        ]
+                        if repeated:
+                            for key in repeated:
+                                del data[key]
+                            data["review_details_in_tool"] = review["id"]
                 if (
                     fact.get("name") == "preview_workflow_draft"
                     and fact.get("ok")
@@ -582,7 +610,7 @@ def compact_exchanges(messages: list[dict], turn_id: int, budget: int) -> list[d
     return result
 
 
-def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
+def shed_samples(messages: list[dict], budget: int) -> list[dict]:
     """Reduce rereadable checkpoint samples, oldest first, until the tail fits.
 
     Ending a build for lack of room is worse than rereading one old sample, so this
@@ -593,7 +621,6 @@ def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
     Args:
         messages: Compacted exchanges of the active turn.
         budget: Available serialized bytes for those exchanges.
-        unread: Newest tool results that have not reached the model yet.
 
     Returns:
         A copy whose oldest samples retain only their source identity, or the
@@ -616,9 +643,6 @@ def shed_samples(messages: list[dict], budget: int, unread: int) -> list[dict]:
         if len(dumps(result)) <= budget:
             break
         if fact.get("name") in REREADABLE_TOOLS and fact.get("ok"):
-            # the newest extraction is only worth keeping while another read can go
-            if fact is order[-1][1] and unread:
-                continue
             fact["data"] = {"sample_in_original": True}
             fact.pop("formatter", None)
             prefix, checkpoint = checkpoints[index]
@@ -638,6 +662,7 @@ async def prepare_context(
     schemas: Sequence[Mapping[str, object]],
     preset: AIProviderPreset | None,
     continuation: list[dict] | None = None,
+    trailing: list[dict] | None = None,
 ) -> tuple[list[dict], dict[str, int], bool]:
     """Compact completed prefixes and atomically checkpoint their summaries.
 
@@ -653,6 +678,7 @@ async def prepare_context(
         preset: Provider option compatibility preset.
         continuation: Completed exchanges in this turn, compacted in place only
             when their size leaves insufficient room for historical context.
+        trailing: Current-round instructions appended by the caller after compaction.
 
     Returns:
         Bounded model messages, summary usage, and whether a checkpoint changed.
@@ -667,6 +693,8 @@ async def prepare_context(
     conversation = await AssistantSessionService.owned(turn.conversation_id, user)
     input_budget, output_budget = budgets(turn.model["model_id"], preset=preset)
     hard = min(input_budget, 512 * 1024) - output_budget
+    if trailing:
+        hard -= len(dumps(trailing)) - 1
     if not continuation:
         hard -= 4096
     if hard <= context_size([{"role": "system", "content": system}], schemas):
@@ -787,27 +815,18 @@ async def prepare_context(
             else 4096
         )
 
-        unread = 0
-        for message in reversed(continuation):
-            if message.get("role") != "tool":
-                break
-            unread += 1
-
+        history_reserve = max(
+            context_size(checkpoint_messages(), []),
+            min(4096, available // 2, history_size) if records else 0,
+        )
         continuation[:] = compact_exchanges(
-            continuation,
-            turn.id,
-            available
-            - max(
-                context_size(checkpoint_messages(), []),
-                min(4096, available // 2, history_size) if records else 0,
-            ),
+            continuation, turn.id, available - history_reserve
         )
         if (turn.context or {}).get("page_type") == "workflow_designer":
             # elsewhere a read can be the very answer the reply is about to give
             continuation[:] = shed_samples(
                 continuation,
-                available - context_size(checkpoint_messages(), []) - 8,
-                unread,
+                available - history_reserve - 8,
             )
         current.extend(continuation)
 

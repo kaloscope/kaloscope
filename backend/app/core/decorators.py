@@ -4,7 +4,31 @@ from inspect import isawaitable
 from sanic import Request
 
 from app.core.exceptions import ForbiddenException, UnauthorizedException
-from app.models.user import Permissions, PermType, UserInfo, UserPermission, UserRole
+from app.models.user import (
+    Permissions,
+    PermType,
+    User,
+    UserInfo,
+    UserPermission,
+    UserRole,
+)
+
+
+async def require_browser_admin(user: UserInfo) -> None:
+    """Require a browser session with a current administrator role.
+
+    Args:
+        user: Authenticated identity submitting or viewing the decision.
+
+    Raises:
+        ForbiddenException: If the identity uses an MCP credential or lacks the role.
+    """
+    if (
+        getattr(user, "mcp_scope", None) is not None
+        or user.role != UserRole.ADMIN
+        or not await User.exists(id=user.id, role=UserRole.ADMIN)
+    ):
+        raise ForbiddenException
 
 
 def authorize(role: UserRole | None = None):

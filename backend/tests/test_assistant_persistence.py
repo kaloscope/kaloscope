@@ -1732,7 +1732,7 @@ def test_shed_samples():
     ]
     compact = history.compact_exchanges(exchanges, 1, 1)
 
-    shed = history.shed_samples(compact, 3500, 1)
+    shed = history.shed_samples(compact, 3500)
     facts = [
         fact
         for message in shed
@@ -1742,7 +1742,11 @@ def test_shed_samples():
     assert facts[0]["data"] == recipe["data"]
     assert facts[1]["data"] == {"sample_in_original": True}
     assert facts[3]["data"]["formatted"]["value"]["row"] == "x" * 700
-    assert history.shed_samples(compact, 10**6, 1) == compact
+    assert history.shed_samples(compact, 10**6) == compact
+    smallest = history.shed_samples(compact, 1)
+    newest = loads(smallest[-1]["content"].split("\n", 1)[1])["tools"][-1]
+    assert newest["id"] == "probe-2"
+    assert newest["data"] == {"sample_in_original": True}
 
 
 def test_incremental_generation_budget():
@@ -2537,6 +2541,23 @@ def test_partial_reply_is_durable(monkeypatch):
             assert record["status"] == "interrupted"
             assert not (await Sessions.owned(conversation["id"], owner)).active_request
             assert source.closed
+
+    asyncio.run(run())
+
+
+def test_disconnect_after_lease_change():
+    async def run():
+        async with database() as (owner, _):
+            conv = (
+                await Sessions.create(
+                    ConversationCreate.model_validate({"model": MODEL}), owner
+                )
+            )["id"]
+            events = AssistantService.persistent_stream(conv, request("first"), owner)
+            assert (await anext(events)).event == "start"
+            await AssistantConversation.filter(id=conv).update(active_request="second")
+            await events.aclose()
+            assert (await AssistantConversation.get(id=conv)).active_request == "second"
 
     asyncio.run(run())
 
@@ -3442,13 +3463,21 @@ def test_download_context(monkeypatch):
             assert result["data"]["total"] == 1
             assert result["data"]["items"][0]["name"] == "Ubuntu ISO"
             turn = await AssistantTurn.get(request_id="downloads")
-            # shared download visibility adds no resource to recheck later
-            assert turn.resource_ids == []
+            assert turn.resource_ids == ["admin:downloads"]
             assert turn.context == context
             owner.role, owner.perms = UserRole.USER, Permissions()
             history = (await Sessions.turns(conversation["id"], owner))["items"]
-            assert history[0]["content"] == "Done"
-            assert history[0]["context"] == context
+            assert history[0]["error"] == "permission_denied"
+            assert history[0]["content"] == "" and history[0]["context"] is None
+            assert history[0]["tools"] == []
+            blocked = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request("demoted", context=context), owner
+                )
+            ]
+            assert blocked[-1].event == "error"
+            assert blocked[-1].data["code"] == "permission_denied"
 
     asyncio.run(run())
 

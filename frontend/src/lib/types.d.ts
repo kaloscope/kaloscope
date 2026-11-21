@@ -88,6 +88,8 @@ export interface AIModelSelection {
  * A validated snapshot of a page supported by the assistant.
  */
 export type AssistantPageContext =
+  | { page_type: 'dashboard'; route: '/dashboard'; watch_ids: number[]; read_ids: number[] }
+  | { page_type: 'web_search'; route: string; workflow_id: number | null; keyword: string }
   | {
       page_type: 'workflows';
       route: string;
@@ -192,6 +194,10 @@ export type AssistantStoredContext =
  */
 export type AssistantDestination = {
   page:
+    | 'dashboard'
+    | 'web_search'
+    | 'play_video'
+    | 'resume_reading'
     | 'workflows'
     | 'workflow_jobs'
     | 'workflow_designer'
@@ -231,7 +237,7 @@ export type ScheduleChangeOutcome = {
 /** Outcome of applying a reviewed download plan update or deletion. */
 export type PlanChangeOutcome = {
   applied: boolean | null;
-  outcome?: 'updated' | 'deleted' | 'absent' | 'uncertain';
+  outcome?: 'updated' | 'deleted' | 'absent' | 'uncertain' | 'cancelled';
   plan_id?: number;
   workflow_id?: number;
   replayed?: boolean;
@@ -393,7 +399,7 @@ export type GraphValidation = {
  * A validated event from the assistant's streaming response.
  */
 export type AssistantStreamEvent =
-  | { event: 'start'; data: { turn_id: string; conversation_id?: number } }
+  | { event: 'start'; data: { turn_id: string; conversation_id?: number; is_answer_turn?: boolean } }
   | { event: 'compacting'; data: { active: boolean; compacted?: boolean } }
   | { event: 'text_delta'; data: { text: string } }
   | { event: 'tool_start'; data: { id: string; name: string } }
@@ -511,6 +517,8 @@ export interface MCPAccessToken {
   name: string;
   prefix: string;
   scope: 'read_only' | 'read_write';
+  domain: 'all' | 'media' | 'downloads' | 'workflows' | 'system';
+  library_ids: number[] | null;
   expires_at: string;
   last_used_at: string | null;
   status: 'active' | 'expired';
@@ -521,6 +529,8 @@ export interface MCPAccessTokenCreate {
   name: string;
   expires_in_days: 30 | 90 | 365;
   scope: MCPAccessToken['scope'];
+  domain?: MCPAccessToken['domain'];
+  library_ids?: number[];
 }
 
 /** A creation response containing the credential shown only once. */
@@ -1039,6 +1049,10 @@ export type DownloadTask = {
   sub_repl: string | null;
 };
 
+/** Recorded facts for one check, separate from the plan's scheduling timestamp. */
+export type PlanExecution = { stage: string; added?: number; errors?: number; uncertain?: number };
+export type FirstPlanExecution = Partial<PlanExecution> & { status: string };
+
 /**
  * A plan for scheduling automated downloads.
  */
@@ -1062,13 +1076,65 @@ export type DownloadPlan = {
   running: boolean;
   // stored scheduling state from the plan list, not an execution result
   schedule?: 'active' | 'indexer_unpublished' | 'not_started' | 'ended' | 'limit_reached';
-  first_execution?: { status: string; added?: number; errors?: number; uncertain?: number };
+  first_execution?: FirstPlanExecution;
+  last_execution?: PlanExecution & { started_at: string };
 
   // transfer options
   transfer_lib_id: number | null;
   transfer_method: keyof typeof TransferMethod | null;
   sub_pattern: string | null;
   sub_repl: string | null;
+};
+
+/** Frozen assistant review and the recorded decision for one plan change. */
+export type PlanReview = {
+  retryable?: boolean;
+  issues?: { path?: string; message: string }[];
+  request_id: string;
+  plan_id: number;
+  action: 'update' | 'delete';
+  keyword: string;
+  workflow_name: string;
+  changes: { field: string; before: unknown; after: unknown }[];
+  status:
+    | 'reviewed'
+    | 'updated'
+    | 'deleted'
+    | 'cancelled'
+    | 'incomplete'
+    | 'superseded'
+    | 'absent'
+    | 'stale'
+    | 'pending'
+    | 'conflict'
+    | 'failed'
+    | 'uncertain';
+};
+
+/** Frozen replacement options and their durable approval state. */
+export type PlanReplacement = {
+  plan_id: number;
+  operation_id: string;
+  digest: string;
+  status: 'pending' | 'approved' | 'uncertain' | 'applied' | 'cancelled' | 'expired' | 'conflict' | 'failed';
+  before: DownloadPlanSettings & {
+    history_count: number;
+    total_count: number;
+    workflow_name?: string;
+    downloader_name?: string;
+    transfer_lib_name?: string | null;
+  };
+  after: {
+    schedule: 'scheduled' | 'immediate' | 'blocked';
+    next_due: string | null;
+    blocked_by?: 'limit_reached' | 'outside_window';
+    total_count: number;
+    total_limit: number | null;
+  };
+  first_execution?: DownloadPlanCreation['first_execution'] & { reason?: 'limit_reached' | 'outside_window' };
+  new_plan_id: number | null;
+  keep_history: boolean;
+  expires_at: string;
 };
 
 /** Final editable settings shared by plan validation and creation. */
@@ -1097,7 +1163,7 @@ export type DownloadPlanCreation = {
   workflow_id: number;
   plan: DownloadPlan;
   replayed?: boolean;
-  first_execution: { status: string; added?: number; errors?: number; uncertain?: number };
+  first_execution: FirstPlanExecution;
 };
 
 /** Validation errors leave the editor available for corrections. */
@@ -1105,6 +1171,7 @@ export type DownloadPlanCreateResult =
   | DownloadPlanCreation
   | {
       created: false;
+      duplicate_plan_id?: number;
       issues: { path: string; message: string }[];
       confirmation_required?: boolean;
     };
@@ -1536,4 +1603,27 @@ export type SystemLogState = {
   paused: boolean;
   run_id: string;
   buffer_id: number;
+};
+
+/** A displayed question with server-issued option identities. */
+export type AssistantQuestion = {
+  id: string;
+  title: string;
+  multiple: boolean;
+  required: boolean;
+  format: 'text' | 'plan' | 'datetime';
+  options: { id: string; label: string; detail: string }[];
+};
+
+/** The user's current selection, including an explicit skip. */
+export type QuestionAnswer = { id: string; selected: string[]; custom: string; skipped: boolean };
+
+/** The immutable questions and any answers accepted by the server. */
+export type QuestionCard = {
+  version: string;
+  state: 'pending' | 'deferred' | 'answered';
+  questions: AssistantQuestion[];
+  subscription?: Pick<DownloadPlanPreview, 'workflow_name' | 'plan'> & { related_plan_ids?: number[] };
+  answers?: QuestionAnswer[];
+  summary?: { id: string; title: string; values: string[]; skipped: boolean }[];
 };

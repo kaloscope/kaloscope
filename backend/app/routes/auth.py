@@ -65,8 +65,8 @@ async def current(request: Request) -> HTTPResponse:
     if result:
         user = await User.get_or_none(id=result["id"])
         preferences = user.preferences if user is not None else result["preferences"]
-        result["preferences"] = UserService.DEFAULT_PREFERENCES | (
-            preferences if isinstance(preferences, dict) else {}
+        result["preferences"] = UserService.preferences_for(
+            preferences, user.role if user is not None else request.ctx.user.role
         )
     return json(result)
 

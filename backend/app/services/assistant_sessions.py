@@ -5,9 +5,10 @@ from datetime import timedelta
 from typing import Any
 
 from tortoise import timezone
-from tortoise.expressions import Q
+from tortoise.expressions import F, Q
 from tortoise.transactions import in_transaction
 
+from app.core.dl.access import ADMIN_PREVIEW
 from app.core.exceptions import (
     BadRequestException,
     ErrorCode,
@@ -30,9 +31,10 @@ from app.models.assistant import (
 )
 from app.models.download import DownloadPlan
 from app.models.flow import FlowJob, GraphDocument
-from app.models.user import UserInfo
+from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
+from app.services.subscription_choices import first_check_pending, first_check_summary
 from app.utils.json import dumps
 
 # retain ownership while a reasoning model has no public text to checkpoint
@@ -59,6 +61,72 @@ def resource_order(resource_id: int | str) -> tuple[bool, int | str]:
 
 class AssistantSessionService:
     """Apply ownership checks to every persistent conversation operation."""
+
+    @classmethod
+    async def locked_tool(
+        cls, conversation_id: int, call_id: str, name: str, user: UserInfo
+    ) -> tuple[AssistantToolCall, AssistantTurn]:
+        """Lock an owned conversation and recheck access to a successful tool result.
+
+        Args:
+            conversation_id: Account-owned conversation.
+            call_id: Server-issued tool call identity.
+            name: Expected tool type.
+            user: Account submitting an interaction inside a write transaction.
+
+        Returns:
+            The authorized tool record and its originating turn.
+
+        Raises:
+            NotFoundException: If the interaction is absent or belongs to another user.
+            ForbiddenException: If access to the originating turn was revoked.
+        """
+        # reserve the SQLite writer before reading an answer another worker can update
+        locked = await AssistantConversation.filter(
+            id=conversation_id, user_id=user.id
+        ).update(active_request=F("active_request"))
+        if not locked:
+            raise NotFoundException
+        record = await AssistantToolCall.filter(
+            call_id=call_id,
+            name=name,
+            status="complete",
+            turn__conversation_id=conversation_id,
+        ).first()
+        if not record or not (record.result or {}).get("ok"):
+            raise NotFoundException
+        turn = await AssistantTurn.get(id=record.turn_id)
+        if not await cls.allowed(turn.resource_ids, user):
+            raise ForbiddenException
+        return record, turn
+
+    @classmethod
+    async def record_device_result(
+        cls, conversation_id: int, call_id: str, opened: bool, user: UserInfo
+    ) -> str:
+        """Record whether the user's device opened its authorized destination.
+
+        Args:
+            conversation_id: Account-owned conversation.
+            call_id: Navigation call addressed by this report.
+            opened: Whether the current page or viewer acknowledged opening.
+            user: Signed-in account.
+
+        Returns:
+            Observed outcome; a confirmed opening remains valid across retries.
+        """
+        async with in_transaction():
+            record, _ = await cls.locked_tool(
+                conversation_id, call_id, "navigate", user
+            )
+            data = record.result["data"]
+            if data.get("device_outcome") == "opened":
+                return "opened"
+            outcome = "opened" if opened else "unconfirmed"
+            await AssistantToolCall.filter(id=record.id).update(
+                result={**record.result, "data": {**data, "device_outcome": outcome}}
+            )
+            return outcome
 
     @classmethod
     async def owned(cls, conversation_id: int, user: UserInfo) -> AssistantConversation:
@@ -221,7 +289,7 @@ class AssistantSessionService:
 
         Args:
             resource_ids: Resources contributing to one record or checkpoint: bare
-                workflow IDs or typed media library references.
+                workflow IDs, media library references, or the download task grant.
             user: Account with current permissions.
 
         Returns:
@@ -230,7 +298,9 @@ class AssistantSessionService:
         """
         for resource_id in set(resource_ids):
             try:
-                if isinstance(resource_id, str):
+                if resource_id in ("admin:downloads", "admin:workspace"):
+                    ADMIN_PREVIEW.require(user)
+                elif isinstance(resource_id, str):
                     kind, _, value = resource_id.partition(":")
                     if kind != "media_lib" or not value.isdecimal():
                         return False
@@ -265,6 +335,19 @@ class AssistantSessionService:
             query = query.filter(id__lt=before)
         records = await query.order_by("-id").limit(21)
 
+        retry_ids = {turn.retry_of for turn in records[:20] if turn.retry_of}
+        answer_ids = (
+            set(
+                await AssistantTurn.filter(
+                    conversation_id=conversation_id,
+                    id__in=retry_ids,
+                    request_id__startswith="answer-",
+                ).values_list("id", flat=True)
+            )
+            if retry_ids
+            else set()
+        )
+
         items = []
         visible = []
         for turn in reversed(records[:20]):
@@ -275,7 +358,15 @@ class AssistantSessionService:
                 {
                     "id": str(turn.id),
                     "request_id": turn.request_id,
-                    "prompt": turn.prompt,
+                    "is_answer_turn": turn.request_id.startswith("answer-")
+                    or turn.retry_of in answer_ids,
+                    "prompt": turn.prompt
+                    if allowed
+                    or (
+                        turn.retry_of is None
+                        and not turn.request_id.startswith("answer-")
+                    )
+                    else "",
                     "content": turn.content if allowed else "",
                     "context": turn.context if allowed else None,
                     "status": turn.status if allowed else "error",
@@ -300,6 +391,39 @@ class AssistantSessionService:
         proposals = await AssistantProposalService.latest(conversation_id, visible)
         for item in items:
             for tool in item["tools"]:
+                data = (tool.get("result") or {}).get("data") or {}
+                if (
+                    item["status"] == "complete"
+                    and user.role == UserRole.ADMIN
+                    and tool["name"] == "create_download_plan"
+                    and data.get("created")
+                    and data.get("follow_first_check")
+                ):
+                    # recover results that arrived after the conversation closed
+                    from app.services.download import DownloadPlanService
+
+                    try:
+                        first = (
+                            await DownloadPlanService.get_creation(
+                                data["plan_id"], user
+                            )
+                        )["first_execution"]
+                    except (NotFoundException, ForbiddenException):
+                        continue
+                    if not first_check_pending(first):
+                        chinese = data.get("follow_language") == "zh"
+                        item["content"] += (
+                            "" if chinese else " "
+                        ) + first_check_summary(first, chinese=chinese)
+                        tool["result"] = {
+                            **tool["result"],
+                            "data": {
+                                **data,
+                                "first_execution": first,
+                                "follow_first_check": False,
+                                "show_first_check": False,
+                            },
+                        }
                 if tool["id"] in proposals:
                     tool["proposal"] = proposals[tool["id"]]
 
@@ -524,7 +648,16 @@ class AssistantSessionService:
         resource_ids: list[int | str] = []
         if context:
             # page references are rechecked now and with every later history read
-            if context["page_type"] == "workflows":
+            if context["page_type"] == "dashboard":
+                from app.services.media import MediaItemService
+
+                for item_id in {*context["watch_ids"], *context["read_ids"]}:
+                    item = await MediaItemService.get_accessible(item_id, user)
+                    resource_ids.append(media_resource(item.lib_id))
+            elif context["page_type"] == "web_search":
+                if context["workflow_id"]:
+                    resource_ids.append(context["workflow_id"])
+            elif context["page_type"] == "workflows":
                 resource_ids = context["selected_ids"]
             elif context["page_type"] == "workflow_designer":
                 resource_ids = [context["resource_id"]]
@@ -538,17 +671,25 @@ class AssistantSessionService:
                 if context["filters"]["workflow_id"]:
                     resource_ids = [context["filters"]["workflow_id"]]
                 if selected := context["selected_plan"]:
+                    resource_ids.append(selected["workflow_id"])
+                    if user.role != UserRole.ADMIN and not await cls.allowed(
+                        resource_ids, user
+                    ):
+                        raise KaloscopeException(
+                            ErrorCode.PERMISSION_DENIED, status_code=403
+                        )
                     plan = await DownloadPlan.get_or_none(
                         id=selected["plan_id"], graph_id=selected["workflow_id"]
                     )
                     if plan is None:
                         raise BadRequestException
                     # a selected plan also reveals the library it transfers to
-                    resource_ids.append(plan.graph_id)
                     if plan.transfer_lib_id:
                         resource_ids.append(media_resource(plan.transfer_lib_id))
 
-            # download pages show shared tasks, so they add nothing to recheck
+            elif context["page_type"] in {"active_downloads", "completed_downloads"}:
+                resource_ids.append("admin:downloads")
+
             if not await cls.allowed(resource_ids, user):
                 raise KaloscopeException(ErrorCode.PERMISSION_DENIED, status_code=403)
             if context["page_type"] == "workflow_jobs" and context["selected_job"]:
@@ -575,15 +716,31 @@ class AssistantSessionService:
                 raise KaloscopeException(
                     ErrorCode.ASSISTANT_REQUEST_EXISTS, status_code=409
                 )
-            if (
-                body.retry_of is not None
-                and not await AssistantTurn.filter(
-                    id=body.retry_of, conversation_id=conversation_id
+            retry_id = body.retry_of
+            answered_retry = None
+            if retry_id is not None:
+                previous = (
+                    await AssistantTurn.filter(
+                        id=retry_id, conversation_id=conversation_id
+                    )
+                    .exclude(status="complete")
+                    .first()
                 )
-                .exclude(status="complete")
-                .exists()
-            ):
-                raise NotFoundException
+                if previous is None:
+                    raise NotFoundException
+                if previous.request_id.startswith("answer-"):
+                    answered_retry = previous
+                elif previous.retry_of:
+                    answered_retry = await AssistantTurn.get_or_none(
+                        id=previous.retry_of,
+                        conversation_id=conversation_id,
+                        request_id__startswith="answer-",
+                    )
+                if answered_retry:
+                    if not await cls.allowed(answered_retry.resource_ids, user):
+                        raise ForbiddenException
+                    retry_id = answered_retry.id
+                    resource_ids.extend(answered_retry.resource_ids)
 
             if isinstance(body.context, WorkflowDesignerContext):
                 if context is None:
@@ -607,14 +764,22 @@ class AssistantSessionService:
                     },
                 )
 
+            prompt = answered_retry.prompt if answered_retry else body.prompt.strip()
+            if body.answer_to:
+                from app.services.assistant_questions import continuation_prompt
+
+                prompt, provenance = await continuation_prompt(
+                    conversation_id, body.answer_to, user
+                )
+                resource_ids.extend(provenance)
             turn = await AssistantTurn.create(
                 conversation_id=conversation_id,
                 request_id=body.request_id,
-                prompt=body.prompt.strip(),
+                prompt=prompt,
                 model=body.model.model_dump(),
                 context=context,
                 resource_ids=resource_ids,
-                retry_of=body.retry_of,
+                retry_of=retry_id,
             )
             if not conversation.title:
                 await AssistantConversation.filter(id=conversation_id).update(

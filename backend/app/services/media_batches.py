@@ -82,6 +82,7 @@ from app.services.media import (
     MediaLibService,
     _media_activity,
     _parent_deletion_snapshot,
+    accessible_library_ids,
 )
 from app.utils.asyncio import write_in_thread
 from app.utils.json import dumps, loads
@@ -2932,11 +2933,12 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
             )
 
     @classmethod
-    async def details(cls, id: int) -> dict[str, Any]:
+    async def details(cls, id: int, *, user: UserInfo | None = None) -> dict[str, Any]:
         """Read one batch's header, progress and outcome for the plan dialog.
 
         Args:
             id: Batch identity.
+            user: Caller whose library grant limits which stored batch can be read.
 
         Returns:
             The reviewed plan header with its `change`, unit counts, whether it
@@ -2948,7 +2950,10 @@ class MediaBatchService(BaseService[MediaBatchEntry], model=MediaBatchEntry):
         Raises:
             NotFoundException: If no batch has this identity.
         """
-        receipt = await MediaChangeReceipt.get_or_none(id=id, action=MediaAction.BATCH)
+        query = MediaChangeReceipt.filter(id=id, action=MediaAction.BATCH)
+        if user is not None and (allowed := accessible_library_ids(user)) is not None:
+            query = query.filter(lib_id__in=allowed)
+        receipt = await query.first()
         if receipt is None or receipt.plan is None:
             raise NotFoundException
 

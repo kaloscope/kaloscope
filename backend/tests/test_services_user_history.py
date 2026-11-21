@@ -8,6 +8,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.media import (
     EpubContent,
     ImageContent,
@@ -924,5 +925,49 @@ def test_history_recover_chapter(tmp_path, monkeypatch):
             assert row["locator"] is None and row["percentage"] is None
             await saved.refresh_from_db()
             assert saved.locator == entry["locator"]
+
+    asyncio.run(run())
+
+
+def test_indexer_grant(monkeypatch):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            owner = await _login(client, 1)
+            graph = await FlowGraph.create(
+                name="Search",
+                category=GraphCategory.INDEXER,
+                state=GraphState.PUBLISHED,
+            )
+            entry = {"rel_type": "search", "rel_id": graph.id, "keyword": "title"}
+            response = await client.post("/_api/user/history/record", json=entry)
+            assert response.status_code == 403
+            grant = await UserPermission.create(
+                user_id=owner.id, rel_type=PermType.INDEXER, rel_id=graph.id
+            )
+            assert (
+                await client.post("/_api/user/history/record", json=entry)
+            ).status_code == 204
+            assert (
+                await client.post(
+                    "/_api/user/history/record", json={**entry, "rel_id": 0}
+                )
+            ).status_code == 204
+            query = {"rel_type": "search"}
+            before = await client.get("/_api/user/history/list", params=query)
+            assert before.json()["data"]["total"] == 2
+
+            from app.services.flow import FlowGraphService
+
+            original = FlowGraphService.dump
+
+            async def revoke_during_read(*args, **kwargs):
+                result = await original(*args, **kwargs)
+                await grant.delete()
+                return result
+
+            monkeypatch.setattr(FlowGraphService, "dump", revoke_during_read)
+            after = await client.get("/_api/user/history/list", params=query)
+            assert after.json()["data"]["total"] == 1
+            assert [item["rel_id"] for item in after.json()["data"]["items"]] == [0]
 
     asyncio.run(run())

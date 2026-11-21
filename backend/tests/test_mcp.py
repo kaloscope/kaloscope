@@ -13,7 +13,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from mcp.client import Client
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import TextContent, ToolAnnotations
+from mcp.types import TextContent, Tool, ToolAnnotations
 from sanic import HTTPResponse, Request, Sanic
 from sanic.compat import Header
 from sanic.models.protocol_types import TransportProtocol
@@ -78,6 +78,7 @@ async def application():
     app.config.update(AUTH_EXCLUDE_PATHS=[], TOKEN_EXPIRATION_HOURS=120)
     app.shared_ctx.sessions = {}
     app.ctx.mcp_tokens = {}
+    app.ctx.output_schemas = {}
     app.ctx.lib_watcher = SimpleNamespace(is_scanning=lambda _: False)
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
@@ -198,12 +199,12 @@ async def call(app, name, arguments=None, *, token="reader"):
     if not result.get("isError"):
         assert len(result["content"]) == 1
         assert loads(result["content"][0]["text"]) == result["structuredContent"]
-        if not hasattr(app.ctx, "output_schemas"):
+        if name not in app.ctx.output_schemas.get(token, {}):
             listed = response_json(await post(app, "tools/list", token=token))
-            app.ctx.output_schemas = {
+            app.ctx.output_schemas[token] = {
                 tool["name"]: tool["outputSchema"] for tool in listed["result"]["tools"]
             }
-        Draft202012Validator(app.ctx.output_schemas[name]).validate(
+        Draft202012Validator(app.ctx.output_schemas[token][name]).validate(
             result["structuredContent"]
         )
     return result
@@ -214,7 +215,27 @@ def test_protocol(mode):
     async def run():
         async with Client(create_server(), mode=mode) as client:
             result = await client.list_tools()
-            assert {tool.name for tool in result.tools} == {
+            assert result.tools == []
+            result = await client.call_tool("list_workflows", {})
+            assert result.is_error
+            content = result.content[0]
+            assert isinstance(content, TextContent)
+            assert "authenticated" in content.text
+            assert "valid Kaloscope MCP access token" in content.text
+
+    asyncio.run(run())
+
+
+def test_catalog():
+    async def run():
+        async with application() as app:
+            token = await MCPAccessTokenService.create(
+                app.shared_ctx.sessions["admin"].id,
+                MCPAccessTokenCreate(name="catalog", scope="read_write"),
+            )
+            reply = response_json(await post(app, "tools/list", token=token["token"]))
+            catalog = [Tool.model_validate(t) for t in reply["result"]["tools"]]
+            assert {tool.name for tool in catalog} == {
                 "list_workflows",
                 "get_workflow",
                 "list_node_types",
@@ -228,6 +249,9 @@ def test_protocol(mode):
                 "list_download_tasks",
                 "list_workflow_jobs",
                 "list_ai_providers",
+                "get_personal_preferences",
+                "set_personal_preference",
+                "set_indexer_favorite",
                 "validate_workflow",
                 "preview_workflow_draft",
                 "create_workflow_draft",
@@ -235,7 +259,10 @@ def test_protocol(mode):
                 "validate_download_plan",
                 "create_download_plan",
                 "get_download_plan",
+                "list_indexer_favorites",
+                "diagnose_download_ingestion",
                 "list_download_plans",
+                "list_download_indexers",
                 "get_library_ingestion",
                 "validate_download_task",
                 "create_download_task",
@@ -247,6 +274,10 @@ def test_protocol(mode):
                 "run_workflow",
                 "review_workflow_schedule",
                 "apply_workflow_schedule",
+                "inspect_workspace",
+                "review_workspace_change",
+                "review_plan_replacement",
+                "get_plan_replacement",
                 "review_download_plan_change",
                 "apply_download_plan_change",
                 "review_download_task_action",
@@ -260,10 +291,12 @@ def test_protocol(mode):
                 "cancel_media_batch",
             }
 
-            for tool in result.tools:
+            for tool in catalog:
                 assert tool.annotations is not None
                 assert tool.output_schema is not None
                 writes = tool.name in {
+                    "set_personal_preference",
+                    "set_indexer_favorite",
                     "create_workflow_draft",
                     "save_workflow_draft",
                     "restore_workflow_draft",
@@ -272,6 +305,7 @@ def test_protocol(mode):
                     "create_download_task",
                     "search_indexer",
                     "run_workflow",
+                    "review_media_rescrape",
                     "apply_workflow_schedule",
                     "apply_download_plan_change",
                     "apply_download_task_action",
@@ -284,11 +318,13 @@ def test_protocol(mode):
                     in {
                         "save_workflow_draft",
                         "restore_workflow_draft",
+                        "set_indexer_favorite",
                         "probe_http_request",
                         "create_download_plan",
                         "create_download_task",
                         "search_indexer",
                         "run_workflow",
+                        "review_media_rescrape",
                         "apply_workflow_schedule",
                         "apply_download_plan_change",
                         "apply_download_task_action",
@@ -300,6 +336,8 @@ def test_protocol(mode):
                     not writes
                     or tool.name
                     in {
+                        "set_personal_preference",
+                        "set_indexer_favorite",
                         "create_download_plan",
                         "create_download_task",
                         "run_workflow",
@@ -343,13 +381,6 @@ def test_protocol(mode):
                     assert fields["has_api_key"]["type"] == "boolean"
                     assert schema["$defs"]["AIProtocol"]["enum"] == ["chat_completions"]
 
-            result = await client.call_tool("list_workflows", {})
-            assert result.is_error
-            content = result.content[0]
-            assert isinstance(content, TextContent)
-            assert "authenticated" in content.text
-            assert "valid Kaloscope MCP access token" in content.text
-
     asyncio.run(run())
 
 
@@ -379,7 +410,26 @@ def test_http_protocol():
             response = await post(app, "notifications/initialized")
             assert response.status == 202
             response = await post(app, "tools/list")
-            assert len(response_json(response)["result"]["tools"]) == 43
+            names = {
+                tool["name"] for tool in response_json(response)["result"]["tools"]
+            }
+            assert {"get_download_plan", "list_workflows"} <= names
+            assert (
+                not {
+                    "list_download_tasks",
+                    "apply_download_plan_change",
+                    "set_indexer_favorite",
+                }
+                & names
+            )
+            admin_names = {
+                t["name"]
+                for t in response_json(await post(app, "tools/list", token="admin"))[
+                    "result"
+                ]["tools"]
+            }
+            assert {"review_plan_replacement", "list_download_tasks"} <= admin_names
+            assert "apply_download_plan_change" not in admin_names
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )
@@ -434,8 +484,20 @@ def test_write_tool_denied(annotations):
         await operation()
         return "done"
 
-    with pytest.raises(ToolError, match="no registered access grant"):
-        asyncio.run(server.call_tool("future_write", {}))
+    async def run():
+        async with application() as app:
+            identity = await MCPAccessTokenService.authenticate(
+                app.ctx.mcp_tokens["admin"], client_ip="127.0.0.1", user_agent=None
+            )
+            ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    request=SimpleNamespace(state=SimpleNamespace(user=identity))
+                )
+            )
+            with pytest.raises(ToolError, match="no registered access grant"):
+                await server.call_tool("future_write", {}, ctx)
+
+    asyncio.run(run())
     operation.assert_not_awaited()
 
 
@@ -928,7 +990,10 @@ def test_media_results(tmp_path, lib_type):
                 (
                     "get_media_item",
                     {"item_id": item.id},
-                    await MediaItemService.get_details(item.id, user),
+                    {
+                        **await MediaItemService.get_details(item.id, user),
+                        "app_path": f"/medialibs/{lib.id}/{item.id}",
+                    },
                 ),
             ]
 
@@ -1286,10 +1351,13 @@ methods:
                     last_error_kind=error_kind,
                 )
             before = await DownloadTask.all().values()
+            denied = await call(app, "list_download_tasks")
+            assert denied["isError"]
             result = await call(
                 app,
                 "list_download_tasks",
                 {"name": "mcp", "state": "error", "downloader_id": downloader.id},
+                token="admin",
             )
             data = result["structuredContent"]["items"][0]
             assert data["id"] == task.id and data["percentage"] == 25
@@ -1299,7 +1367,10 @@ methods:
             assert "private-downloader-password" not in str(result)
             assert "private-source-token" not in str(result)
             empty_page = await call(
-                app, "list_download_tasks", {"page_num": 2, "page_size": 1}
+                app,
+                "list_download_tasks",
+                {"page_num": 2, "page_size": 1},
+                token="admin",
             )
             assert empty_page["structuredContent"] == {"total": 1, "items": []}
             assert await DownloadTask.all().values() == before
@@ -1431,3 +1502,20 @@ def test_authoring_tools(monkeypatch):
             complete.assert_not_awaited()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("tool", ["list_workflows", "future_write"])
+def test_missing_identity(tool):
+    for context in (
+        None,
+        SimpleNamespace(),
+        SimpleNamespace(
+            request_context=SimpleNamespace(
+                request=SimpleNamespace(
+                    state=SimpleNamespace(user=SimpleNamespace(role="admin"))
+                )
+            )
+        ),
+    ):
+        with pytest.raises(ToolError, match="authenticated"):
+            asyncio.run(create_server().call_tool(tool, {}, context))

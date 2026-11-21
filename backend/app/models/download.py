@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum, auto
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Self, cast
@@ -16,6 +16,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 from sanic.request.form import File
 from tortoise.fields import (
     CASCADE,
@@ -44,6 +45,9 @@ from app.models.flow import FlowGraph
 from app.models.media import MediaLib
 from app.utils.datetime import duration
 from app.utils.disk import format_bytes
+
+DEFAULT_PLAN_BATCH_LIMIT = 12
+DEFAULT_TRANSFER_NAMING = {"sub_pattern": "^(.+/)?", "sub_repl": "{{title}}/"}
 
 
 # -------------------- Enumerations --------------------
@@ -153,6 +157,7 @@ class DownloadPlan(TortoiseModel):
     # durable creation receipt; existing plans keep their original scheduling behavior
     creation_key = CharField(max_length=64, unique=True, null=True)
     creation_receipt = JSONField[dict[str, Any] | None](null=True)
+    replacement_due = DatetimeField(null=True)
     graph_id: int
     graph: ForeignKeyRelation[FlowGraph] = ForeignKeyField(
         "models.FlowGraph", related_name="plans", db_index=True
@@ -167,7 +172,7 @@ class DownloadPlan(TortoiseModel):
     interval_num = IntField(default=1)
     interval_start = DatetimeField(null=True)
     interval_end = DatetimeField(null=True)
-    batch_limit = IntField(default=10)
+    batch_limit = IntField(default=DEFAULT_PLAN_BATCH_LIMIT)
     total_limit = IntField(null=True)
     total_count = IntField(default=0)
     last_exec = DatetimeField(null=True)
@@ -184,6 +189,27 @@ class DownloadPlan(TortoiseModel):
     sub_repl = CharField(max_length=4096, null=True)
     # relational fields
     histories: ReverseRelation["DownloadPlanHistory"]
+
+    def revised_first_due(
+        self, interval: int, start: datetime | None
+    ) -> datetime | None:
+        """Compute a pending replacement's first check under edited timing.
+
+        Args:
+            interval: Proposed interval in hours.
+            start: Earliest eligible check time, with naive editor values in UTC.
+
+        Returns:
+            The preserved or revised first-check time, or `None` for a regular plan.
+        """
+        if start is not None and start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        if self.replacement_due is None or (
+            interval == self.interval_num and start == self.interval_start
+        ):
+            return self.replacement_due
+        due = (self.last_exec or self.created_at) + timedelta(hours=interval)
+        return max(start, due) if start else due
 
     def inactive(self) -> bool:
         """Check whether the plan is currently inactive.
@@ -230,8 +256,104 @@ class DownloadPlan(TortoiseModel):
             "histories",
             "creation_key",
             "creation_receipt",
+            "replacement_due",
         )
         computed = ("inactive",)
+
+
+class DownloadPlanAttempt(TortoiseModel):
+    """Keep the search and submission evidence of one subscription check."""
+
+    plan_id = IntField(db_index=True)
+    workflow_id = IntField()
+    status = CharField(max_length=16, default="started")
+    results_seen = IntField(default=0)
+    submitted = IntField(default=0)
+    errors = IntField(default=0)
+    uncertain = IntField(default=0)
+
+    def outcome_status(self) -> str:
+        """Return the coarse status used by existing diagnostics clients.
+
+        Returns:
+            The recorded state with detailed error causes grouped under `failed`.
+        """
+        return (
+            "failed"
+            if self.status in {"search_failed", "submit_failed", "invalid_link"}
+            else self.status
+        )
+
+    def stage(self, *, detailed: bool = True) -> str:
+        """Describe what the recorded check actually established.
+
+        Args:
+            detailed: Include specific failure causes instead of the legacy stage.
+
+        Returns:
+            The recorded cause or the outcome derived from search and submission.
+        """
+        if self.status == "started":
+            return "completion_unknown"
+        if self.status != "completed":
+            return self.status if detailed else self.outcome_status()
+        if self.submitted:
+            return "tasks_submitted"
+        return "no_new_tasks" if self.results_seen else "no_search_results"
+
+    class Meta:
+        table = "download_plan_attempt"
+
+
+class DownloadPlanCreation(TortoiseModel):
+    """Keep the account-scoped creation key after a subscription is removed."""
+
+    key = CharField(max_length=64, unique=True)
+    digest = CharField(max_length=64)
+    plan_id = IntField()
+
+    class Meta:
+        table = "download_plan_creation"
+
+
+class ReplacementDecision(BaseModel):
+    """Bind a browser decision to the exact frozen review."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approve: bool
+
+
+class DownloadPlanReplacement(TortoiseModel):
+    """Bind a replacement decision to the exact stored review and account."""
+
+    operation_id = CharField(max_length=36, unique=True)
+    owner_id = IntField(db_index=True)
+    plan_id = IntField(db_index=True)
+    digest = CharField(max_length=64)
+    preview = JSONField()
+    status = CharField(max_length=16, default="pending", db_index=True)
+    expires_at = DatetimeField()
+    decided_at = DatetimeField(null=True)
+    new_plan_id = IntField(null=True)
+    first_execution = JSONField(null=True)
+
+    class Meta:
+        table = "download_plan_replacement"
+
+
+class DownloadPlanDispatch(TortoiseModel):
+    """Track one in-flight plan submission until its effects can be verified."""
+
+    key = CharField(max_length=64, unique=True)
+    plan_id = IntField(db_index=True)
+    info_hash = CharField(max_length=40, null=True)
+    info_hash_v2 = CharField(max_length=68, null=True)
+    counted = BooleanField(default=False)
+    task_id = IntField(null=True)
+
+    class Meta:
+        table = "download_plan_dispatch"
 
 
 class DownloadPlanHistory(TortoiseModel):
@@ -278,6 +400,32 @@ class DownloadTaskReceipt(TortoiseModel):
         table = "download_task_receipt"
 
 
+class DownloadTaskCreation(TortoiseModel):
+    """Retain the reviewed submission identity when its download task is removed."""
+
+    key = CharField(max_length=64, unique=True)
+    digest = CharField(max_length=64)
+    task_id = IntField()
+
+    class Meta:
+        table = "download_task_creation"
+
+    def removed_result(self) -> dict[str, Any]:
+        """Describe a previously submitted task that has since been removed.
+
+        Returns:
+            The original task ID and an explicit result for safe replays.
+        """
+        return {
+            "created": False,
+            "replayed": True,
+            "outcome": "absent",
+            "task_id": self.task_id,
+            "message": "This request already submitted a task that was later "
+            "removed. Review a new request to download again.",
+        }
+
+
 class DownloadTask(TortoiseModel):
     downloader_id: int
     downloader: ForeignKeyRelation[Downloader] = ForeignKeyField(
@@ -312,6 +460,8 @@ class DownloadTask(TortoiseModel):
     sub_repl = CharField(max_length=4096, null=True)
     transfer_targets = JSONField[dict[str, str] | None](null=True)
     transfer_pending = BooleanField(default=False, db_default=False)
+    last_transfer_failed = BooleanField(null=True)
+    plan_attempt_id = IntField(null=True, db_index=True)
     # durable identity of a confirmed one-time request; other tasks keep null
     creation_key = CharField(max_length=64, unique=True, null=True)
     creation_receipt = JSONField[dict[str, Any] | None](null=True)
@@ -361,6 +511,8 @@ class DownloadTask(TortoiseModel):
             "offline_job",
             "transfer_targets",
             "transfer_pending",
+            "last_transfer_failed",
+            "plan_attempt_id",
             "creation_key",
             "creation_receipt",
         )
@@ -528,6 +680,7 @@ class DownloadPlanSettings(DownloadPlanUpsert):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     id: None = None
     interval_end: datetime | None = None
+    batch_limit: PositiveInt = DEFAULT_PLAN_BATCH_LIMIT
 
 
 def _check_samples(samples: list[str] | None) -> list[str] | None:
@@ -609,6 +762,8 @@ class DownloadPlanCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     request_id: UUID
     plan: DownloadPlanSettings
+    # accept old editor payloads without advertising or honoring the override
+    separate_plan: SkipJsonSchema[bool] = Field(default=False, exclude=True)
     ingestion: IngestionBinding | None = Field(
         default=None,
         description="Validation's ingestion review; binds it before creating.",
@@ -686,6 +841,14 @@ class DownloadPlanChange(BaseModel):
         }:
             raise ValueError("delete takes only plan_id")
         return self
+
+
+class PlanReviewDecision(BaseModel):
+    """Bind a browser decision to the exact stored assistant review."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    approve: bool = Field(strict=True)
 
 
 class DownloadPlanApply(BaseModel):

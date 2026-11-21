@@ -15,7 +15,6 @@ from app.models.user import (
     User,
     UserAvatar,
     UserCreate,
-    UserFavorite,
     UserHistory,
     UserInfo,
     UserPermission,
@@ -179,6 +178,7 @@ async def update_pref(request: Request, body: UserPreference) -> HTTPResponse:
 
 
 @user.post("/favorite/list")
+@authorize()
 @validate(json=FavoriteQuery)
 async def list_favorites(request: Request, body: FavoriteQuery) -> HTTPResponse:
     """List the current user's favorites.
@@ -190,14 +190,7 @@ async def list_favorites(request: Request, body: FavoriteQuery) -> HTTPResponse:
     Returns:
         Response containing the requested data.
     """
-    user: UserInfo = request.ctx.user
-    queries = [Q(user_id=user.id)]
-    if body.indexer_id:
-        queries.append(Q(indexer_id=body.indexer_id))
-    if body.rsrc_ids:
-        queries.append(Q(rsrc_id__in=body.rsrc_ids))
-    page = await UserFavorite.page(*queries, **body.page_params)
-    return json(await UserFavoriteService.dump_page(page))
+    return json(await UserFavoriteService.list_page(body, request.ctx.user))
 
 
 @user.get("/history/list")

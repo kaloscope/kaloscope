@@ -854,8 +854,8 @@ def test_edit_during_apply(monkeypatch, tmp_path):
             checked = service.MediaChangeService._checked
             calls = []
 
-            async def edited(body, current, base):
-                refused = await checked(body, current, base)
+            async def edited(body, current, base, user, **kwargs):
+                refused = await checked(body, current, base, user, **kwargs)
                 calls.append(refused)
                 # the library editor saves right after the first recheck
                 if len(calls) == 1:

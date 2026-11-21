@@ -70,14 +70,19 @@ class ErrorCode(StrEnum):
     ASSISTANT_BUSY = auto()
     ASSISTANT_REQUEST_EXISTS = auto()
     DOWNLOAD_PLAN_REQUEST_CONFLICT = auto()
+    DOWNLOAD_PLAN_ALREADY_EXISTS = auto()
     ASSISTANT_CONTEXT_LIMIT = auto()
     ASSISTANT_RESULT_LIMIT = auto()
     ASSISTANT_COMPACTION_FAILED = auto()
     ASSISTANT_PROPOSAL_CHANGED = auto()
+    ASSISTANT_REVIEW_UNAVAILABLE = auto()
     ASSISTANT_CANVAS_CHANGED = auto()
     EXPORT_ITEMS_FAILED = auto()
     IMPORT_ITEMS_FAILED = auto()
     FILE_NOT_EXISTS = auto()
+    MEDIA_SOURCE_UNAVAILABLE = auto()
+    MEDIA_LIMIT_EXCEEDED = auto()
+    INVALID_METADATA = auto()
 
 
 class KaloscopeException(SanicException):

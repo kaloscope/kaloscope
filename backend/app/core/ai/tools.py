@@ -42,12 +42,19 @@ from app.core.ai.queries import (
     workflow_list,
     workflow_logs,
 )
+from app.core.dl.access import ADMIN_PREVIEW, DOWNLOAD_GRANTS
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.core.flow.reference import (
     SELF_CONTAINED_RECIPES,
     compact_node_schemas,
     get_workflow_reference,
+)
+from app.models.agent_actions import (
+    AdminChange,
+    BatchProgress,
+    BatchStop,
+    WorkspaceQuery,
 )
 from app.models.assistant import (
     DOWNLOAD_PATHS,
@@ -63,7 +70,9 @@ from app.models.assistant import (
     WorkflowOrdering,
     media_resource,
 )
+from app.models.assistant_questions import AskUser
 from app.models.download import (
+    DEFAULT_TRANSFER_NAMING,
     DownloadPlanApply,
     DownloadPlanChange,
     DownloadPlanCheck,
@@ -105,13 +114,31 @@ from app.models.media import (
     MediaQuery,
     MediaRescrape,
 )
-from app.models.user import UserInfo, UserRole
+from app.models.user import (
+    DisplayPreference,
+    IndexerFavoriteChange,
+    IndexerFavoritesQuery,
+    UserInfo,
+    UserRole,
+)
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
+from app.services.agent_actions import inspect_workspace, review_action
+from app.services.assistant_questions import build_card
 from app.services.download import DownloadPlanService, DownloadTaskService, open_source
+from app.services.download_diagnostics import IngestionQuery, diagnose_ingestion
 from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
+from app.services.plan_replacement import PlanReplacementService
+from app.services.subscription_intent import (
+    accepts_offer,
+    has_release_question,
+    submission_check,
+    subscription_intent,
+    superseded_retry,
+)
+from app.services.user import UserFavoriteService, UserService
 from app.services.workflow_authoring import (
     probe_http_request,
     validate_workflow_template,
@@ -123,7 +150,11 @@ TOOL_TIMEOUT = 15
 CREATE_TOOL = "create_workflow_draft"
 SCHEDULE_TOOLS = frozenset({"review_workflow_schedule", "apply_workflow_schedule"})
 PLAN_CHANGE_TOOLS = frozenset(
-    {"review_download_plan_change", "apply_download_plan_change"}
+    {
+        "review_download_plan_change",
+        "apply_download_plan_change",
+        "review_plan_replacement",
+    }
 )
 TASK_ACTION_TOOLS = frozenset(
     {"review_download_task_action", "apply_download_task_action"}
@@ -139,6 +170,10 @@ MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
 # a file conversation keeps library management available without unrelated domains
 BATCH_FOCUS = MEDIA_CHANGE_TOOLS | frozenset(
     {
+        "ask_user",
+        "discover_actions",
+        "get_media_batch",
+        "cancel_media_batch",
         "list_media_libraries",
         "list_media_items",
         "get_media_item",
@@ -175,6 +210,57 @@ class ToolArguments(BaseModel):
     """Reject unknown arguments without echoing model-generated content."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+type ActionDomain = Literal[
+    "questions", "personal", "workspace", "search", "downloads", "workflows", "media"
+]
+
+DOMAIN_TOOLS = {
+    "questions": {"ask_user"},
+    "personal": {"get_personal_preferences", "set_personal_preference"},
+    "workspace": {
+        "inspect_workspace",
+        "review_workspace_change",
+        "get_media_batch",
+        "cancel_media_batch",
+    },
+    "workflows": {
+        "list_workflows",
+        "get_workflow",
+        "create_workflow_draft",
+        "get_workflow_reference",
+        "list_workflow_jobs",
+    },
+    "media": {
+        "list_media_libraries",
+        "list_media_items",
+        "get_media_item",
+        "review_media_batch",
+    },
+    "search": {
+        "list_workflows",
+        "search_indexer",
+        "list_indexer_favorites",
+        "set_indexer_favorite",
+    },
+    "downloads": {
+        "list_download_plans",
+        "get_download_plan",
+        "review_download_plan_change",
+        "list_download_tasks",
+        "get_download_task",
+        "diagnose_download_ingestion",
+        "get_plan_replacement",
+        "review_plan_replacement",
+    },
+}
+
+
+class ActionDiscovery(ToolArguments):
+    """Select the business domain to work in next."""
+
+    domain: ActionDomain
 
 
 class WorkflowList(ToolArguments):
@@ -436,6 +522,20 @@ class PlanChangeReview(DownloadPlanChange):
     transfer_method: Annotated[TransferMethod, plain_enum(TransferMethod)] | None = None
 
 
+class ReplacementReview(ToolArguments):
+    """Preview a replacement with an explicit history and scheduling policy."""
+
+    plan_id: ResourceID
+    keep_history: bool = True
+    run_now: bool = False
+
+
+class ReplacementStatus(ToolArguments):
+    """Read the current result of an existing replacement review."""
+
+    operation_id: UUID
+
+
 class PlanChangeConfirm(ToolArguments):
     """Apply a plan review from an earlier turn of this conversation."""
 
@@ -491,6 +591,9 @@ class BatchBrief(ToolArguments):
         default=None, description="Omit to list; organize = naming template."
     )
     item_ids: list[ResourceID] = Field(default_factory=list)
+    delete_files: bool = Field(
+        default=True, description="Item deletion: false keeps files."
+    )
     directory: str | None = None
     extensions: list[str] = Field(default_factory=list)
     name: str | None = Field(default=None, description="Glob.")
@@ -520,6 +623,26 @@ class BatchReview(MediaBatch):
         description="File classes it may touch.",
     )
 
+    @model_validator(mode="after")
+    def require_item_delete_mode(self) -> Self:
+        """Require an explicit file choice when removing indexed media items.
+
+        Returns:
+            The validated assistant preview.
+
+        Raises:
+            ValueError: If an item deletion omits its file behavior.
+        """
+        if (
+            self.operation == "delete"
+            and self.item_ids
+            and "delete_files" not in self.model_fields_set
+        ):
+            raise ValueError(
+                "Set delete_files=false to keep files or true to remove them."
+            )
+        return self
+
 
 class MediaConfirm(ToolArguments):
     """Apply a media change review from an earlier turn of this conversation."""
@@ -535,6 +658,10 @@ class NavigationTarget(ToolArguments):
     """Select a registered application destination without accepting URLs."""
 
     page: Literal[
+        "dashboard",
+        "web_search",
+        "play_video",
+        "resume_reading",
         "workflows",
         "workflow_jobs",
         "workflow_designer",
@@ -557,7 +684,14 @@ class NavigationTarget(ToolArguments):
             ValueError: If the resource does not match the destination type.
         """
         listed = (
-            self.page in {"workflows", "workflow_jobs", "download_plans"}
+            self.page
+            in {
+                "dashboard",
+                "web_search",
+                "workflows",
+                "workflow_jobs",
+                "download_plans",
+            }
             or self.page in DOWNLOAD_PATHS
         )
         if listed != (self.resource_id is None):
@@ -589,43 +723,70 @@ class AssistantTool:
 
 TOOLS = (
     AssistantTool(
+        "discover_actions",
+        "Switch to tools for a business domain, questions or personal settings.",
+        ActionDiscovery,
+    ),
+    AssistantTool(
+        "get_personal_preferences",
+        "Read your home page and dashboard display settings.",
+        ToolArguments,
+    ),
+    AssistantTool(
+        "set_personal_preference",
+        "Change your requested display preference.",
+        DisplayPreference,
+    ),
+    AssistantTool(
+        "ask_user",
+        "Collect missing choices; plan_ids for ambiguous plans. Ask alone.",
+        AskUser,
+    ),
+    AssistantTool(
+        "list_indexer_favorites", "Read my favorite results.", IndexerFavoritesQuery
+    ),
+    AssistantTool(
+        "set_indexer_favorite",
+        "Save or remove a result in my favorites.",
+        IndexerFavoriteChange,
+    ),
+    AssistantTool(
+        "diagnose_download_ingestion",
+        "Trace one plan, attempt or task to recorded transfer and index evidence.",
+        IngestionQuery,
+    ),
+    AssistantTool(
         "search_indexer",
         "Preview (10s/page<=20). For one download use sources=true; offer choices.",
         IndexerSearch,
-        admin=True,
     ),
     AssistantTool(
         "get_download_plan_options",
         "Read subscription defaults, filters and creation rules.",
         PlanOptions,
-        admin=True,
     ),
     AssistantTool(
         "validate_download_plan",
         "Check plan/sample without execution; return editor settings/request_id.",
         DownloadPlanCheck,
-        admin=True,
     ),
     AssistantTool(
         "create_download_plan",
-        "Set confirmed=true on acceptance. Changed keyword: proposal_id = prior "
-        "request_id or search call ID.",
+        "Create an ordered subscription with confirmed=true. Revised keyword: "
+        "proposal_id = prior request_id/search call ID.",
         PlanCreate,
-        admin=True,
     ),
     AssistantTool(
         "validate_download_task",
         "Check a chosen search result's sealed source and settings for a one-time "
         "download. No submission.",
         DownloadTaskCheck,
-        admin=True,
     ),
     AssistantTool(
         "create_download_task",
         "Submit one approved result. Picking an offered source with its defaults "
         "confirms it. Reuse request_id on retry.",
         TaskCreate,
-        admin=True,
     ),
     AssistantTool(
         "get_download_plan",
@@ -637,7 +798,6 @@ TOOLS = (
         "Read a transfer library's ingestion bindings, compatible workflows and setup "
         "rules; no changes. Bindings apply to the whole library.",
         LibraryIngestion,
-        admin=True,
     ),
     AssistantTool(
         "list_download_plans",
@@ -791,11 +951,47 @@ TOOLS = (
         admin=True,
     ),
     AssistantTool(
+        "inspect_workspace",
+        "Admin diagnostics, templates, batches, receipts or actions.",
+        WorkspaceQuery,
+        admin=True,
+    ),
+    AssistantTool(
+        "review_workspace_change",
+        "Show a review in chat. copy_template: target_id=template ID, "
+        "name=new draft name.",
+        AdminChange,
+        admin=True,
+    ),
+    AssistantTool(
+        "get_media_batch",
+        "Read batch progress and remaining work.",
+        BatchProgress,
+        admin=True,
+    ),
+    AssistantTool(
+        "cancel_media_batch",
+        "Stop a running batch at its next unit.",
+        BatchStop,
+        admin=True,
+    ),
+    AssistantTool(
+        "review_plan_replacement",
+        "Preview atomic rebuild; keep history and timing. Confirm in chat.",
+        ReplacementReview,
+        admin=True,
+    ),
+    AssistantTool(
+        "get_plan_replacement",
+        "Check an earlier rebuild receipt.",
+        ReplacementStatus,
+        admin=True,
+    ),
+    AssistantTool(
         "review_download_plan_change",
         "Preview update/delete after get_download_plan. Omissions keep values, null "
         "clears; indexer is fixed. Show changes, timing and notes for confirmation.",
         PlanChangeReview,
-        admin=True,
     ),
     AssistantTool(
         "apply_download_plan_change",
@@ -803,7 +999,6 @@ TOOLS = (
         "no attempt. Repeat the same request_id after errors; never re-review to "
         "retry.",
         PlanChangeConfirm,
-        admin=True,
     ),
     AssistantTool(
         "review_download_task_action",
@@ -843,16 +1038,13 @@ TOOLS = (
     ),
     AssistantTool(
         "review_media_batch",
-        "List files (omit operation) or review changes "
-        "in one library. On media_library pages library_id=page_context.resource_id. "
-        "directory/destination are its relative folders, not library names; "
-        "no cross-library moves. Review paths directly; an unindexed folder can exist. "
+        "Omit operation to list. Library page: library_id=page_context.resource_id. "
+        "Library-relative paths; moves stay in one library. Folders can be unindexed. "
         "move merges shows/collections, skips duplicates, "
         "or renames a work folder. organize uses saved naming and cannot undo; "
         "revert only finished rename/move batches. Report can_revert. "
         "empty_dirs clears empty folders. owners defaults loose; name other classes. "
-        "Explain planned, blocked, duplicates, leftovers and notes in the user's "
-        "language. End for confirmation; apply_media_change executes.",
+        "Explain counts, leftovers and notes. Confirm before apply_media_change.",
         BatchReview,
         brief=BatchBrief,
         admin=True,
@@ -868,7 +1060,7 @@ TOOLS = (
     ),
     AssistantTool(
         "navigate",
-        "Offer a user-clicked page button with unsaved-edit checks. "
+        "Offer a device action button; opened only after a device receipt. "
         "Designer/media: accessible resource_id; lists: omit it.",
         NavigationTarget,
     ),
@@ -889,7 +1081,10 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
     return {
         tool.name: tool
         for tool in TOOLS
-        if not tool.admin or user.role == UserRole.ADMIN
+        if (not tool.admin or user.role == UserRole.ADMIN)
+        and (
+            tool.name not in DOWNLOAD_GRANTS or DOWNLOAD_GRANTS[tool.name].allows(user)
+        )
     }
 
 
@@ -973,6 +1168,7 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
 def tool_schemas(
     user: UserInfo,
     *,
+    domain: ActionDomain | None = None,
     authoring: bool = False,
     plan_authoring: bool = False,
     plan_only: bool = False,
@@ -983,11 +1179,13 @@ def tool_schemas(
     task_action: bool = False,
     media_change: bool | Collection[str] = False,
     batch: bool = False,
+    workspace: bool = False,
 ) -> list[ChatCompletionFunctionToolParam]:
     """Describe currently authorized tools using their Pydantic argument models.
 
     Args:
         user: Account whose tool catalog is being requested.
+        domain: Explicitly discovered domain whose full tools are offered.
         authoring: Focus this recipe turn on workflow construction. Other tools
             return next turn; this changes model context, never authorization.
         plan_authoring: Expose plan tools after reading the source workflows.
@@ -1002,6 +1200,7 @@ def tool_schemas(
             a review in the previous turn.
         media_change: Offer media changes: `True` for all after reading media this
             turn, or the named tools continuing a review from the previous turn.
+        workspace: Focus on administration after inspecting a workspace topic.
         batch: Focus on files and library management after a listing or review,
             or when the previous turn ended with one. Other domains return in a
             later turn.
@@ -1013,93 +1212,161 @@ def tool_schemas(
     """
     schemas = []
     for tool in available_tools(user).values():
-        if batch and tool.name not in BATCH_FOCUS:
+        if workspace and tool.name not in {
+            "discover_actions",
+            "inspect_workspace",
+            "review_workspace_change",
+            "get_media_batch",
+            "cancel_media_batch",
+            "ask_user",
+            "get_workflow",
+            "list_workflows",
+            "list_media_libraries",
+            "get_media_item",
+            "navigate",
+        }:
             continue
-        if tool.name == "run_workflow" and not trial:
-            continue
-        if tool.name in SCHEDULE_TOOLS and not schedule:
-            continue
-        if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
-            continue
-        if tool.name in TASK_ACTION_TOOLS and not task_action:
-            continue
-        if (
-            not batch
-            and tool.name in MEDIA_CHANGE_TOOLS
-            and (
-                not media_change
-                or (media_change is not True and tool.name not in media_change)
-            )
+        if tool.name == "review_workspace_change" and not (
+            workspace or domain == "workspace"
         ):
             continue
-        if tool.name in {
-            "search_indexer",
-            "get_download_plan_options",
-            "validate_download_plan",
-            "create_download_plan",
-            "get_library_ingestion",
-            "validate_download_task",
-            "create_download_task",
-        } and not (plan_authoring or plan_only):
+        if tool.name in {"get_media_batch", "cancel_media_batch"} and not (
+            batch or workspace or domain == "workspace"
+        ):
             continue
-        if (
-            plan_only
-            and tool.name
-            not in {
-                "list_workflows",
-                "get_workflow",
+        if domain:
+            if tool.name not in DOMAIN_TOOLS[domain] | {
+                "discover_actions",
+                "navigate",
+                "ask_user",
+            }:
+                continue
+        else:
+            if tool.name in DOMAIN_TOOLS["personal"] or (
+                tool.name == "inspect_workspace" and not workspace
+            ):
+                continue
+            # graph authors can request the full question schema through discovery
+            if tool.name in {"ask_user", "get_plan_replacement"} and not (
+                plan_only or plan_change or task_action or batch or workspace
+            ):
+                continue
+            # re-enter graph editing through its reference recipe when switching domains
+            if (
+                tool.name == "preview_workflow_draft"
+                and not authoring
+                and (plan_authoring or task_action or schedule or media_change is True)
+            ):
+                continue
+            if batch and tool.name not in BATCH_FOCUS:
+                continue
+            if tool.name == "run_workflow" and not trial:
+                continue
+            if tool.name in {"set_indexer_favorite", "list_indexer_favorites"}:
+                continue
+            if tool.name == "diagnose_download_ingestion" and not (
+                plan_change or task_action
+            ):
+                continue
+            if tool.name in SCHEDULE_TOOLS and not schedule:
+                continue
+            if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
+                continue
+            if tool.name in TASK_ACTION_TOOLS and not task_action:
+                continue
+            if (
+                not batch
+                and tool.name in MEDIA_CHANGE_TOOLS
+                and (
+                    not media_change
+                    or (media_change is not True and tool.name not in media_change)
+                )
+            ):
+                continue
+            if tool.name in {
                 "get_download_plan_options",
-                "search_indexer",
                 "validate_download_plan",
                 "create_download_plan",
-                "get_download_plan",
-                "list_download_plans",
                 "get_library_ingestion",
                 "validate_download_task",
                 "create_download_task",
-                "list_media_libraries",
-                "list_media_items",
-                "get_workflow_logs",
-                "read_workflow_log",
-                "read_conversation_history",
-                "create_workflow_draft",
-                "navigate",
-                *PLAN_CHANGE_TOOLS,
-            }
-            and not (
-                (ingestion or plan_change) and tool.name == "get_workflow_reference"
-            )
-        ):
-            continue
-        if (
-            authoring
-            and not (
-                trial
+            } and not (plan_authoring or plan_only):
+                continue
+            if (
+                tool.name == "search_indexer"
+                and user.role == UserRole.ADMIN
+                and not (plan_authoring or plan_only)
+            ):
+                continue
+            if (
+                plan_only
                 and tool.name
-                in {"run_workflow", "get_workflow_logs", "read_workflow_log"}
-            )
-            and tool.name
-            not in {
-                "list_workflows",
-                "get_workflow",
-                "list_node_types",
-                "get_workflow_reference",
-                "probe_http_request",
-                "validate_workflow_template",
-                "validate_workflow",
-                "preview_workflow_draft",
-                "create_workflow_draft",
-                "read_workflow_snapshot",
-                "read_conversation_history",
-                "navigate",
-            }
-        ):
-            continue
+                not in {
+                    "discover_actions",
+                    "ask_user",
+                    "diagnose_download_ingestion",
+                    "list_workflows",
+                    "get_workflow",
+                    "get_download_plan_options",
+                    "search_indexer",
+                    "validate_download_plan",
+                    "create_download_plan",
+                    "get_download_plan",
+                    "list_download_plans",
+                    "get_library_ingestion",
+                    "validate_download_task",
+                    "create_download_task",
+                    "list_media_libraries",
+                    "list_media_items",
+                    "get_workflow_logs",
+                    "read_workflow_log",
+                    "read_conversation_history",
+                    "create_workflow_draft",
+                    "navigate",
+                    "get_plan_replacement",
+                    *PLAN_CHANGE_TOOLS,
+                }
+                and not (
+                    (ingestion or plan_change) and tool.name == "get_workflow_reference"
+                )
+            ):
+                continue
+            if (
+                authoring
+                and not (
+                    trial
+                    and tool.name
+                    in {"run_workflow", "get_workflow_logs", "read_workflow_log"}
+                )
+                and tool.name
+                not in {
+                    "discover_actions",
+                    "list_workflows",
+                    "get_workflow",
+                    "list_node_types",
+                    "get_workflow_reference",
+                    "probe_http_request",
+                    "validate_workflow_template",
+                    "validate_workflow",
+                    "preview_workflow_draft",
+                    "create_workflow_draft",
+                    "read_workflow_snapshot",
+                    "read_conversation_history",
+                    "navigate",
+                }
+            ):
+                continue
         short = tool.brief is not None and not batch
         parameters = compact_schema(
             (tool.brief if short else tool.arguments).model_json_schema()
         )
         parameters.pop("description", None)
+        description = (tool.brief_description if short else None) or tool.description
+        if tool.name == "search_indexer" and not ADMIN_PREVIEW.allows(user):
+            parameters["properties"].pop("sources")
+            description = (
+                "Search an accessible published indexer; returns resource metadata."
+            )
 
         encoded = dumps(parameters)
         definitions = {
@@ -1115,8 +1382,7 @@ def tool_schemas(
                 "type": "function",
                 "function": {
                     "name": tool.name,
-                    "description": (tool.brief_description if short else None)
-                    or tool.description,
+                    "description": description,
                     "parameters": parameters,
                 },
             }
@@ -1199,6 +1465,7 @@ async def execute_tool(
     call_id: str,
     canvas: dict[str, Any] | None = None,
     canvas_snapshot_id: int | None = None,
+    metadata_search: bool = False,
 ) -> dict[str, Any]:
     """Validate and invoke a registered tool using the current account's services.
 
@@ -1210,6 +1477,7 @@ async def execute_tool(
         call_id: Server-generated call identifier for this conversation's tool call.
         canvas: Current turn's editable designer context, never historical context.
         canvas_snapshot_id: Latest successful canvas snapshot in this turn.
+        metadata_search: Limit a subscription clarification search to public metadata.
 
     Returns:
         Bounded JSON data or a sanitized recoverable tool error.
@@ -1235,18 +1503,83 @@ async def execute_tool(
     try:
         async with asyncio.timeout(TOOL_TIMEOUT):
             match args:
+                case ActionDiscovery():
+                    permitted = available_tools(user)
+                    result = {
+                        "domain": args.domain,
+                        "tools": sorted(
+                            DOMAIN_TOOLS[args.domain].intersection(permitted)
+                        ),
+                    }
+                case DisplayPreference():
+                    result = await UserService.display_preferences(user, args)
+                case ToolArguments() if name == "get_personal_preferences":
+                    result = await UserService.display_preferences(user)
+                case AskUser():
+                    result = await build_card(args, user)
+                case IndexerFavoritesQuery():
+                    result = await UserFavoriteService.summaries(args, user)
+                case IndexerFavoriteChange():
+                    result = await UserFavoriteService.set_selected(args, user)
+                case IngestionQuery():
+                    result = await diagnose_ingestion(args, user)
                 case IndexerSearch():
+                    if metadata_search and args.sources:
+                        return tool_error(
+                            ErrorCode.BAD_REQUEST,
+                            "Use metadata-only search for a subscription.",
+                        )
                     result = await preview_indexer(args, user)
                 case PlanOptions():
                     result = await DownloadPlanService.authoring_options(
                         **args.model_dump(), user=user
                     )
                 case DownloadPlanCheck():
-                    result = await DownloadPlanService.validate_creation(args, user)
+                    if (
+                        args.plan.transfer_lib_id
+                        and args.plan.model_fields_set.isdisjoint(
+                            DEFAULT_TRANSFER_NAMING
+                        )
+                    ):
+                        args.plan = args.plan.model_copy(update=DEFAULT_TRANSFER_NAMING)
+                    original = (
+                        await AssistantToolCall.filter(
+                            call_id=call_id, turn__conversation_id=conversation_id
+                        )
+                        .select_related("turn")
+                        .first()
+                    )
+                    intent = (
+                        await subscription_intent(original.turn) if original else None
+                    )
+                    # card answers may change the final plan
+                    result = await DownloadPlanService.validate_creation(
+                        args, user, check_duplicate=not intent
+                    )
+                    if result["valid"] and intent:
+                        result["assistant_submission"] = await submission_check(
+                            intent, result, user
+                        )
                 case PlanCreate():
                     result = await create_plan(args, conversation_id, call_id, user)
                 case PlanID():
                     result = await DownloadPlanService.get_creation(args.plan_id, user)
+                    result["available_reviews"] = [
+                        tool_name
+                        for tool_name in (
+                            "review_download_plan_change",
+                            "review_plan_replacement",
+                        )
+                        if tool_name in available_tools(user)
+                    ]
+                case ReplacementReview():
+                    result = await PlanReplacementService.review(
+                        **args.model_dump(), user=user
+                    )
+                case ReplacementStatus():
+                    result = await PlanReplacementService.status(
+                        str(args.operation_id), user
+                    )
                 case LibraryIngestion():
                     result = await MediaLibService.ingestion_bindings(
                         args.library_id, user
@@ -1275,6 +1608,15 @@ async def execute_tool(
                     )
                 case LibraryConfig():
                     result = await MediaChangeService.review_config(args, user)
+                case WorkspaceQuery():
+                    result = await inspect_workspace(args, user)
+                case AdminChange():
+                    result = await review_action(args, user)
+                case BatchProgress():
+                    result = await MediaBatchService.details(args.batch_id)
+                    await MediaLibService.get_accessible(result["library_id"], user)
+                    if isinstance(args, BatchStop):
+                        result = await MediaBatchService.cancel(args.batch_id)
                 case MediaBatch():
                     result = await MediaBatchService.review(args, user)
                 case MediaConfirm():
@@ -1297,6 +1639,26 @@ async def execute_tool(
                         path=f"{MEDIA_PATH}/{library.id}",
                         library_id=library.id,
                     )
+                case NavigationTarget(page="dashboard" | "web_search"):
+                    result = NavigationResult(
+                        target=args,
+                        path="/dashboard"
+                        if args.page == "dashboard"
+                        else "/websearch/global",
+                    )
+                case NavigationTarget(
+                    page="play_video" | "resume_reading", resource_id=int(item_id)
+                ):
+                    item = await MediaItemService.get_accessible(item_id, user)
+                    if (args.page == "resume_reading") != (
+                        item.lib.lib_type in {"novel", "comic"}
+                    ):
+                        raise ValueError("Use the matching media type")
+                    result = NavigationResult(
+                        target=args,
+                        path=f"{MEDIA_PATH}/{item.lib_id}/{item.id}",
+                        library_id=item.lib_id,
+                    )
                 case NavigationTarget(page="media_item", resource_id=int(item_id)):
                     item = await MediaItemService.get_accessible(item_id, user)
                     result = NavigationResult(
@@ -1305,6 +1667,7 @@ async def execute_tool(
                         library_id=item.lib_id,
                     )
                 case NavigationTarget(page="active_downloads" | "completed_downloads"):
+                    ADMIN_PREVIEW.require(user)
                     result = NavigationResult(
                         target=args, path=DOWNLOAD_PATHS[args.page]
                     )
@@ -1796,7 +2159,11 @@ async def preview_indexer(args: IndexerSearch, user: UserInfo) -> dict:
         page of a metadata preview with suggested subscription settings.
     """
     result = await DownloadPlanService.search_indexer(args, user)
-    if result["status"] != "ok" or (not args.sources and args.page_num != 1):
+    if (
+        user.role != UserRole.ADMIN
+        or result["status"] != "ok"
+        or (not args.sources and args.page_num != 1)
+    ):
         return result
 
     try:
@@ -1992,37 +2359,93 @@ async def create_plan(
         .order_by("-id")
         .limit(30)
     )
+    current = await AssistantTurn.get(id=call.turn_id, conversation_id=conversation_id)
+    logical = await AssistantTurn.get(id=turn_ids[-1], conversation_id=conversation_id)
+    intent = await subscription_intent(current)
+    is_answer = logical.request_id.startswith("answer-")
+    previous = (
+        await AssistantTurn.filter(conversation_id=conversation_id, id__lt=logical.id)
+        .order_by("-id")
+        .first()
+    )
     for index, record in enumerate(records):
         data = (record.result or {}).get("data") or {}
         if data.get("valid") and data.get("request_id") == str(args.request_id):
-            # an editor may already have created this reviewed proposal
             receipt = await DownloadPlanService.find_creation(args.request_id, user)
             if receipt["created"]:
                 return receipt
-
-            ready = False
-            if index == 0 and record.turn_id in turn_ids:
+            prepared_here = record.turn_id in turn_ids
+            previous_offer = bool(
+                previous
+                and previous.status == "complete"
+                and record.turn_id == previous.id
+            )
+            explicit_reply = (
+                not is_answer
+                and accepts_offer(logical.prompt)
+                and not await superseded_retry(current, logical.id)
+                and not (previous and await has_release_question(previous.id))
+            )
+            proposal = None
+            if (
+                index == 0
+                and prepared_here
+                and (explicit_reply or (intent and intent.answered))
+            ):
                 proposal = await _answered_plan_request(
-                    conversation_id, turn_ids[-1], data, args.proposal_id
+                    conversation_id, logical.id, data, args.proposal_id
                 )
-                ready = proposal is not None
-                if proposal and proposal != args.request_id:
-                    # the editor may already have submitted the original proposal
-                    receipt = await DownloadPlanService.find_creation(proposal, user)
-                    if receipt["created"]:
-                        return receipt
-            elif index == 0:
-                ready = await AssistantTurn.filter(
-                    id=record.turn_id, status="complete"
-                ).exists()
+            if proposal and proposal != args.request_id:
+                receipt = await DownloadPlanService.find_creation(proposal, user)
+                if receipt["created"]:
+                    return receipt
+
+            check = {}
+            if (
+                not index
+                and intent
+                and (prepared_here or (previous_offer and not is_answer))
+            ):
+                check = await submission_check(intent, data, user)
+            legacy = explicit_reply and (previous_offer or (proposal and prepared_here))
+            ready = check.get("status") == "ready"
+            if not index and legacy:
+                # explicit text can accept a manual preview without a search log
+                ready = (
+                    ready
+                    or not check
+                    or (
+                        check.get("status") in {"needs_search", "needs_settings"}
+                        and bool(proposal)
+                        and bool(intent)
+                        and (
+                            check.get("status") == "needs_search"
+                            or (
+                                args.proposal_id == str(proposal)
+                                and (original_title := check.get("requested_title"))
+                                and data["plan"]["keyword"]
+                                .casefold()
+                                .startswith(original_title.casefold() + " ")
+                                and not check.get("required_term")
+                            )
+                        )
+                        and not await AssistantToolCall.filter(
+                            turn_id__in=intent.turns, name="search_indexer"
+                        ).exists()
+                    )
+                )
+            if (data.get("ingestion") or {}).get("binding") == "add":
+                ready = bool(
+                    not index and explicit_reply and (previous_offer or proposal)
+                )
             if not ready:
                 return {
                     **data,
                     "created": False,
                     "confirmation_required": True,
-                    "message": (
-                        "Propose the latest settings and collect all remaining choices "
-                        "in one reply. Create when the user accepts or supplies them."
+                    "message": check.get(
+                        "next",
+                        "Review the settings or ask for the missing preferences.",
                     ),
                 }
 
@@ -2041,6 +2464,7 @@ async def create_plan(
                     confirmed=args.confirmed,
                 ),
                 user,
+                active_review_call_id=record.call_id,
             )
 
     raise NotFoundException
@@ -2165,7 +2589,7 @@ async def create_task(
         )
 
         result = await DownloadTaskService.create_once(body, user)
-        if not ready and not result.get("created"):
+        if not ready and not result.get("created") and not result.get("replayed"):
             return {
                 **result,
                 "created": False,
@@ -2264,18 +2688,9 @@ async def apply_plan_change(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = [
-        (record, data)
-        for record in (
-            await AssistantToolCall.filter(
-                turn__conversation_id=conversation_id,
-                name="review_download_plan_change",
-            )
-            .order_by("-id")
-            .limit(30)
-        )
-        if "valid" in (data := (record.result or {}).get("data") or {})
-    ]
+    from app.services.assistant_plan_review import recent_plan_reviews
+
+    reviews = await recent_plan_reviews(conversation_id)
     for index, (record, data) in enumerate(reviews):
         if data.get("request_id") != str(args.request_id):
             continue
@@ -2443,7 +2858,7 @@ async def apply_media_change(
                 "applied": False,
                 "confirmation_required": True,
                 "message": "A newer review replaced this one; confirm that one."
-                if index
+                if superseded
                 else "Show this review, finish the turn and wait for the user's "
                 "confirmation.",
             }

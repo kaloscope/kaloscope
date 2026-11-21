@@ -1,6 +1,7 @@
 """JSON serialization and parsing utilities."""
 
 import decimal
+import hashlib
 import re
 from functools import partial
 from pathlib import Path
@@ -39,6 +40,18 @@ def default(obj):
 
 dumps = partial(orjson.dumps, default=default)
 loads = orjson.loads
+
+
+def json_digest(value: Any) -> str:
+    """Hash a JSON payload with sorted object keys for a stable review identity.
+
+    Args:
+        value: Data serialized by the application's JSON encoder.
+
+    Returns:
+        The full hexadecimal SHA-256 digest.
+    """
+    return hashlib.sha256(dumps(value, option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
 def loads_jsonc(string: str) -> JSONType:

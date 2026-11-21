@@ -84,6 +84,7 @@ from app.models.flow import (
     ScheduleApply,
     ScheduleChange,
 )
+from app.models.review_decision import AssistantReviewDecision, review_attempt
 from app.models.user import (
     HistoryType,
     PermType,
@@ -343,6 +344,26 @@ class FlowGraphService(BaseService[FlowGraph], model=FlowGraph):
             if tmpl := graph["tmpl"]:
                 graph["newest_tmpl"] = await FlowTemplateService.get_newest(tmpl)
         return result
+
+    @classmethod
+    async def require_indexer(cls, indexer_id: int, user: UserInfo) -> FlowGraph:
+        """Load the requested indexer under current resource permissions.
+
+        Args:
+            indexer_id: Workflow providing the resource.
+            user: Authenticated account with current workflow grants.
+
+        Returns:
+            The accessible indexer.
+
+        Raises:
+            ForbiddenException: If the account cannot use the indexer.
+            NotFoundException: If the indexer does not exist.
+        """
+        graph = await cls.get_accessible(indexer_id, user)
+        if graph.category != GraphCategory.INDEXER:
+            raise NotFoundException
+        return graph
 
     @classmethod
     async def get_accessible(cls, id: int, user: UserInfo) -> FlowGraph:
@@ -2117,14 +2138,19 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
         lock = _SCHEDULE_LOCKS.setdefault(key, asyncio.Lock())
         async with lock:
             try:
-                with submission_lock(f"schedule:{key}"):
+                with submission_lock(f"schedule:{key}"), review_attempt():
                     task = asyncio.ensure_future(cls._apply(body, key, user))
                     try:
-                        return await asyncio.shield(task)
+                        outcome = await asyncio.shield(task)
                     except asyncio.CancelledError:
-                        # a cancelled caller never splits a change from its receipt
-                        await task
+                        # persist the result before the request lock is released
+                        await AssistantReviewDecision.finish(
+                            user.id, body.request_id, await task
+                        )
                         raise
+                    return await AssistantReviewDecision.finish(
+                        user.id, body.request_id, outcome
+                    )
             except Timeout:
                 if receipt := await FlowJobReceipt.get_or_none(key=key):
                     return await cls._replay(receipt, user)
@@ -2221,13 +2247,18 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
             "schedule instead of repeating it.",
         }
         # keep a claim even when the later transaction or outcome write fails
-        receipt = await FlowJobReceipt.create(
-            key=key,
-            action=change.action,
-            job_id=change.job_id,
-            graph_id=base["workflow_id"],
-            result=uncertain,
-        )
+        async with in_transaction():
+            if not (
+                await AssistantReviewDecision.claim(user.id, body.request_id, True)
+            ).approved:
+                return {"applied": False, "outcome": "cancelled", **base}
+            receipt = await FlowJobReceipt.create(
+                key=key,
+                action=change.action,
+                job_id=change.job_id,
+                graph_id=base["workflow_id"],
+                result=uncertain,
+            )
         notified = False
         try:
             async with in_transaction():
@@ -2279,6 +2310,7 @@ class FlowJobService(BaseService[FlowJob], model=FlowJob):
                 return {
                     "applied": False,
                     **base,
+                    "failed": True,
                     "message": "The scheduler refused the change, so nothing was "
                     "saved; the same request may be repeated.",
                 }

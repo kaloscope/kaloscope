@@ -616,9 +616,9 @@ def test_running_attempt(monkeypatch, action):
                 assert stored.last_exec > LAST_EXEC
                 assert await DownloadPlanHistory.filter(plan_id=plan.id).count() == 2
             else:
-                # deletion does not cancel it; it stops at its first history write
-                assert isinstance(outcome, Exception) and stored is None
-                assert len(driver.submitted) == len(tasks) == 1
+                # the plan vanished while searching, before any dispatch was claimed
+                assert outcome["status"] == "unconfirmed" and stored is None
+                assert len(driver.submitted) == len(tasks) == 0
                 assert not await DownloadPlanHistory.exists()
 
     asyncio.run(run())
@@ -1472,6 +1472,24 @@ def test_page_selection(monkeypatch):
                 call_id="history",
             )
             assert denied["error"]["code"] == "permission_denied"
+
+            admin.perms = Permissions()
+            for plan_id in (kept.id, kept.id + 1000):
+                inaccessible = {
+                    **context,
+                    "selected_plan": {"plan_id": plan_id, "workflow_id": graph.id},
+                }
+                refused, _ = await converse(
+                    conversation["id"],
+                    admin,
+                    "Show plan",
+                    context=inaccessible,
+                    key=f"hidden-{plan_id}",
+                )
+                assert (
+                    refused.event == "error"
+                    and refused.data["code"] == "permission_denied"
+                )
 
             refused = await tools.execute_tool(
                 "review_download_plan_change",

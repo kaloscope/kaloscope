@@ -20,6 +20,7 @@ from app.models.user import PermType, User, UserInfo, UserPermission, UserRole
 from app.routes import danmaku as danmaku_routes
 from app.routes import download as download_routes
 from app.routes import filesystem as filesystem_routes
+from app.routes import flow as flow_routes
 from app.routes import media as media_routes
 from app.routes import network as network_routes
 from app.routes import subtitle as subtitle_routes
@@ -125,6 +126,9 @@ async def library(directory: Path, access: str) -> UserInfo:
         pytest.param(filesystem_routes.get_stats, {}, id="filesystem-stats"),
         pytest.param(filesystem_routes.create_dir, {}, id="filesystem-mkdir"),
         pytest.param(filesystem_routes.delete_dir, {}, id="filesystem-rmdir"),
+        pytest.param(flow_routes.list_repositories, {}, id="flow-repositories"),
+        pytest.param(flow_routes.list_templates, {}, id="flow-templates"),
+        pytest.param(flow_routes.gen_graph_name, {}, id="flow-name"),
         pytest.param(download_routes.list_downloaders, {}, id="download-managers"),
         pytest.param(download_routes.sort_downloaders, {}, id="download-sort"),
         pytest.param(download_routes.get_downloader_presets, {}, id="download-presets"),

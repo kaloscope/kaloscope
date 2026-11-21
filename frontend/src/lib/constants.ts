@@ -18,6 +18,9 @@ export const LOOP_TAG = '$loop';
  */
 export const MEDIA_STREAM_PREFIX = '/_api/media/stream?path=';
 
+/** Maximum number of new resources per check in a new download plan. */
+export const DEFAULT_PLAN_BATCH_LIMIT = 12;
+
 /**
  * Default sub pattern for download transfer substitution.
  */

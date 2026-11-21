@@ -12,6 +12,7 @@ from app.core.ai import history, tools
 from app.core.exceptions import ForbiddenException
 from app.core.flow.engine import FlowEngine
 from app.models.assistant import AssistantToolCall, AssistantTurn, ConversationCreate
+from app.models.assistant_questions import AnswerGroup
 from app.models.download import (
     DownloadPlan,
     DownloadPlanCheck,
@@ -20,9 +21,10 @@ from app.models.download import (
 )
 from app.models.flow import FlowGraph, FlowJob, FlowLog, FlowVariable
 from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
-from app.models.user import Permissions, UserRole
+from app.models.user import Permissions, PermType, UserPermission, UserRole
 from app.services import download as service
 from app.services.assistant import AssistantService
+from app.services.assistant_questions import answer_card
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.flow import FlowGraphService
 from app.services.mcp import MCPAccessTokenService
@@ -445,20 +447,81 @@ def test_login_and_permissions(monkeypatch):
             assert denied["status"] == "login_required"
             execute.assert_not_called()
             other.role, other.perms = UserRole.USER, Permissions(indexer_ids=[graph.id])
+            assert (await service.DownloadPlanService.search_indexer(body, other))[
+                "status"
+            ] == "login_required"
             with pytest.raises(ForbiddenException):
-                await service.DownloadPlanService.search_indexer(body, other)
+                await service.DownloadPlanService.search_indexer(
+                    body.model_copy(update={"sources": True}), other
+                )
             auth = await FlowVariable.create(
                 graph_id=graph.id,
                 key="$auth",
                 value={"name": "test", "token": "never-expose"},
             )
-            result = await service.DownloadPlanService.search_indexer(body, owner)
+            result = await tools.preview_indexer(body, other)
             assert result["status"] == "ok" and "never-expose" not in str(result)
+            assert "subscription" not in result and "subscription_note" not in result
+            other.perms = Permissions()
+            with pytest.raises(ForbiddenException):
+                await service.DownloadPlanService.search_indexer(body, other)
             auth.expires = 1
             await auth.save()
             assert (await service.DownloadPlanService.search_indexer(body, owner))[
                 "status"
             ] == "login_required"
+
+    asyncio.run(run())
+
+
+def test_preview_search_permissions(monkeypatch):
+    execute = engine_fixture(
+        monkeypatch,
+        {"items": [{"id": "r1", "title": "Lantern", "link": "test-source"}]},
+    )
+    options = AsyncMock()
+    monkeypatch.setattr(service.DownloadPlanService, "authoring_options", options)
+
+    async def run():
+        async with database() as (owner, reader):
+            graph, _, _ = await fixture_plan()
+            graph.definition["nodes"][0]["data"]["config"] += "\nonly_preview: true\n"
+            await graph.save()
+            reader.role, reader.perms = (
+                UserRole.USER,
+                Permissions(indexer_ids=[graph.id]),
+            )
+            values = {
+                "workflow_id": graph.id,
+                "keyword": "Lantern",
+                "filters": {"category": "movie"},
+            }
+            result = await tools.execute_tool(
+                "search_indexer",
+                dumps(values).decode(),
+                reader,
+                conversation_id=1,
+                call_id="search",
+            )
+            assert result["data"]["items"] == [{"id": "r1", "title": "Lantern"}]
+            assert "subscription" not in result["data"]
+            assert execute.await_args.args[1] == {
+                "$start": "search_start",
+                "keyword": "Lantern",
+                "category": "movie",
+                "page_num": 1,
+                "page_size": 5,
+            }
+            options.assert_not_awaited()
+            for account, settings in (
+                (reader, {"filters": {"undeclared": 1}}),
+                (owner, {"sources": True}),
+            ):
+                rejected = await service.DownloadPlanService.search_indexer(
+                    IndexerSearch(**{**values, **settings}), account
+                )
+                assert rejected["status"] == "invalid_input"
+            execute.assert_awaited_once()
 
     asyncio.run(run())
 
@@ -723,6 +786,22 @@ def test_mcp_search(monkeypatch):
                 "isError"
             ]
 
+            await UserPermission.create(
+                user_id=app.shared_ctx.sessions["reader"].id,
+                rel_type=PermType.INDEXER,
+                rel_id=graph.id,
+            )
+            read_only = await call(app, "search_indexer", args, token="reader")
+            assert read_only["isError"] and "read-only" in str(read_only)
+            visible = await call(app, "search_indexer", args, token=tokens["reader"])
+            assert visible["structuredContent"]["status"] == "ok"
+            blocked = await call(
+                app,
+                "search_indexer",
+                {"search": {**args["search"], "sources": True}},
+                token=tokens["reader"],
+            )
+            assert blocked["isError"]
             result = await call(app, "search_indexer", args, token=tokens["admin"])
             assert not result.get("isError"), result
             assert result["structuredContent"]["status"] == "ok"
@@ -867,11 +946,8 @@ def test_conversation(monkeypatch, verbose):
                 graph.id, owner
             )
             assert options["defaults"]["downloader_id"] == downloader.id
-            assert (
-                options["defaults"]["total_limit"]
-                == options["defaults"]["batch_limit"]
-                == 1
-            )
+            assert options["defaults"]["total_limit"] is None
+            assert options["defaults"]["batch_limit"] == 12
             fixture.update(
                 graph_id=graph.id,
                 plan={
@@ -933,12 +1009,46 @@ def test_conversation(monkeypatch, verbose):
             assert "category" not in execute.call_args_list[0].args[1]
             assert execute.call_args_list[1].args[1]["category"] == "movie"
 
+            assert not await DownloadPlan.exists()
+            question = all_results[-1]
+            assert question["name"] == "ask_user"
+            card = question["data"]
+            answers = [
+                {
+                    "id": q["id"],
+                    "selected": [
+                        q["options"][-1 if q["field"] == "release" else 0]["id"]
+                    ],
+                }
+                for q in card["questions"]
+            ]
+            accepted = await answer_card(
+                conversation["id"],
+                question["id"],
+                AnswerGroup.model_validate(
+                    {"version": card["version"], "items": answers}
+                ),
+                owner,
+            )
+            assert accepted["card"]["state"] == "answered"
+            submission = request("answer-" + question["id"], answer_to=question["id"])
+            applied = [
+                e
+                async for e in AssistantService.persistent_stream(
+                    conversation["id"], submission, owner
+                )
+            ]
+            assert any(
+                e.event == "tool_result"
+                and e.data["name"] == "create_download_plan"
+                and e.data["data"]["created"]
+                for e in applied
+            )
             assert await DownloadPlan.all().count() == 1
             plan = await DownloadPlan.first()
             assert plan.keyword == "Lantern" and plan.filters == {"category": "movie"}
-            assert plan.batch_limit == plan.total_limit == 1
+            assert plan.batch_limit == 12 and plan.total_limit is None
             assert plan.creation_receipt["first_execution"]["status"] == "queued"
-            assert all_results[-1]["data"]["replayed"]
             service.notify_download_changes.assert_called_once()
             assert await DownloadTask.all().count() == await FlowLog.all().count() == 0
             preview_turn = await AssistantTurn.get(request_id="step-0")

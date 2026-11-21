@@ -2,6 +2,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import aiofiles
 from pydantic import ValidationError
@@ -18,14 +19,20 @@ from app.core.exceptions import (
     KaloscopeException,
     NotFoundException,
 )
+from app.core.flow.nodes.base import start_config
 from app.core.media.common import ContentError
 from app.core.middleware import SessionHolder
-from app.models.flow import FlowGraph, IndexerResource
+from app.models.flow import FlowGraph, GraphCategory, IndexerResource
 from app.models.media import LibType, MediaItem
 from app.models.user import (
+    DISPLAY_KEYS,
+    DisplayPreference,
+    FavoriteQuery,
     HistoryEntry,
     HistoryQuery,
     HistoryType,
+    IndexerFavoriteChange,
+    IndexerFavoritesQuery,
     Permissions,
     PermType,
     User,
@@ -59,6 +66,27 @@ class UserService(BaseService[User], model=User):
     }
 
     @classmethod
+    def preferences_for(cls, stored: dict | None, role: UserRole) -> dict:
+        """Resolve saved preferences, including display values from older clients.
+
+        Args:
+            stored: Previously saved settings.
+            role: Current role controlling access to the downloads homepage.
+
+        Returns:
+            Effective settings with defaults for invalid display values.
+        """
+        result = cls.DEFAULT_PREFERENCES | (stored if isinstance(stored, dict) else {})
+        for key in DISPLAY_KEYS:
+            try:
+                DisplayPreference(key=key, value=result[key])
+            except ValidationError:
+                result[key] = cls.DEFAULT_PREFERENCES[key]
+        if result["homepage"] == "/downloads" and role != UserRole.ADMIN:
+            result["homepage"] = cls.DEFAULT_PREFERENCES["homepage"]
+        return result
+
+    @classmethod
     async def login(
         cls, username: str, password: str, ambiguity: bool = True
     ) -> UserInfo:
@@ -86,9 +114,7 @@ class UserService(BaseService[User], model=User):
                 ErrorCode.LOGIN_FAILED if ambiguity else ErrorCode.INCORRECT_PASSWORD
             )
         # set default preferences
-        preferences = cls.DEFAULT_PREFERENCES.copy()
-        if isinstance(user.preferences, dict):
-            preferences.update(user.preferences)
+        preferences = cls.preferences_for(user.preferences, user.role)
         # construct the login user object
         request = Request.get_current()
         now = timezone.now()
@@ -165,6 +191,7 @@ class UserService(BaseService[User], model=User):
 
         Raises:
             KaloscopeException: If the user is not found.
+            ForbiddenException: If the homepage requires an administrator.
         """
         # SQLite does not support the `SELECT ... FOR UPDATE` syntax,
         # use the following `UPDATE` statement to acquire a `RESERVED` lock
@@ -173,9 +200,13 @@ class UserService(BaseService[User], model=User):
         user = await User.filter(id=id).select_for_update().first()
         if user is None:
             raise KaloscopeException(ErrorCode.USER_NOT_FOUND)
-        preferences = cls.DEFAULT_PREFERENCES.copy()
-        if isinstance(user.preferences, dict):
-            preferences.update(user.preferences)
+        preferences = cls.preferences_for(user.preferences, user.role)
+        if (
+            pref.key == "homepage"
+            and pref.value == "/downloads"
+            and user.role != UserRole.ADMIN
+        ):
+            raise ForbiddenException
         if pref.key in preferences:
             preferences[pref.key] = pref.value
             await User.filter(id=id).update(preferences=preferences)
@@ -184,6 +215,32 @@ class UserService(BaseService[User], model=User):
             for token, login_user in entries(sessions, vfilter=lambda u: u.id == id):
                 login_user.preferences = preferences
                 sessions[token] = login_user
+
+    @classmethod
+    async def display_preferences(
+        cls, user: UserInfo, change: DisplayPreference | None = None
+    ) -> dict:
+        """Read or update the authenticated account's reversible display preferences.
+
+        Args:
+            user: Authenticated account.
+            change: One requested update, or absent for a read.
+
+        Returns:
+            Effective values from the database, including defaults.
+
+        Raises:
+            ForbiddenException: If an ordinary user selects the downloads homepage.
+        """
+        if change:
+            if change.value == "/downloads" and user.role != UserRole.ADMIN:
+                raise ForbiddenException
+            await cls.update_pref(
+                user.id, UserPreference(key=change.key, value=change.value)
+            )
+        record = await User.get(id=user.id)
+        preferences = cls.preferences_for(record.preferences, record.role)
+        return {key: preferences[key] for key in DISPLAY_KEYS}
 
     @classmethod
     def get_pref(cls, preferences: dict | None, key: str) -> Any:
@@ -217,35 +274,135 @@ class UserFavoriteService(BaseService[UserFavorite], model=UserFavorite):
     """The service class for all user favorite related operations."""
 
     @classmethod
-    async def favorite(cls, user_id: int, indexer_id: int, rsrc: IndexerResource):
-        """Add a new favorite for the user.
+    async def list_page(cls, query: FavoriteQuery, user: UserInfo) -> dict:
+        """List the owner's favorites inside the current indexer grants.
 
         Args:
-            user_id: User ID.
-            indexer_id: Indexer ID.
-            rsrc: Resource to favorite.
+            query: Indexer and resource filters and pagination.
+            user: Current account with loaded indexer permissions.
+
+        Returns:
+            Matching favorites and their total count.
         """
-        data = rsrc.rsrc or {}
-        data.pop("favorite", None)
-        await UserFavorite.update_or_create(
-            user_id=user_id,
-            indexer_id=indexer_id,
-            rsrc_id=rsrc.rsrc_id,
-            defaults={"rsrc": data, "url": rsrc.url},
+        criteria = [Q(user_id=user.id)]
+        if user.role != UserRole.ADMIN:
+            criteria.append(
+                Q(indexer_id__in=user.perms.indexer_ids if user.perms else [])
+            )
+        if query.indexer_id:
+            criteria.append(Q(indexer_id=query.indexer_id))
+        if query.rsrc_ids:
+            criteria.append(Q(rsrc_id__in=query.rsrc_ids))
+        return await cls.dump_page(
+            await UserFavorite.page(*criteria, **query.page_params)
         )
 
     @classmethod
-    async def unfavorite(cls, user_id: int, indexer_id: int, rsrc: IndexerResource):
-        """Remove a favorite of the user.
+    async def summaries(cls, query: IndexerFavoritesQuery, user: UserInfo) -> dict:
+        """Read personal favorites without returning external URLs or private metadata.
 
         Args:
-            user_id: User ID.
-            indexer_id: Indexer ID.
-            rsrc: Resource to unfavorite.
+            query: Optional indexer and requested page.
+            user: Current authenticated account.
+
+        Returns:
+            Resource IDs and titles in the requested page.
         """
-        await UserFavorite.filter(
-            user_id=user_id, indexer_id=indexer_id, rsrc_id=rsrc.rsrc_id
-        ).delete()
+        result = await cls.list_page(
+            FavoriteQuery(
+                indexer_id=query.workflow_id, page_num=query.page, page_size=10
+            ),
+            user,
+        )
+        return {
+            "total": result["total"],
+            "next_page": query.page + 1 if query.page * 10 < result["total"] else None,
+            "items": [
+                {
+                    "workflow_id": item["indexer_id"],
+                    "resource_id": item["rsrc_id"],
+                    "title": str(item["rsrc"].get("title") or "")[:256],
+                }
+                for item in result["items"]
+            ],
+        }
+
+    @classmethod
+    async def set_resource(
+        cls, indexer_id: int, resource: IndexerResource, user: UserInfo
+    ) -> None:
+        """Store or remove a personal favorite within the caller's indexer grants.
+
+        Args:
+            indexer_id: Source indexer.
+            resource: Identity and optional metadata. Omitting metadata removes it.
+            user: Current owner.
+
+        Raises:
+            ForbiddenException: If the account cannot access the indexer.
+            NotFoundException: If the indexer does not exist.
+        """
+        await FlowGraphService.require_indexer(indexer_id, user)
+        identity = {
+            "user_id": user.id,
+            "indexer_id": indexer_id,
+            "rsrc_id": str(resource.rsrc_id),
+        }
+        if resource.rsrc is None:
+            await UserFavorite.filter(**identity).delete()
+            return
+        data = {key: value for key, value in resource.rsrc.items() if key != "favorite"}
+        await UserFavorite.update_or_create(
+            defaults={"rsrc": data, "url": resource.url}, **identity
+        )
+
+    @classmethod
+    async def set_selected(cls, change: IndexerFavoriteChange, user: UserInfo) -> dict:
+        """Apply an explicit personal favorite choice for one search result.
+
+        Args:
+            change: Selected resource identity, title and desired state.
+            user: Current account.
+
+        Returns:
+            The stored resource identity and favorite state.
+
+        Raises:
+            ForbiddenException: If the account cannot access the indexer.
+            NotFoundException: If the indexer does not exist.
+        """
+        graph = await FlowGraphService.require_indexer(change.workflow_id, user)
+        identity = {
+            "user_id": user.id,
+            "indexer_id": graph.id,
+            "rsrc_id": change.resource_id,
+        }
+        if change.favorite:
+            details = (await start_config(graph, "details"))["details"]
+            url = None
+            if isinstance(details, dict):
+                params = {k: v for k, v in (details.get("specific") or {}).items() if v}
+                url = f"/websearch/{graph.id}/{quote(change.resource_id, safe='')}"
+                if params:
+                    url += "?" + urlencode(params)
+            # replaying the action preserves richer metadata saved from the search page
+            await UserFavorite.get_or_create(
+                **identity,
+                defaults={
+                    "rsrc": {
+                        "id": change.resource_id,
+                        "title": change.title or change.resource_id,
+                    },
+                    "url": url if url and len(url) <= 255 else None,
+                },
+            )
+        else:
+            await UserFavorite.filter(**identity).delete()
+        return {
+            "workflow_id": graph.id,
+            "resource_id": change.resource_id,
+            "favorite": change.favorite,
+        }
 
 
 class UserHistoryService(BaseService[UserHistory], model=UserHistory):
@@ -280,17 +437,17 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
         """Record a user history entry, incrementing repetitions on duplicate.
 
         Args:
-            user: Authenticated user with loaded library permissions.
+            user: Authenticated user with loaded library and indexer grants.
             obj: History entry data.
 
         Returns:
-            History instance, or None if recording is disabled or the search
+            History instance, or `None` if recording is disabled or the search
             is empty.
 
         Raises:
             ContentError: If a reading locator or its content version is invalid.
-            NotFoundException: If a reading work or chapter is missing or hidden.
-            ForbiddenException: If the user cannot access the reading library.
+            NotFoundException: If the indexer, reading work or chapter is missing.
+            ForbiddenException: If the user cannot access the indexer or library.
         """
         if obj.locator is not None:
             await MediaItemService.get_locator(obj.rel_id, user, obj.locator)
@@ -322,6 +479,8 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                 # record web search history
                 keyword = (obj.keyword or "").strip()
                 if keyword:
+                    if obj.rel_id:
+                        await FlowGraphService.require_indexer(obj.rel_id, user)
                     history, created = await UserHistory.get_or_create(
                         user_id=user.id,
                         rel_type=obj.rel_type,
@@ -338,7 +497,7 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
 
     @classmethod
     async def get_page(cls, user: UserInfo, query: HistoryQuery) -> dict[str, Any]:
-        """List retained history with accessible media and usable reading locators.
+        """List retained history for the account's accessible indexers and media.
 
         Args:
             user: Authenticated user with loaded library permissions.
@@ -382,6 +541,12 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                 )
             # filter before pagination to keep totals and page boundaries accurate
             queries.append(Q(rel_id__in=Subquery(items.values("id"))))
+        elif user.role != UserRole.ADMIN:
+            grants = UserPermission.filter(user_id=user.id, rel_type=PermType.INDEXER)
+            indexers = FlowGraph.filter(
+                category=GraphCategory.INDEXER, id__in=Subquery(grants.values("rel_id"))
+            )
+            queries.append(Q(rel_id=0) | Q(rel_id__in=Subquery(indexers.values("id"))))
         page = await UserHistory.page(*queries, **query.page_params)
         result = await cls.dump_page(page)
         for history in result["items"]:
@@ -424,8 +589,8 @@ class UserHistoryService(BaseService[UserHistory], model=UserHistory):
                 ):
                     history["locator"] = None
                     history["percentage"] = None
-        if media_history and result["items"]:
-            # recheck visibility and grants after the unlocked content reads
+        if result["items"] and (media_history or user.role != UserRole.ADMIN):
+            # recheck visibility and grants after the unlocked metadata reads
             visible = set(
                 await UserHistory.filter(
                     *queries, id__in=[history["id"] for history in result["items"]]

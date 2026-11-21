@@ -1,6 +1,8 @@
 <script lang="ts">
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
+  import { api } from '$lib/api';
+  import { requestDeviceAction } from '$lib/assistant/device';
   import { tooltip } from '$lib/actions';
   import { assistantCanvas } from '$lib/assistant/canvas';
   import { assistantDestination } from '$lib/assistant/navigation';
@@ -22,15 +24,22 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores.svelte';
-  import type { DownloadPlanCreation, DownloadPlanPreview } from '$lib/types';
+  import type { AssistantDestination, DownloadPlanPreview, QuestionCard, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
   import AssistantActivity from './AssistantActivity.svelte';
   import AssistantHistory from './AssistantHistory.svelte';
+  import FirstCheckResult from './FirstCheckResult.svelte';
   import AssistantChanges from './AssistantChanges.svelte';
+  import AssistantQuestions from './AssistantQuestions.svelte';
   import AssistantMarkdown from './AssistantMarkdown.svelte';
   import AssistantTool from './AssistantTool.svelte';
+  import AdminReviewCard from './AdminReviewCard.svelte';
+  import PlanReplacementCard from './PlanReplacementCard.svelte';
+  import PlanReviewCard from './PlanReviewCard.svelte';
+  import AssistantReviewCard from './AssistantReviewCard.svelte';
+  import { isAssistantReview } from '$lib/assistant/reviews';
 
   let panel: HTMLDivElement | undefined = $state();
   let composer: HTMLTextAreaElement | undefined = $state();
@@ -46,7 +55,8 @@
   let planEditor: PlanEditor | undefined = $state();
   let planPreview: DownloadPlanPreview | null = $state(null);
   let planConversationId: number | undefined = $state();
-  let createdPlan: DownloadPlanCreation | null = $state(null);
+  let planCallId: string | undefined = $state();
+  let currentPlanRecord: AssistantReviewCard | undefined = $state();
   let viewportHeight: number | undefined = $state();
   let position: { x: number; y: number } | null = $state(null);
   let drag: { x: number; y: number; left: number; top: number } | null = null;
@@ -54,14 +64,38 @@
   const turns = $derived($assistant.turns);
 
   $effect(() => {
-    if (planConversationId !== $assistant.conversation?.id) {
-      planPreview = null;
-      createdPlan = null;
-    }
+    if (planConversationId !== $assistant.conversation?.id) planPreview = null;
   });
 
   const input = $derived($assistant.input);
   const lastTurn = $derived(turns.at(-1));
+  const latestPlan = $derived(
+    lastTurn?.status === 'complete'
+      ? lastTurn.tools.findLast(
+          (tool) =>
+            tool.name === 'validate_download_plan' ||
+            (tool.name === 'ask_user' && tool.result?.ok) ||
+            (tool.name === 'create_download_plan' && tool.result?.data?.created)
+        )
+      : undefined
+  );
+  let dismissedQuestion = $state<string | null>(null);
+  const latestQuestion = $derived(
+    lastTurn?.status === 'complete'
+      ? lastTurn.tools.findLast((tool) => tool.name === 'ask_user' && tool.result?.ok)
+      : null
+  );
+  const questionTool = $derived(latestQuestion?.id === dismissedQuestion ? null : latestQuestion);
+  const canResumeQuestion = $derived(
+    !!latestQuestion &&
+      latestQuestion.id === dismissedQuestion &&
+      latestQuestion.result?.data?.state !== 'answered' &&
+      !$assistant.busy &&
+      !$assistant.conversation?.busy &&
+      !$assistant.historyLoading &&
+      !$assistantRestoring
+  );
+  const card = $derived(questionTool?.result?.data as QuestionCard | undefined);
   const isOpen = $derived($assistant.open);
   const compact = $derived(viewportHeight !== undefined && viewportHeight < 540);
   const rows = $derived(compact ? 1 : 2);
@@ -80,6 +114,8 @@
 
   const currentPage = $derived.by(() => {
     const pathname = page.url.pathname;
+    if (pathname === '/dashboard') return 'dashboard';
+    if (/^\/websearch\/(?:global|[1-9]\d*)\/?$/.test(pathname)) return 'web_search';
     if (/\/graphs\/(r\/)?\d+\/?$/.test(pathname)) return 'workflow_designer';
     if (/\/workflows\/graphs\/?$/.test(pathname)) return 'workflows';
     if (/^\/settings\/workflows\/schedules\/?$/.test(pathname)) return 'workflow_jobs';
@@ -95,15 +131,22 @@
   const retryable = $derived(incomplete || !!lastTurn?.canvasError);
 
   const destinations = $derived.by(() => {
-    const items: { path: string; label: string }[] = [];
+    const items: { path: string; label: string; target: AssistantDestination; id?: string }[] = [];
     const pathname = normalizePathname(page.url.pathname);
     for (const { result } of lastTurn?.tools ?? []) {
       const destination = result && assistantDestination(result);
       if (!destination) continue;
       const { path, target } = destination;
-      if (path === pathname || items.some((item) => item.path === path)) continue;
+      const device = target.page === 'resume_reading' || target.page === 'play_video';
+      if (
+        result?.data?.device_outcome === 'opened' ||
+        (path === pathname && !device) ||
+        items.some((item) => item.path === path && item.target.page === target.page)
+      )
+        continue;
       const name = $_(`assistant.pages.${target.page}`);
-      items.push({ path, label: $_('action.open', target.resource_id ? `${name} #${target.resource_id}` : name) });
+      const label = device ? name : $_('action.open', target.resource_id ? `${name} #${target.resource_id}` : name);
+      items.push({ path, label, target, id: result?.name === 'navigate' ? result.id : undefined });
     }
     return items;
   });
@@ -112,6 +155,37 @@
   const handoff = $derived(
     $assistantHandoff?.conversationId === $assistant.conversation?.id ? $assistantHandoff : null
   );
+
+  /**
+   * Find creations whose first result still belongs in this reply.
+   * @param turn - Current or restored turn, including older creation receipts.
+   * @returns Distinct plan IDs to follow independently of subsequent checks.
+   */
+  function followedPlans(turn: AssistantTurn): number[] {
+    const ids: number[] = [];
+    for (const tool of turn.tools) {
+      const data = tool.result?.data;
+      if (
+        tool.name !== 'create_download_plan' ||
+        !tool.result?.ok ||
+        !data?.created ||
+        data.already_exists ||
+        typeof data.plan_id !== 'number'
+      )
+        continue;
+      const receipt = data.first_execution;
+      const olderPending =
+        data.follow_first_check === undefined &&
+        receipt &&
+        typeof receipt === 'object' &&
+        'status' in receipt &&
+        ['queued', 'waiting', 'unconfirmed'].includes(String(receipt.status));
+      if ((data.follow_first_check || data.show_first_check || olderPending) && !ids.includes(data.plan_id)) {
+        ids.push(data.plan_id);
+      }
+    }
+    return ids;
+  }
 
   /**
    * Keep a dragged panel inside the visible viewport, including after resizing.
@@ -172,7 +246,7 @@
       closeAssistant();
     } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
       event.preventDefault();
-      void sendAssistant(page.url.pathname);
+      if (!questionTool) void sendAssistant(page.url.pathname);
     }
   }
 
@@ -263,6 +337,52 @@
     }
   }
 
+  let deviceBusy = $state<string | null>(null);
+
+  /**
+   * Open a registered destination and record what this device observed.
+   * @param destination - Checked tool result and route.
+   * @param turnId - Turn offering the navigation action.
+   */
+  async function openDestination(destination: (typeof destinations)[number], turnId: string) {
+    const { path, target, id } = destination;
+    const conversationId = $assistant.conversation?.id;
+    const ownerId = user.current?.id;
+    if (deviceBusy || !conversationId || !ownerId) return;
+    deviceBusy = path;
+    try {
+      await navigate(path, turnId);
+      let opened = normalizePathname(page.url.pathname) === path;
+      if (opened && (target.page === 'resume_reading' || target.page === 'play_video') && target.resource_id) {
+        opened = await requestDeviceAction(ownerId, target.resource_id, target.page);
+      }
+      if (!id || ownerId !== user.current?.id) return;
+      const { data } = await api
+        .post(`assistant/conversations/${conversationId}/device/${id}`, {
+          json: { opened },
+          retry: 0,
+          context: { silentErrors: true }
+        })
+        .json<Resp<string>>();
+      if ($assistant.conversation?.id === conversationId)
+        assistant.update((state) => ({
+          ...state,
+          turns: state.turns.map((turn) => ({
+            ...turn,
+            tools: turn.tools.map((tool) =>
+              tool.id === id && tool.result
+                ? { ...tool, result: { ...tool.result, data: { ...tool.result.data, device_outcome: data } } }
+                : tool
+            )
+          }))
+        }));
+    } catch {
+      navigationFailure = turnId;
+    } finally {
+      deviceBusy = null;
+    }
+  }
+
   /**
    * Open plain plan settings in the existing editor without searching or creating.
    * Keep ingestion reviews in the conversation so their binding is confirmed together.
@@ -273,12 +393,12 @@
   async function reviewPlan(tool: Tool): Promise<void> {
     if (!tool.result?.ok || !tool.result.data?.valid || tool.result.data.ingestion) return;
 
-    if (planPreview?.request_id !== tool.result.data.request_id) {
+    if (planPreview?.request_id !== tool.result.data.request_id || planCallId !== tool.id) {
       planPreview = null;
       await tick();
       planPreview = tool.result.data as unknown as DownloadPlanPreview;
       planConversationId = $assistant.conversation?.id;
-      createdPlan = null;
+      planCallId = tool.id;
       await tick();
     }
 
@@ -312,23 +432,19 @@
   }
 
   /**
-   * Identify finished lookups and checks whose results can be folded into the activity log.
+   * Choose which consecutive tool calls can share a collapsed activity entry.
    *
    * @param tool - Tool call as displayed in the conversation.
-   * @returns Whether the call can share a disclosure with adjacent calls.
+   * @returns A group key, or `null` for a call that needs its own visible status.
    */
-  function isRoutineCall(tool: Tool): boolean {
-    return (
-      tool.status === 'complete' &&
-      (/^(get|list|read)_/.test(tool.name) ||
-        [
-          'probe_http_request',
-          'validate_workflow_template',
-          'validate_workflow',
-          'validate_download_task',
-          'navigate'
-        ].includes(tool.name))
-    );
+  function activityGroup(tool: Tool): string | null {
+    if (tool.status !== 'complete') return null;
+    // keep search results and plan checks identifiable beside their previews
+    if (['search_indexer', 'validate_download_plan', 'discover_actions'].includes(tool.name)) return tool.name;
+    if (/^(get|list|read|validate|inspect|diagnose)_/.test(tool.name) || tool.name === 'probe_http_request') {
+      return 'lookup';
+    }
+    return null;
   }
 
   /**
@@ -346,7 +462,8 @@
       if (text.trim()) parts.push({ key: `text-${offset}`, text });
       offset = Math.max(offset, tool.offset);
       const previous = parts.at(-1);
-      if (previous && 'tools' in previous && isRoutineCall(tool) && isRoutineCall(previous.tools[0])) {
+      const group = activityGroup(tool);
+      if (group && previous && 'tools' in previous && group === activityGroup(previous.tools[0])) {
         previous.tools.push(tool);
       } else {
         parts.push({ key: tool.id, tools: [tool] });
@@ -534,13 +651,16 @@
         </li>
       {/if}
       {#each turns as turn (turn.id)}
+        {@const asksForChoices = turn.tools.some((tool) => tool.name === 'ask_user' && tool.result?.ok)}
         <li class="space-y-3">
           <div class="flex flex-col items-end gap-1 pl-8">
             <p class="sr-only">{$_('assistant.you')}</p>
             <p
               class="max-w-full rounded-box bg-base-content/8 px-3 py-2 text-sm leading-6 wrap-break-word whitespace-pre-wrap shadow-(--assistant-message-shadow) ring-1 ring-base-content/10"
             >
-              {turn.prompt}
+              {(turn.is_answer_turn ?? (turn.request_id ?? turn.id).startsWith('answer-'))
+                ? $_('assistant.question.submitted')
+                : turn.prompt}
             </p>
             {#if turn.context}
               <p class="flex items-center gap-1 text-[0.6875rem] leading-4 text-base-content/50">
@@ -553,27 +673,65 @@
             <p class="sr-only">{$_('assistant.title')}</p>
             {#each segments(turn) as segment (segment.key)}
               {#if 'tools' in segment}
+                {@const lastPlanRecord = segment.tools.findLast(
+                  (entry) => entry.name === 'validate_download_plan' && isAssistantReview(entry.result, asksForChoices)
+                )}
                 <AssistantActivity tools={segment.tools}>
                   {#snippet entry(tool, number)}
                     <AssistantTool
                       {tool}
                       callNumber={number}
                       unsaved={turn.context?.page_type === 'workflow_designer' && turn.context.unsaved}
-                      onplan={user.current?.role === 'admin' &&
-                      !$assistant.busy &&
-                      !$assistantCanvas &&
-                      !$assistantRestoring
-                        ? () => reviewPlan(tool)
-                        : undefined}
                     />
                   {/snippet}
                 </AssistantActivity>
+                {#each segment.tools as operation (operation.id)}
+                  {#if user.current?.role === 'admin' && turn.status === 'complete'}
+                    {#if isAssistantReview(operation.result, asksForChoices)}
+                      {@const review = {
+                        id: operation.id,
+                        createdInChat: turn.tools.some(
+                          (tool) => tool.name === 'create_download_plan' && tool.result?.data?.created
+                        ),
+                        requestId: operation.result.data.request_id,
+                        tool: operation.result.name,
+                        onview:
+                          operation.name === 'validate_download_plan' && currentPage !== 'download_plans'
+                            ? () => navigate('/downloads/plans', turn.id)
+                            : undefined,
+                        onedit:
+                          operation.name === 'validate_download_plan' &&
+                          !operation.result.data.ingestion &&
+                          !$assistantCanvas &&
+                          !$assistantRestoring
+                            ? () => reviewPlan(operation)
+                            : undefined
+                      }}
+                      {#if operation.name === 'validate_download_plan' && operation.id === latestPlan?.id}
+                        <AssistantReviewCard {...review} bind:this={currentPlanRecord} />
+                      {:else if operation.name !== 'validate_download_plan' || operation.id === lastPlanRecord?.id}
+                        <AssistantReviewCard {...review} />
+                      {/if}
+                    {:else if operation.name === 'review_plan_replacement' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
+                      <PlanReplacementCard id={operation.result.data.operation_id} />
+                    {:else if operation.name === 'review_download_plan_change' && operation.result?.ok && typeof operation.result.data?.request_id === 'string'}
+                      <PlanReviewCard id={operation.id} />
+                    {:else if operation.name === 'review_workspace_change' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
+                      <AdminReviewCard id={operation.result.data.operation_id} />
+                    {/if}
+                  {/if}
+                {/each}
               {:else if /^\s*<(?:｜|(?:tool_calls|function_calls|invoke)(?:[\s>]|$))/.test(segment.text)}
                 <p class="text-sm leading-6 text-base-content/70">{$_('assistant.invalid_tool_call')}</p>
               {:else}
                 <AssistantMarkdown source={segment.text} />
               {/if}
             {/each}
+            {#if turn.status !== 'streaming' && user.current?.role === 'admin'}
+              {#each followedPlans(turn) as planId (planId)}
+                <FirstCheckResult {planId} />
+              {/each}
+            {/if}
             {#if turn.status === 'streaming'}
               <p class="flex h-6 items-center gap-2 text-xs text-base-content/60">
                 <span class="loading loading-xs loading-dots" aria-hidden="true"></span>
@@ -609,21 +767,6 @@
     </ol>
 
     <footer class="relative shrink-0 rounded-b-box px-2 pb-2">
-      {#if createdPlan && lastTurn}
-        <p class="mb-2 px-2 text-sm" role="status">
-          {$_('assistant.plan.created', createdPlan.plan_id)} ·
-          {$_(`assistant.plan.first.${createdPlan.first_execution.status}`)}
-          {#if currentPage !== 'download_plans'}
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              onclick={() => navigate('/downloads/plans', lastTurn.id)}
-            >
-              {$_('action.open', $_('assistant.pages.download_plans'))}
-            </button>
-          {/if}
-        </p>
-      {/if}
       {#if !following && turns.length}
         <button
           type="button"
@@ -664,13 +807,21 @@
               {$_('assistant.retry')}
             </button>
           {/if}
-          {#each destinations as destination (destination.path)}
+          {#each destinations as destination (destination.id ?? destination.path)}
             <button
               type="button"
               class="btn gap-1 btn-subtle font-normal btn-xs"
-              onclick={() => navigate(destination.path, lastTurn.id)}
+              disabled={!!deviceBusy}
+              aria-busy={deviceBusy === destination.path}
+              onclick={() => openDestination(destination, lastTurn.id)}
             >
-              <iconify-icon icon={icons.arrowRight} width="0.875rem" class="size-3.5" aria-hidden="true"></iconify-icon>
+              {#if deviceBusy === destination.path}<span class="loading loading-xs loading-spinner" aria-hidden="true"
+                ></span>{:else}<iconify-icon
+                  icon={icons.arrowRight}
+                  width="0.875rem"
+                  class="size-3.5"
+                  aria-hidden="true"
+                ></iconify-icon>{/if}
               {destination.label}
             </button>
           {/each}
@@ -680,25 +831,73 @@
         </section>
       {/if}
 
+      {#if latestPlan?.name === 'validate_download_plan' && currentPlanRecord?.needsPlanDecision() && !card && !$assistant.busy && !$assistant.conversation?.busy && !$assistant.historyLoading && !$assistantRestoring && !$assistantCanvas}
+        <div
+          class="mb-1.5 flex items-center justify-between gap-2 rounded-field bg-base-content/5 py-1 ps-2.5 pe-1.5 text-xs"
+        >
+          <span class="min-w-0 font-medium">{$_('assistant.plan.awaiting')}</span>
+          <button
+            type="button"
+            class="btn shrink-0 btn-primary btn-xs"
+            aria-haspopup="dialog"
+            onclick={() => currentPlanRecord?.showPlanRecord()}>{$_('assistant.plan.inspect')}</button
+          >
+        </div>
+      {/if}
+
       {#if $assistantCanvas}
         <AssistantChanges />
       {:else}
         <div
           class="rounded-box bg-base-100 shadow-(--assistant-composer-shadow) ring-1 ring-border transition-shadow has-[textarea:focus]:ring-primary/80"
         >
-          <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
-          <textarea
-            id="assistant-input"
-            bind:this={composer}
-            bind:value={$assistant.input}
-            {rows}
-            readonly={$assistantRestoring}
-            maxlength="32768"
-            class="block w-full resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-1 text-sm leading-6 outline-none placeholder:text-base-content/60"
-            class:max-h-40={!compact}
-            class:max-h-20={compact}
-            placeholder={$_($assistantRestoring ? 'assistant.loading_history' : 'assistant.placeholder')}
-            aria-describedby="assistant-help"></textarea>
+          {#if card && questionTool && $assistant.conversation && !$assistant.historyLoading}
+            {#key questionTool.id}
+              <AssistantQuestions
+                {card}
+                callId={questionTool.id}
+                conversationId={$assistant.conversation.id}
+                onclose={() => {
+                  dismissedQuestion = questionTool?.id ?? null;
+                }}
+                oncard={(value) => {
+                  const id = questionTool?.id;
+                  assistant.update((state) => ({
+                    ...state,
+                    turns: state.turns.map((turn) => ({
+                      ...turn,
+                      tools: turn.tools.map((tool) =>
+                        tool.id === id && tool.result ? { ...tool, result: { ...tool.result, data: value } } : tool
+                      )
+                    }))
+                  }));
+                }}
+              />
+            {/key}
+          {:else}
+            {#if canResumeQuestion}
+              <button
+                type="button"
+                class="btn m-2 btn-soft btn-primary btn-sm"
+                onclick={() => (dismissedQuestion = null)}
+              >
+                {$_('assistant.question.resume')}
+              </button>
+            {/if}
+            <label class="sr-only" for="assistant-input">{$_('assistant.input')}</label>
+            <textarea
+              id="assistant-input"
+              bind:this={composer}
+              bind:value={$assistant.input}
+              {rows}
+              readonly={$assistantRestoring}
+              maxlength="32768"
+              class="block w-full resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-1 text-sm leading-6 outline-none placeholder:text-base-content/60"
+              class:max-h-40={!compact}
+              class:max-h-20={compact}
+              placeholder={$_($assistantRestoring ? 'assistant.loading_history' : 'assistant.placeholder')}
+              aria-describedby="assistant-help"></textarea>
+          {/if}
 
           {#if $assistant.modelsError || $assistant.error}
             <div class="space-y-0.5 px-3 pt-1 text-xs leading-5 text-base-content/60">
@@ -791,23 +990,25 @@
                 </ul>
               </Dropdown>
             {/if}
-            <button
-              bind:this={primary}
-              type="button"
-              class="btn btn-circle shrink-0 btn-sm {$assistant.busy ? 'btn-neutral' : 'btn-primary'}"
-              class:btn-disabled={!$assistant.busy && !canSend}
-              aria-disabled={!$assistant.busy && !canSend}
-              aria-label={$_($assistant.busy ? 'assistant.stop' : 'assistant.send')}
-              aria-keyshortcuts={$assistant.busy ? undefined : 'Control+Enter Meta+Enter'}
-              use:tooltip={{ content: $assistant.busy ? '' : $_('assistant.send_shortcut'), zIndex: 10000 }}
-              onclick={submit}
-            >
-              <iconify-icon
-                icon={$assistant.busy ? icons.stopFilled : icons.arrowUp}
-                width={$assistant.busy ? '0.875rem' : '1.125rem'}
-                aria-hidden="true"
-              ></iconify-icon>
-            </button>
+            {#if !card || $assistant.busy}
+              <button
+                bind:this={primary}
+                type="button"
+                class="btn btn-circle shrink-0 btn-sm {$assistant.busy ? 'btn-neutral' : 'btn-primary'}"
+                class:btn-disabled={!$assistant.busy && !canSend}
+                aria-disabled={!$assistant.busy && !canSend}
+                aria-label={$_($assistant.busy ? 'assistant.stop' : 'assistant.send')}
+                aria-keyshortcuts={$assistant.busy ? undefined : 'Control+Enter Meta+Enter'}
+                use:tooltip={{ content: $assistant.busy ? '' : $_('assistant.send_shortcut'), zIndex: 10000 }}
+                onclick={submit}
+              >
+                <iconify-icon
+                  icon={$assistant.busy ? icons.stopFilled : icons.arrowUp}
+                  width={$assistant.busy ? '0.875rem' : '1.125rem'}
+                  aria-hidden="true"
+                ></iconify-icon>
+              </button>
+            {/if}
           </div>
         </div>
       {/if}
@@ -826,8 +1027,9 @@
     interval_start={toDatetimeLocal(planPreview.plan.interval_start)}
     interval_end={toDatetimeLocal(planPreview.plan.interval_end)}
     creationRequestId={planPreview.request_id}
-    oncreated={(result) => {
-      createdPlan = result;
+    reviewCallId={planCallId}
+    oncreated={() => {
+      window.dispatchEvent(new Event('assistant-review-changed'));
       window.dispatchEvent(new Event('download-plan-created'));
     }}
   />

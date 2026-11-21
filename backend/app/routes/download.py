@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from uuid import UUID
 
 from sanic import Blueprint, HTTPResponse, Request, empty, json
 from sanic.log import logger
@@ -7,6 +8,7 @@ from sanic_ext import validate
 
 from app.core.constants import ENCODING
 from app.core.decorators import authorize
+from app.core.dl.access import ADMIN_CHANGE, ADMIN_PREVIEW, READ_PLAN
 from app.core.dl.config import load_driver
 from app.core.dl.endpoint import Endpoint
 from app.core.dl.openlist.client import OpenListClient, OpenListClientError
@@ -25,6 +27,7 @@ from app.models.download import (
     DownloadPlanQuery,
     DownloadPlanUpsert,
     DownloadQuery,
+    ReplacementDecision,
 )
 from app.models.user import UserRole
 from app.services.download import (
@@ -33,6 +36,7 @@ from app.services.download import (
     DownloadTaskService,
     default_download_directory,
 )
+from app.services.plan_replacement import PlanReplacementService
 from app.utils.bittorrent import standardize_magnet
 from app.utils.disk import disk_usage
 
@@ -178,7 +182,7 @@ async def delete_downloaders(_, body: IDs) -> HTTPResponse:
 
 
 @download.get("/plan/list")
-@authorize()
+@authorize(role=READ_PLAN.role)
 @validate(query=DownloadPlanQuery)
 async def list_plans(request: Request, query: DownloadPlanQuery) -> HTTPResponse:
     """List plans within current workflow and transfer-library permissions.
@@ -194,7 +198,7 @@ async def list_plans(request: Request, query: DownloadPlanQuery) -> HTTPResponse
 
 
 @download.post("/plan/validate")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_PREVIEW.role)
 @validate(json=DownloadPlanCheck)
 async def validate_plan(request: Request, body: DownloadPlanCheck) -> HTTPResponse:
     """Validate a plan without executing the indexer or downloader.
@@ -210,23 +214,29 @@ async def validate_plan(request: Request, body: DownloadPlanCheck) -> HTTPRespon
 
 
 @download.post("/plan/create")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=DownloadPlanCreate)
 async def create_plan(request: Request, body: DownloadPlanCreate) -> HTTPResponse:
     """Create once and queue the authorized first attempt without waiting for it.
 
     Args:
-        request: Authenticated administrator request.
+        request: Administrator request with an optional assistant review query.
         body: Stable request identity and final settings.
 
     Returns:
         Created or replayed plan, or field validation errors.
     """
-    return json(await DownloadPlanService.create_once(body, request.ctx.user))
+    return json(
+        await DownloadPlanService.create_once(
+            body,
+            request.ctx.user,
+            review_call_id=request.get_args(keep_blank_values=True).get("review"),
+        )
+    )
 
 
 @download.get("/plan/<id:int>")
-@authorize()
+@authorize(role=READ_PLAN.role)
 async def get_plan(request: Request, id: int) -> HTTPResponse:
     """Read a plan and its stored first-attempt result.
 
@@ -241,7 +251,7 @@ async def get_plan(request: Request, id: int) -> HTTPResponse:
 
 
 @download.get("/plan/request/<request_id:uuid>")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_PREVIEW.role)
 async def find_plan(request: Request, request_id) -> HTTPResponse:
     """Recover the current account's plan after an uncertain editor response.
 
@@ -256,7 +266,7 @@ async def find_plan(request: Request, request_id) -> HTTPResponse:
 
 
 @download.post("/plan/upsert")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=DownloadPlanUpsert)
 async def upsert_plan(_, body: DownloadPlanUpsert) -> HTTPResponse:
     """Create or update a download plan.
@@ -273,7 +283,7 @@ async def upsert_plan(_, body: DownloadPlanUpsert) -> HTTPResponse:
 
 
 @download.post("/plan/delete")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=IDs)
 async def delete_plans(_, body: IDs) -> HTTPResponse:
     """Delete the download plans.
@@ -315,19 +325,19 @@ async def list_directories(_) -> HTTPResponse:
 
 
 @download.get("/list")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_PREVIEW.role)
 @validate(query=DownloadQuery)
-async def list_tasks(_, query: DownloadQuery) -> HTTPResponse:
+async def list_tasks(request: Request, query: DownloadQuery) -> HTTPResponse:
     """List the download tasks.
 
     Args:
-        _: Unused request.
+        request: Authenticated administrator request.
         query: Query filters and options.
 
     Returns:
         Response containing the requested data.
     """
-    return json(await DownloadTaskService.list_tasks(query))
+    return json(await DownloadTaskService.list_tasks(query, request.ctx.user))
 
 
 @download.post("/validate")
@@ -355,7 +365,7 @@ async def valid_magnet_link(request: Request) -> HTTPResponse:
 
 
 @download.post("/add")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(form=DownloadAdd)
 async def add_task(_, body: DownloadAdd) -> HTTPResponse:
     """Add a download task.
@@ -372,7 +382,7 @@ async def add_task(_, body: DownloadAdd) -> HTTPResponse:
 
 
 @download.post("/pause")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=IDs)
 async def pause_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Pause the download tasks.
@@ -397,7 +407,7 @@ async def pause_tasks(request: Request, body: IDs) -> HTTPResponse:
 
 
 @download.post("/start")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=IDs)
 async def start_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Start the download tasks.
@@ -422,7 +432,7 @@ async def start_tasks(request: Request, body: IDs) -> HTTPResponse:
 
 
 @download.post("/retry")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=IDs)
 async def retry_tasks(request: Request, body: IDs) -> HTTPResponse:
     """Retry the download tasks.
@@ -447,7 +457,7 @@ async def retry_tasks(request: Request, body: IDs) -> HTTPResponse:
 
 
 @download.post("/delete")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_CHANGE.role)
 @validate(json=DownloadDel)
 async def delete_tasks(request: Request, body: DownloadDel) -> HTTPResponse:
     """Delete the download tasks.
@@ -472,7 +482,7 @@ async def delete_tasks(request: Request, body: DownloadDel) -> HTTPResponse:
 
 
 @download.get("/stats")
-@authorize(role=UserRole.ADMIN)
+@authorize(role=ADMIN_PREVIEW.role)
 async def get_stats(request: Request):
     """Get download statistics.
 
@@ -496,3 +506,48 @@ async def get_stats(request: Request):
                     break
     finally:
         syncer.decelerate()
+
+
+@download.get("/plan/replacement/<operation_id:uuid>")
+@authorize(role=UserRole.ADMIN)
+async def replacement_status(request: Request, operation_id: UUID) -> HTTPResponse:
+    """Read an existing review for the signed-in administrator.
+
+    Args:
+        request: Authenticated session.
+        operation_id: Review returned by the assistant or MCP.
+
+    Returns:
+        Frozen preview and current operation status.
+    """
+    return json(
+        await PlanReplacementService.status(str(operation_id), request.ctx.user),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@download.post("/plan/replacement/<operation_id:uuid>/decision")
+@authorize(role=UserRole.ADMIN)
+@validate(json=ReplacementDecision)
+async def decide_replacement(
+    request: Request, operation_id: UUID, body: ReplacementDecision
+) -> HTTPResponse:
+    """Record an explicit decision from the review card.
+
+    Args:
+        request: Authenticated browser session.
+        operation_id: Account-owned review.
+        body: Displayed digest and the user's decision.
+
+    Returns:
+        Latest operation receipt including the replacement identity when committed.
+    """
+    return json(
+        await PlanReplacementService.decide(
+            str(operation_id),
+            body.digest,
+            approve=body.approve,
+            user=request.ctx.user,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )

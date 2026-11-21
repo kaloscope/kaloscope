@@ -56,6 +56,10 @@ export function assistantDestination(
   if (!target) return null;
 
   const id = target.resource_id;
+  if (target.page === 'dashboard' || target.page === 'web_search') {
+    const expected = target.page === 'dashboard' ? '/dashboard' : '/websearch/global';
+    return id == null && path === expected ? { path: expected, target } : null;
+  }
   if (target.page === 'workflows') {
     return id == null && path === workflowPath ? { path, target } : null;
   }
@@ -77,6 +81,13 @@ export function assistantDestination(
     valid = path === `${workflowPath}/${id}` || (result.name === 'navigate' && path === `${workflowPath}/r/${id}`);
   } else if (target.page === 'media_library') {
     valid = path === `${mediaPath}/${id}`;
+  } else if (target.page === 'resume_reading' || target.page === 'play_video') {
+    const libraryId = result.data.library_id;
+    valid =
+      typeof libraryId === 'number' &&
+      Number.isSafeInteger(libraryId) &&
+      libraryId > 0 &&
+      path === `${mediaPath}/${libraryId}/${id}`;
   } else if (target.page === 'media_item') {
     // the server resolves the item's own library into the path
     valid = new RegExp(`^${mediaPath}/[1-9]\\d*/${id}$`).test(path);

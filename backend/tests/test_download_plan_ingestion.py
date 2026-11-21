@@ -348,6 +348,29 @@ def test_add_then_reuse(tmp_path):
     asyncio.run(run())
 
 
+def test_duplicate_skips_binding(tmp_path, monkeypatch):
+    async def run():
+        async with database() as (owner, _):
+            data = await libraries(tmp_path)
+            validation = await reviewed(owner, data)
+            first = await service.DownloadPlanService.create_once(
+                creation(data, validation), owner
+            )
+
+            ensure = AsyncMock()
+            monkeypatch.setattr(service.MediaLibService, "ensure_ingestion", ensure)
+            duplicate = await service.DownloadPlanService.create_once(
+                creation(data, validation, request_id=uuid4()), owner
+            )
+
+            assert not duplicate["created"]
+            assert duplicate["duplicate_plan_id"] == first["plan_id"]
+            ensure.assert_not_awaited()
+            assert await DownloadPlan.all().count() == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("change", ["added", "reordered", "edited", "removed"])
 @pytest.mark.parametrize("bound", [False, True], ids=["add", "reuse"])
 def test_changed_bindings(tmp_path, change, bound):
@@ -993,5 +1016,36 @@ def test_completion_to_ingestion(tmp_path, monkeypatch):
             assert item.title == "Lantern & Rain"
             logs = await FlowLog.filter(graph_id=data.movie.id).values()
             assert logs and all(log["exc_info"] is None for log in logs)
+
+    asyncio.run(run())
+
+
+def test_existing_binding_failure(tmp_path, monkeypatch):
+    async def run():
+        async with database() as (owner, _):
+            data = await libraries(tmp_path)
+            await FlowTrigger.create(
+                category="ingest", rel_id=data.movies.id, graph=data.movie, priority=3
+            )
+            validation = await reviewed(owner, data)
+            body = creation(data, validation)
+            before = await bindings(data.movies.id)
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    DownloadPlan,
+                    "create",
+                    AsyncMock(side_effect=IntegrityError("storage")),
+                )
+                failed = await service.DownloadPlanService.create_once(body, owner)
+            assert (
+                failed["failed"] and failed["retryable"] and "plan_error" not in failed
+            )
+            assert (
+                not await DownloadPlan.exists()
+                and await bindings(data.movies.id) == before
+            )
+            assert (await service.DownloadPlanService.create_once(body, owner))[
+                "created"
+            ]
 
     asyncio.run(run())

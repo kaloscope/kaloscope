@@ -11,11 +11,17 @@ import pytest
 
 from app.core.ai import history, tools
 from app.core.config import KaloscopeConfig
-from app.core.dl.driver import DownloadSnapshot, DownloadSource, DownloadState
+from app.core.dl.driver import (
+    DownloadAction,
+    DownloadSnapshot,
+    DownloadSource,
+    DownloadState,
+)
 from app.core.dl.rpc import RpcConfig, RpcDriver
 from app.core.exceptions import ErrorCode, ForbiddenException, KaloscopeException
 from app.models.assistant import (
     AssistantConversation,
+    AssistantToolCall,
     AssistantTurn,
     ConversationCreate,
 )
@@ -32,6 +38,7 @@ from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
 from app.models.user import Permissions, UserRole
 from app.services import download as service
 from app.services.assistant import AssistantService
+from app.services.assistant_reviews import assistant_review
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.mcp import MCPAccessTokenService
 from app.utils.bittorrent import decode_torrent
@@ -333,6 +340,87 @@ def test_validation(monkeypatch, item, sources, path, kind):
     asyncio.run(run())
 
 
+def test_deleted_submission(monkeypatch):
+    driver = Rpc()
+    monkeypatch.setattr(
+        driver, "capabilities", AsyncMock(return_value={DownloadAction.DELETE})
+    )
+    monkeypatch.setattr(driver, "delete", AsyncMock())
+    _, client = setup(monkeypatch, driver)
+
+    async def run():
+        async with database() as (owner, _), client:
+            graph, downloader, _ = await fixture_plan()
+            items = await searched(owner, graph.id, monkeypatch, driver, client)
+            settings_body = DownloadTaskCheck.model_validate(
+                settings(graph.id, items["r1"], downloader.id)
+            )
+            review = await service.DownloadTaskService.validate_request(
+                settings_body, owner
+            )
+            conversation = await AssistantConversation.create(
+                user_id=owner.id, title="Review"
+            )
+            turn = await AssistantTurn.create(
+                conversation=conversation,
+                request_id="task",
+                prompt="Download",
+                status="complete",
+            )
+            call = await AssistantToolCall.create(
+                turn=turn,
+                call_id=uuid4().hex,
+                name="validate_download_task",
+                status="complete",
+                arguments=settings_body.model_dump_json(),
+                result={"ok": True, "data": review},
+            )
+            body = DownloadTaskCreate(
+                request_id=review["request_id"],
+                confirmed=True,
+                info_hash=HASH,
+                **settings(graph.id, items["r1"], downloader.id),
+            )
+            submitted = await service.DownloadTaskService.create_once(body, owner)
+            await service.DownloadTaskService.delete(submitted["task_id"])
+            assert not await DownloadTask.exists()
+
+            replays = await asyncio.gather(
+                *(
+                    service.DownloadTaskService.create_once(body, owner)
+                    for _ in range(2)
+                )
+            )
+            changed = await service.DownloadTaskService.create_once(
+                body.model_copy(update={"dir": "/changed"}), owner
+            )
+            assert all(
+                r.get("outcome") == "absent"
+                and r["replayed"]
+                and not r["created"]
+                and r["task_id"] == submitted["task_id"]
+                for r in replays
+            )
+            assert (
+                changed["conflict"]
+                and len(driver.added) == 1
+                and not await DownloadTask.exists()
+            )
+            panel = await assistant_review(call.call_id, owner)
+            assert (
+                panel["status"] == "stale"
+                and panel["outcome"]["task_id"] == submitted["task_id"]
+            )
+
+            new = await service.DownloadTaskService.create_once(
+                body.model_copy(update={"request_id": uuid4()}), owner
+            )
+            assert new["created"] and new["task_id"] != submitted["task_id"]
+            assert len(driver.added) == 2
+
+    asyncio.run(run())
+
+
 def test_submission_and_replay(monkeypatch):
     driver = Rpc()
     _, client = setup(monkeypatch, driver)
@@ -412,6 +500,13 @@ def test_concurrent_retries(monkeypatch, kind):
             assert [result["replayed"] for result in results].count(False) == 1
             assert len(driver.added) == 1
             assert await DownloadTask.all().count() == 1
+            await DownloadTask.filter(id=results[0]["task_id"]).delete()
+            removed = await service.DownloadTaskService.create_once(body, owner)
+            assert (
+                removed["outcome"] == "absent"
+                and removed["task_id"] == results[0]["task_id"]
+            )
+            assert len(driver.added) == 1
 
     asyncio.run(run())
 
@@ -488,13 +583,21 @@ def test_offline_unknown(monkeypatch):
     asyncio.run(run())
 
 
-def test_ingestion(monkeypatch, tmp_path):
+@pytest.mark.parametrize("prebound", [True, False])
+def test_ingestion(monkeypatch, tmp_path, prebound):
     driver = Rpc(error=httpx.ConnectError("downloader connection refused"))
     _, client = setup(monkeypatch, driver)
 
     async def run():
         async with database() as (owner, _), client:
             data = await libraries(tmp_path)
+            if prebound:
+                await FlowTrigger.create(
+                    category="ingest",
+                    rel_id=data.movies.id,
+                    graph=data.movie,
+                    priority=3,
+                )
             items = await searched(owner, data.graph.id, monkeypatch, driver, client)
             fields = settings(
                 data.graph.id,
@@ -537,11 +640,17 @@ def test_ingestion(monkeypatch, tmp_path):
                 owner,
             )
 
-            assert check["valid"] and review["binding"] == "add"
-            assert "not only" in review["scope"]
-            assert not failed["created"] and failed["ingestion"]["binding"] == "added"
-            assert "retry with the same request_id" in failed["submit_error"]
-            assert kept == [*before, (data.movie.id, 3, False)]
+            assert check["valid"] and review["binding"] == (
+                "reuse" if prebound else "add"
+            )
+            assert "not only" in review["scope"] and not failed["created"]
+            if prebound:
+                assert failed["retryable"] and "submit_error" not in failed
+                assert failed["ingestion"]["binding"] == "reused" and kept == before
+            else:
+                assert failed["ingestion"]["binding"] == "added"
+                assert "retry with the same request_id" in failed["submit_error"]
+                assert kept == [*before, (data.movie.id, 3, False)]
             assert retried["created"] and retried["ingestion"]["binding"] == "reused"
             assert replayed["replayed"]
             assert replayed["ingestion"]["binding"] == "configured"

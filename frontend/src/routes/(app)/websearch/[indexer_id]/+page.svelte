@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { registerAssistantContext } from '$lib/assistant/context';
   import { enhance } from '$app/forms';
   import { beforeNavigate } from '$app/navigation';
   import { page } from '$app/state';
@@ -26,7 +27,7 @@
   import type { IndexerAuth, Page, Resource, Resp, ViewMode, ViewModes } from '$lib/types';
   import { sniffer } from '$lib/utils/browser';
   import { aspectRatio } from '$lib/utils/number';
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { queryParameters, ssp } from 'sveltekit-search-params';
   import type { PageData } from './$types';
@@ -271,6 +272,18 @@
       });
     }
   });
+  onMount(() =>
+    registerAssistantContext(() => {
+      const workflowId = Number(indexerId);
+      if (!Number.isSafeInteger(workflowId) || workflowId < 1 || String(workflowId) !== indexerId) return null;
+      return {
+        page_type: 'web_search',
+        route: `/websearch/${indexerId}`,
+        workflow_id: workflowId,
+        keyword: (query.keyword ?? '').slice(0, 255)
+      };
+    })
+  );
 </script>
 
 <Container class="pull-to-refresh" loading={$outerLoading}>

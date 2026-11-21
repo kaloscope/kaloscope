@@ -89,6 +89,8 @@ def request(app, *, body=BODY, authenticated=True):
         (routes.persistent_chat, {"conversation_id": 1}),
         (routes.list_models, {}),
         (routes.delete_conversations, {}),
+        (routes.record_device, {"conversation_id": 1, "call_id": "nav"}),
+        (routes.submit_answers, {"conversation_id": 1, "call_id": "question"}),
     ],
 )
 def test_login_required(application, handler, kwargs):

@@ -16,6 +16,7 @@ from app.models.ai import AIProviderPreset
 from app.models.assistant import AssistantTurn
 from app.models.user import UserInfo, UserRole
 from app.services import assistant as service
+from app.services.subscription_intent import SubscriptionIntent
 
 TURN_IDS = count(1)
 
@@ -49,6 +50,8 @@ def make_turn(text="查看 AI 节点", *, context=None) -> AssistantTurn:
         AssistantTurn,
         SimpleNamespace(
             id=next(TURN_IDS),
+            request_id="fixture",
+            retry_of=None,
             conversation_id=1,
             model={"provider_id": 1, "model_id": "test-model"},
             prompt=text,
@@ -63,7 +66,9 @@ def make_turn(text="查看 AI 节点", *, context=None) -> AssistantTurn:
 def stored_context(monkeypatch):
     """Isolate SDK transport; persistence and history use separate database tests."""
 
-    async def prepare(_client, turn, _user, prompt, _schemas, _preset, continuation=()):
+    async def prepare(
+        _client, turn, _user, prompt, _schemas, _preset, continuation=(), trailing=None
+    ):
         return (
             [
                 {"role": "system", "content": prompt},
@@ -91,7 +96,12 @@ def stored_context(monkeypatch):
     monkeypatch.setattr(
         service.AssistantToolCall,
         "filter",
-        lambda **_: SimpleNamespace(update=AsyncMock()),
+        lambda **_: SimpleNamespace(
+            update=AsyncMock(),
+            select_related=lambda *_: SimpleNamespace(
+                first=AsyncMock(return_value=None)
+            ),
+        ),
     )
 
 
@@ -1366,3 +1376,142 @@ def test_network_timeout(monkeypatch):
     events = asyncio.run(collect())
 
     assert events[-1].data == {"code": "ai_timeout"}
+
+
+def test_question_suspends_batch(monkeypatch):
+    calls = [
+        call_delta("create_download_task", id="write"),
+        call_delta("ask_user", id="ask", index=1),
+    ]
+    configure(
+        monkeypatch,
+        lambda _: response(
+            [chunk({"role": "assistant", "tool_calls": calls}, "tool_calls")]
+        ),
+    )
+    execute = AsyncMock(
+        return_value={"ok": True, "data": {"resources": [], "questions": []}}
+    )
+    monkeypatch.setattr(service, "execute_tool", execute)
+
+    events = asyncio.run(collect(make_turn("Which plan?")))
+
+    assert [e.data["name"] for e in events if e.event == "tool_start"] == ["ask_user"]
+    assert events[-1].event == "done"
+    execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize("subscription", [False, True])
+def test_answer_never_approves(monkeypatch, subscription):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return response(
+                [
+                    chunk(
+                        {
+                            "role": "assistant",
+                            "tool_calls": [call_delta("apply_download_plan_change")],
+                        },
+                        "tool_calls",
+                    )
+                ]
+            )
+        return response(
+            [chunk({"role": "assistant", "content": "Preview required."}, "stop")]
+        )
+
+    configure(monkeypatch, handler)
+    execute = AsyncMock()
+    monkeypatch.setattr(service, "execute_tool", execute)
+    turn = make_turn("同意")
+    turn.request_id = "answer-" + "a" * 32
+    order = SubscriptionIntent("帮我订阅《Lantern》", [turn.id], [], True)
+    monkeypatch.setattr(
+        service,
+        "subscription_intent",
+        AsyncMock(return_value=order if subscription else None),
+    )
+
+    events = asyncio.run(collect(turn))
+
+    assert events[-1].event == "done"
+    assert not next(e.data for e in events if e.event == "tool_result")["ok"]
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("role", [UserRole.USER, UserRole.ADMIN])
+def test_search_followup(monkeypatch, role):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return response([chunk({"role": "assistant", "content": "Done."}, "stop")])
+
+    configure(monkeypatch, handler)
+    monkeypatch.setattr(
+        service.AssistantSessionService,
+        "reviewed",
+        AsyncMock(return_value={"search_indexer"}),
+    )
+    user = cast(UserInfo, SimpleNamespace(id=1, role=role))
+    turn = make_turn(
+        "重新查询我的收藏",
+        context={"page_type": "web_search", "route": "/websearch/1", "workflow_id": 1},
+    )
+    assert asyncio.run(collect(turn, user))[-1].event == "done"
+    assert {item["function"]["name"] for item in requests[0]["tools"]} >= {
+        "list_indexer_favorites",
+        "set_indexer_favorite",
+        "search_indexer",
+    }
+
+
+def test_device_handoff(monkeypatch):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        assert len(requests) == 1
+        return response(
+            [
+                chunk(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            call_delta(
+                                "navigate", '{"page":"play_video","resource_id":7}'
+                            )
+                        ],
+                    },
+                    "tool_calls",
+                )
+            ]
+        )
+
+    configure(monkeypatch, handler)
+    monkeypatch.setattr(
+        service,
+        "execute_tool",
+        AsyncMock(
+            return_value={
+                "ok": True,
+                "data": {
+                    "target": {"page": "play_video", "resource_id": 7},
+                    "library_id": 1,
+                    "path": "/medialibs/1/7",
+                },
+            }
+        ),
+    )
+    events = asyncio.run(collect(make_turn("播放选中的影片")))
+    assert events[-1].event == "done"
+    assert not any(event.event == "text_delta" for event in events)
+    assert (
+        next(
+            event.data["data"] for event in events if event.event == "tool_result"
+        ).get("device_outcome")
+        is None
+    )

@@ -657,6 +657,7 @@ def test_recorded_rule_error(tmp_path, partial):
             )
             assert await syncer.transfer_files(task, task.files)
             await task.refresh_from_db()
+            assert task.last_transfer_failed is False
             recorded = dict(task.transfer_targets)
             task.sub_pattern = "("
             if partial:
@@ -669,6 +670,7 @@ def test_recorded_rule_error(tmp_path, partial):
             assert await syncer.transfer_files(task, task.files) is not partial
             await task.refresh_from_db()
             assert task.transfer_targets == recorded
+            assert task.last_transfer_failed is partial
 
     asyncio.run(run())
 

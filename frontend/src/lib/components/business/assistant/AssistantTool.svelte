@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
+  import { isAssistantReview, scheduleDetail } from '$lib/assistant/reviews';
   import type { AssistantTool } from '$lib/assistant/session';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -17,9 +18,8 @@
   const {
     tool,
     callNumber,
-    unsaved = false,
-    onplan
-  }: { tool: AssistantTool; callNumber?: number; unsaved?: boolean; onplan?: () => void } = $props();
+    unsaved = false
+  }: { tool: AssistantTool; callNumber?: number; unsaved?: boolean } = $props();
 
   const trialStatus = $derived.by(() => {
     if (tool.name !== 'run_workflow' || tool.status !== 'complete' || !tool.result?.ok) return null;
@@ -140,7 +140,16 @@
     return icons.subtractCircle;
   });
 
-  const detail = $derived(tool.result?.data ? JSON.stringify(tool.result.data, null, 2) : '');
+  const answers = $derived(
+    tool.name === 'ask_user' && tool.result?.ok
+      ? (tool.result.data as import('$lib/types').QuestionCard | undefined)?.summary
+      : null
+  );
+  const detail = $derived(
+    tool.name !== 'ask_user' && tool.result?.data
+      ? JSON.stringify(tool.result.data, tool.name.includes('workflow_schedule') ? scheduleDetail : undefined, 2)
+      : ''
+  );
   const error = $derived(
     tool.result?.error
       ? $_(`assistant.errors.${tool.result.error.code}`, {
@@ -196,6 +205,19 @@
 {:else}
   <div class="flex min-h-7 items-center gap-2 px-2 text-xs text-base-content/60">{@render row()}</div>
 {/if}
+{#if tool.name === 'navigate' && tool.result?.data?.device_outcome}
+  <p class="ml-8 text-xs" role="status">{$_(`assistant.device.${tool.result.data.device_outcome}`)}</p>
+{/if}
+{#if answers?.length}
+  <dl class="ml-8 grid gap-1 text-sm">
+    {#each answers as answer (answer.id)}
+      <div>
+        <dt class="text-xs text-base-content/65">{answer.title || $_('assistant.question.plan_title')}</dt>
+        <dd>{answer.skipped ? $_('assistant.question.skipped') : answer.values.join(' · ')}</dd>
+      </div>
+    {/each}
+  </dl>
+{/if}
 {#if tool.name === 'preview_workflow_draft' && tool.result?.ok && tool.result.data?.proposal_id}
   <p class="ml-8 text-xs leading-5 text-base-content/60">
     {#if tool.proposal?.status === 'saved'}
@@ -218,14 +240,12 @@
     {$_(replayed ? 'assistant.create.replayed' : 'assistant.create.created', [String(name), Number(workflow_id)])}
   </p>
 {/if}
-{#if onplan && tool.name === 'validate_download_plan' && tool.result?.ok && tool.result.data?.valid && !tool.result.data.ingestion}
-  <button type="button" class="btn ml-8 btn-outline btn-sm" onclick={onplan}>
-    {$_('assistant.plan.review')}
-  </button>
-{/if}
 {#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.created}
   <p class="ml-8 text-xs leading-5 text-base-content/60">
-    {$_('assistant.plan.created', Number(tool.result.data.plan_id))}
+    {$_(
+      tool.result.data.already_exists ? 'assistant.review.plan_exists' : 'assistant.plan.created',
+      Number(tool.result.data.plan_id)
+    )}
   </p>
 {/if}
 {#if tool.name === 'create_download_plan' && tool.result?.ok && tool.result.data?.confirmation_required}
@@ -239,7 +259,7 @@
       livePlan.counts.remaining
     ])}
   </p>
-{:else if changeKind && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
+{:else if changeKind && changeKind !== 'plan_change' && !isAssistantReview(tool.result) && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{changeMessage(changeKind, 'reviewed')}</p>
 {/if}
 {#if batchId !== null}

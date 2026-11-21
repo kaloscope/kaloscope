@@ -1,7 +1,7 @@
 """Define MCP access tokens, requests, and public tool results."""
 
 from enum import StrEnum, auto
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -11,6 +11,7 @@ from pydantic import (
     RootModel,
     SerializerFunctionWrapHandler,
     model_serializer,
+    model_validator,
 )
 from tortoise import timezone
 from tortoise.fields import (
@@ -19,6 +20,7 @@ from tortoise.fields import (
     DatetimeField,
     ForeignKeyField,
     ForeignKeyRelation,
+    JSONField,
 )
 
 from app.core.dl.driver import DownloadAction, DownloadState
@@ -46,10 +48,22 @@ class MCPTokenScope(StrEnum):
     READ_WRITE = auto()
 
 
+class MCPTokenDomain(StrEnum):
+    """Limit an MCP credential to one operational tool catalog."""
+
+    ALL = auto()
+    MEDIA = auto()
+    DOWNLOADS = auto()
+    WORKFLOWS = auto()
+    SYSTEM = auto()
+
+
 class MCPUserInfo(UserInfo):
     """Carry a verified token grant alongside its owner's current identity."""
 
     mcp_scope: MCPTokenScope
+    mcp_domain: MCPTokenDomain = MCPTokenDomain.ALL
+    mcp_library_ids: list[int] | None = None
 
 
 class MCPAccessToken(TortoiseModel):
@@ -65,6 +79,13 @@ class MCPAccessToken(TortoiseModel):
     scope = CharEnumField(
         enum_type=MCPTokenScope, max_length=32, default=MCPTokenScope.READ_ONLY
     )
+    domain = CharEnumField(
+        enum_type=MCPTokenDomain,
+        max_length=16,
+        default=MCPTokenDomain.ALL,
+        db_default=MCPTokenDomain.ALL,
+    )
+    library_ids = JSONField[list[int] | None](null=True)
     expires_at = DatetimeField()
     last_used_at = DatetimeField(null=True)
 
@@ -95,6 +116,27 @@ class MCPAccessTokenCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     expires_in_days: Literal[30, 90, 365] = 90
     scope: MCPTokenScope = MCPTokenScope.READ_ONLY
+    domain: MCPTokenDomain = MCPTokenDomain.ALL
+    library_ids: list[Annotated[int, Field(strict=True, gt=0)]] | None = Field(
+        default=None, min_length=1, max_length=128
+    )
+
+    @model_validator(mode="after")
+    def validate_libraries(self) -> Self:
+        """Bind an explicit library selection to the media domain.
+
+        Returns:
+            The validated grant.
+
+        Raises:
+            ValueError: If the requested domain or library list is invalid.
+        """
+        if self.library_ids is not None and (
+            self.domain != MCPTokenDomain.MEDIA
+            or len(set(self.library_ids)) != len(self.library_ids)
+        ):
+            raise ValueError("Select distinct libraries for a media-domain token.")
+        return self
 
 
 class Result(BaseModel):
@@ -147,6 +189,60 @@ class PlanOptionsResult(Result):
     timezone: Literal["UTC"]
     defaults: dict[str, JSONType]
     creation_rules: str
+
+
+class FavoriteSummary(Result):
+    """Identify a personal favorite without disclosing source URLs."""
+
+    workflow_id: int
+    resource_id: str
+    title: str
+
+
+class FavoritesPage(PageResult[FavoriteSummary]):
+    """Describe the requested page and whether another page is available."""
+
+    next_page: int | None
+
+
+class PersonalPreferences(Result):
+    """Describe the dashboard, vibration and homepage settings of one account."""
+
+    homepage: str
+    vibration: bool
+    recent_reads: bool
+    recent_watches: bool
+    recent_searches: bool
+
+
+class FavoriteStateResult(Result):
+    """Report a resource's current personal favorite state."""
+
+    workflow_id: int
+    resource_id: str
+    favorite: bool
+
+
+class IngestionDiagnosis(Result):
+    """Describe the selected subscription, check, or task and its recorded evidence."""
+
+    stage: str
+    task_id: int | None = None
+    attempt_id: int | None = None
+    plan_id: int | None = None
+    tasks: list[dict[str, JSONType]] | None = None
+    attempts: list[dict[str, JSONType]] | None = None
+    targets: list[dict[str, JSONType]] | None = None
+    next_page: int | None = None
+
+
+class DownloadIndexerInfo(Result):
+    """Describe an accessible published search source and its public inputs."""
+
+    workflow_id: int
+    name: str
+    only_preview: bool
+    filters: dict[str, dict[str, JSONType]]
 
 
 class IndexerSearchResult(Result):
@@ -237,6 +333,32 @@ class PlanChangeReviewResult(Result):
         description="Scheduling `before`/`after` from stored settings and its "
         "`rule`; never an exact run time."
     )
+
+
+class WorkspaceFacts(Result):
+    """Expose the requested diagnostic topic and observed facts."""
+
+    topic: str
+
+
+class AdminReviewResult(Result):
+    """Identify a frozen administrative proposal and its current outcome."""
+
+    action: str
+    status: str
+    preview: dict[str, JSONType]
+
+
+class ReplacementResult(Result):
+    """Describe a frozen plan replacement or an existing decision."""
+
+    valid: bool
+    plan_id: int
+    status: str
+    before: dict[str, JSONType]
+    after: dict[str, JSONType]
+    operation_id: str | None = None
+    new_plan_id: int | None = None
 
 
 class PlanChangeApplyResult(Result):
@@ -735,6 +857,9 @@ class MediaResult(RecordResult):
 class MediaDetails(MediaResult):
     """Include current metadata and visible relatives for all supported media kinds."""
 
+    app_path: str = Field(
+        description="Relative page that opens this item on a signed-in device."
+    )
     lib: LibraryResult = Field(
         description="Settings of the item's owning media library."
     )
