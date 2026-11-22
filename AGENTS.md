@@ -146,10 +146,10 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
   Preserve task cancellation and resource cleanup. Delayed download actions follow the `DLSyncer.publish` path.
 - Reuse application HTTP clients and `backend/app/core/network.py` for ordinary external requests to retain proxy, DNS,
   cookie, and cache behavior. Keep specialized clients within their existing lifecycle management.
-- Assistant tools in `backend/app/core/ai/tools.py` and MCP tools in `backend/app/mcp.py` bypass route decorators. Mark
-  admin-only assistant tools with `admin=True`, check roles inside MCP tools (for example with `_require_admin`), and apply
-  the caller's resource permissions in both. The system prompt and tool schemas consume a fixed context budget:
-  `test_floor_catalog` in `backend/tests/test_core_ai_tools.py` caps fixed text at 24,796 bytes per catalog state.
+- Assistant tools in `backend/app/core/ai/tools.py` and MCP tools in `backend/app/mcp.py` bypass route decorators. Require
+  an administrator for both catalogs and tool dispatch. Preserve MCP token scopes, domains and library restrictions.
+  The system prompt and tool schemas consume a fixed context budget. `test_floor_catalog` in `backend/tests/test_core_ai_tools.py`
+  caps fixed text at 24,796 bytes per catalog state.
   Measure growth with `fixed_size(...)` and offset it instead of loosening assertions.
 
 ### Assistant interactions and MCP scopes

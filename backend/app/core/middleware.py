@@ -8,6 +8,7 @@ from sanic.response import JSONResponse
 from tortoise import timezone
 
 from app.core.constants import ENCODING, MCP_PATH, SESSION_ID, URL_PREFIX
+from app.core.decorators import require_browser_admin
 from app.core.exceptions import ErrorCode, UnauthorizedException
 from app.models.user import UserInfo, UserSession
 from app.services.mcp import MCPAccessTokenService
@@ -31,6 +32,7 @@ async def on_request(request: Request):
 
     Raises:
         UnauthorizedException: If the required credential is absent or invalid.
+        ForbiddenException: If the account lacks current administrator access for AI.
     """
     app = request.app
     # check if the request path is in the exclude paths
@@ -61,6 +63,11 @@ async def on_request(request: Request):
     if user.expire_at < now:
         sessions.pop(token, None)
         raise UnauthorizedException(ErrorCode.LOGIN_EXPIRED)
+    # a cached browser session can outlive its administrator grant
+    if request.path.startswith(
+        (f"{URL_PREFIX}/assistant/", f"{URL_PREFIX}/mcp/", f"{URL_PREFIX}/ai/")
+    ):
+        await require_browser_admin(user)
     # update the expire time
     user.expire_at = now + timedelta(hours=app.config.TOKEN_EXPIRATION_HOURS)
     user.last_activity = now

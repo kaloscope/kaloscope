@@ -103,15 +103,9 @@ def test_grants():
     read_names = {tool["function"]["name"] for tool in tools.tool_schemas(reader)}
     admin_names = {tool["function"]["name"] for tool in tools.tool_schemas(ADMIN)}
 
-    search = next(
-        t["function"]
-        for t in tools.tool_schemas(reader)
-        if t["function"]["name"] == "search_indexer"
-    )
-    assert "sources" not in search["parameters"]["properties"]
-    assert read_names == {
+    assert read_names == set()
+    assert admin_names == {
         "discover_actions",
-        "search_indexer",
         "list_workflows",
         "list_workflow_jobs",
         "get_workflow",
@@ -128,8 +122,6 @@ def test_grants():
         "get_download_plan",
         "list_download_plans",
         "navigate",
-    }
-    assert admin_names - read_names == {
         "list_download_tasks",
         "get_download_task",
         "validate_workflow",
@@ -159,6 +151,9 @@ def test_domain_catalog(domain):
                 call_id="discover",
             )
         )
+        if principal.role != UserRole.ADMIN:
+            assert not offered and report["error"]["code"] == "forbidden"
+            continue
         assert report["ok"]
         assert set(report["data"]["tools"]) == offered - {
             "navigate",
@@ -368,12 +363,12 @@ def test_account_scope():
             )
 
             listing = await tools.execute_tool(
-                "list_workflows", "{}", reader, conversation_id=1, call_id="test"
+                "list_workflows", "{}", ADMIN, conversation_id=1, call_id="test"
             )
             details = await tools.execute_tool(
                 "get_workflow",
                 json.dumps({"workflow_id": visible.id}),
-                reader,
+                ADMIN,
                 conversation_id=1,
                 call_id="test",
             )
@@ -393,7 +388,10 @@ def test_account_scope():
             )
 
             assert listing["ok"] is True
-            assert [item["id"] for item in listing["data"]["items"]] == [visible.id]
+            assert {item["id"] for item in listing["data"]["items"]} == {
+                visible.id,
+                private.id,
+            }
             assert details["ok"] is True
             assert details["data"]["id"] == visible.id
             assert details["data"]["graph_source"] == "saved_draft"
@@ -404,8 +402,8 @@ def test_account_scope():
             assert snapshot.conversation_id == 1
             assert snapshot.workflow_id == visible.id
             assert snapshot.document == {"nodes": [], "edges": []}
-            assert denied["error"]["code"] == ErrorCode.PERMISSION_DENIED
-            assert logs["error"]["code"] == ErrorCode.PERMISSION_DENIED
+            assert denied["error"]["code"] == ErrorCode.FORBIDDEN
+            assert logs["error"]["code"] == ErrorCode.FORBIDDEN
             assert "Private" not in json.dumps(denied)
 
     asyncio.run(run())
@@ -506,9 +504,9 @@ def test_navigation_scope():
             )
 
             assert edit["data"]["path"] == f"/settings/workflows/graphs/{graph.id}"
-            assert view["data"]["path"] == f"/settings/workflows/graphs/r/{graph.id}"
-            assert listing["data"]["path"] == "/settings/workflows/graphs"
-            assert failure["error"]["code"] == "permission_denied"
+            assert view["error"]["code"] == "forbidden"
+            assert listing["error"]["code"] == "forbidden"
+            assert failure["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 

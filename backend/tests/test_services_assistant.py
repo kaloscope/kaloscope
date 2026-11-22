@@ -1461,7 +1461,12 @@ def test_search_followup(monkeypatch, role):
         "重新查询我的收藏",
         context={"page_type": "web_search", "route": "/websearch/1", "workflow_id": 1},
     )
-    assert asyncio.run(collect(turn, user))[-1].event == "done"
+    result = asyncio.run(collect(turn, user))[-1]
+    if role == UserRole.USER:
+        assert result.event == "error" and result.data["code"] == "forbidden"
+        assert not requests
+        return
+    assert result.event == "done"
     assert {item["function"]["name"] for item in requests[0]["tools"]} >= {
         "list_indexer_favorites",
         "set_indexer_favorite",

@@ -13,7 +13,7 @@ from app.models.assistant import AssistantTurn, ConversationCreate
 from app.models.download import DownloadPlan, DownloadTask, TransferMethod
 from app.models.flow import FlowGraph, FlowLog
 from app.models.media import MediaItem, MediaLib
-from app.models.user import Permissions, PermType, UserPermission, UserRole
+from app.models.user import Permissions, UserRole
 from app.services import download as service
 from app.services.assistant import AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
@@ -233,23 +233,18 @@ def test_permissions():
                 media_lib_ids=[data.movies.id],
             )
 
-            visible = (await listed(owner, keyword="lantern"))["data"]
-            denied = await listed(owner, workflow_id=data.draft.id)
-            missing = await listed(owner, workflow_id=9999)
-            owner.perms.media_lib_ids = []
-            narrowed = (await listed(owner, keyword="lantern"))["data"]
-
-            ids = {plan.id: name for name, plan in data.plans.items()}
-            # draft-indexer and hidden-library plans stay out of the exact total
-            assert {ids[item["plan_id"]] for item in visible["items"]} == {
-                "same",
-                "other",
-            }
+            assert (await listed(owner, keyword="lantern"))["error"][
+                "code"
+            ] == "forbidden"
+            visible = await service.DownloadPlanService.list_plans(
+                service.DownloadPlanQuery(keyword="lantern"), owner
+            )
             assert visible["total"] == 2
-            assert denied["error"]["code"] == "permission_denied"
-            assert missing["error"]["code"] == "not_found"
-            assert narrowed["total"] == 1
-            assert [ids[item["plan_id"]] for item in narrowed["items"]] == ["same"]
+            owner.perms.media_lib_ids = []
+            narrowed = await service.DownloadPlanService.list_plans(
+                service.DownloadPlanQuery(keyword="lantern"), owner
+            )
+            assert [plan["id"] for plan in narrowed["items"]] == [data.plans["same"].id]
 
     asyncio.run(run())
 
@@ -257,43 +252,14 @@ def test_permissions():
 def test_mcp_parity():
     async def run():
         async with application() as app:
-            data = await overlaps()
-            reader = app.shared_ctx.sessions["reader"]
-            for rel_type, rel_id in (
-                (PermType.INDEXER, data.graph.id),
-                (PermType.INDEXER, data.other.id),
-                (PermType.MEDIA_LIB, data.movies.id),
-            ):
-                await UserPermission.create(
-                    user_id=reader.id, rel_type=rel_type, rel_id=rel_id
-                )
+            await overlaps()
             before = await DownloadPlan.all().values()
             arguments = {"keyword": "Lantern", "ordering": "-keyword", "page_size": 2}
 
-            for account, permissions in (
-                (
-                    "reader",
-                    Permissions(
-                        indexer_ids=[data.graph.id, data.other.id],
-                        media_lib_ids=[data.movies.id],
-                    ),
-                ),
-                ("admin", None),
-            ):
-                session = app.shared_ctx.sessions[account].model_copy(
-                    update={"perms": permissions}
-                )
-                mcp = await call(app, "list_download_plans", arguments, token=account)
-                assistant = await listed(session, **arguments)
-
-                assert not mcp.get("isError"), mcp
-                assert mcp["structuredContent"] == loads(dumps(assistant["data"]))
-            denied = await call(
-                app, "list_download_plans", {"workflow_id": data.draft.id}
-            )
-
+            mcp = await call(app, "list_download_plans", arguments)
+            assistant = await listed(app.shared_ctx.sessions["admin"], **arguments)
+            assert mcp["structuredContent"] == loads(dumps(assistant["data"]))
             assert mcp["structuredContent"]["total"] == 4
-            assert denied["isError"]
             assert await DownloadPlan.all().values() == before
 
     asyncio.run(run())
@@ -309,10 +275,10 @@ def test_route_parity():
             page = await service.DownloadPlanService.list_plans(
                 service.DownloadPlanQuery(keyword="2019"), owner
             )
-            listed_page = (await listed(owner, keyword="2019"))["data"]
+            assert (await listed(owner, keyword="2019"))["error"]["code"] == "forbidden"
 
             # the page keeps its existing fields and gains the stored schedule state
-            assert page["total"] == listed_page["total"] == 0
+            assert page["total"] == 0
             owner.perms.media_lib_ids = [data.movies.id]
             page = await service.DownloadPlanService.list_plans(
                 service.DownloadPlanQuery(keyword="2019"), owner
@@ -536,6 +502,6 @@ def test_overlap_conversation(monkeypatch, verbose):
                 conversation_id=conversation["id"],
                 call_id="read",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())

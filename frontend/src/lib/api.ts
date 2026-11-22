@@ -4,6 +4,7 @@ import { UserRole } from '$lib/enums';
 import { token, user } from '$lib/stores.svelte';
 import type { BaseResp, Resp, User } from '$lib/types';
 import { sniffer } from '$lib/utils/browser';
+import { redirect } from '@sveltejs/kit';
 import ky, { isHTTPError } from 'ky';
 import { untrack } from 'svelte';
 
@@ -53,7 +54,8 @@ export const api = ky.create({
           // goto login page if unauthorized
           if (unauthorized) {
             token.current = null;
-            goto('/login');
+            user.current = null;
+            if (!options.context.layoutLoad) goto('/login');
           }
 
           if (message) error.message = message;
@@ -136,18 +138,20 @@ export function proxyImage(url: string | null, policy: boolean | 'auto' | 'store
 /**
  * Get current user's role, retaining fetched details in the shared state.
  *
+ * @param layoutLoad - Let the router handle expired sessions during a layout load.
  * @returns The current user's role.
  */
-export async function getCurrentRole(): Promise<keyof typeof UserRole | null> {
+export async function getCurrentRole(layoutLoad = false): Promise<keyof typeof UserRole | null> {
   const role = untrack(() => user.current?.role);
   if (role) {
     return role;
   }
   try {
-    const resp = await api.get('auth/current').json<Resp<User>>();
+    const resp = await api.get('auth/current', { context: { layoutLoad } }).json<Resp<User>>();
     user.current = resp.data;
     return resp.data.role ?? null;
-  } catch {
+  } catch (error) {
+    if (layoutLoad && isHTTPError(error) && error.response.status === 401) redirect(307, '/login');
     return null;
   }
 }

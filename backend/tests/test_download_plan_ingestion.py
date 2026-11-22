@@ -579,7 +579,8 @@ def test_mcp_scopes_and_parity(tmp_path):
                 conversation_id=1,
                 call_id="ingestion",
             )
-            reader = await call(app, "get_library_ingestion", arguments)
+            with pytest.raises(ForbiddenException):
+                await call(app, "get_library_ingestion", arguments, token="reader")
             denied = await tools.execute_tool(
                 "get_library_ingestion",
                 dumps(arguments).decode(),
@@ -622,7 +623,7 @@ def test_mcp_scopes_and_parity(tmp_path):
             assert not mcp.get("isError"), mcp
             assert mcp["structuredContent"] == loads(dumps(assistant["data"]))
             # ordinary accounts are never offered the administrator-only tool
-            assert reader["isError"] and denied["error"]["code"] == "forbidden"
+            assert denied["error"]["code"] == "forbidden"
             assert review["binding"] == "add"
             assert read_only["isError"] and "read-only" in str(read_only)
             assert unchanged == original and not planned
@@ -949,7 +950,7 @@ def test_ingestion_conversation(tmp_path, monkeypatch, verbose):
                 conversation_id=conversation["id"],
                 call_id="read",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 

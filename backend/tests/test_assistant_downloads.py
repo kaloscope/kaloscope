@@ -375,7 +375,7 @@ def test_navigation():
         )
 
         assert active["data"]["path"] == "/downloads/downloading"
-        assert completed["error"]["code"] == "permission_denied"
+        assert completed["error"]["code"] == "forbidden"
         assert task["error"]["code"] == "bad_request"
 
     asyncio.run(run())

@@ -1089,7 +1089,7 @@ def test_assistant_parity(monkeypatch):
         result = await tools.execute_tool(
             "validate_workflow_template",
             dumps(fixture).decode(),
-            READER,
+            ADMIN,
             conversation_id=1,
             call_id="validation",
         )

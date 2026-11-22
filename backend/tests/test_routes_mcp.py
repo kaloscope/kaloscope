@@ -17,8 +17,7 @@ from app.core.exceptions import error_handler
 from app.core.middleware import SessionHolder, on_request, on_response
 from app.mcp import close_mcp, start_mcp
 from app.models.mcp import MCPAccessToken
-from app.models.media import MediaLib
-from app.models.user import User, UserInfo, UserPermission, UserRole
+from app.models.user import User, UserInfo, UserRole
 from app.routes.auth import auth
 from app.routes.mcp import mcp
 from app.utils.json import dumps
@@ -58,7 +57,11 @@ async def client(monkeypatch):
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
-        for name, role in (("reader", UserRole.USER), ("admin", UserRole.ADMIN)):
+        for name, role in (
+            ("reader", UserRole.USER),
+            ("admin", UserRole.ADMIN),
+            ("other", UserRole.ADMIN),
+        ):
             user = await User.create(username=name, password="unused", role=role)
             now = timezone.now()
             app.shared_ctx.sessions[name] = UserInfo(
@@ -87,7 +90,7 @@ async def client(monkeypatch):
         BaseHTTPResponse._dumps = original_dumps
 
 
-async def issue(http, owner="reader", **body):
+async def issue(http, owner="admin", **body):
     """Create a dedicated token using a browser session.
 
     Args:
@@ -133,18 +136,46 @@ async def rpc(http, token, method="tools/list", params=None):
     )
 
 
+def test_reader_access(monkeypatch):
+    async def run():
+        async with client(monkeypatch) as (http, app):
+            issued = await issue(http, "admin")
+            owner = app.shared_ctx.sessions["admin"]
+            await User.filter(id=owner.id).update(role=UserRole.USER)
+            for method in ("initialize", "tools/list", "tools/call"):
+                denied = await rpc(http, issued["token"], method)
+                assert denied.status_code == 403
+            for session in ("reader", "admin"):
+                for method, path in (
+                    ("GET", "list"),
+                    ("POST", "create"),
+                    ("POST", f"{issued['id']}/delete"),
+                ):
+                    response = await http.request(
+                        method,
+                        f"{MCP_PATH}/token/{path}",
+                        headers={"Authorization": f"Bearer {session}"},
+                        json={"name": "denied"},
+                    )
+                    assert response.status_code == 403
+            assert await MCPAccessToken.all().count() == 1
+            assert (await MCPAccessToken.get(id=issued["id"])).last_used_at is None
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("expired", [False, True])
 def test_management(monkeypatch, expired):
     async def run():
         async with client(monkeypatch) as (http, app):
             issued = await issue(http)
-            other = await issue(http, "admin")
+            other = await issue(http, "other")
             if expired:
                 await MCPAccessToken.filter(id=issued["id"]).update(
                     expires_at=timezone.now() - timedelta(seconds=1)
                 )
             listed = await http.get(
-                f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer reader"}
+                f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer admin"}
             )
             records = listed.json()["data"]
             assert listed.headers["cache-control"] == "no-store"
@@ -155,7 +186,7 @@ def test_management(monkeypatch, expired):
             assert records[0]["scope"] == "read_only"
             assert records[0]["status"] == ("expired" if expired else "active")
 
-            for owner, id in (("admin", issued["id"]), ("reader", other["id"])):
+            for owner, id in (("other", issued["id"]), ("admin", other["id"])):
                 denied = await http.post(
                     f"{MCP_PATH}/token/{id}/delete",
                     headers={"Authorization": f"Bearer {owner}"},
@@ -167,24 +198,24 @@ def test_management(monkeypatch, expired):
 
             deleted = await http.post(
                 f"{MCP_PATH}/token/{issued['id']}/delete",
-                headers={"Authorization": "Bearer reader"},
+                headers={"Authorization": "Bearer admin"},
             )
 
             assert deleted.status_code == 204
             assert not await MCPAccessToken.filter(id=issued["id"]).exists()
             listed = await http.get(
-                f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer reader"}
+                f"{MCP_PATH}/token/list", headers={"Authorization": "Bearer admin"}
             )
             assert listed.json()["data"] == []
 
             missing = await http.post(
                 f"{MCP_PATH}/token/{issued['id']}/delete",
-                headers={"Authorization": "Bearer reader"},
+                headers={"Authorization": "Bearer admin"},
             )
             assert missing.status_code == 404
             assert (await rpc(http, issued["token"])).status_code == 401
             assert (await rpc(http, other["token"])).status_code == 200
-            assert len(app.shared_ctx.sessions) == 2
+            assert len(app.shared_ctx.sessions) == 3
 
     asyncio.run(run())
 
@@ -193,20 +224,20 @@ def test_session_independence(monkeypatch):
     async def run():
         async with client(monkeypatch) as (http, app):
             issued = await issue(http)
-            session_expiry = app.shared_ctx.sessions["reader"].expire_at
+            session_expiry = app.shared_ctx.sessions["admin"].expire_at
             response = await rpc(http, issued["token"])
             assert response.status_code == 200
             names = {tool["name"] for tool in response.json()["result"]["tools"]}
-            assert "get_download_plan" in names and "list_ai_providers" not in names
+            assert "get_download_plan" in names and "list_ai_providers" in names
             assert "set-cookie" not in response.headers
-            assert app.shared_ctx.sessions["reader"].expire_at == session_expiry
+            assert app.shared_ctx.sessions["admin"].expire_at == session_expiry
             assert issued["token"] not in app.shared_ctx.sessions
 
             logged_out = await http.post(
-                "/_api/auth/logout", headers={"Authorization": "Bearer reader"}
+                "/_api/auth/logout", headers={"Authorization": "Bearer admin"}
             )
             assert logged_out.status_code == 204
-            assert "reader" not in app.shared_ctx.sessions
+            assert "admin" not in app.shared_ctx.sessions
             assert (await rpc(http, issued["token"])).status_code == 200
             stored = await MCPAccessToken.get(id=issued["id"])
             assert stored.expires_at.isoformat() == issued["expires_at"]
@@ -269,44 +300,13 @@ def test_cookie_denied(monkeypatch):
     asyncio.run(run())
 
 
-def test_current_permissions(monkeypatch):
-    async def run():
-        async with client(monkeypatch) as (http, app):
-            issued = await issue(http)
-            user_id = app.shared_ctx.sessions["reader"].id
-            library = await MediaLib.create(
-                name="Visible", lib_type="movie", dir="/media", priority=1
-            )
-            request = {"name": "list_media_libraries", "arguments": {}}
-            response = await rpc(http, issued["token"], "tools/call", request)
-            assert response.json()["result"]["structuredContent"]["items"] == []
-
-            permission = await UserPermission.create(
-                user_id=user_id, rel_type="media_lib", rel_id=library.id
-            )
-            response = await rpc(http, issued["token"], "tools/call", request)
-            items = response.json()["result"]["structuredContent"]["items"]
-            assert [item["id"] for item in items] == [library.id]
-            await permission.delete()
-            response = await rpc(http, issued["token"], "tools/call", request)
-            assert response.json()["result"]["structuredContent"]["items"] == []
-
-            request = {"name": "list_ai_providers", "arguments": {}}
-            for role, denied in (("user", True), ("admin", False), ("user", True)):
-                await User.filter(id=user_id).update(role=role)
-                response = await rpc(http, issued["token"], "tools/call", request)
-                assert response.json()["result"].get("isError", False) is denied
-
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("body", [{"name": " "}, {"name": "Codex", "scope": "write"}])
 def test_invalid_create(monkeypatch, body):
     async def run():
         async with client(monkeypatch) as (http, _):
             response = await http.post(
                 f"{MCP_PATH}/token/create",
-                headers={"Authorization": "Bearer reader"},
+                headers={"Authorization": "Bearer admin"},
                 json=body,
             )
             assert response.status_code == 400

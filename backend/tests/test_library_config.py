@@ -1488,7 +1488,7 @@ def test_provenance(monkeypatch, tmp_path):
                 conversation_id=conversation["id"],
                 call_id="review",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
             assert refused["error"]["code"] == "forbidden"
 
     asyncio.run(run())
@@ -1512,7 +1512,10 @@ def test_mcp(monkeypatch, tmp_path):
                 "rename_template": MOVIE_TEMPLATE,
             }
 
-            denied = await call(app, "review_library_config", {"change": change})
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app, "review_library_config", {"change": change}, token="reader"
+                )
             reviewed = await call(
                 app, "review_library_config", {"change": change}, token="admin"
             )
@@ -1556,7 +1559,6 @@ def test_mcp(monkeypatch, tmp_path):
             saved = await call(app, "apply_media_change", arguments, token=write)
             replay = await call(app, "apply_media_change", arguments, token=write)
 
-            assert denied["isError"] and "not allowed" in str(denied)
             assert data["valid"] and data["naming"]["samples"]
             assert read_only["isError"] and "read-only" in str(read_only)
             assert altered["structuredContent"]["conflict"]

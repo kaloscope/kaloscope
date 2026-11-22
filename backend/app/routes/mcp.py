@@ -9,13 +9,14 @@ from app.core.decorators import authorize
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.mcp import handle_http
 from app.models.mcp import MCPAccessTokenCreate
+from app.models.user import UserRole
 from app.services.mcp import MCPAccessTokenService
 
 mcp = Blueprint("mcp", url_prefix="/mcp")
 
 
 @mcp.route("", methods=["POST", "GET", "DELETE"], strict_slashes=True)
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def dispatch(request: Request) -> HTTPResponse:
     """Accept authenticated MCP requests without creating another server process.
 
@@ -53,7 +54,7 @@ async def dispatch(request: Request) -> HTTPResponse:
 
 
 @mcp.get("/token/list")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def list_tokens(request: Request) -> HTTPResponse:
     """List the signed-in user's MCP tokens without revealing credentials.
 
@@ -70,7 +71,7 @@ async def list_tokens(request: Request) -> HTTPResponse:
 
 
 @mcp.post("/token/create")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=MCPAccessTokenCreate)
 async def create_token(request: Request, body: MCPAccessTokenCreate) -> HTTPResponse:
     """Issue a scoped MCP credential for the signed-in user.
@@ -89,7 +90,7 @@ async def create_token(request: Request, body: MCPAccessTokenCreate) -> HTTPResp
 
 
 @mcp.post("/token/<id:int>/delete")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def delete_token(request: Request, id: int) -> HTTPResponse:
     """Delete an active or expired token belonging to the signed-in user.
 

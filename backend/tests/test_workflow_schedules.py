@@ -1100,7 +1100,10 @@ def test_mcp(monkeypatch):
                 "timezone": "Asia/Shanghai",
             }
 
-            denied = await call(app, "review_workflow_schedule", {"change": values})
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app, "review_workflow_schedule", {"change": values}, token="reader"
+                )
             reviewed = await call(
                 app, "review_workflow_schedule", {"change": values}, token="admin"
             )
@@ -1139,7 +1142,6 @@ def test_mcp(monkeypatch):
                 token=write["token"],
             )
 
-            assert denied["isError"] and "not allowed" in str(denied)
             assert data["valid"] and data["workflow_id"] == graph.id
             assert read_only["isError"] and "read-only" in str(read_only)
             assert applied["structuredContent"]["outcome"] == "created"
@@ -1539,7 +1541,7 @@ def test_page_selection(monkeypatch):
                 conversation_id=conversation["id"],
                 call_id="history",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
             refused = await tools.execute_tool(
                 "review_workflow_schedule",

@@ -1414,7 +1414,7 @@ def test_scan_conversation(monkeypatch, tmp_path):
                 conversation_id=conversation["id"],
                 call_id="review",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
             assert refused["error"]["code"] == "forbidden"
 
     asyncio.run(run())
@@ -1620,7 +1620,8 @@ def test_mcp(monkeypatch, tmp_path):
             admin = app.shared_ctx.sessions["admin"]
             scan = {"action": "scan", "library_id": 60}
 
-            denied = await call(app, "review_library_scan", {"change": scan})
+            with pytest.raises(ForbiddenException):
+                await call(app, "review_library_scan", {"change": scan}, token="reader")
             reviewed = await call(
                 app, "review_library_scan", {"change": scan}, token="admin"
             )
@@ -1689,7 +1690,6 @@ def test_mcp(monkeypatch, tmp_path):
                 token=write,
             )
 
-            assert denied["isError"] and "not allowed" in str(denied)
             assert read_only["isError"] and "read-only" in str(read_only)
             assert scanned["structuredContent"]["outcome"] == "scanned"
             assert replay["structuredContent"]["replayed"]

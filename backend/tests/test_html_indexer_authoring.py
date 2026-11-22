@@ -774,7 +774,7 @@ def test_mcp_parity():
             assistant = await tools.execute_tool(
                 "validate_workflow_template",
                 dumps(fixture).decode(),
-                app.shared_ctx.sessions["reader"],
+                app.shared_ctx.sessions["admin"],
                 conversation_id=1,
                 call_id="html",
             )

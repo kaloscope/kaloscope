@@ -41,7 +41,7 @@ from app.models.download import (
 from app.models.flow import FlowGraph, FlowLog, GraphState
 from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
 from app.models.media import MediaLib
-from app.models.user import Permissions, PermType, UserPermission, UserRole
+from app.models.user import Permissions, UserRole
 from app.routes import download as download_routes
 from app.services import download as service
 from app.services.assistant import SYSTEM_PROMPT, AssistantService
@@ -563,29 +563,24 @@ def test_mcp():
         async with application() as app:
             graph, _, body = await fixture_plan()
             args = body.model_dump(mode="json")
-            for account in ("reader", "admin"):
-                denied = await call(
-                    app, "create_download_plan", {"creation": args}, token=account
-                )
-                assert (
-                    denied["isError"]
-                    and "only permits read-only" in denied["content"][0]["text"]
-                )
-
-            tokens = {}
-            for account in ("reader", "admin"):
-                tokens[account] = (
-                    await MCPAccessTokenService.create(
-                        app.shared_ctx.sessions[account].id,
-                        MCPAccessTokenCreate(
-                            name="plan", scope=MCPTokenScope.READ_WRITE
-                        ),
-                    )
-                )["token"]
             denied = await call(
-                app, "create_download_plan", {"creation": args}, token=tokens["reader"]
+                app, "create_download_plan", {"creation": args}, token="admin"
             )
-            assert denied["isError"]
+            assert (
+                denied["isError"]
+                and "only permits read-only" in denied["content"][0]["text"]
+            )
+
+            token = (
+                await MCPAccessTokenService.create(
+                    app.shared_ctx.sessions["admin"].id,
+                    MCPAccessTokenCreate(name="plan", scope=MCPTokenScope.READ_WRITE),
+                )
+            )["token"]
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app, "create_download_plan", {"creation": args}, token="reader"
+                )
 
             options = await call(
                 app,
@@ -604,12 +599,12 @@ def test_mcp():
             assert checked["structuredContent"]["valid"]
 
             made = await call(
-                app, "create_download_plan", {"creation": args}, token=tokens["admin"]
+                app, "create_download_plan", {"creation": args}, token=token
             )
             assert not made.get("isError"), made
             plan_id = made["structuredContent"]["plan_id"]
             replay = await call(
-                app, "create_download_plan", {"creation": args}, token=tokens["admin"]
+                app, "create_download_plan", {"creation": args}, token=token
             )
             assert replay["structuredContent"]["replayed"]
 
@@ -623,7 +618,7 @@ def test_mcp():
                 app,
                 "create_download_plan",
                 {"creation": {**args, "request_id": str(uuid4())}},
-                token=tokens["admin"],
+                token=token,
             )
             for result in (validation, duplicate):
                 assert not result.get("isError"), result
@@ -631,17 +626,12 @@ def test_mcp():
                 assert result["structuredContent"]["duplicate_plan_id"] == plan_id
             assert not duplicate["structuredContent"]["created"]
 
-            permission = await UserPermission.create(
-                user_id=app.shared_ctx.sessions["reader"].id,
-                rel_type=PermType.INDEXER,
-                rel_id=graph.id,
-            )
             allowed = await call(app, "get_download_plan", {"plan_id": plan_id})
             assert allowed["structuredContent"]["workflow_id"] == graph.id
-            await permission.delete()
-            assert (await call(app, "get_download_plan", {"plan_id": plan_id}))[
-                "isError"
-            ]
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app, "get_download_plan", {"plan_id": plan_id}, token="reader"
+                )
             assert await DownloadPlan.all().count() == 1
             assert await DownloadTask.all().count() == 0
 
@@ -927,7 +917,7 @@ def test_assistant_generation(monkeypatch, verbose, revoked):
                 conversation_id=conversation["id"],
                 call_id="history",
             )
-            assert original["error"]["code"] == "permission_denied"
+            assert original["error"]["code"] == "forbidden"
 
             current = await Sessions.begin(conversation["id"], request("next"), owner)
             messages, _, _ = await history.prepare_context(

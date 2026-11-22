@@ -25,7 +25,7 @@ async def database():
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
     try:
         await Tortoise.generate_schemas()
-        yield await User.create(username="reader", password="unused", role="user")
+        yield await User.create(username="owner", password="unused", role="admin")
     finally:
         await Tortoise.close_connections()
 
@@ -73,7 +73,7 @@ def test_read_write_grant():
                 issued["token"], client_ip="127.0.0.1", user_agent=None
             )
             assert identity.mcp_scope == MCPTokenScope.READ_WRITE
-            assert identity.role == "user"
+            assert identity.role == "admin"
 
     asyncio.run(run())
 

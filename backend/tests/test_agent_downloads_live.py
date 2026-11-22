@@ -8,7 +8,7 @@ from app.models.ai import AIModelSelection
 from app.models.assistant import AssistantTurnRequest, ConversationCreate
 from app.models.download import DownloadPlanAttempt, DownloadTask
 from app.models.media import MediaLib
-from app.models.user import Permissions, PermType, UserFavorite, UserPermission
+from app.models.user import UserFavorite
 from app.services.assistant import AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from tests.test_agent_live import official_provider
@@ -127,11 +127,7 @@ def test_favorites(tmp_path, monkeypatch):
                 provider_id=provider.id, model_id=provider.model_ids[0]
             )
             graph, _, _ = await stored_plan()
-            account = app.shared_ctx.sessions["reader"]
-            await UserPermission.create(
-                user_id=account.id, rel_type=PermType.INDEXER, rel_id=graph.id
-            )
-            account.perms = Permissions(indexer_ids=[graph.id])
+            account = app.shared_ctx.sessions["admin"]
             execute = AsyncMock(
                 return_value={
                     "items": [

@@ -42,7 +42,7 @@ export const load: LayoutLoad = async () => {
     }
   ];
 
-  if ((await getCurrentRole()) === 'admin') {
+  if ((await getCurrentRole(true)) === 'admin') {
     navs.splice(3, 0, {
       title: 'nav.downloads.title',
       path: '/downloads',

@@ -336,6 +336,10 @@ class AssistantService:
         Yields:
             Start, text, tool, and terminal events; errors contain stable codes only.
         """
+        if user.role != UserRole.ADMIN:
+            yield AssistantEvent(event="error", data={"code": ErrorCode.FORBIDDEN})
+            return
+
         answer_request = turn.request_id
         if getattr(turn, "retry_of", None) is not None:
             answer_request = (
@@ -504,6 +508,10 @@ class AssistantService:
         Yields:
             Stream events whose successful terminal state is already durable.
         """
+        if user.role != UserRole.ADMIN:
+            yield AssistantEvent(event="error", data={"code": ErrorCode.FORBIDDEN})
+            return
+
         turn = None
         text = ""
         finished = False
@@ -594,9 +602,7 @@ class AssistantService:
         )
         current_context = turn.context
         # direct download requests need the search tools from the first turn
-        intent = (
-            await subscription_intent(turn) if user.role == UserRole.ADMIN else None
-        )
+        intent = await subscription_intent(turn)
         reply_in_chinese = bool(
             re.search(r"[\u3400-\u9fff]", intent.prompt if intent else turn.prompt)
         )
@@ -630,13 +636,12 @@ class AssistantService:
             or explicit_subscription(turn.prompt)
             or bool(DOWNLOAD_REQUEST.match(turn.prompt.lstrip()))
         )
-        pending_subscription = user.role == UserRole.ADMIN and (
+        pending_subscription = (
             subscription_answer or revising or explicit_subscription(turn.prompt)
         )
         named_replacement = None
         if (
-            user.role == UserRole.ADMIN
-            and not answer_only
+            not answer_only
             and not (current_context or {}).get("selected_plan")
             and not re.search(r"#\s*\d+", turn.prompt)
         ):
@@ -664,10 +669,7 @@ class AssistantService:
             )
         ) and (current_context or {}).get("page_type") != "workflow_designer"
         search_page = (current_context or {}).get("page_type") == "web_search"
-        if search_page and (
-            user.role != UserRole.ADMIN
-            or (not direct_download and reviewed <= {"search_indexer"})
-        ):
+        if search_page and not direct_download and reviewed <= {"search_indexer"}:
             plan_authoring = False
         plan_tools = plan_authoring
         preparing_download = direct_download or bool(
@@ -1398,7 +1400,6 @@ class AssistantService:
                     if (
                         preparing_download
                         and plan_authoring
-                        and user.role == UserRole.ADMIN
                         and not workflow_authoring
                         and (
                             domain in {"search", "downloads"}

@@ -196,6 +196,30 @@ def script_code(node: GraphNode) -> str:
     return code
 
 
+def test_reader_turn():
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            owner.role = UserRole.USER
+            events = [
+                event
+                async for event in AssistantService.persistent_stream(
+                    conversation["id"], request(), owner
+                )
+            ]
+            assert [(event.event, event.data["code"]) for event in events] == [
+                ("error", "forbidden")
+            ]
+            assert not await AssistantTurn.exists(conversation_id=conversation["id"])
+            stored = await AssistantConversation.get(id=conversation["id"])
+            assert stored.title == conversation["title"]
+            assert stored.active_request is None
+
+    asyncio.run(run())
+
+
 def test_owned_history():
     async def run():
         async with database() as (owner, other):
@@ -2511,7 +2535,9 @@ def test_permission_revocation(deleted):
                 conversation_id=conversation["id"],
                 call_id="test",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == (
+                "permission_denied" if deleted else "forbidden"
+            )
 
     asyncio.run(run())
 
@@ -3002,7 +3028,7 @@ def test_tool_history_resources(monkeypatch):
                     conversation_id=conversation["id"],
                     call_id="test",
                 )
-                assert denied["error"]["code"] == "permission_denied"
+                assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -3389,7 +3415,7 @@ def test_media_context(monkeypatch):
                 conversation_id=conversation["id"],
                 call_id="test",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
             with pytest.raises(KaloscopeException) as rejected:
                 await Sessions.begin(
                     conversation["id"], request("stale", context=library_context), owner
@@ -3477,7 +3503,7 @@ def test_download_context(monkeypatch):
                 )
             ]
             assert blocked[-1].event == "error"
-            assert blocked[-1].data["code"] == "permission_denied"
+            assert blocked[-1].data["code"] == "forbidden"
 
     asyncio.run(run())
 

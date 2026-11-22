@@ -44,10 +44,10 @@ def test_personal_settings(monkeypatch):
             monkeypatch.setattr(
                 SessionHolder, "get_sessions", lambda: app.shared_ctx.sessions
             )
-            reader = app.shared_ctx.sessions["reader"]
+            admin = app.shared_ctx.sessions["admin"]
             token = (
                 await MCPAccessTokenService.create(
-                    reader.id,
+                    admin.id,
                     MCPAccessTokenCreate(
                         name="preferences", scope=MCPTokenScope.READ_WRITE
                     ),
@@ -66,18 +66,15 @@ def test_personal_settings(monkeypatch):
             updated = await execute_tool(
                 "get_personal_preferences",
                 "{}",
-                reader,
+                admin,
                 conversation_id=1,
                 call_id="pref",
             )
             assert updated["data"] == saved["structuredContent"]
-            assert (await call(app, "get_personal_preferences", {}, token="admin"))[
-                "structuredContent"
-            ]["vibration"] is False
             denied = await execute_tool(
                 "set_personal_preference",
                 '{"key":"homepage","value":"/downloads"}',
-                reader,
+                app.shared_ctx.sessions["reader"],
                 conversation_id=1,
                 call_id="denied",
             )
@@ -109,8 +106,6 @@ def test_device_receipt():
                     ConversationCreate.model_validate({"model": MODEL}), owner
                 )
             )["id"]
-            owner.role = "user"
-            owner.perms = Permissions(media_lib_ids=[lib.id])
             turn = await Sessions.begin(conv, request(context=context), owner)
             assert turn.resource_ids == [f"media_lib:{lib.id}"]
             target = {"page": "resume_reading", "resource_id": item.id}
@@ -157,6 +152,7 @@ def test_device_receipt():
                 await Sessions.record_device_result(conv, "device", False, owner)
                 == "opened"
             )
+            owner.role = "user"
             owner.perms = Permissions()
             with pytest.raises(ForbiddenException):
                 await Sessions.record_device_result(conv, "device", True, owner)

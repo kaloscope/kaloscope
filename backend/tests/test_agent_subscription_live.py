@@ -77,14 +77,8 @@ async def check_receipt(app, browser, review, expected_status):
         }
     }
     prior_count = await DownloadPlan.all().count()
-    reader = app.shared_ctx.sessions["reader"]
-    reader_token = await MCPAccessTokenService.create(
-        reader.id,
-        MCPAccessTokenCreate(name="reader", scope=MCPTokenScope.READ_WRITE),
-    )
-    for token in ("admin", reader_token["token"]):
-        denied = await call(app, "create_download_plan", creation, token=token)
-        assert denied["isError"]
+    denied = await call(app, "create_download_plan", creation, token="admin")
+    assert denied["isError"]
     assert await DownloadPlan.all().count() == prior_count
     plan_ids = []
     for _ in range(2):

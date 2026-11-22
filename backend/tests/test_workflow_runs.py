@@ -1339,7 +1339,7 @@ def test_parity(monkeypatch, engine):
                 conversation_id=conversation["id"],
                 call_id="history",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 

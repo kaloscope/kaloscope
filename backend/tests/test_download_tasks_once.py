@@ -935,7 +935,7 @@ def test_conversation(monkeypatch, verbose):
                 conversation_id=conversation["id"],
                 call_id="read",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -1358,7 +1358,7 @@ def test_replay_history(monkeypatch, tmp_path, revoked):
                 conversation_id=conversation["id"],
                 call_id="read",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
             record = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert record["content"] == "" and record["tools"] == []
 

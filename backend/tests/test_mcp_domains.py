@@ -13,7 +13,7 @@ from app.core.exceptions import ForbiddenException
 from app.models.agent_actions import AdminChange
 from app.models.flow import FlowGraph, FlowRepository, FlowTemplate
 from app.models.mcp import MCPAccessTokenCreate
-from app.models.user import PermType, User, UserPermission
+from app.models.user import User
 from app.routes.assistant import decide_operation, get_operation
 from app.services import agent_actions
 from app.services.mcp import MCPAccessTokenService
@@ -123,43 +123,19 @@ def test_catalog():
                     assert "diagnose_download_ingestion" not in tools
                     assert (await call(app, "list_workflows", token=token))["isError"]
 
-            reader = app.shared_ctx.sessions["reader"]
-            downloads = (await issue(reader, "downloads"))["token"]
             from tests.test_download_plan_authoring import fixture_plan
 
             graph, _, _ = await fixture_plan()
-            ro = (await issue(reader, "downloads", scope="read_only"))["token"]
-            assert (await call(app, "list_download_indexers", token=ro))[
-                "structuredContent"
-            ]["items"] == []
-            grant = await UserPermission.create(
-                user_id=reader.id, rel_type=PermType.INDEXER, rel_id=graph.id
-            )
+            ro = (await issue(admin, "downloads", scope="read_only"))["token"]
             sources = (await call(app, "list_download_indexers", token=ro))[
                 "structuredContent"
             ]
             assert sources["total"] == 1
             assert sources["items"][0]["workflow_id"] == graph.id
             assert sources["items"][0]["filters"]["quality"]["type"] == "checkbox"
-            await grant.delete()
-            assert (await call(app, "list_download_indexers", token=ro))[
-                "structuredContent"
-            ]["items"] == []
             ro_media = (await issue(admin, "all", scope="read_only"))["token"]
             assert "review_media_rescrape" not in await catalog(app, ro_media)
             assert (await call(app, "review_media_rescrape", token=ro_media))["isError"]
-            listed = response_json(await post(app, "tools/list", token=downloads))
-            search = next(
-                t for t in listed["result"]["tools"] if t["name"] == "search_indexer"
-            )
-            assert (
-                "sources"
-                not in search["inputSchema"]["$defs"]["IndexerSearch"]["properties"]
-            )
-            assert "diagnose_download_ingestion" not in await catalog(app, downloads)
-            assert (await call(app, "diagnose_download_ingestion", token=downloads))[
-                "isError"
-            ]
             assert {"inspect_workspace", "review_workspace_change"} <= await catalog(
                 app, "admin"
             )
@@ -178,15 +154,13 @@ def test_library_grants(tmp_path, monkeypatch):
                 await issue(reader, libraries=[media.movies.id])
             with pytest.raises(ForbiddenException):
                 await issue(admin, libraries=[999])
-            allowed = await UserPermission.create(
-                user_id=reader.id, rel_type=PermType.MEDIA_LIB, rel_id=media.movies.id
-            )
-            await UserPermission.create(
-                user_id=reader.id, rel_type=PermType.MEDIA_LIB, rel_id=media.shows.id
-            )
-            token = (await issue(reader, libraries=[media.movies.id]))["token"]
+            token = (
+                await issue(admin, libraries=[media.movies.id], scope="read_only")
+            )["token"]
             tools = await catalog(app, token)
             assert tools == {
+                "get_media_batch",
+                "review_media_batch",
                 "list_media_libraries",
                 "list_media_items",
                 "get_media_item",
@@ -217,15 +191,6 @@ def test_library_grants(tmp_path, monkeypatch):
                 )
             )["structuredContent"]["total"] == 0
 
-            await allowed.delete()
-            assert not (await call(app, "list_media_libraries", token=token))[
-                "structuredContent"
-            ]["items"]
-            assert (
-                await call(
-                    app, "get_media_item", {"item_id": media.movie.id}, token=token
-                )
-            )["isError"]
             assert (await call(app, "list_media_items", token="admin"))[
                 "structuredContent"
             ]["total"] > 1
@@ -447,15 +412,8 @@ def test_workflow_reviews(tmp_path, monkeypatch):
                 )
 
             await User.filter(id=admin.id).update(role="user")
-            assert "review_workspace_change" not in await catalog(app, token)
-            assert (
-                await call(
-                    app,
-                    "inspect_workspace",
-                    {"query": {"topic": "workflow_templates"}},
-                    token=token,
-                )
-            )["isError"]
+            with pytest.raises(ForbiddenException):
+                await catalog(app, token)
 
     asyncio.run(run())
 
@@ -486,24 +444,9 @@ def test_system_topics(monkeypatch):
                 "isError"
             ]
             for domain in ("system", "workflows"):
-                token = (
+                with pytest.raises(ForbiddenException):
                     await issue(
                         app.shared_ctx.sessions["reader"], domain, scope="read_write"
                     )
-                )["token"]
-                assert {"inspect_workspace", "review_workspace_change"}.isdisjoint(
-                    await catalog(app, token)
-                )
-                assert (
-                    await call(
-                        app,
-                        "inspect_workspace",
-                        {"query": {"topic": "logs"}},
-                        token=token,
-                    )
-                )["isError"]
-                assert (await call(app, "review_workspace_change", args, token=token))[
-                    "isError"
-                ]
 
     asyncio.run(run())
