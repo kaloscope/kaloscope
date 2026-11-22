@@ -1,16 +1,11 @@
 """Resolve browser decisions against the assistant's stored plan reviews."""
 
 from typing import Any
-from uuid import UUID
 
-from tortoise.expressions import F
 from tortoise.transactions import in_transaction
 
 from app.core.decorators import require_browser_admin
-from app.core.exceptions import (
-    BadRequestException,
-    NotFoundException,
-)
+from app.core.exceptions import NotFoundException
 from app.models.assistant import AssistantToolCall
 from app.models.download import (
     DownloadPlan,
@@ -21,6 +16,11 @@ from app.models.download import (
 )
 from app.models.user import UserInfo
 from app.services.download import DownloadPlanService
+from app.services.review_common import (
+    load_owned_review,
+    recent_review_calls,
+    reserve_writer,
+)
 
 
 async def recent_plan_reviews(
@@ -34,18 +34,9 @@ async def recent_plan_reviews(
     Returns:
         Stored reviews in descending creation order, including failed validation.
     """
-    rows = (
-        await AssistantToolCall.filter(
-            turn__conversation_id=conversation_id, name="review_download_plan_change"
-        )
-        .order_by("-id")
-        .limit(30)
+    return await recent_review_calls(
+        conversation_id, ("review_download_plan_change",), require_valid=True
     )
-    return [
-        (row, data)
-        for row in rows
-        if "valid" in (data := (row.result or {}).get("data") or {})
-    ]
 
 
 async def plan_review(
@@ -73,9 +64,11 @@ async def plan_review(
     """
     if decision is not None and not decision.approve:
         async with in_transaction():
-            await AssistantToolCall.filter(
-                call_id=call_id, turn__conversation__user_id=user.id
-            ).update(updated_at=F("updated_at"))
+            await reserve_writer(
+                AssistantToolCall.filter(
+                    call_id=call_id, turn__conversation__user_id=user.id
+                )
+            )
             return await _plan_review(call_id, user, decision)
     return await _plan_review(call_id, user, decision)
 
@@ -100,27 +93,12 @@ async def _plan_review(
         BadRequestException: If the submitted request differs from the shown review.
     """
     await require_browser_admin(user)
-    call = (
-        await AssistantToolCall.filter(
-            call_id=call_id,
-            name="review_download_plan_change",
-            status="complete",
-            turn__conversation__user_id=user.id,
-        )
-        .select_related("turn")
-        .first()
+    call, preview, request_id = await load_owned_review(
+        call_id,
+        ("review_download_plan_change",),
+        user,
+        expected_request_id=decision.request_id if decision is not None else None,
     )
-    preview = ((call.result or {}).get("data") or {}) if call else {}
-    if (
-        not call
-        or not (call.result or {}).get("ok")
-        or not preview.get("valid")
-        or not preview.get("request_id")
-    ):
-        raise NotFoundException
-    request_id = UUID(preview["request_id"])
-    if decision is not None and decision.request_id != request_id:
-        raise BadRequestException
     key = DownloadPlanService.change_key(user.id, request_id)
     result = {
         "request_id": str(request_id),

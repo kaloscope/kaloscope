@@ -1,7 +1,7 @@
 """Expose bounded, permission-checked workflow, media, and download tools."""
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
@@ -121,7 +121,7 @@ from app.models.user import (
     UserRole,
 )
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
-from app.services.agent_actions import inspect_workspace, review_action
+from app.services.agent_actions import review_action
 from app.services.assistant_questions import build_card
 from app.services.download import DownloadPlanService, DownloadTaskService, open_source
 from app.services.download_diagnostics import IngestionQuery, diagnose_ingestion
@@ -130,6 +130,11 @@ from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.services.plan_replacement import PlanReplacementService
+from app.services.review_common import (
+    is_media_file_listing,
+    recent_review_calls,
+    schedule_review_target,
+)
 from app.services.subscription_intent import (
     accepts_offer,
     has_release_question,
@@ -142,6 +147,7 @@ from app.services.workflow_authoring import (
     probe_http_request,
     validate_workflow_template,
 )
+from app.services.workspace_queries import inspect_workspace
 from app.utils.json import JSONType, dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
@@ -2563,6 +2569,63 @@ async def create_task(
     raise NotFoundException
 
 
+async def _apply_reviewed_change(
+    request_id: UUID,
+    confirmed: bool,
+    conversation_id: int,
+    *,
+    names: Collection[str],
+    require_valid: bool,
+    is_superseded: Callable[
+        [int, AssistantToolCall, dict, list[tuple[AssistantToolCall, dict]]], bool
+    ],
+    apply_fn: Callable[[AssistantToolCall, dict, bool], Awaitable[dict]],
+) -> dict:
+    """Apply a stored review after verifying turn completion and supersession.
+
+    Args:
+        request_id: Reviewed request identity submitted for confirmation.
+        confirmed: Whether the user confirmed applying the review.
+        conversation_id: Server-owned conversation containing the review calls.
+        names: Review tool names sharing the supersession window.
+        require_valid: Whether to ignore calls whose data lacks a `valid` field.
+        is_superseded: Predicate checking whether newer calls in the window replace
+            the matched review.
+        apply_fn: Domain callback receiving `(record, data, ready)` to execute.
+
+    Returns:
+        Shared domain outcome, or a confirmation prompt when the review is not ready.
+
+    Raises:
+        NotFoundException: If no matching review exists in the recent window.
+    """
+    reviews = await recent_review_calls(
+        conversation_id, names, require_valid=require_valid
+    )
+    for index, (record, data) in enumerate(reviews):
+        if data.get("request_id") != str(request_id):
+            continue
+
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        superseded = is_superseded(index, record, data, reviews)
+        ready = not superseded and reviewed.status == "complete"
+
+        result = await apply_fn(record, data, confirmed and ready)
+        if not ready and not result.get("replayed"):
+            return {
+                **result,
+                "applied": False,
+                "confirmation_required": True,
+                "message": "A newer review replaced this one; confirm that one."
+                if superseded
+                else "Show this review, finish the turn and wait for the user's "
+                "confirmation.",
+            }
+        return result
+
+    raise NotFoundException
+
+
 async def apply_schedule(
     args: ScheduleConfirm, conversation_id: int, user: UserInfo
 ) -> dict:
@@ -2584,48 +2647,26 @@ async def apply_schedule(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = []
-    for record in (
-        await AssistantToolCall.filter(
-            turn__conversation_id=conversation_id, name="review_workflow_schedule"
-        )
-        .order_by("-id")
-        .limit(30)
-    ):
-        data = (record.result or {}).get("data") or {}
-        if "valid" in data:
-            target = (data["job_id"], None if data["job_id"] else data["workflow_id"])
-            reviews.append((record, data, target))
-    for index, (record, data, target) in enumerate(reviews):
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        superseded = any(other == target for _, _, other in reviews[:index])
-        ready = not superseded and reviewed.status == "complete"
-
-        result = await FlowJobService.apply_change(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=("review_workflow_schedule",),
+        require_valid=True,
+        is_superseded=lambda index, _, data, reviews: any(
+            schedule_review_target(other) == schedule_review_target(data)
+            for _, other in reviews[:index]
+        ),
+        apply_fn=lambda record, data, confirmed: FlowJobService.apply_change(
             ScheduleApply(
                 request_id=args.request_id,
                 change=ScheduleChange.model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if superseded
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def apply_plan_change(
@@ -2649,41 +2690,25 @@ async def apply_plan_change(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    from app.services.assistant_plan_review import recent_plan_reviews
-
-    reviews = await recent_plan_reviews(conversation_id)
-    for index, (record, data) in enumerate(reviews):
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        superseded = any(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=("review_download_plan_change",),
+        require_valid=True,
+        is_superseded=lambda index, _, data, reviews: any(
             other["plan_id"] == data["plan_id"] for _, other in reviews[:index]
-        )
-        ready = not superseded and reviewed.status == "complete"
-
-        result = await DownloadPlanService.apply_change(
+        ),
+        apply_fn=lambda record, data, confirmed: DownloadPlanService.apply_change(
             DownloadPlanApply(
                 request_id=args.request_id,
                 change=DownloadPlanChange.model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if superseded
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def apply_task_action(
@@ -2708,46 +2733,23 @@ async def apply_task_action(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = [
-        (record, (record.result or {}).get("data") or {})
-        for record in (
-            await AssistantToolCall.filter(
-                turn__conversation_id=conversation_id,
-                name="review_download_task_action",
-            )
-            .order_by("-id")
-            .limit(30)
-        )
-    ]
-    for index, (record, data) in enumerate(reviews):
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        ready = index == 0 and reviewed.status == "complete"
-
-        result = await DownloadTaskService.apply_action(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=("review_download_task_action",),
+        require_valid=False,
+        is_superseded=lambda index, *_: index > 0,
+        apply_fn=lambda record, data, confirmed: DownloadTaskService.apply_action(
             DownloadTaskActionApply(
                 request_id=args.request_id,
                 change=DownloadTaskAction.model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if index
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def apply_media_change(
@@ -2773,59 +2775,26 @@ async def apply_media_change(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = (
-        await AssistantToolCall.filter(
-            turn__conversation_id=conversation_id, name__in=list(MEDIA_REVIEW_TOOLS)
-        )
-        .order_by("-id")
-        .limit(30)
-    )
-    for index, record in enumerate(reviews):
-        data = (record.result or {}).get("data") or {}
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        superseded = False
-        for later in reviews[:index]:
-            later_result = later.result or {}
-            later_data = later_result.get("data") or {}
-            if not (
-                later.turn_id == record.turn_id
-                and later.name == "review_media_batch"
-                and later_result.get("ok")
-                and "matched" in later_data
-                and "operation" not in later_data
-                and isinstance(data.get("library_id"), int)
-                and later_data.get("library_id") == data["library_id"]
-            ):
-                superseded = True
-                break
-
-        ready = not superseded and reviewed.status == "complete"
-        change = MEDIA_REVIEWS[record.name].model_validate_json(record.arguments)
-        result = await MediaChangeService.apply_change(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=MEDIA_REVIEW_TOOLS,
+        require_valid=False,
+        is_superseded=lambda index, record, data, reviews: any(
+            not is_media_file_listing(later, record, data)
+            for later, _ in reviews[:index]
+        ),
+        apply_fn=lambda record, data, confirmed: MediaChangeService.apply_change(
             MediaChangeApply(
                 request_id=args.request_id,
-                change=change,
+                change=MEDIA_REVIEWS[record.name].model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if superseded
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def create_workflow(

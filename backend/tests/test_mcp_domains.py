@@ -15,7 +15,7 @@ from app.models.flow import FlowGraph, FlowRepository, FlowTemplate
 from app.models.mcp import MCPAccessTokenCreate
 from app.models.user import User
 from app.routes.assistant import decide_operation, get_operation
-from app.services import agent_actions
+from app.services import agent_actions, workspace_queries
 from app.services.mcp import MCPAccessTokenService
 from app.utils.json import loads
 from tests.test_download_plan_changes import stored_plan
@@ -422,7 +422,9 @@ def test_system_topics(monkeypatch):
     async def run():
         async with application() as app:
             monkeypatch.setattr(Sanic, "get_app", lambda *a, **kw: app)
-            monkeypatch.setattr(agent_actions, "list_tasks", AsyncMock(return_value=[]))
+            monkeypatch.setattr(
+                workspace_queries, "list_tasks", AsyncMock(return_value=[])
+            )
             admin = app.shared_ctx.sessions["admin"]
             system = (await issue(admin, "system", scope="read_only"))["token"]
             for topic in ("logs", "downloaders", "transcoding"):

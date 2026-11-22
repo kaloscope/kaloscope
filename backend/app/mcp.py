@@ -135,11 +135,7 @@ from app.models.workflow_authoring import (
 )
 from app.services.agent_actions import (
     WORKFLOW_REVIEW_ACTIONS,
-    WORKSPACE_TOPICS,
     review_action,
-)
-from app.services.agent_actions import (
-    inspect_workspace as workspace_facts,
 )
 from app.services.ai import AIProviderService
 from app.services.download import DownloadPlanService, DownloadTaskService
@@ -152,7 +148,7 @@ from app.services.flow import (
 )
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
-from app.services.media_changes import MediaChangeService, _require_admin
+from app.services.media_changes import MediaChangeService
 from app.services.plan_replacement import PlanReplacementService
 from app.services.user import UserFavoriteService, UserService
 from app.services.workflow_authoring import (
@@ -160,6 +156,12 @@ from app.services.workflow_authoring import (
 )
 from app.services.workflow_authoring import (
     validate_workflow_template as validate_template,
+)
+from app.services.workspace_queries import (
+    WORKSPACE_TOPICS,
+)
+from app.services.workspace_queries import (
+    inspect_workspace as workspace_facts,
 )
 from app.utils.json import dumps, loads
 
@@ -1648,8 +1650,7 @@ def create_server() -> MCPServer:
                 MediaLibService.list_libraries(
                     user,
                     watcher,
-                    include_bindings=getattr(user, "mcp_domain", MCPTokenDomain.ALL)
-                    != MCPTokenDomain.MEDIA,
+                    include_bindings=user.mcp_domain != MCPTokenDomain.MEDIA,
                 )
             )
         )
@@ -2277,7 +2278,6 @@ def create_server() -> MCPServer:
 
         async def read() -> dict:
             user = _user(ctx)
-            _require_admin(user)
             details = await MediaBatchService.details(batch_id, user=user)
             await MediaLibService.get_accessible(details["library_id"], user)
             page = await MediaBatchService.entries(
@@ -2354,7 +2354,6 @@ def create_server() -> MCPServer:
 
         async def stop() -> dict:
             user = _user(ctx)
-            _require_admin(user)
             details = await MediaBatchService.details(batch_id, user=user)
             await MediaLibService.get_accessible(details["library_id"], user)
             details = await MediaBatchService.cancel(batch_id)

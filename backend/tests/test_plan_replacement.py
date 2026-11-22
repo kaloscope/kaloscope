@@ -12,6 +12,7 @@ from tortoise import Tortoise, connections, timezone
 from app.core.dl import syncer
 from app.core.exceptions import (
     BadRequestException,
+    ErrorCode,
     ForbiddenException,
     NotFoundException,
 )
@@ -99,8 +100,17 @@ def test_decision(reason):
             elif reason == "mcp":
                 owner.mcp_scope = "read_write"
             if reason in {"revoked", "mcp"}:
-                with pytest.raises(ForbiddenException):
+                with pytest.raises(ForbiddenException) as exc:
                     await decide(a, owner)
+                assert exc.value.message == ErrorCode.FORBIDDEN
+                if reason == "revoked":
+                    with pytest.raises(ForbiddenException) as demoted:
+                        await Replacement.status(a["operation_id"], owner)
+                    assert demoted.value.message == ErrorCode.FORBIDDEN
+                    non_admin = SimpleNamespace(id=owner.id, role="user")
+                    with pytest.raises(ForbiddenException) as regular:
+                        await Replacement.review(plan.id, user=non_admin)
+                    assert regular.value.message == ErrorCode.PERMISSION_DENIED
             else:
                 result = await decide(a, owner, approve=reason != "cancel")
                 assert result["status"] == {

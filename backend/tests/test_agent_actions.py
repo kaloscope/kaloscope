@@ -16,6 +16,7 @@ from app.core.ai.tools import execute_tool
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
+    ErrorCode,
     ForbiddenException,
     KaloscopeException,
     NotFoundException,
@@ -25,7 +26,7 @@ from app.models.agent_actions import AdminChange, AgentAdminReview, WorkspaceQue
 from app.models.download import DownloadPlan
 from app.models.flow import FlowGraph, FlowRepository, FlowTemplate
 from app.models.media import MediaFormat, MediaItem, MediaLib
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.agent_actions import (
     action_status,
     decide_action,
@@ -189,10 +190,19 @@ def test_permission_expiry():
             with pytest.raises(ForbiddenException):
                 await decide(card, owner)
             await User.filter(id=owner.id).update(role="user")
-            with pytest.raises(ForbiddenException):
+            with pytest.raises(ForbiddenException) as demoted:
                 await review_action(change, owner)
-            with pytest.raises(ForbiddenException):
+            assert demoted.value.message == ErrorCode.FORBIDDEN
+            with pytest.raises(ForbiddenException) as demoted_inspect:
                 await inspect_workspace(WorkspaceQuery(topic="actions"), owner)
+            assert demoted_inspect.value.message == ErrorCode.FORBIDDEN
+            non_admin = SimpleNamespace(id=owner.id, role=UserRole.USER)
+            with pytest.raises(ForbiddenException) as regular:
+                await review_action(change, non_admin)
+            assert regular.value.message == ErrorCode.PERMISSION_DENIED
+            with pytest.raises(ForbiddenException) as regular_inspect:
+                await inspect_workspace(WorkspaceQuery(topic="actions"), non_admin)
+            assert regular_inspect.value.message == ErrorCode.PERMISSION_DENIED
 
     asyncio.run(run())
 

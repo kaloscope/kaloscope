@@ -8,16 +8,11 @@ from pydantic import ValidationError
 from sanic.log import logger
 from tortoise import timezone
 from tortoise.exceptions import OperationalError
-from tortoise.expressions import F
 from tortoise.transactions import in_transaction
 
 from app.core.decorators import require_browser_admin
 from app.core.dl.syncer import notify_download_changes
-from app.core.exceptions import (
-    BadRequestException,
-    ForbiddenException,
-    NotFoundException,
-)
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.models.download import (
     DownloadPlan,
     DownloadPlanCheck,
@@ -27,7 +22,7 @@ from app.models.download import (
 )
 from app.models.user import User, UserInfo, UserRole
 from app.services.download import DownloadPlanService
-from app.services.flow import FlowGraphService
+from app.services.review_common import require_live_admin, reserve_writer
 from app.utils.json import dumps, json_digest, loads
 
 
@@ -137,9 +132,7 @@ class PlanReplacementService:
             ForbiddenException: If current editor access is unavailable.
             NotFoundException: If the plan is unavailable.
         """
-        FlowGraphService.require_editor(user)
-        if not await User.exists(id=user.id, role=UserRole.ADMIN):
-            raise ForbiddenException
+        await require_live_admin(user)
         plan = await DownloadPlan.get_or_none(id=plan_id)
         if not plan:
             raise NotFoundException
@@ -156,7 +149,7 @@ class PlanReplacementService:
                 expires_at__gt=timezone.now(),
             )
             # SQLite uses deferred transactions; reserve the writer before the lookup
-            await active.update(updated_at=F("updated_at"))
+            await reserve_writer(active)
             operation = await active.first()
             if operation is None:
                 operation = await DownloadPlanReplacement.create(
@@ -206,9 +199,7 @@ class PlanReplacementService:
             ForbiddenException: If the account is no longer an administrator.
             NotFoundException: If the review is unavailable.
         """
-        FlowGraphService.require_editor(user)
-        if not await User.exists(id=user.id, role=UserRole.ADMIN):
-            raise ForbiddenException
+        await require_live_admin(user)
         operation = await DownloadPlanReplacement.get_or_none(
             operation_id=operation_id, owner_id=user.id
         )
@@ -257,11 +248,13 @@ class PlanReplacementService:
         """
         await require_browser_admin(user)
         async with in_transaction():
-            await DownloadPlanReplacement.filter(
-                operation_id=operation_id,
-                owner_id=user.id,
-                status__in=["pending", "approved", "uncertain"],
-            ).update(updated_at=F("updated_at"))
+            await reserve_writer(
+                DownloadPlanReplacement.filter(
+                    operation_id=operation_id,
+                    owner_id=user.id,
+                    status__in=["pending", "approved", "uncertain"],
+                )
+            )
             operation = await cls._owned(operation_id, user)
             if operation.digest != digest:
                 raise BadRequestException
@@ -326,7 +319,7 @@ class PlanReplacementService:
             update = DownloadPlanReplacement.filter(
                 id=operation_pk, status__in=["approved", "uncertain"]
             )
-            if not await update.update(updated_at=F("updated_at")):
+            if not await reserve_writer(update):
                 return
             operation = await DownloadPlanReplacement.get(id=operation_pk)
             owner = await User.get_or_none(id=operation.owner_id, role=UserRole.ADMIN)

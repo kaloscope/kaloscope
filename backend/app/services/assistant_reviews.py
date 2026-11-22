@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from tortoise import timezone
-from tortoise.expressions import F, Q
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
 from app.core.ai.tools import (
@@ -38,8 +38,13 @@ from app.models.flow import FlowJobReceipt
 from app.models.media import MediaChangeReceipt
 from app.models.review_decision import AssistantReviewDecision
 from app.models.user import UserInfo
-from app.services.assistant_sessions import AssistantSessionService
 from app.services.download import DownloadPlanService, DownloadTaskService
+from app.services.review_common import (
+    is_media_file_listing,
+    load_owned_review,
+    reserve_writer,
+    schedule_review_target,
+)
 
 REVIEW_TOOLS = {
     "validate_download_plan",
@@ -198,21 +203,11 @@ async def _newer(call: AssistantToolCall, preview: dict) -> bool:
     for row in await rows.only("turn_id", "name", "result"):
         data = (row.result or {}).get("data") or {}
         if call.name == "review_workflow_schedule":
-            if (
-                "valid" in data
-                and (data.get("job_id") or data.get("workflow_id"))
-                == (preview.get("job_id") or preview.get("workflow_id"))
-                and bool(data.get("job_id")) == bool(preview.get("job_id"))
-            ):
+            if "valid" in data and schedule_review_target(
+                data
+            ) == schedule_review_target(preview):
                 return True
-        elif not (
-            row.turn_id == call.turn_id
-            and row.name == "review_media_batch"
-            and (row.result or {}).get("ok")
-            and "matched" in data
-            and "operation" not in data
-            and preview.get("library_id") == data.get("library_id")
-        ):
+        elif not is_media_file_listing(row, call, preview):
             return True
     return False
 
@@ -280,34 +275,20 @@ async def assistant_review(
     async with in_transaction():
         if decision:
             # obtain the SQLite writer before checking a competing decision's result
-            await AssistantToolCall.filter(
-                call_id=call_id,
-                turn__conversation__user_id=user.id,
-            ).update(updated_at=F("updated_at"))
-        await require_browser_admin(user)
-        call = (
-            await AssistantToolCall.filter(
-                call_id=call_id,
-                name__in=REVIEW_TOOLS,
-                status="complete",
-                turn__conversation__user_id=user.id,
+            await reserve_writer(
+                AssistantToolCall.filter(
+                    call_id=call_id,
+                    turn__conversation__user_id=user.id,
+                )
             )
-            .select_related("turn")
-            .first()
+        await require_browser_admin(user)
+        call, preview, request_id = await load_owned_review(
+            call_id,
+            REVIEW_TOOLS,
+            user,
+            expected_request_id=decision.request_id if decision else None,
+            check_allowed=True,
         )
-        preview = ((call.result or {}).get("data") or {}) if call else {}
-        if not (
-            call
-            and (call.result or {}).get("ok")
-            and preview.get("valid")
-            and preview.get("request_id")
-        ):
-            raise NotFoundException
-        if not await AssistantSessionService.allowed(call.turn.resource_ids, user):
-            raise ForbiddenException
-        request_id = UUID(preview["request_id"])
-        if decision and request_id != decision.request_id:
-            raise BadRequestException
         base = {"tool": call.name, "request_id": str(request_id), "preview": preview}
         key = DownloadPlanService.change_key(user.id, request_id)
         if done := await _recorded(call.name, key, user):
