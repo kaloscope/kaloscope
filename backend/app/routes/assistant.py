@@ -51,7 +51,7 @@ def private_json(data: Any) -> HTTPResponse:
 
 
 @assistant.get("/models")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def list_models(_: Request) -> HTTPResponse:
     """List configured model choices for the current authenticated account.
 
@@ -115,7 +115,7 @@ async def serve_events(
 
 
 @assistant.get("/conversations")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def list_conversations(request: Request) -> HTTPResponse:
     """List the current account's conversations.
 
@@ -155,7 +155,7 @@ def cursor(request: Request) -> int | None:
 
 
 @assistant.post("/conversations")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=ConversationCreate)
 async def create_conversation(
     request: Request, body: ConversationCreate
@@ -173,7 +173,7 @@ async def create_conversation(
 
 
 @assistant.post("/conversations/<conversation_id:int>/snapshots")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=AssistantSnapshotRequest)
 async def create_snapshot(
     request: Request, conversation_id: int, body: AssistantSnapshotRequest
@@ -206,7 +206,7 @@ async def create_snapshot(
 
 
 @assistant.get("/conversations/<conversation_id:int>/turns")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def get_turns(request: Request, conversation_id: int) -> HTTPResponse:
     """Read a page of owned conversation history.
 
@@ -225,7 +225,7 @@ async def get_turns(request: Request, conversation_id: int) -> HTTPResponse:
 
 
 @assistant.patch("/conversations/<conversation_id:int>")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=ConversationRename)
 async def rename_conversation(
     request: Request, conversation_id: int, body: ConversationRename
@@ -248,7 +248,7 @@ async def rename_conversation(
 
 
 @assistant.delete("/conversations/<conversation_id:int>")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def delete_conversation(request: Request, conversation_id: int) -> HTTPResponse:
     """Delete an idle owned conversation and its retained history.
 
@@ -264,7 +264,7 @@ async def delete_conversation(request: Request, conversation_id: int) -> HTTPRes
 
 
 @assistant.post("/conversations/delete")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=ConversationDelete)
 async def delete_conversations(
     request: Request, body: ConversationDelete
@@ -283,7 +283,7 @@ async def delete_conversations(
 
 
 @assistant.post("/conversations/<conversation_id:int>/chat")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=AssistantTurnRequest)
 async def persistent_chat(
     request: Request, conversation_id: int, body: AssistantTurnRequest
@@ -303,7 +303,7 @@ async def persistent_chat(
 
 
 @assistant.post("/conversations/<conversation_id:int>/device/<call_id:str>")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=DeviceReceipt)
 async def record_device(
     request: Request, conversation_id: int, call_id: str, body: DeviceReceipt
@@ -327,7 +327,7 @@ async def record_device(
 
 
 @assistant.post("/conversations/<conversation_id:int>/questions/<call_id:str>/answer")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=AnswerGroup)
 async def submit_answers(
     request: Request, conversation_id: int, call_id: str, body: AnswerGroup
@@ -352,7 +352,7 @@ PROPOSAL = "/conversations/<conversation_id:int>/proposals/<proposal_id:int>"
 
 
 @assistant.get(f"{PROPOSAL}/canvas")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def get_proposal_canvas(
     request: Request, conversation_id: int, proposal_id: int
 ) -> HTTPResponse:
@@ -374,7 +374,7 @@ async def get_proposal_canvas(
 
 
 @assistant.get(f"{PROPOSAL}/outcome")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 async def get_proposal_outcome(
     request: Request, conversation_id: int, proposal_id: int
 ) -> HTTPResponse:
@@ -396,7 +396,7 @@ async def get_proposal_outcome(
 
 
 @assistant.post(f"{PROPOSAL}/confirm")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=ProposalConfirm)
 async def confirm_proposal(
     request: Request, conversation_id: int, proposal_id: int, body: ProposalConfirm
@@ -420,7 +420,7 @@ async def confirm_proposal(
 
 
 @assistant.post(f"{PROPOSAL}/cancel")
-@authorize()
+@authorize(role=UserRole.ADMIN)
 @validate(json=ProposalDecision)
 async def cancel_proposal(
     request: Request, conversation_id: int, proposal_id: int, body: ProposalDecision

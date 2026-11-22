@@ -549,7 +549,7 @@ def test_config_pairing(mode, config):
         tools.execute_tool(
             "validate_workflow_template",
             dumps({"template": "{}", "mode": mode, "config": config}).decode(),
-            SimpleNamespace(id=1, role="user"),
+            SimpleNamespace(id=1, role="admin"),
             conversation_id=1,
             call_id="pairing",
         )
@@ -1207,21 +1207,20 @@ def test_mcp_parity(monkeypatch):
                     "context": login_fixture(body),
                     "config": TOKEN_CONFIG,
                 }
-                for account in ("reader", "admin"):
-                    result = await call(
-                        app,
-                        "validate_workflow_template",
-                        {"validation": fixture},
-                        token=account,
-                    )
-                    assistant = await tools.execute_tool(
-                        "validate_workflow_template",
-                        dumps(fixture).decode(),
-                        app.shared_ctx.sessions[account],
-                        conversation_id=1,
-                        call_id="auth",
-                    )
-                    assert result["structuredContent"] == assistant["data"]
+                result = await call(
+                    app,
+                    "validate_workflow_template",
+                    {"validation": fixture},
+                    token="admin",
+                )
+                assistant = await tools.execute_tool(
+                    "validate_workflow_template",
+                    dumps(fixture).decode(),
+                    app.shared_ctx.sessions["admin"],
+                    conversation_id=1,
+                    call_id="auth",
+                )
+                assert result["structuredContent"] == assistant["data"]
                 outcomes.append(result["structuredContent"].get("outcome"))
             assert outcomes == [None, "authenticated", "unauthenticated"]
 
@@ -1234,7 +1233,7 @@ def test_mcp_parity(monkeypatch):
                 await tools.execute_tool(
                     "validate_workflow_template",
                     dumps(missing).decode(),
-                    app.shared_ctx.sessions["reader"],
+                    app.shared_ctx.sessions["admin"],
                     conversation_id=1,
                     call_id="missing",
                 )
@@ -1242,11 +1241,10 @@ def test_mcp_parity(monkeypatch):
 
             # login probes keep their administrator and read_write requirements
             probe = {"request": {"url": SOURCES["token"]["login"], "method": "POST"}}
-            for account in ("reader", "admin"):
-                denied = await call(
-                    app, "probe_http_request", {"probe": probe}, token=account
-                )
-                assert denied["isError"] and "read-only" in str(denied)
+            denied = await call(
+                app, "probe_http_request", {"probe": probe}, token="admin"
+            )
+            assert denied["isError"] and "read-only" in str(denied)
 
             reader = await tools.execute_tool(
                 "probe_http_request",

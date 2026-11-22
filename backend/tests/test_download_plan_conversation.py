@@ -21,7 +21,7 @@ from app.models.download import (
 )
 from app.models.flow import FlowGraph, FlowJob, FlowLog, FlowVariable
 from app.models.mcp import MCPAccessTokenCreate, MCPTokenScope
-from app.models.user import Permissions, PermType, UserPermission, UserRole
+from app.models.user import Permissions, UserRole
 from app.services import download as service
 from app.services.assistant import AssistantService
 from app.services.assistant_questions import answer_card
@@ -503,8 +503,12 @@ def test_preview_search_permissions(monkeypatch):
                 conversation_id=1,
                 call_id="search",
             )
-            assert result["data"]["items"] == [{"id": "r1", "title": "Lantern"}]
-            assert "subscription" not in result["data"]
+            assert result["error"]["code"] == "forbidden"
+            execute.assert_not_awaited()
+            result = await service.DownloadPlanService.search_indexer(
+                IndexerSearch(**values), reader
+            )
+            assert result["items"] == [{"id": "r1", "title": "Lantern"}]
             assert execute.await_args.args[1] == {
                 "$start": "search_start",
                 "keyword": "Lantern",
@@ -770,39 +774,16 @@ def test_mcp_search(monkeypatch):
             )
             app.ctx.flow_engine = SimpleNamespace(execute=engine)
             args = {"search": {"workflow_id": graph.id, "keyword": "Lantern"}}
-            for account in ("reader", "admin"):
-                denied = await call(app, "search_indexer", args, token=account)
-                assert denied["isError"]
-            engine.assert_not_called()
-
-            tokens = {}
-            for account in ("reader", "admin"):
-                token = await MCPAccessTokenService.create(
-                    app.shared_ctx.sessions[account].id,
-                    MCPAccessTokenCreate(name="search", scope=MCPTokenScope.READ_WRITE),
-                )
-                tokens[account] = token["token"]
-            assert (await call(app, "search_indexer", args, token=tokens["reader"]))[
-                "isError"
-            ]
-
-            await UserPermission.create(
-                user_id=app.shared_ctx.sessions["reader"].id,
-                rel_type=PermType.INDEXER,
-                rel_id=graph.id,
-            )
-            read_only = await call(app, "search_indexer", args, token="reader")
+            with pytest.raises(ForbiddenException):
+                await call(app, "search_indexer", args, token="reader")
+            read_only = await call(app, "search_indexer", args)
             assert read_only["isError"] and "read-only" in str(read_only)
-            visible = await call(app, "search_indexer", args, token=tokens["reader"])
-            assert visible["structuredContent"]["status"] == "ok"
-            blocked = await call(
-                app,
-                "search_indexer",
-                {"search": {**args["search"], "sources": True}},
-                token=tokens["reader"],
+            engine.assert_not_called()
+            writer = await MCPAccessTokenService.create(
+                app.shared_ctx.sessions["admin"].id,
+                MCPAccessTokenCreate(name="search", scope=MCPTokenScope.READ_WRITE),
             )
-            assert blocked["isError"]
-            result = await call(app, "search_indexer", args, token=tokens["admin"])
+            result = await call(app, "search_indexer", args, token=writer["token"])
             assert not result.get("isError"), result
             assert result["structuredContent"]["status"] == "ok"
             assert result["structuredContent"]["items"][0]["title"] == "Lantern"
@@ -812,7 +793,7 @@ def test_mcp_search(monkeypatch):
                 app,
                 "create_download_plan",
                 {"creation": body.model_dump(mode="json")},
-                token=tokens["admin"],
+                token=writer["token"],
             )
             assert unconfirmed["structuredContent"]["confirmation_required"]
             assert (
@@ -1061,7 +1042,7 @@ def test_conversation(monkeypatch, verbose):
                 conversation_id=conversation["id"],
                 call_id="read",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
             restored = await Sessions.turns(conversation["id"], owner)
             assert all(
                 not item["tools"] and not item["content"] for item in restored["items"]

@@ -1471,7 +1471,7 @@ def test_page_selection(monkeypatch):
                 conversation_id=conversation["id"],
                 call_id="history",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
             admin.perms = Permissions()
             for plan_id in (kept.id, kept.id + 1000):
@@ -1486,10 +1486,7 @@ def test_page_selection(monkeypatch):
                     context=inaccessible,
                     key=f"hidden-{plan_id}",
                 )
-                assert (
-                    refused.event == "error"
-                    and refused.data["code"] == "permission_denied"
-                )
+                assert refused.event == "error" and refused.data["code"] == "forbidden"
 
             refused = await tools.execute_tool(
                 "review_download_plan_change",
@@ -1510,7 +1507,13 @@ def test_mcp():
             _, _, plan = await stored_plan()
             values = {"action": "update", "plan_id": plan.id, "total_limit": 20}
 
-            denied = await call(app, "review_download_plan_change", {"change": values})
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app,
+                    "review_download_plan_change",
+                    {"change": values},
+                    token="reader",
+                )
             reviewed = await call(
                 app, "review_download_plan_change", {"change": values}, token="admin"
             )
@@ -1549,7 +1552,6 @@ def test_mcp():
                 token=write["token"],
             )
 
-            assert denied["isError"] and "not allowed" in str(denied)
             assert data["valid"] and data["plan_id"] == plan.id
             assert read_only["isError"] and "read-only" in str(read_only)
             assert applied["structuredContent"]["outcome"] == "updated"

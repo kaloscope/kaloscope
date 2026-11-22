@@ -859,7 +859,10 @@ def test_mcp(monkeypatch, tmp_path):
                 "extensions": ["url"],
             }
 
-            denied = await call(app, "review_media_batch", {"change": change})
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app, "review_media_batch", {"change": change}, token="reader"
+                )
             listed = await call(
                 app,
                 "review_media_batch",
@@ -913,7 +916,6 @@ def test_mcp(monkeypatch, tmp_path):
             # a finished batch has nothing left to stop
             assert stopped["structuredContent"]["state"] == "finished"
             assert stopped["structuredContent"]["stop_requested"] is False
-            assert denied["isError"]
             assert listed["structuredContent"]["matched"]["files"] == 2
             assert "request_id" not in listed["structuredContent"]
             assert plan["structuredContent"]["state"] == "reviewed"

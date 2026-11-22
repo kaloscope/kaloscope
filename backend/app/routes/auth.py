@@ -4,9 +4,10 @@ from sanic import Blueprint, HTTPResponse, Request, empty, json
 from sanic_ext import validate
 from tortoise import timezone
 
+from app.core.exceptions import UnauthorizedException
 from app.core.middleware import SessionHolder
 from app.models.base import IDs
-from app.models.user import User, UserInfo, UserLogin
+from app.models.user import User, UserInfo, UserLogin, UserRole
 from app.services.user import UserService
 from app.utils.dict import remove, values
 
@@ -53,21 +54,29 @@ async def logout(request: Request) -> HTTPResponse:
 
 @auth.get("/current")
 async def current(request: Request) -> HTTPResponse:
-    """Get current user's information.
+    """Return the profile for the current browser session.
 
     Args:
         request: Incoming request with session and application context.
 
     Returns:
-        Response containing the requested data.
+        Profile with stored preferences and the session's effective role.
+
+    Raises:
+        UnauthorizedException: If the session's account no longer exists.
     """
-    result = request.ctx.user.model_dump() if hasattr(request.ctx, "user") else {}
-    if result:
-        user = await User.get_or_none(id=result["id"])
-        preferences = user.preferences if user is not None else result["preferences"]
-        result["preferences"] = UserService.preferences_for(
-            preferences, user.role if user is not None else request.ctx.user.role
-        )
+    session = request.ctx.user
+    user = await User.get_or_none(id=session.id)
+    if user is None:
+        remove(SessionHolder.get_sessions(), vfilter=lambda u: u.id == session.id)
+        raise UnauthorizedException
+
+    result = session.model_dump()
+    if session.role == UserRole.ADMIN:
+        result["role"] = user.role
+    result["preferences"] = UserService.preferences_for(
+        user.preferences, result["role"]
+    )
     return json(result)
 
 

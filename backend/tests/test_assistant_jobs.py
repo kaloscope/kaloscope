@@ -311,14 +311,7 @@ def test_permissions():
     async def run():
         async with schedules() as fixture:
             result = await call(fixture.reader)
-            assert result["data"]["total"] == 2
-            assert {item["workflow_id"] for item in result["data"]["items"]} == {41}
-            hidden = await call(fixture.reader, {"name": "Beta"})
-            assert hidden["data"]["total"] == 0
-            fixture.reader.perms = None
-            empty = await call(fixture.reader)
-            assert empty["data"]["items"] == []
-            assert empty["data"]["total"] == 0
+            assert result["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -385,13 +378,12 @@ def test_invalid(arguments):
 def test_navigation():
     async def run():
         async with schedules() as fixture:
-            for user in (fixture.owner, fixture.reader):
-                result = await call(user, {"page": "workflow_jobs"}, "navigate")
-                assert result["data"]["path"] == ROUTE
-                assert result["data"]["target"] == {
-                    "page": "workflow_jobs",
-                    "resource_id": None,
-                }
+            result = await call(fixture.owner, {"page": "workflow_jobs"}, "navigate")
+            assert result["data"]["path"] == ROUTE
+            assert result["data"]["target"] == {
+                "page": "workflow_jobs",
+                "resource_id": None,
+            }
             for arguments in (
                 {"page": "workflow_jobs", "resource_id": 101},
                 {"page": ROUTE},
@@ -404,13 +396,13 @@ def test_navigation():
                 {"page": "workflow_designer", "resource_id": 41},
                 "navigate",
             )
-            assert result["data"]["path"] == "/settings/workflows/graphs/r/41"
+            assert result["error"]["code"] == "forbidden"
             denied = await call(
                 fixture.reader,
                 {"page": "workflow_designer", "resource_id": 42},
                 "navigate",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -467,7 +459,7 @@ def test_selection(selected, error):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("source", ["query", "reader_query", "selection"])
+@pytest.mark.parametrize("source", ["query", "selection"])
 def test_history_permissions(monkeypatch, source):
     streams = []
 
@@ -501,9 +493,7 @@ def test_history_permissions(monkeypatch, source):
 
     async def run():
         async with schedules() as fixture:
-            owner = fixture.owner if source == "query" else fixture.reader
-            if source == "reader_query":
-                owner.perms = Permissions(indexer_ids=[41, 42])
+            owner = fixture.owner
             conversation = await Sessions.create(
                 ConversationCreate.model_validate({"model": MODEL}), owner
             )
@@ -524,7 +514,6 @@ def test_history_permissions(monkeypatch, source):
             turn = await AssistantTurn.get(request_id="request")
             expected_resources = {
                 "query": [41, 42, 43],
-                "reader_query": [41, 42],
                 "selection": [41],
             }[source]
             assert turn.resource_ids == expected_resources
@@ -548,10 +537,7 @@ def test_history_permissions(monkeypatch, source):
 
             owner.role, owner.perms = UserRole.USER, Permissions(indexer_ids=[42])
             current_jobs = await call(owner)
-            assert current_jobs["data"]["total"] == 2
-            assert {item["workflow_id"] for item in current_jobs["data"]["items"]} == {
-                42
-            }
+            assert current_jobs["error"]["code"] == "forbidden"
 
             page = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert page["content"] == ""
@@ -567,11 +553,11 @@ def test_history_permissions(monkeypatch, source):
                 denied = await call(
                     owner, args, "read_conversation_history", conversation["id"]
                 )
-                assert denied["error"]["code"] == "permission_denied"
+                assert denied["error"]["code"] == "forbidden"
             index = await call(
                 owner, {}, "read_conversation_history", conversation["id"]
             )
-            assert index["data"]["items"] == []
+            assert index["error"]["code"] == "forbidden"
 
             current = await Sessions.begin(conversation["id"], request("next"), owner)
             create = AsyncMock()
@@ -590,7 +576,8 @@ def test_history_permissions(monkeypatch, source):
             assert (await Sessions.owned(conversation["id"], owner)).summary == {}
             create.assert_not_awaited()
 
-            owner.perms = Permissions(indexer_ids=expected_resources)
+            owner.role = UserRole.ADMIN
+            owner.perms = None
             restored = (await Sessions.turns(conversation["id"], owner))["items"][0]
             assert restored["content"] == "Private schedule facts"
             original = await call(

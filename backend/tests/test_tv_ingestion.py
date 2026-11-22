@@ -1543,6 +1543,6 @@ def test_resumed_download(monkeypatch, tmp_path, verbose):
                 conversation_id=conversation["id"],
                 call_id="read",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())

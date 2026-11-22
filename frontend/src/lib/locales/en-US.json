@@ -320,7 +320,7 @@
     }
   },
   "access_token": {
-    "description": "MCP access follows your account and token permissions",
+    "description": "Administrators can use these tokens to connect MCP clients.",
     "create": "Create Token",
     "created": "Token Created",
     "empty": "No access tokens",
@@ -332,8 +332,8 @@
     "read_only": "Read-Only",
     "scope": "Permissions",
     "read_write": "Read-Write",
-    "read_only_hint": "Read data within your account permissions, without making changes.",
-    "read_write_hint": "Read and write data within your account permissions.",
+    "read_only_hint": "Look up resources and check their status within the token’s scope.",
+    "read_write_hint": "Also allows tools that change data or run workflows within the token’s scope.",
     "status": {
       "active": "Active",
       "expired": "Expired"

@@ -29,6 +29,7 @@ from app.services.user import (
     UserPermissionService,
     UserService,
 )
+from app.utils.dict import remove
 
 user = Blueprint("user", url_prefix="/user")
 
@@ -114,7 +115,7 @@ async def create_user(_, body: UserCreate) -> HTTPResponse:
 @authorize(role=UserRole.ADMIN)
 @validate(json=IDs)
 async def delete_users(_, body: IDs) -> HTTPResponse:
-    """Delete the users.
+    """Delete the selected accounts and revoke their browser sessions.
 
     Args:
         _: Unused request.
@@ -123,7 +124,9 @@ async def delete_users(_, body: IDs) -> HTTPResponse:
     Returns:
         Empty response on success.
     """
-    await User.filter(id__in=body.ids).delete()
+    user_ids = {int(user_id) for user_id in body.ids}
+    await User.filter(id__in=user_ids).delete()
+    remove(SessionHolder.get_sessions(), vfilter=lambda u: u.id in user_ids)
     return empty()
 
 

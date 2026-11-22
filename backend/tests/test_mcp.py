@@ -55,7 +55,7 @@ from app.models.mcp import (
     WorkflowLogs,
 )
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
-from app.models.user import PermType, User, UserInfo, UserPermission, UserRole
+from app.models.user import User, UserInfo, UserRole
 from app.models.workflow_authoring import TemplateValidation
 from app.routes.mcp import dispatch
 from app.services import workflow_authoring as authoring
@@ -84,7 +84,9 @@ async def application():
     try:
         await Tortoise.generate_schemas()
         for name, role in (("reader", UserRole.USER), ("admin", UserRole.ADMIN)):
-            user = await User.create(username=name, password="unused", role=role)
+            user = await User.create(
+                username=name, password="unused", role=UserRole.ADMIN
+            )
             now = timezone.now()
             app.shared_ctx.sessions[name] = UserInfo(
                 id=user.id,
@@ -102,6 +104,9 @@ async def application():
                 user.id, MCPAccessTokenCreate(name=name)
             )
             app.ctx.mcp_tokens[name] = issued["token"]
+            if role != UserRole.ADMIN:
+                # keep the issued token as a legacy credential after demotion
+                await User.filter(id=user.id).update(role=role)
         await start_mcp(app)
         yield app
     finally:
@@ -116,7 +121,7 @@ async def post(
     method,
     params=None,
     *,
-    token: str | None = "reader",
+    token: str | None = "admin",
     headers=None,
     http_method="POST",
 ) -> HTTPResponse:
@@ -177,7 +182,7 @@ def response_json(response: HTTPResponse):
     return loads(response.body)
 
 
-async def call(app, name, arguments=None, *, token="reader"):
+async def call(app, name, arguments=None, *, token="admin"):
     """Call a tool and validate its public schema and both result representations.
 
     Args:
@@ -414,22 +419,10 @@ def test_http_protocol():
                 tool["name"] for tool in response_json(response)["result"]["tools"]
             }
             assert {"get_download_plan", "list_workflows"} <= names
-            assert (
-                not {
-                    "list_download_tasks",
-                    "apply_download_plan_change",
-                    "set_indexer_favorite",
-                }
-                & names
+            assert {"review_plan_replacement", "list_download_tasks"} <= names
+            assert {"apply_download_plan_change", "set_indexer_favorite"}.isdisjoint(
+                names
             )
-            admin_names = {
-                t["name"]
-                for t in response_json(await post(app, "tools/list", token="admin"))[
-                    "result"
-                ]["tools"]
-            }
-            assert {"review_plan_replacement", "list_download_tasks"} <= admin_names
-            assert "apply_download_plan_change" not in admin_names
             response = await post(
                 app, "ping", headers={"origin": "http://localhost:8000"}
             )
@@ -507,10 +500,9 @@ def test_write_tool_denied(annotations):
 def test_readonly_grant(name):
     async def run():
         async with application() as app:
-            for token in ("reader", "admin"):
-                result = await call(app, name, {}, token=token)
-                assert result["isError"]
-                assert "only permits read-only" in result["content"][0]["text"]
+            result = await call(app, name, {}, token="admin")
+            assert result["isError"]
+            assert "only permits read-only" in result["content"][0]["text"]
             assert not await FlowGraph.all().exists()
 
     asyncio.run(run())
@@ -520,24 +512,13 @@ def test_read_write_account():
     async def run():
         async with application() as app:
             identity = app.shared_ctx.sessions["reader"]
-            token = await MCPAccessTokenService.create(
-                identity.id,
-                MCPAccessTokenCreate(name="writer", scope=MCPTokenScope.READ_WRITE),
-            )
-            result = await call(
-                app,
-                "create_workflow_draft",
-                {
-                    "workflow": {
-                        "name": "Denied",
-                        "category": "schedule",
-                        "document": {"nodes": [], "edges": []},
-                    }
-                },
-                token=token["token"],
-            )
-
-            assert result["isError"] and "not allowed" in result["content"][0]["text"]
+            with pytest.raises(ForbiddenException):
+                await MCPAccessTokenService.create(
+                    identity.id,
+                    MCPAccessTokenCreate(name="writer", scope=MCPTokenScope.READ_WRITE),
+                )
+            with pytest.raises(ForbiddenException):
+                await call(app, "create_workflow_draft", token="reader")
             assert not await FlowGraph.all().exists()
 
     asyncio.run(run())
@@ -676,13 +657,13 @@ def test_draft_repair():
 
             await User.filter(id=identity.id).update(role="user")
             proposed["draft_version"] = 4
-            denied = await call(
-                app,
-                "save_workflow_draft",
-                {"workflow_id": graph_id, "draft": proposed},
-                token="writer",
-            )
-            assert denied["isError"] and "not allowed" in denied["content"][0]["text"]
+            with pytest.raises(ForbiddenException):
+                await call(
+                    app,
+                    "save_workflow_draft",
+                    {"workflow_id": graph_id, "draft": proposed},
+                    token="writer",
+                )
             assert (await FlowGraph.get(id=graph_id)).draft_version == 4
 
     asyncio.run(run())
@@ -721,14 +702,6 @@ def test_reads():
                     "edges": [],
                 },
             )
-            hidden = await FlowGraph.create(
-                name="Hidden", category=GraphCategory.SCHEDULE, state=GraphState.DRAFT
-            )
-            permission = await UserPermission.create(
-                user_id=app.shared_ctx.sessions["reader"].id,
-                rel_type=PermType.INDEXER,
-                rel_id=graph.id,
-            )
             await FlowLog.create(
                 graph=graph,
                 started_at=timezone.now(),
@@ -761,24 +734,11 @@ def test_reads():
             assert schemas["structuredContent"]["general"][0]["node_type"] == "ai"
 
             for tool in ("get_workflow", "get_workflow_logs"):
-                denied = await call(app, tool, {"workflow_id": hidden.id})
+                missing = await call(app, tool, {"workflow_id": 9999})
                 assert (
-                    denied["isError"] and "not allowed" in denied["content"][0]["text"]
+                    missing["isError"] and "not found" in missing["content"][0]["text"]
                 )
-                assert "permissions change" in denied["content"][0]["text"]
-                for token in ("reader", "admin"):
-                    missing = await call(app, tool, {"workflow_id": 9999}, token=token)
-                    assert (
-                        missing["isError"]
-                        and "not found" in missing["content"][0]["text"]
-                    )
-                    assert "accessible resource list" in missing["content"][0]["text"]
-            await permission.delete()
-            denied = await call(app, "get_workflow", {"workflow_id": graph.id})
-            assert denied["isError"]
-            assert (await call(app, "list_workflows"))["structuredContent"][
-                "total"
-            ] == 0
+                assert "accessible resource list" in missing["content"][0]["text"]
             assert await FlowGraph.all().values() == before
             assert await FlowLog.all().count() == 1
 
@@ -1017,9 +977,13 @@ def test_concurrent_accounts():
                 *(
                     call(app, "list_workflows", token=token)
                     for token in ["reader", "admin"] * 4
-                )
+                ),
+                return_exceptions=True,
             )
-            assert [r["structuredContent"]["total"] for r in results] == [0, 1] * 4
+            assert all(
+                isinstance(result, ForbiddenException) for result in results[::2]
+            )
+            assert [r["structuredContent"]["total"] for r in results[1::2]] == [1] * 4
 
     asyncio.run(run())
 
@@ -1105,11 +1069,13 @@ def test_media_reads(tmp_path):
                 dir=private.dir,
                 path=f"{private.dir}/Private.mp4",
             )
-            permission = await UserPermission.create(
-                user_id=app.shared_ctx.sessions["reader"].id,
-                rel_type=PermType.MEDIA_LIB,
-                rel_id=library.id,
+            scoped = await MCPAccessTokenService.create(
+                app.shared_ctx.sessions["admin"].id,
+                MCPAccessTokenCreate(
+                    name="one library", domain="media", library_ids=[library.id]
+                ),
             )
+            token = scoped["token"]
             await MediaEvent.create(
                 lib=library,
                 src_path=library.dir,
@@ -1119,9 +1085,9 @@ def test_media_reads(tmp_path):
             before = await MediaItem.all().values()
             events_before = await MediaEvent.all().values()
 
-            libraries = (await call(app, "list_media_libraries"))["structuredContent"][
-                "items"
-            ]
+            libraries = (await call(app, "list_media_libraries", token=token))[
+                "structuredContent"
+            ]["items"]
             assert [lib["id"] for lib in libraries] == [library.id]
             assert libraries[0]["scanning"] is True
 
@@ -1129,39 +1095,36 @@ def test_media_reads(tmp_path):
                 app,
                 "list_media_items",
                 {"keyword": "mcp", "library_id": library.id, "page_size": 1},
+                token=token,
             )
             assert [row["id"] for row in listed["structuredContent"]["items"]] == [
                 item.id
             ]
 
             empty_page = await call(
-                app, "list_media_items", {"page_num": 2, "page_size": 1}
+                app, "list_media_items", {"page_num": 2, "page_size": 1}, token=token
             )
             assert empty_page["structuredContent"] == {"total": 1, "items": []}
 
-            excluded = await call(app, "list_media_items", {"library_id": private.id})
+            excluded = await call(
+                app, "list_media_items", {"library_id": private.id}, token=token
+            )
             assert excluded["structuredContent"]["total"] == 0
 
-            details = (await call(app, "get_media_item", {"item_id": item.id}))[
-                "structuredContent"
-            ]
+            details = (
+                await call(app, "get_media_item", {"item_id": item.id}, token=token)
+            )["structuredContent"]
             assert details["metadata"]["title"] == "MCP Movie"
             assert details["metadata_state"] == "ready"
-            assert (await call(app, "get_media_item", {"item_id": hidden.id}))[
-                "isError"
-            ]
+            assert (
+                await call(app, "get_media_item", {"item_id": hidden.id}, token=token)
+            )["isError"]
             assert (await call(app, "get_media_item", {"item_id": 9999}))["isError"]
 
             admin = await call(app, "list_media_libraries", token="admin")
             assert len(admin["structuredContent"]["items"]) == 2
             assert await MediaItem.all().values() == before
             assert await MediaEvent.all().values() == events_before
-
-            await permission.delete()
-            assert (await call(app, "get_media_item", {"item_id": item.id}))["isError"]
-            assert (await call(app, "list_media_items"))["structuredContent"][
-                "total"
-            ] == 0
 
     asyncio.run(run())
     assert nfo.read_text() == "<movie><title>MCP Movie</title><year>2026</year></movie>"
@@ -1213,16 +1176,20 @@ def test_inaccessible_media(tmp_path, parent_state):
                 path=f"{parent.path}/child.mp4",
                 name="Child",
             )
-            await UserPermission.create(
-                user_id=app.shared_ctx.sessions["reader"].id,
-                rel_type=PermType.MEDIA_LIB,
-                rel_id=lib.id,
+            issued = await MCPAccessTokenService.create(
+                app.shared_ctx.sessions["admin"].id,
+                MCPAccessTokenCreate(
+                    name="series", domain="media", library_ids=[lib.id]
+                ),
             )
+            token = issued["token"]
             for item in (parent, child):
-                assert (await call(app, "get_media_item", {"item_id": item.id}))[
-                    "isError"
-                ]
-                page = await call(app, "list_media_items", {"path": item.path})
+                assert (
+                    await call(app, "get_media_item", {"item_id": item.id}, token=token)
+                )["isError"]
+                page = await call(
+                    app, "list_media_items", {"path": item.path}, token=token
+                )
                 assert page["structuredContent"]["items"] == []
 
     asyncio.run(run())
@@ -1241,11 +1208,6 @@ def test_job_reads():
                 await FlowJob.create(
                     graph=graph, state="pending", trigger="cron", cron_expr="0 8 * * *"
                 )
-            permission = await UserPermission.create(
-                user_id=app.shared_ctx.sessions["reader"].id,
-                rel_type=PermType.INDEXER,
-                rel_id=allowed.id,
-            )
             before = await FlowJob.all().values()
 
             page = await call(
@@ -1259,10 +1221,6 @@ def test_job_reads():
             admin = await call(app, "list_workflow_jobs", token="admin")
             assert admin["structuredContent"]["total"] == 2
             assert await FlowJob.all().values() == before
-            await permission.delete()
-            assert (await call(app, "list_workflow_jobs"))["structuredContent"][
-                "total"
-            ] == 0
 
     asyncio.run(run())
 
@@ -1299,7 +1257,8 @@ def test_provider_reads(monkeypatch):
                 data["model_ids"] == ["fixture-model"] and data["has_api_key"] is True
             )
             assert "api_key" not in data and "encrypted-private-key" not in str(result)
-            assert (await call(app, "list_ai_providers"))["isError"]
+            with pytest.raises(ForbiddenException):
+                await call(app, "list_ai_providers", token="reader")
             assert await AIProvider.all().values() == before
             network.assert_not_awaited()
 
@@ -1351,8 +1310,8 @@ methods:
                     last_error_kind=error_kind,
                 )
             before = await DownloadTask.all().values()
-            denied = await call(app, "list_download_tasks")
-            assert denied["isError"]
+            with pytest.raises(ForbiddenException):
+                await call(app, "list_download_tasks", token="reader")
             result = await call(
                 app,
                 "list_download_tasks",
@@ -1472,26 +1431,20 @@ def test_authoring_tools(monkeypatch):
                     '{{ response.text|jsonpath_all("$.items[*]")|tojson }}}',
                 }
             }
-            for name in ("reader", "admin"):
-                result = await call(app, "probe_http_request", probe, token=name)
-                assert result["isError"]
-                assert "read-only" in result["content"][0]["text"]
+            result = await call(app, "probe_http_request", probe, token="admin")
+            assert result["isError"]
+            assert "read-only" in result["content"][0]["text"]
 
-                identity = app.shared_ctx.sessions[name]
-                issued = await MCPAccessTokenService.create(
-                    identity.id,
-                    MCPAccessTokenCreate(name="probe", scope=MCPTokenScope.READ_WRITE),
-                )
-                result = await call(
-                    app, "probe_http_request", probe, token=issued["token"]
-                )
-                if name == "reader":
-                    assert result["isError"]
-                else:
-                    assert result["structuredContent"]["formatted"]["value"] == {
-                        "items": [{"id": "one"}]
-                    }
-                    assert result["structuredContent"]["body_complete"]
+            identity = app.shared_ctx.sessions["admin"]
+            issued = await MCPAccessTokenService.create(
+                identity.id,
+                MCPAccessTokenCreate(name="probe", scope=MCPTokenScope.READ_WRITE),
+            )
+            result = await call(app, "probe_http_request", probe, token=issued["token"])
+            assert result["structuredContent"]["formatted"]["value"] == {
+                "items": [{"id": "one"}]
+            }
+            assert result["structuredContent"]["body_complete"]
 
             assert len(requests) == 1
             assert counts == [

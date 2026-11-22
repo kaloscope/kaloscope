@@ -155,8 +155,7 @@ def test_libraries(tmp_path):
             assert libraries["Shows"]["scanning"] is True
             assert libraries["Movies"]["scanning"] is False
             assert "danmaku_server" not in libraries["Movies"]
-            assert limited["data"]["total"] == 1
-            assert limited["data"]["items"][0]["id"] == data.movies.id
+            assert limited["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
@@ -205,14 +204,14 @@ def test_item_filters(tmp_path):
             assert episode["data"]["scope"] == "exact_path"
             assert episode["data"]["items"][0]["episode"] == 3
             assert episode["data"]["items"][0]["parent_id"] == data.show.id
-            assert limited["data"]["total"] == 13
+            assert limited["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 
 
 @pytest.mark.parametrize(
     ("library", "user", "code"),
-    [("missing", "admin", "not_found"), ("shows", "reader", "permission_denied")],
+    [("missing", "admin", "not_found"), ("shows", "reader", "forbidden")],
 )
 def test_unavailable_library(tmp_path, library, user, code):
     async def run():
@@ -337,7 +336,7 @@ def test_long_metadata_text(tmp_path):
 @pytest.mark.parametrize(
     ("item", "user", "code"),
     [
-        ("show", "reader", "permission_denied"),
+        ("show", "reader", "forbidden"),
         ("hidden", "admin", "not_found"),
         ("missing", "admin", "not_found"),
     ],
@@ -365,7 +364,6 @@ def test_navigation(tmp_path):
             library = await call(
                 "navigate",
                 {"page": "media_library", "resource_id": data.movies.id},
-                data.reader,
             )
             item = await call(
                 "navigate", {"page": "media_item", "resource_id": data.show.id + 3}
@@ -381,7 +379,7 @@ def test_navigation(tmp_path):
             assert (
                 item["data"]["path"] == f"/medialibs/{data.shows.id}/{data.show.id + 3}"
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
     asyncio.run(run())
 

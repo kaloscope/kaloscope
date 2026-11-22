@@ -265,7 +265,7 @@ watch(
       sessionUser = currentUser;
       // the token already clears a new login; its first profile must not close a just-opened panel
       if (currentUser) {
-        if (accountId !== undefined && accountId !== currentUser.id) resetSession();
+        if (currentUser.role !== 'admin' || (accountId !== undefined && accountId !== currentUser.id)) resetSession();
         accountId = currentUser.id;
       }
     }
@@ -535,6 +535,7 @@ export async function loadAssistantModels(): Promise<void> {
  * Show the assistant and refresh its catalogs outside generation and history changes.
  */
 export function openAssistant(): void {
+  if (user.current?.role !== 'admin') return;
   assistant.update((state) => ({ ...state, open: true }));
   if (!get(assistant).busy && !get(assistant).historyLoading) {
     void loadAssistantModels();

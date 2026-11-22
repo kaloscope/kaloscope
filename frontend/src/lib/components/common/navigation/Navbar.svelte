@@ -24,7 +24,7 @@
   import { Languages, Logo, Notifications, PageHeader, Signposts, Themes, UserCenter } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
-  import { historyBack, subroutes } from '$lib/stores.svelte';
+  import { historyBack, subroutes, user } from '$lib/stores.svelte';
 
   let { navs = [], back = false, shadow = false, hidden = false, appMode = false }: NavbarProps = $props();
   let themeSwitcher: Themes;
@@ -152,7 +152,7 @@
       onrefresh={(unread) => (unreadNotifications = unread)}
       bind:this={notifications}
     />
-    {#if appMode}
+    {#if appMode && user.current?.role === 'admin'}
       <button
         id="assistant-trigger"
         type="button"

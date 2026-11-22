@@ -1488,7 +1488,7 @@ def test_page_selection(monkeypatch):
                 conversation_id=conversation["id"],
                 call_id="review",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
             assert resume["error"]["code"] == refused["error"]["code"] == "forbidden"
 
     asyncio.run(run())
@@ -1504,7 +1504,6 @@ def test_mcp(monkeypatch):
             monkeypatch.setattr(Sanic, "get_app", lambda *args, **kwargs: app)
             try:
                 await store()
-                reader = app.shared_ctx.sessions["reader"]
                 admin = app.shared_ctx.sessions["admin"]
                 pause = {"task_id": 21, "action": "pause"}
 
@@ -1521,44 +1520,39 @@ def test_mcp(monkeypatch):
                     }
                 }
                 read_only = await call(app, "apply_download_task_action", arguments)
-                tokens = {
-                    user.id: (
-                        await MCPAccessTokenService.create(
-                            user.id,
-                            MCPAccessTokenCreate(
-                                name="tasks", scope=MCPTokenScope.READ_WRITE
-                            ),
-                        )
-                    )["token"]
-                    for user in (reader, admin)
-                }
-                blocked = await call(
-                    app,
-                    "apply_download_task_action",
-                    arguments,
-                    token=tokens[reader.id],
-                )
-                assert blocked["isError"]
+                token = (
+                    await MCPAccessTokenService.create(
+                        admin.id,
+                        MCPAccessTokenCreate(
+                            name="tasks", scope=MCPTokenScope.READ_WRITE
+                        ),
+                    )
+                )["token"]
+                with pytest.raises(ForbiddenException):
+                    await call(
+                        app, "apply_download_task_action", arguments, token="reader"
+                    )
                 applied = await call(
                     app,
                     "apply_download_task_action",
                     arguments,
-                    token=tokens[admin.id],
+                    token=token,
                 )
                 replay = await call(
                     app,
                     "apply_download_task_action",
                     arguments,
-                    token=tokens[admin.id],
+                    token=token,
                 )
 
                 delete = {"task_id": 23, "action": "delete", "delete_files": True}
-                denied = await call(
-                    app,
-                    "review_download_task_action",
-                    {"change": delete},
-                    token=tokens[reader.id],
-                )
+                with pytest.raises(ForbiddenException):
+                    await call(
+                        app,
+                        "review_download_task_action",
+                        {"change": delete},
+                        token="reader",
+                    )
                 deleting = await call(
                     app,
                     "review_download_task_action",
@@ -1589,20 +1583,19 @@ def test_mcp(monkeypatch):
                             "change": {**delete, "delete_files": False},
                         }
                     },
-                    token=tokens[admin.id],
+                    token=token,
                 )
                 deleted = await call(
                     app,
                     "apply_download_task_action",
                     {"application": application_args},
-                    token=tokens[admin.id],
+                    token=token,
                 )
 
                 assert data["valid"] and data["dispatch"] == "immediate"
                 assert read_only["isError"] and "read-only" in str(read_only)
                 assert applied["structuredContent"]["outcome"] == "changed"
                 assert replay["structuredContent"]["replayed"]
-                assert denied["isError"] and "not allowed" in str(denied)
                 assert changed["structuredContent"]["conflict"]
                 assert deleted["structuredContent"]["outcome"] == "deleted"
                 assert [path for path, _ in remote.requests] == ["/pause", "/delete"]

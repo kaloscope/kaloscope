@@ -21,7 +21,7 @@ from app.models.mcp import (
     MCPUserInfo,
 )
 from app.models.media import MediaLib
-from app.models.user import PermType, User, UserPermission, UserRole
+from app.models.user import User, UserRole
 from app.services.base import BaseService
 
 _TOKEN_PREFIX = "ks_mcp_"
@@ -43,18 +43,14 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             Public token metadata plus the one-time `token` value.
 
         Raises:
-            ForbiddenException: If the account cannot access a requested library.
+            ForbiddenException: If the owner lacks the role or a library is missing.
         """
-        if body.library_ids is not None:
-            libraries = MediaLib.filter(id__in=body.library_ids)
-            if not await User.exists(id=user_id, role=UserRole.ADMIN):
-                permitted = await UserPermission.filter(
-                    user_id=user_id,
-                    rel_type=PermType.MEDIA_LIB,
-                ).values_list("rel_id", flat=True)
-                libraries = libraries.filter(id__in=permitted)
-            if await libraries.count() != len(body.library_ids):
-                raise ForbiddenException
+        if not await User.exists(id=user_id, role=UserRole.ADMIN):
+            raise ForbiddenException
+        if body.library_ids is not None and await MediaLib.filter(
+            id__in=body.library_ids
+        ).count() != len(body.library_ids):
+            raise ForbiddenException
         token = _TOKEN_PREFIX + secrets.token_urlsafe(32)
         record = await MCPAccessToken.create(
             user_id=user_id,
@@ -100,7 +96,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
     ) -> MCPUserInfo:
         """Resolve an active credential to its owner's current account identity.
 
-        Resource permissions are loaded by the existing `authorize` decorator.
+        Only tokens owned by a current administrator grant MCP access.
         Usage updates never extend the fixed expiry or create a login session.
 
         Args:
@@ -114,6 +110,7 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         Raises:
             UnauthorizedException: If the token is invalid, expired, deleted,
                 missing its creation time, or no longer belongs to an account.
+            ForbiddenException: If the owner no longer has the administrator role.
         """
         if not token or not _TOKEN_PATTERN.fullmatch(token):
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
@@ -128,6 +125,9 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         record = await active.select_related("user").first()
         if record is None or record.created_at is None:
             raise UnauthorizedException(headers={"WWW-Authenticate": "Bearer"})
+
+        if record.user.role != UserRole.ADMIN:
+            raise ForbiddenException
 
         # recheck existence when recording usage, without restoring deleted records
         if not await active.update(last_used_at=now):

@@ -1,13 +1,22 @@
 import { getCurrentRole } from '$lib/api';
 import { icons } from '$lib/icons';
 import type { Menu } from '$lib/types';
+import { normalizePathname } from '$lib/utils/url';
+import { redirect } from '@sveltejs/kit';
 import type { LayoutLoad } from './$types';
 
 /**
  * Build settings navigation for the current user role.
- * @returns Data used by the layout or page.
+ * @param event - Settings URL and the parent layout that loads the session.
+ * @returns Navigation available to the current account.
  */
-export const load: LayoutLoad = async () => {
+export const load: LayoutLoad = async ({ url, parent }) => {
+  await parent();
+  const admin = (await getCurrentRole(true)) === 'admin';
+  if (!admin && ['/settings/personal/tokens', '/settings/system/ai'].includes(normalizePathname(url.pathname))) {
+    redirect(307, '/settings/personal/account');
+  }
+
   const menus: Menu[] = [
     {
       title: 'nav.settings.personal.title',
@@ -26,11 +35,6 @@ export const load: LayoutLoad = async () => {
           title: 'nav.settings.personal.preferences',
           path: '/settings/personal/preferences',
           icon: icons.textGrammarSettings
-        },
-        {
-          title: 'nav.settings.personal.tokens',
-          path: '/settings/personal/tokens',
-          icon: icons.key
         }
       ]
     },
@@ -51,7 +55,8 @@ export const load: LayoutLoad = async () => {
     }
   ];
 
-  if ((await getCurrentRole()) === 'admin') {
+  if (admin) {
+    menus[0].routes.push({ title: 'nav.settings.personal.tokens', path: '/settings/personal/tokens', icon: icons.key });
     menus.splice(
       1,
       0,

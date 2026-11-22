@@ -42,7 +42,6 @@ from app.core.ai.queries import (
     workflow_list,
     workflow_logs,
 )
-from app.core.dl.access import ADMIN_PREVIEW, DOWNLOAD_GRANTS
 from app.core.dl.driver import DownloadState
 from app.core.exceptions import ErrorCode, KaloscopeException, NotFoundException
 from app.core.flow.reference import (
@@ -715,7 +714,6 @@ class AssistantTool:
     name: str
     description: str
     arguments: type[BaseModel]
-    admin: bool = False
     # a smaller schema and description offered until the tool's focus is entered
     brief: type[BaseModel] | None = None
     brief_description: str | None = None
@@ -836,7 +834,6 @@ TOOLS = (
         "body <=256KiB, otherwise text=2000-char sample plus HTML structure. "
         "No login/cache/retry/save; secrets hidden.",
         HTTPProbe,
-        admin=True,
     ),
     AssistantTool(
         "validate_workflow_template",
@@ -856,7 +853,6 @@ TOOLS = (
         "Validate exact-base structure/fields/readiness; never executes. Valid "
         "unlocks run_workflow.",
         WorkflowValidation,
-        admin=True,
     ),
     AssistantTool(
         "preview_workflow_draft",
@@ -864,21 +860,18 @@ TOOLS = (
         "No save/publish; final Keep/Revert. Outside designer: reference only. "
         "Conflict: revert/reload. Remove edges first.",
         WorkflowPreview,
-        admin=True,
     ),
     AssistantTool(
         "run_workflow",
         "Really run a validated version/snapshot once, only on user request; never "
         "saves/publishes. Reports effects, status, output checks.",
         WorkflowRun,
-        admin=True,
     ),
     AssistantTool(
         CREATE_TOOL,
         "Explicit workflow authoring only. Create an empty unpublished draft; "
         "retries replay, duplicate names fail.",
         WorkflowCreate,
-        admin=True,
     ),
     AssistantTool(
         "read_workflow_log",
@@ -941,51 +934,43 @@ TOOLS = (
         "Preview schedule changes with listed IDs and offset times. Show changes, "
         "defaults, first_run and notes together for confirmation.",
         ScheduleReview,
-        admin=True,
     ),
     AssistantTool(
         "apply_workflow_schedule",
         "Apply a prior turn's valid review after the user confirms it; returns at "
         "once. Repeat the same request_id after errors; never re-review to retry.",
         ScheduleConfirm,
-        admin=True,
     ),
     AssistantTool(
         "inspect_workspace",
         "Admin diagnostics, templates, batches, receipts or actions.",
         WorkspaceQuery,
-        admin=True,
     ),
     AssistantTool(
         "review_workspace_change",
         "Show a review in chat. copy_template: target_id=template ID, "
         "name=new draft name.",
         AdminChange,
-        admin=True,
     ),
     AssistantTool(
         "get_media_batch",
         "Read batch progress and remaining work.",
         BatchProgress,
-        admin=True,
     ),
     AssistantTool(
         "cancel_media_batch",
         "Stop a running batch at its next unit.",
         BatchStop,
-        admin=True,
     ),
     AssistantTool(
         "review_plan_replacement",
         "Preview atomic rebuild; keep history and timing. Confirm in chat.",
         ReplacementReview,
-        admin=True,
     ),
     AssistantTool(
         "get_plan_replacement",
         "Check an earlier rebuild receipt.",
         ReplacementStatus,
-        admin=True,
     ),
     AssistantTool(
         "review_download_plan_change",
@@ -1017,7 +1002,6 @@ TOOLS = (
         "review_library_scan",
         "Preview a movie/TV scan. Show library, bindings and notes for confirmation.",
         ScanReview,
-        admin=True,
     ),
     AssistantTool(
         "review_media_rescrape",
@@ -1025,7 +1009,6 @@ TOOLS = (
         "A sole result gets a preview; otherwise use a key the user identified "
         "or ask which match. Show changes, episodes and organization to confirm.",
         RescrapeReview,
-        admin=True,
     ),
     AssistantTool(
         "review_library_config",
@@ -1034,7 +1017,6 @@ TOOLS = (
         "fields stay. Summarize changes, order, naming samples and notes in the "
         "user's language; end the turn to confirm.",
         ConfigReview,
-        admin=True,
     ),
     AssistantTool(
         "review_media_batch",
@@ -1047,7 +1029,6 @@ TOOLS = (
         "Explain counts, leftovers and notes. Confirm before apply_media_change.",
         BatchReview,
         brief=BatchBrief,
-        admin=True,
     ),
     AssistantTool(
         "apply_media_change",
@@ -1056,7 +1037,6 @@ TOOLS = (
         "same request_id after errors; never re-review. Report can_revert for batches; "
         "false means no undo, never offer it.",
         MediaConfirm,
-        admin=True,
     ),
     AssistantTool(
         "navigate",
@@ -1074,18 +1054,11 @@ def available_tools(user: UserInfo) -> dict[str, AssistantTool]:
         user: Authenticated account with current resource permissions.
 
     Returns:
-        Read and preview tools, plus draft and download-plan creation and
-        user-requested trial runs for editors. Canvas saves, publication and
-        unrequested execution remain user actions.
+        Registered tools for an administrator, or an empty mapping for any other role.
     """
-    return {
-        tool.name: tool
-        for tool in TOOLS
-        if (not tool.admin or user.role == UserRole.ADMIN)
-        and (
-            tool.name not in DOWNLOAD_GRANTS or DOWNLOAD_GRANTS[tool.name].allows(user)
-        )
-    }
+    if user.role != UserRole.ADMIN:
+        return {}
+    return {tool.name: tool for tool in TOOLS}
 
 
 def compact_schema(value: Any, definitions: dict | None = None) -> Any:
@@ -1292,11 +1265,7 @@ def tool_schemas(
                 "create_download_task",
             } and not (plan_authoring or plan_only):
                 continue
-            if (
-                tool.name == "search_indexer"
-                and user.role == UserRole.ADMIN
-                and not (plan_authoring or plan_only)
-            ):
+            if tool.name == "search_indexer" and not (plan_authoring or plan_only):
                 continue
             if (
                 plan_only
@@ -1362,12 +1331,6 @@ def tool_schemas(
         )
         parameters.pop("description", None)
         description = (tool.brief_description if short else None) or tool.description
-        if tool.name == "search_indexer" and not ADMIN_PREVIEW.allows(user):
-            parameters["properties"].pop("sources")
-            description = (
-                "Search an accessible published indexer; returns resource metadata."
-            )
-
         encoded = dumps(parameters)
         definitions = {
             name: value
@@ -1667,7 +1630,6 @@ async def execute_tool(
                         library_id=item.lib_id,
                     )
                 case NavigationTarget(page="active_downloads" | "completed_downloads"):
-                    ADMIN_PREVIEW.require(user)
                     result = NavigationResult(
                         target=args, path=DOWNLOAD_PATHS[args.page]
                     )
@@ -1681,8 +1643,7 @@ async def execute_tool(
                         graph = await FlowGraphService.get_accessible(
                             args.resource_id, user
                         )
-                        readonly = user.role != UserRole.ADMIN or not graph.editable
-                        path += f"/{'r/' if readonly else ''}{graph.id}"
+                        path += f"/{'' if graph.editable else 'r/'}{graph.id}"
                     result = NavigationResult(target=args, path=path)
                 case MediaLibraryList():
                     result = await media_libraries(user)

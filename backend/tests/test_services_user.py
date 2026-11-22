@@ -250,6 +250,71 @@ def test_history_record(monkeypatch, rel_type, days):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.USER])
+def test_profile_role(monkeypatch, role):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, _):
+            user = await User.create(
+                username="Member", password=encrypt("test-password"), role=role
+            )
+            login = await client.post(
+                "/_api/auth/login",
+                data={"username": user.username, "password": "test-password"},
+            )
+            token = login.json()["data"]["token"]
+            changed = UserRole.USER if role == UserRole.ADMIN else UserRole.ADMIN
+            await User.filter(id=user.id).update(role=changed)
+            profile = await client.get(
+                "/_api/auth/current", headers={"Authorization": f"Bearer {token}"}
+            )
+            assert profile.json()["data"]["role"] == UserRole.USER
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("via_route", [True, False])
+def test_deleted_sessions(monkeypatch, via_route):
+    async def run():
+        async with _database(), _client(monkeypatch) as (client, app):
+            password = "test-password"
+            for name in ("removed", "keeper"):
+                await User.create(
+                    username=name, password=encrypt(password), role=UserRole.ADMIN
+                )
+            sessions = app.shared_ctx.sessions
+            tokens = []
+            for name in ("removed", "removed", "keeper"):
+                login = await client.post(
+                    "/_api/auth/login", data={"username": name, "password": password}
+                )
+                tokens.append(login.json()["data"]["token"])
+            old, second, keeper = tokens
+            account_id = sessions[old].id
+            if via_route:
+                response = await client.post(
+                    "/_api/user/delete",
+                    headers={"Authorization": f"Bearer {keeper}"},
+                    json={"ids": [str(account_id)]},
+                )
+                assert response.is_success
+                assert set(sessions) == {keeper}
+            else:
+                await User.filter(id=account_id).delete()
+
+            for token in (old, second):
+                response = await client.get(
+                    "/_api/auth/current", headers={"Authorization": f"Bearer {token}"}
+                )
+                assert response.status_code == 401
+            assert set(sessions) == {keeper}
+            response = await client.get(
+                "/_api/auth/current", headers={"Authorization": f"Bearer {keeper}"}
+            )
+            assert response.json()["data"]["username"] == "keeper"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "preferences",
     [None, {"watch_records": 3}, {"watch_records": 42}, {"recent_reads": False}],

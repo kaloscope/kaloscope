@@ -606,52 +606,46 @@ def test_tool_parity(monkeypatch, saved_session):
                 },
                 "workflow_id": graph.id,
             }
-            for name in ("reader", "admin"):
-                result = await call(
-                    app, "probe_http_request", {"probe": args}, token=name
-                )
-                assert result["isError"] and "read-only" in str(result)
+            result = await call(
+                app, "probe_http_request", {"probe": args}, token="admin"
+            )
+            assert result["isError"] and "read-only" in str(result)
 
-                user = app.shared_ctx.sessions[name]
-                token = await MCPAccessTokenService.create(
-                    user.id,
-                    MCPAccessTokenCreate(
-                        name="auth probe", scope=MCPTokenScope.READ_WRITE
-                    ),
-                )
-                result = await call(
-                    app, "probe_http_request", {"probe": args}, token=token["token"]
-                )
-                if name == "reader":
-                    assert result["isError"]
-                else:
-                    invalid = {**args, "workflow_id": str(graph.id)}
-                    denied = await call(
-                        app,
-                        "probe_http_request",
-                        {"probe": invalid},
-                        token=token["token"],
-                    )
-                    assert denied["isError"]
+            user = app.shared_ctx.sessions["admin"]
+            token = await MCPAccessTokenService.create(
+                user.id,
+                MCPAccessTokenCreate(name="auth probe", scope=MCPTokenScope.READ_WRITE),
+            )
+            result = await call(
+                app, "probe_http_request", {"probe": args}, token=token["token"]
+            )
+            invalid = {**args, "workflow_id": str(graph.id)}
+            denied = await call(
+                app,
+                "probe_http_request",
+                {"probe": invalid},
+                token=token["token"],
+            )
+            assert denied["isError"]
 
-                    denied = await tools.execute_tool(
-                        "probe_http_request",
-                        dumps(invalid).decode(),
-                        user,
-                        conversation_id=1,
-                        call_id="invalid-probe",
-                    )
-                    assert not denied["ok"]
+            denied = await tools.execute_tool(
+                "probe_http_request",
+                dumps(invalid).decode(),
+                user,
+                conversation_id=1,
+                call_id="invalid-probe",
+            )
+            assert not denied["ok"]
 
-                    assistant = await tools.execute_tool(
-                        "probe_http_request",
-                        dumps(args).decode(),
-                        user,
-                        conversation_id=1,
-                        call_id="probe",
-                    )
-                    assert assistant["ok"]
-                    assert result["structuredContent"] == assistant["data"]
+            assistant = await tools.execute_tool(
+                "probe_http_request",
+                dumps(args).decode(),
+                user,
+                conversation_id=1,
+                call_id="probe",
+            )
+            assert assistant["ok"]
+            assert result["structuredContent"] == assistant["data"]
 
             assert len(network) == 2
             assert await GlobalCookie.all().count() == await FlowLog.all().count() == 0
@@ -741,7 +735,7 @@ def test_history_access(monkeypatch, saved_session):
                 conversation_id=conversation["id"],
                 call_id="history",
             )
-            assert denied["error"]["code"] == "permission_denied"
+            assert denied["error"]["code"] == "forbidden"
 
             await AssistantConversation.filter(id=conversation["id"]).update(
                 summary={"goals": ["Private fixture"]},

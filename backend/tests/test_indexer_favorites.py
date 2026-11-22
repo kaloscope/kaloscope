@@ -45,6 +45,8 @@ def test_shared_favorites():
                 user_id=reader.id, rel_type=PermType.INDEXER, rel_id=graph.id
             )
             await flow.favorite_resource(request(reader, "POST", payload), id=graph.id)
+            admin = app.shared_ctx.sessions["admin"]
+            await flow.favorite_resource(request(admin, "POST", payload), id=graph.id)
             query = {"workflow_id": graph.id}
             items = await call(app, "list_indexer_favorites", {"query": query})
             assert items["structuredContent"]["items"] == [
@@ -61,7 +63,7 @@ def test_shared_favorites():
             assert blocked["isError"]
             token = (
                 await MCPAccessTokenService.create(
-                    reader.id,
+                    admin.id,
                     MCPAccessTokenCreate(name="rw", scope=MCPTokenScope.READ_WRITE),
                 )
             )["token"]
@@ -69,23 +71,17 @@ def test_shared_favorites():
                 app, "set_indexer_favorite", {"change": change}, token=token
             )
             assert saved["structuredContent"]["favorite"]
-            assert (await UserFavorite.get(user_id=reader.id)).rsrc == payload["rsrc"]
+            assert (await UserFavorite.get(user_id=admin.id)).rsrc == payload["rsrc"]
             another = await tools.execute_tool(
                 "set_indexer_favorite",
                 dumps({**change, "resource_id": "book/2"}),
-                reader,
+                admin,
                 conversation_id=1,
                 call_id="favorite",
             )
             assert another["ok"] and another["data"]["favorite"]
-            listed = loads(
-                (await user.list_favorites(request(reader, "POST", {}))).body
-            )
+            listed = loads((await user.list_favorites(request(admin, "POST", {}))).body)
             assert listed["total"] == 2
-            admin = await call(
-                app, "list_indexer_favorites", {"query": {}}, token="admin"
-            )
-            assert admin["structuredContent"]["items"] == []
             removed = await call(
                 app,
                 "set_indexer_favorite",
@@ -93,23 +89,15 @@ def test_shared_favorites():
                 token=token,
             )
             assert not removed["structuredContent"]["favorite"]
-            await flow.unfavorite_resource(
-                request(reader, "POST", payload), id=graph.id
-            )
-            assert await UserFavorite.filter(user_id=reader.id).count() == 1
+            await flow.unfavorite_resource(request(admin, "POST", payload), id=graph.id)
+            assert await UserFavorite.filter(user_id=admin.id).count() == 1
             await grant.delete()
-            revoked = await call(app, "list_indexer_favorites", {"query": query})
-            assert revoked["structuredContent"]["total"] == 0
             assert (
                 loads((await user.list_favorites(request(reader, "POST", {}))).body)[
                     "items"
                 ]
                 == []
             )
-            denied = await call(
-                app, "set_indexer_favorite", {"change": change}, token=token
-            )
-            assert denied["isError"]
             with pytest.raises(ForbiddenException):
                 await flow.unfavorite_resource(
                     request(reader, "POST", payload), id=graph.id

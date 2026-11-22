@@ -320,7 +320,7 @@
     }
   },
   "access_token": {
-    "description": "用于 MCP 接入，访问范围受当前账号和令牌权限限制",
+    "description": "管理员可使用这些令牌连接 MCP 客户端",
     "create": "创建令牌",
     "created": "令牌已创建",
     "empty": "暂无访问令牌",
@@ -332,8 +332,8 @@
     "read_only": "只读",
     "scope": "访问权限",
     "read_write": "读写",
-    "read_only_hint": "仅可读取当前账号有权访问的数据",
-    "read_write_hint": "允许读写数据，具体操作受当前账号权限限制",
+    "read_only_hint": "可在令牌授权范围内查询资源和状态",
+    "read_write_hint": "还可在令牌授权范围内使用修改数据或运行工作流的工具",
     "status": {
       "active": "有效",
       "expired": "已过期"

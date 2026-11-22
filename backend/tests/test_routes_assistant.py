@@ -17,7 +17,7 @@ from sanic.response.types import BaseHTTPResponse
 from sanic_ext.exceptions import ValidationError
 from tortoise import Tortoise, timezone
 
-from app.core.exceptions import UnauthorizedException
+from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.middleware import on_request, on_response
 from app.models.ai import AIProvider
 from app.models.assistant import AssistantEvent
@@ -79,7 +79,9 @@ def request(app, *, body=BODY, authenticated=True):
         app=app,
     )
     result.body = json.dumps(body).encode()
-    result.ctx.user = SimpleNamespace(role=UserRole.ADMIN) if authenticated else None
+    result.ctx.user = (
+        SimpleNamespace(id=1, role=UserRole.ADMIN) if authenticated else None
+    )
     return result
 
 
@@ -96,6 +98,25 @@ def request(app, *, body=BODY, authenticated=True):
 def test_login_required(application, handler, kwargs):
     with pytest.raises(UnauthorizedException):
         asyncio.run(handler(request(application, authenticated=False), **kwargs))
+
+
+@pytest.mark.parametrize(
+    ("handler", "kwargs"),
+    [
+        (routes.list_models, {}),
+        (routes.list_conversations, {}),
+        (routes.create_conversation, {}),
+        (routes.get_turns, {"conversation_id": 1}),
+        (routes.persistent_chat, {"conversation_id": 1}),
+        (routes.record_device, {"conversation_id": 1, "call_id": "nav"}),
+        (routes.submit_answers, {"conversation_id": 1, "call_id": "question"}),
+    ],
+)
+def test_reader_access(application, handler, kwargs):
+    req = request(application)
+    req.ctx.user.role = UserRole.USER
+    with pytest.raises(ForbiddenException):
+        asyncio.run(handler(req, **kwargs))
 
 
 def test_invalid_request(application, monkeypatch):
@@ -186,7 +207,7 @@ def test_http_contract(application, monkeypatch):
     app.register_middleware(on_request, "request")
     app.register_middleware(on_response, "response")
     user = SimpleNamespace(
-        id=1, role=UserRole.USER, expire_at=timezone.now() + timedelta(hours=1)
+        id=1, role=UserRole.ADMIN, expire_at=timezone.now() + timedelta(hours=1)
     )
     app.shared_ctx.sessions = {"browser-session": user}
     users = []
@@ -209,7 +230,7 @@ def test_http_contract(application, monkeypatch):
         )
         try:
             await Tortoise.generate_schemas()
-            await User.create(id=1, username="owner", password="unused", role="user")
+            await User.create(id=1, username="owner", password="unused", role="admin")
             await User.create(id=2, username="other", password="unused", role="admin")
             provider = await AIProvider.create(
                 name="Enabled",
@@ -281,7 +302,7 @@ def test_http_contract(application, monkeypatch):
                     'event: done\ndata: {"usage":null,"tool_calls":0}\n\n'
                 )
                 assert users[0].id == 1
-                assert users[0].perms.indexer_ids == []
+                assert users[0].role == UserRole.ADMIN
 
                 history = await client.get(path + "/turns", headers=headers)
                 assert history.headers["cache-control"] == "no-store"
@@ -301,7 +322,14 @@ def test_http_contract(application, monkeypatch):
                 other = await client.get(path + "/turns", headers=other_headers)
                 assert other.status_code == 404
 
-                app.shared_ctx.sessions["browser-session"].role = UserRole.ADMIN
+                await User.filter(id=user.id).update(role=UserRole.USER)
+                denied = await client.get(path + "/turns", headers=headers)
+                assert denied.status_code == 403
+                denied = await client.post(path + "/chat", json=BODY, headers=headers)
+                assert denied.status_code == 403
+                assert len(users) == 1
+                await User.filter(id=user.id).update(role=UserRole.ADMIN)
+
                 graph = await FlowGraph.create(
                     name="Upload fixture", category="indexer", state="draft"
                 )

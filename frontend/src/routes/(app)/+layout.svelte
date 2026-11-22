@@ -232,4 +232,6 @@
 
 <!-- the bottom navigation dock -->
 <Dock navs={data.navs} />
-<AssistantPanel />
+{#if user.current?.role === 'admin'}
+  <AssistantPanel />
+{/if}

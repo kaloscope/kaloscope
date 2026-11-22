@@ -103,14 +103,14 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                 app,
                 "get_workflow_reference",
                 {"topic": topic, "include_nodes": include_nodes},
-                token="reader",
+                token="admin",
             )
             assert recipe["structuredContent"]["topic"] == topic
 
             shared = await tools.execute_tool(
                 "get_workflow_reference",
                 dumps({"topic": topic, "include_nodes": include_nodes}).decode(),
-                app.shared_ctx.sessions["reader"],
+                app.shared_ctx.sessions["admin"],
                 conversation_id=1,
                 call_id="recipe",
             )
@@ -123,7 +123,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                     "node_type": "movie" if movie else "search_end",
                     "include_examples": False,
                 },
-                token="reader",
+                token="admin",
             )
             assert not any(
                 field.get("readonly")
@@ -156,22 +156,21 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                     "mode": "movie" if movie else "search",
                     "context": {**formatted["value"], "page_num": 2, "page_size": 1},
                 }
-                for account in ("reader", "admin"):
-                    result = await call(
-                        app,
-                        "validate_workflow_template",
-                        {"validation": fixture},
-                        token=account,
-                    )
-                    assistant = await tools.execute_tool(
-                        "validate_workflow_template",
-                        dumps(fixture).decode(),
-                        app.shared_ctx.sessions[account],
-                        conversation_id=1,
-                        call_id="fixture",
-                    )
-                    assert result["structuredContent"] == assistant["data"]
-                    assert result["structuredContent"]["valid"] is valid
+                result = await call(
+                    app,
+                    "validate_workflow_template",
+                    {"validation": fixture},
+                    token="admin",
+                )
+                assistant = await tools.execute_tool(
+                    "validate_workflow_template",
+                    dumps(fixture).decode(),
+                    app.shared_ctx.sessions["admin"],
+                    conversation_id=1,
+                    call_id="fixture",
+                )
+                assert result["structuredContent"] == assistant["data"]
+                assert result["structuredContent"]["valid"] is valid
 
             assert before == [
                 await model.all().count()
@@ -198,7 +197,7 @@ def test_shared_recipe(monkeypatch, movie, include_nodes):
                         app,
                         "validate_workflow_template",
                         {"validation": fixture},
-                        token="reader",
+                        token="admin",
                     )
                     assert checked["structuredContent"]["valid"]
 

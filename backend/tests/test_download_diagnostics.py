@@ -189,8 +189,8 @@ def test_diagnostic_scope():
                 plan_id=15, workflow_id=graph.id, status="unconfirmed"
             )
             query = {"query": {"attempt_id": attempt.id}}
-            reader = await call(app, "diagnose_download_ingestion", query)
-            assert reader["isError"]
+            with pytest.raises(ForbiddenException):
+                await call(app, "diagnose_download_ingestion", query, token="reader")
             admin = await call(app, "diagnose_download_ingestion", query, token="admin")
             assert admin["structuredContent"]["stage"] == "unconfirmed"
             assert admin["structuredContent"]["linked_task_count"] == 0

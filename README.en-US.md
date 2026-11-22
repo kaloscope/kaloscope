@@ -49,13 +49,13 @@ v1.0.0 brings AI into workflow creation and everyday media management. Describe 
 - Watch changes appear on the node canvas, then save the draft or revert them; you decide when to publish
 - Manage download tasks and plans, workflow schedules, library scans, rescraping, and ingestion settings through conversation
 
-Available actions depend on your account permissions.
+The web assistant and MCP are available to administrators only.
 
 - Administrators can ask “Subscribe me to [title].” The assistant searches actual releases and asks for the remaining choices in one question card. Select or enter a release group, downloader directory, and target library, or choose “Download only.” The card asks about the directory and library separately when each has multiple choices. Ongoing subscriptions default to hourly checks, one resource per check, and no total cap.
 - On the last question, select “Confirm subscription.” The assistant searches again with the chosen release restrictions, validates the settings, and returns the plan ID and first-check status. Skipping a required choice defers creation. Choosing “Any release group or edition” can download multiple releases of an episode. Ask for a preview to review the settings first.
 - Rebuild a download plan by name or ID. By default, the new plan retains its deduplication history and download count. Existing tasks and files stay in place.
 - When plans share a name or settings are missing, choose an option, enter a custom value, or skip the question. If you ask for a plan preview, open it with the review button above the message box. Click a plan in the conversation history to see its settings and current status. Publishing and deleting have separate confirmation buttons.
-- Users can search permitted indexers, save and look up their own favorites, open a video, or resume reading on the current device.
+- Administrators can use the assistant to search indexers, save and look up their own favorites, open a video, or resume reading on the current device.
 - Administrators can trace ingestion through plan runs, downloads, and transfers, inspect a media batch, or stop its remaining work. Older records may lack a link to the originating plan.
 - Administrators can also copy a template into a draft, review a workflow's publication impact, create or remove a library, edit an item's title, and inspect downloader health, transcodes, and log-level summaries.
 
@@ -153,7 +153,7 @@ The assistant requires a model that supports tool calling. Local model services 
 
 <img src="screenshots/mcp-access.png" alt="MCP address and authentication settings on the access tokens page" width="1382" height="849" />
 
-Create a token under **Personal → Access Tokens**, then enter these settings in an MCP client that supports Streamable HTTP and Bearer authentication:
+Sign in as an administrator and create a token under **Personal → Access Tokens**, then enter these settings in an MCP client that supports Streamable HTTP and Bearer authentication:
 
 | Setting              | Value                                                                                        |
 | -------------------- | -------------------------------------------------------------------------------------------- |
