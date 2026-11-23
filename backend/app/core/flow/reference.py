@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from app.models.mcp import WorkflowReference
+from app.models.mcp_results import WorkflowReference
 from app.services.flow import FlowGraphService
 from app.utils.json import dumps, loads
 

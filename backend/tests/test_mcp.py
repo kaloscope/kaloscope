@@ -22,12 +22,13 @@ from tortoise import Tortoise, timezone
 
 from app.core.config import KaloscopeConfig
 from app.core.constants import MCP_PATH, SESSION_ID
+from app.core.dl.access import DOWNLOAD_GRANTS
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.flow.engine import FlowEngine
 from app.core.flow.nodes.base import Node
 from app.core.flow.reference import get_workflow_reference
 from app.core.middleware import on_request, on_response
-from app.mcp import close_mcp, create_server, start_mcp
+from app.mcp import ScopedMCPServer, close_mcp, create_server, start_mcp
 from app.models.ai import AIProvider
 from app.models.download import (
     Downloader,
@@ -51,9 +52,10 @@ from app.models.flow import (
 from app.models.mcp import (
     MCPAccessToken,
     MCPAccessTokenCreate,
+    MCPTokenDomain,
     MCPTokenScope,
-    WorkflowLogs,
 )
+from app.models.mcp_results import WorkflowLogs
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaQuery
 from app.models.user import User, UserInfo, UserRole
 from app.models.workflow_authoring import TemplateValidation
@@ -489,6 +491,112 @@ def test_write_tool_denied(annotations):
             )
             with pytest.raises(ToolError, match="no registered access grant"):
                 await server.call_tool("future_write", {}, ctx)
+
+    asyncio.run(run())
+    operation.assert_not_awaited()
+
+
+def test_declarative_grants():
+    server = create_server()
+    operation = AsyncMock()
+
+    @server.tool(
+        access="write",
+        domains=MCPTokenDomain.WORKFLOWS,
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=True,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+    )
+    async def spoofed_hint() -> str:
+        await operation()
+        return "done"
+
+    with pytest.raises(ValueError, match="explicit access grant"):
+        server.tool(domains=MCPTokenDomain.MEDIA)
+    with pytest.raises(ValueError, match="ToolAnnotations"):
+        server.tool(access="write")
+    with pytest.raises(ValueError, match="specific MCPTokenDomain"):
+        server.tool(access="read", domains=MCPTokenDomain.ALL)
+    with pytest.raises(ValueError, match="already registered"):
+
+        @server.tool(access="read", name="spoofed_hint")
+        async def duplicate_granted() -> str:
+            return "shadow"
+
+    assert server._grants["spoofed_hint"].access == "write"
+
+    @server.tool()
+    async def ungranted_tool() -> str:
+        return "closed"
+
+    with pytest.raises(ValueError, match="already registered"):
+
+        @server.tool(access="read", name="ungranted_tool")
+        async def elevate_ungranted() -> str:
+            return "elevated"
+
+    assert "ungranted_tool" not in server._grants
+
+    fresh = ScopedMCPServer("fresh")
+    with pytest.raises(ValueError, match="DOWNLOAD_GRANTS"):
+
+        @fresh.tool(access="read", name="create_download_plan")
+        async def mismatched_download_grant() -> str:
+            return "nope"
+
+    for name, grant in DOWNLOAD_GRANTS.items():
+        if name == "get_download_task":
+            continue
+        registered = server._grants[name]
+        assert (registered.access == "write") is grant.read_write
+
+    async def run():
+        async with application() as app:
+            ro = await MCPAccessTokenService.authenticate(
+                app.ctx.mcp_tokens["admin"], client_ip="127.0.0.1", user_agent=None
+            )
+            rw_issued = await MCPAccessTokenService.create(
+                app.shared_ctx.sessions["admin"].id,
+                MCPAccessTokenCreate(name="rw", scope=MCPTokenScope.READ_WRITE),
+            )
+            rw = await MCPAccessTokenService.authenticate(
+                rw_issued["token"], client_ip="127.0.0.1", user_agent=None
+            )
+            ro_ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    request=SimpleNamespace(state=SimpleNamespace(user=ro))
+                )
+            )
+            rw_ctx = SimpleNamespace(
+                request_context=SimpleNamespace(
+                    request=SimpleNamespace(state=SimpleNamespace(user=rw))
+                )
+            )
+            rw_req = SimpleNamespace(
+                request=SimpleNamespace(state=SimpleNamespace(user=rw))
+            )
+            listed = await server._handle_list_tools(rw_req, None)
+            spoofed = next(t for t in listed.tools if t.name == "spoofed_hint")
+            assert spoofed.annotations is not None
+            assert spoofed.annotations.read_only_hint is False
+            with pytest.raises(ToolError, match="only permits read-only"):
+                await server.call_tool("spoofed_hint", {}, ro_ctx)
+
+            server.remove_tool("spoofed_hint")
+            assert "spoofed_hint" not in server._grants
+            with pytest.raises(ToolError, match="no registered access grant"):
+                await server.call_tool("spoofed_hint", {}, rw_ctx)
+
+            @server.tool(name="spoofed_hint")
+            async def reregistered_ungranted() -> str:
+                await operation()
+                return "closed"
+
+            with pytest.raises(ToolError, match="no registered access grant"):
+                await server.call_tool("spoofed_hint", {}, rw_ctx)
 
     asyncio.run(run())
     operation.assert_not_awaited()

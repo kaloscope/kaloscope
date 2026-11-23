@@ -102,7 +102,7 @@ from app.models.flow import (
     ScheduleApply,
     ScheduleChange,
 )
-from app.models.mcp import NodeTypesResult
+from app.models.mcp_results import NodeTypesResult
 from app.models.media import (
     FileOwner,
     Language,
