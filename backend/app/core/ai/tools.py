@@ -19,6 +19,28 @@ from pydantic import (
 from pydantic.json_schema import SkipJsonSchema
 from tortoise.transactions import in_transaction
 
+from app.core.ai.catalog import (
+    BATCH_FOCUS as BATCH_FOCUS,
+)
+from app.core.ai.catalog import (
+    DOMAIN_TOOLS,
+    MEDIA_REVIEW_TOOLS,
+    ActionDomain,
+    CatalogProfile,
+    is_tool_visible,
+)
+from app.core.ai.catalog import (
+    MEDIA_CHANGE_TOOLS as MEDIA_CHANGE_TOOLS,
+)
+from app.core.ai.catalog import (
+    PLAN_CHANGE_TOOLS as PLAN_CHANGE_TOOLS,
+)
+from app.core.ai.catalog import (
+    SCHEDULE_TOOLS as SCHEDULE_TOOLS,
+)
+from app.core.ai.catalog import (
+    TASK_ACTION_TOOLS as TASK_ACTION_TOOLS,
+)
 from app.core.ai.documents import (
     GraphProposal,
     GraphReference,
@@ -153,41 +175,12 @@ from app.utils.json import JSONType, dumps, loads
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
 CREATE_TOOL = "create_workflow_draft"
-SCHEDULE_TOOLS = frozenset({"review_workflow_schedule", "apply_workflow_schedule"})
-PLAN_CHANGE_TOOLS = frozenset(
-    {
-        "review_download_plan_change",
-        "apply_download_plan_change",
-        "review_plan_replacement",
-    }
-)
-TASK_ACTION_TOOLS = frozenset(
-    {"review_download_task_action", "apply_download_task_action"}
-)
 MEDIA_REVIEWS = {
     "review_library_scan": LibraryScan,
     "review_media_rescrape": MediaRescrape,
     "review_library_config": LibraryConfig,
     "review_media_batch": MediaBatch,
 }
-MEDIA_REVIEW_TOOLS = frozenset(MEDIA_REVIEWS)
-MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
-# a file conversation keeps library management available without unrelated domains
-BATCH_FOCUS = MEDIA_CHANGE_TOOLS | frozenset(
-    {
-        "ask_user",
-        "discover_actions",
-        "get_media_batch",
-        "cancel_media_batch",
-        "list_media_libraries",
-        "list_media_items",
-        "get_media_item",
-        "list_workflows",
-        "get_workflow",
-        "read_conversation_history",
-        "navigate",
-    }
-)
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -215,51 +208,6 @@ class ToolArguments(BaseModel):
     """Reject unknown arguments without echoing model-generated content."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-
-
-type ActionDomain = Literal[
-    "questions", "personal", "workspace", "search", "downloads", "workflows", "media"
-]
-
-DOMAIN_TOOLS = {
-    "questions": {"ask_user"},
-    "personal": {"get_personal_preferences", "set_personal_preference"},
-    "workspace": {
-        "inspect_workspace",
-        "review_workspace_change",
-        "get_media_batch",
-        "cancel_media_batch",
-    },
-    "workflows": {
-        "list_workflows",
-        "get_workflow",
-        "create_workflow_draft",
-        "get_workflow_reference",
-        "list_workflow_jobs",
-    },
-    "media": {
-        "list_media_libraries",
-        "list_media_items",
-        "get_media_item",
-        "review_media_batch",
-    },
-    "search": {
-        "list_workflows",
-        "search_indexer",
-        "list_indexer_favorites",
-        "set_indexer_favorite",
-    },
-    "downloads": {
-        "list_download_plans",
-        "get_download_plan",
-        "review_download_plan_change",
-        "list_download_tasks",
-        "get_download_task",
-        "diagnose_download_ingestion",
-        "get_plan_replacement",
-        "review_plan_replacement",
-    },
-}
 
 
 class ActionDiscovery(ToolArguments):
@@ -1147,6 +1095,7 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
 def tool_schemas(
     user: UserInfo,
     *,
+    profile: CatalogProfile | None = None,
     domain: ActionDomain | None = None,
     authoring: bool = False,
     plan_authoring: bool = False,
@@ -1164,6 +1113,8 @@ def tool_schemas(
 
     Args:
         user: Account whose tool catalog is being requested.
+        profile: Declarative catalog profile; when omitted, constructed from the
+            keyword flags below.
         domain: Explicitly discovered domain whose full tools are offered.
         authoring: Focus this recipe turn on workflow construction. Other tools
             return next turn; this changes model context, never authorization.
@@ -1189,149 +1140,25 @@ def tool_schemas(
         argument model's own summary is omitted because the tool description
         already states its purpose.
     """
+    active = profile or CatalogProfile(
+        domain=domain,
+        authoring=authoring,
+        plan_authoring=plan_authoring,
+        plan_only=plan_only,
+        ingestion=ingestion,
+        trial=trial,
+        schedule=schedule,
+        plan_change=plan_change,
+        task_action=task_action,
+        media_change=media_change,
+        batch=batch,
+        workspace=workspace,
+    )
     schemas = []
     for tool in available_tools(user).values():
-        if workspace and tool.name not in {
-            "discover_actions",
-            "inspect_workspace",
-            "review_workspace_change",
-            "get_media_batch",
-            "cancel_media_batch",
-            "ask_user",
-            "get_workflow",
-            "list_workflows",
-            "list_media_libraries",
-            "get_media_item",
-            "navigate",
-        }:
+        if not is_tool_visible(tool.name, active):
             continue
-        if tool.name == "review_workspace_change" and not (
-            workspace or domain == "workspace"
-        ):
-            continue
-        if tool.name in {"get_media_batch", "cancel_media_batch"} and not (
-            batch or workspace or domain == "workspace"
-        ):
-            continue
-        if domain:
-            if tool.name not in DOMAIN_TOOLS[domain] | {
-                "discover_actions",
-                "navigate",
-                "ask_user",
-            }:
-                continue
-        else:
-            if tool.name in DOMAIN_TOOLS["personal"] or (
-                tool.name == "inspect_workspace" and not workspace
-            ):
-                continue
-            # graph authors can request the full question schema through discovery
-            if tool.name in {"ask_user", "get_plan_replacement"} and not (
-                plan_only or plan_change or task_action or batch or workspace
-            ):
-                continue
-            # re-enter graph editing through its reference recipe when switching domains
-            if (
-                tool.name == "preview_workflow_draft"
-                and not authoring
-                and (plan_authoring or task_action or schedule or media_change is True)
-            ):
-                continue
-            if batch and tool.name not in BATCH_FOCUS:
-                continue
-            if tool.name == "run_workflow" and not trial:
-                continue
-            if tool.name in {"set_indexer_favorite", "list_indexer_favorites"}:
-                continue
-            if tool.name == "diagnose_download_ingestion" and not (
-                plan_change or task_action
-            ):
-                continue
-            if tool.name in SCHEDULE_TOOLS and not schedule:
-                continue
-            if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
-                continue
-            if tool.name in TASK_ACTION_TOOLS and not task_action:
-                continue
-            if (
-                not batch
-                and tool.name in MEDIA_CHANGE_TOOLS
-                and (
-                    not media_change
-                    or (media_change is not True and tool.name not in media_change)
-                )
-            ):
-                continue
-            if tool.name in {
-                "get_download_plan_options",
-                "validate_download_plan",
-                "create_download_plan",
-                "get_library_ingestion",
-                "validate_download_task",
-                "create_download_task",
-            } and not (plan_authoring or plan_only):
-                continue
-            if tool.name == "search_indexer" and not (plan_authoring or plan_only):
-                continue
-            if (
-                plan_only
-                and tool.name
-                not in {
-                    "discover_actions",
-                    "ask_user",
-                    "diagnose_download_ingestion",
-                    "list_workflows",
-                    "get_workflow",
-                    "get_download_plan_options",
-                    "search_indexer",
-                    "validate_download_plan",
-                    "create_download_plan",
-                    "get_download_plan",
-                    "list_download_plans",
-                    "get_library_ingestion",
-                    "validate_download_task",
-                    "create_download_task",
-                    "list_media_libraries",
-                    "list_media_items",
-                    "get_workflow_logs",
-                    "read_workflow_log",
-                    "read_conversation_history",
-                    "create_workflow_draft",
-                    "navigate",
-                    "get_plan_replacement",
-                    *PLAN_CHANGE_TOOLS,
-                }
-                and not (
-                    (ingestion or plan_change) and tool.name == "get_workflow_reference"
-                )
-            ):
-                continue
-            if (
-                authoring
-                and not (
-                    trial
-                    and tool.name
-                    in {"run_workflow", "get_workflow_logs", "read_workflow_log"}
-                )
-                and tool.name
-                not in {
-                    "discover_actions",
-                    "list_workflows",
-                    "get_workflow",
-                    "list_node_types",
-                    "get_workflow_reference",
-                    "probe_http_request",
-                    "validate_workflow_template",
-                    "validate_workflow",
-                    "preview_workflow_draft",
-                    "create_workflow_draft",
-                    "read_workflow_snapshot",
-                    "read_conversation_history",
-                    "navigate",
-                }
-            ):
-                continue
-        short = tool.brief is not None and not batch
+        short = tool.brief is not None and not active.batch
         parameters = compact_schema(
             (tool.brief if short else tool.arguments).model_json_schema()
         )

@@ -30,6 +30,7 @@ from openai.types.chat import (
 from sanic.log import logger
 from tortoise.exceptions import OperationalError
 
+from app.core.ai.catalog import AssistantCatalog
 from app.core.ai.history import (
     CLOUD_INPUT_TOKENS,
     budgets,
@@ -39,7 +40,6 @@ from app.core.ai.history import (
 from app.core.ai.tools import (
     CREATE_TOOL,
     MEDIA_CHANGE_TOOLS,
-    MEDIA_REVIEW_TOOLS,
     PLAN_CHANGE_TOOLS,
     SCHEDULE_TOOLS,
     TASK_ACTION_TOOLS,
@@ -50,7 +50,6 @@ from app.core.ai.tools import (
 )
 from app.core.decorators import require_browser_admin
 from app.core.exceptions import ErrorCode, KaloscopeException
-from app.core.flow.reference import SELF_CONTAINED_RECIPES
 from app.core.network import NetworkTransport
 from app.models.ai import AIModelSelection, AIProvider, AIProviderPreset
 from app.models.assistant import (
@@ -592,14 +591,6 @@ class AssistantService:
         """
         # a review shown in the previous turn may be confirmed in this one
         reviewed = await AssistantSessionService.reviewed(turn)
-        schedule_ready = "review_workflow_schedule" in reviewed
-        plan_change = "review_download_plan_change" in reviewed
-        task_action = "review_download_task_action" in reviewed
-        # a follow-up turn keeps room for history by offering only its own kind
-        media_reviews = reviewed & MEDIA_REVIEW_TOOLS
-        media_change = (
-            media_reviews | {"apply_media_change"} if media_reviews else False
-        )
         current_context = turn.context
         # direct download requests need the search tools from the first turn
         intent = await subscription_intent(turn)
@@ -651,65 +642,19 @@ class AssistantService:
                 turn.prompt,
                 re.I,
             )
-        workspace_focus = False
-        batch_focus = "review_media_batch" in reviewed and not direct_download
-        plan_authoring = (
-            plan_change
-            or direct_download
-            or bool(
-                reviewed
-                & {
-                    "get_download_plan_options",
-                    "search_indexer",
-                    "validate_download_plan",
-                    "validate_download_task",
-                    "create_download_plan",
-                    "create_download_task",
-                }
-            )
-        ) and (current_context or {}).get("page_type") != "workflow_designer"
-        search_page = (current_context or {}).get("page_type") == "web_search"
-        if search_page and not direct_download and reviewed <= {"search_indexer"}:
-            plan_authoring = False
-        plan_tools = plan_authoring
-        preparing_download = direct_download or bool(
-            reviewed
-            & {
-                "get_download_plan_options",
-                "validate_download_plan",
-                "validate_download_task",
-            }
-        )
 
         input_budget, output_budget = budgets(
             turn.model["model_id"], preset=provider.preset
         )
-        if (
-            media_change is False
-            and not plan_authoring
-            and input_budget >= CLOUD_INPUT_TOKENS
-        ):
-            # the model decides at turn start whether library files can change,
-            # and a batch review only lists or plans; the floor budget keeps
-            # it until media is read, for room
-            media_change = {"review_media_batch"}
-
-        schemas = tool_schemas(
-            user,
-            domain="search" if search_page and not plan_authoring else None,
-            plan_authoring=plan_authoring,
-            plan_only=plan_authoring,
-            schedule=schedule_ready,
-            plan_change=plan_change,
-            task_action=task_action,
-            media_change=media_change,
-            batch=batch_focus,
+        catalog = AssistantCatalog.for_turn(
+            reviewed=reviewed,
+            context=current_context,
+            direct_download=direct_download,
+            input_budget=input_budget,
+            cloud_input_tokens=CLOUD_INPUT_TOKENS,
         )
+        schemas = tool_schemas(user, profile=catalog.initial_profile())
 
-        workflow_authoring = False
-        self_contained = False
-        ingestion_authoring = False
-        trial_ready = False
         # only a server-confirmed editable designer receives saveable direct edits
         canvas = (
             current_context
@@ -724,24 +669,6 @@ class AssistantService:
         finish_requested = False
         text_length = 0
         continuation = []
-
-        def plan_schemas() -> list:
-            """Build the plan catalog with the current turn's prerequisite checks.
-
-            Returns:
-                Authorized schemas for continuing a download plan or task.
-            """
-            return tool_schemas(
-                user,
-                plan_authoring=True,
-                plan_only=plan_authoring,
-                ingestion=ingestion_authoring,
-                trial=trial_ready,
-                schedule=schedule_ready,
-                plan_change=plan_change,
-                task_action=task_action,
-                media_change=media_change,
-            )
 
         yield AssistantEvent(event="compacting", data={"active": True})
         messages, usage, compacted = await prepare_context(
@@ -900,7 +827,7 @@ class AssistantService:
                 reasoning_details = []
             else:
                 generation_output = output_budget
-                if canvas is not None or workflow_authoring:
+                if canvas is not None or catalog.authoring:
                     _, generation_output = budgets(
                         turn.model["model_id"], authoring=True, preset=provider.preset
                     )
@@ -1201,228 +1128,15 @@ class AssistantService:
                         data["follow_language"] = "zh" if reply_in_chinese else "en"
                 full_result = {**info, **result}
 
-                if (
-                    not workflow_authoring
-                    and result["ok"]
-                    and (
-                        call.function.name == "get_download_plan_options"
-                        or call.function.name == "get_library_ingestion"
-                        or call.function.name == "list_download_plans"
-                        or (
-                            preparing_download
-                            and plan_authoring
-                            and call.function.name
-                            in {"list_media_items", "search_indexer"}
-                        )
-                        or (
-                            call.function.name == "list_workflows"
-                            and any(
-                                item.get("downloadable_search")
-                                for item in result["data"]["items"]
-                            )
-                        )
-                        or (
-                            call.function.name == "get_workflow"
-                            and result["data"]["category"] == "indexer"
-                            and result["data"]["state"] != "draft"
-                        )
-                    )
-                ):
-                    # plan pages and offered changes need room, as authoring does
-                    plan_authoring |= (
-                        plan_change
-                        or (current_context or {}).get("page_type") == "download_plans"
-                        or call.function.name
-                        in {
-                            "get_download_plan_options",
-                            "get_library_ingestion",
-                            "list_download_plans",
-                        }
-                    )
-                    if call.function.name == "get_library_ingestion":
-                        ingestion_authoring = result["data"]["supported"]
-                    if call.function.name == "get_download_plan_options":
-                        preparing_download = True
-                    plan_tools = True
-                    schemas = plan_schemas()
-
-                if (
-                    not trial_ready
-                    and result["ok"]
-                    and call.function.name == "validate_workflow"
-                    and result["data"].get("valid")
-                ):
-                    # trial runs follow a successful static check of the same turn
-                    trial_ready = True
-                    schemas = tool_schemas(
-                        user,
-                        authoring=workflow_authoring,
-                        plan_authoring=plan_tools,
-                        plan_only=plan_authoring,
-                        ingestion=ingestion_authoring,
-                        trial=True,
-                        schedule=schedule_ready,
-                        plan_change=plan_change,
-                        task_action=task_action,
-                        media_change=media_change,
-                    )
-
-                if (
-                    not schedule_ready
-                    and result["ok"]
-                    and call.function.name == "list_workflow_jobs"
-                ):
-                    # schedule changes follow a listing of the current schedules
-                    schedule_ready = True
-                    schemas = tool_schemas(
-                        user,
-                        authoring=workflow_authoring,
-                        plan_authoring=plan_tools,
-                        plan_only=plan_authoring,
-                        ingestion=ingestion_authoring,
-                        trial=trial_ready,
-                        schedule=True,
-                        plan_change=plan_change,
-                        task_action=task_action,
-                        media_change=media_change,
-                    )
-
-                if (
-                    not workflow_authoring
-                    and result["ok"]
-                    and call.function.name == "get_download_plan"
-                ):
-                    # plan changes follow reading the plan and focus on plan tools
-                    plan_change = plan_tools = plan_authoring = True
-                    schemas = plan_schemas()
-
-                if (
-                    not task_action
-                    and result["ok"]
-                    and call.function.name
-                    in {"list_download_tasks", "get_download_task"}
-                ):
-                    # task actions follow reading the current tasks
-                    task_action = True
-                    schemas = tool_schemas(
-                        user,
-                        authoring=workflow_authoring,
-                        plan_authoring=plan_tools,
-                        plan_only=plan_authoring,
-                        ingestion=ingestion_authoring,
-                        trial=trial_ready,
-                        schedule=schedule_ready,
-                        plan_change=plan_change,
-                        task_action=True,
-                        media_change=media_change,
-                    )
-
-                if (
-                    media_change is not True
-                    and result["ok"]
-                    and call.function.name
-                    in {"list_media_libraries", "list_media_items", "get_media_item"}
-                ):
-                    # scans and rescrapes follow reading the current media
-                    media_change = True
-                    schemas = tool_schemas(
-                        user,
-                        authoring=workflow_authoring,
-                        plan_authoring=plan_tools,
-                        plan_only=plan_authoring,
-                        ingestion=ingestion_authoring,
-                        trial=trial_ready,
-                        schedule=schedule_ready,
-                        plan_change=plan_change,
-                        task_action=task_action,
-                        media_change=True,
-                    )
-
-                if (
-                    result["ok"]
-                    and call.function.name == "get_workflow_reference"
-                    and result["data"].get("topic")
-                    in {
-                        "json_indexer",
-                        "html_indexer",
-                        "indexer_auth",
-                        "movie_scraper",
-                        "tv_scraper",
-                    }
-                ):
-                    # keep full domain catalogs for ordinary turns, focus recipe builds
-                    workflow_authoring = True
-                    self_contained |= result["data"]["topic"] in SELF_CONTAINED_RECIPES
-                    schemas = tool_schemas(
-                        user,
-                        authoring=True,
-                        trial=trial_ready,
-                        schedule=schedule_ready,
-                        plan_change=plan_change,
-                        task_action=task_action,
-                        media_change=media_change,
-                    )
-
-                if result["ok"] and call.function.name in {
-                    "list_node_types",
-                    "validate_workflow",
-                }:
-                    # keep plan discovery out of node-heavy construction and trial turns
-                    schemas = [
-                        schema
-                        for schema in schemas
-                        if schema["function"]["name"]
-                        not in {"get_download_plan", "list_download_plans"}
-                    ]
-
-                if result["ok"] and call.function.name == "inspect_workspace":
-                    workspace_focus = True
-                if result["ok"] and call.function.name == "review_media_batch":
-                    batch_focus = True
-                    workspace_focus = False
-                if workspace_focus:
-                    schemas = tool_schemas(user, workspace=True)
-                elif batch_focus:
-                    # a plan and its samples need the room other tools would take
-                    schemas = tool_schemas(user, batch=True)
-
-                if (
-                    result["ok"]
-                    and call.function.name == "search_indexer"
-                    and not plan_authoring
-                ):
-                    schemas = tool_schemas(user, domain="search")
-
-                if result["ok"] and call.function.name == "discover_actions":
-                    domain = result["data"]["domain"]
-                    workspace_focus = domain == "workspace"
-                    batch_focus = False
-                    if (
-                        preparing_download
-                        and plan_authoring
-                        and not workflow_authoring
-                        and (
-                            domain in {"search", "downloads"}
-                            or (subscription_answer and domain == "questions")
-                        )
-                    ):
-                        schemas = plan_schemas()
-                        result["data"]["tools"] = sorted(
-                            entry["function"]["name"]
-                            for entry in schemas
-                            if not answer_only
-                            or allow_answer_tool(
-                                entry["function"]["name"], subscription_answer
-                            )
-                        )
-                    else:
-                        schemas = tool_schemas(user, domain=domain)
-                        if answer_only:
-                            result["data"]["tools"] = [
-                                name
-                                for name in result["data"]["tools"]
-                                if allow_answer_tool(name, subscription_answer)
-                            ]
+                schemas = catalog.on_tool_result(
+                    call.function.name,
+                    result,
+                    build=lambda profile: tool_schemas(user, profile=profile),
+                    schemas=schemas,
+                    answer_only=answer_only,
+                    subscription_answer=subscription_answer,
+                    allow_answer_tool=allow_answer_tool,
+                )
 
                 # a result committed together with its effect is authoritative
                 await AssistantToolCall.filter(
@@ -1800,23 +1514,6 @@ class AssistantService:
                 )
                 return
 
-            if workflow_authoring and canvas:
-                # the current canvas already supplies the target and creation handoff
-                schemas = [
-                    schema
-                    for schema in schemas
-                    if schema["function"]["name"]
-                    not in {
-                        "list_workflows",
-                        "create_workflow_draft",
-                        "navigate",
-                        # a self-contained recipe leaves these reads nothing to add
-                        *(
-                            ("list_node_types", "get_workflow")
-                            if self_contained
-                            else ()
-                        ),
-                    }
-                ]
+            schemas = catalog.trim_for_canvas(schemas, has_canvas=canvas is not None)
 
         raise KaloscopeException(ErrorCode.AI_ASSISTANT_LIMIT)

@@ -12,7 +12,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from tortoise import Tortoise
 
-from app.core.ai import history, tools
+from app.core.ai import catalog, history, tools
 from app.core.ai.documents import graph_outline
 from app.core.exceptions import ErrorCode
 from app.models.assistant import (
@@ -175,6 +175,78 @@ def test_workspace_catalog():
         "cancel_media_batch",
     } <= names
     assert fixed_size(workspace=True) <= 24796
+
+
+def test_catalog_failure_recovery():
+    def build(profile: catalog.CatalogProfile):
+        return tools.tool_schemas(ADMIN, profile=profile)
+
+    def names(schemas):
+        return {entry["function"]["name"] for entry in schemas}
+
+    ws_catalog = catalog.AssistantCatalog.for_turn(
+        reviewed=set(),
+        context=None,
+        direct_download=False,
+        input_budget=32000,
+        cloud_input_tokens=history.CLOUD_INPUT_TOKENS,
+    )
+    schemas = build(ws_catalog.initial_profile())
+    schemas = ws_catalog.on_tool_result(
+        "discover_actions",
+        {"ok": True, "data": {"domain": "workspace", "tools": []}},
+        build=build,
+        schemas=schemas,
+        answer_only=False,
+        subscription_answer=False,
+        allow_answer_tool=lambda _name, _sub: True,
+    )
+    assert len(schemas) == 7
+    schemas = ws_catalog.on_tool_result(
+        "inspect_workspace",
+        {"ok": False, "error": {"code": "bad_request"}},
+        build=build,
+        schemas=schemas,
+        answer_only=False,
+        subscription_answer=False,
+        allow_answer_tool=lambda _name, _sub: True,
+    )
+    assert names(schemas) == catalog.WORKSPACE_FOCUS
+
+    batch_catalog = catalog.AssistantCatalog.for_turn(
+        reviewed={"review_media_batch"},
+        context={"page_type": "web_search"},
+        direct_download=False,
+        input_budget=32000,
+        cloud_input_tokens=history.CLOUD_INPUT_TOKENS,
+    )
+    schemas = build(batch_catalog.initial_profile())
+    assert len(schemas) == 7
+    schemas = batch_catalog.on_tool_result(
+        "search_indexer",
+        {"ok": False, "error": {"code": "bad_request"}},
+        build=build,
+        schemas=schemas,
+        answer_only=False,
+        subscription_answer=False,
+        allow_answer_tool=lambda _name, _sub: True,
+    )
+    assert names(schemas) == catalog.BATCH_FOCUS
+
+
+def test_catalog_profile_immutable():
+    allowed = {"review_media_batch"}
+    profile = catalog.CatalogProfile(media_change=allowed)
+    before = {s["function"]["name"] for s in tools.tool_schemas(ADMIN, profile=profile)}
+
+    allowed.add("review_media_rescrape")
+    after = {s["function"]["name"] for s in tools.tool_schemas(ADMIN, profile=profile)}
+
+    assert isinstance(profile.media_change, frozenset)
+    assert after == before
+    assert "review_media_rescrape" not in after
+    assert catalog.CatalogProfile(media_change=True).media_change is True
+    assert catalog.CatalogProfile(media_change=False).media_change is False
 
 
 def test_batch_delete_mode():
