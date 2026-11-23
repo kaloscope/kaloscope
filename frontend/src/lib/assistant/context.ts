@@ -1,6 +1,8 @@
 import type { AssistantPageContext, FlowGraph, NodeSchema } from '$lib/types';
+import { requiresAssistantContext } from './navigation';
 
 const readers: (() => AssistantPageContext | null)[] = [];
+const encoder = new TextEncoder();
 
 /**
  * Remove transient selection, measurements, and expanded schemas from a canvas.
@@ -59,27 +61,30 @@ export function captureAssistantContext(route: string): AssistantPageContext | n
     const context = read();
     if (context?.route !== pathname) continue;
 
-    const json = JSON.stringify(context);
-    const encoder = new TextEncoder();
-    let metadata = json;
-
     if (context.page_type === 'workflow_designer') {
       const { canvas, ...reference } = context;
-      if (encoder.encode(JSON.stringify(canvas)).length > 512 * 1024) {
+      // serialize the canvas and metadata separately once so large graphs are never stringified twice
+      const canvasJson = JSON.stringify(canvas);
+      if (encoder.encode(canvasJson).length > 512 * 1024) {
         throw new Error('assistant_context_limit');
       }
-      metadata = JSON.stringify(reference);
+      const metadataJson = JSON.stringify(reference);
+      if (encoder.encode(metadataJson).length > 128 * 1024) {
+        throw new Error('assistant_context_limit');
+      }
+      return {
+        ...(JSON.parse(metadataJson) as Omit<typeof context, 'canvas'>),
+        canvas: JSON.parse(canvasJson) as typeof canvas
+      };
     }
 
-    if (encoder.encode(metadata).length > 128 * 1024) throw new Error('assistant_context_limit');
+    const json = JSON.stringify(context);
+    if (encoder.encode(json).length > 128 * 1024) throw new Error('assistant_context_limit');
 
     return JSON.parse(json) as AssistantPageContext;
   }
 
-  if (
-    /^\/settings\/workflows\/graphs(?:\/(?:r\/)?[1-9]\d*)?\/?$/.test(route) ||
-    /^\/medialibs\/[1-9]\d*(?:\/[1-9]\d*)?\/?$/.test(route)
-  ) {
+  if (requiresAssistantContext(route)) {
     throw new Error('assistant_context_invalid');
   }
 

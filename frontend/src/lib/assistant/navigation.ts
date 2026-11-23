@@ -3,11 +3,65 @@ import type { AssistantDestination, AssistantToolResult } from '$lib/types';
 export const workflowPath = '/settings/workflows/graphs';
 export const workflowJobsPath = '/settings/workflows/schedules';
 export const downloadPlansPath = '/downloads/plans';
-export const mediaPath = '/medialibs';
+const mediaPath = '/medialibs';
 export const downloadPaths = {
   active_downloads: '/downloads/downloading',
   completed_downloads: '/downloads/completed'
 } as const;
+
+export type AssistantRoutePage =
+  | 'dashboard'
+  | 'web_search'
+  | 'workflow_designer'
+  | 'workflows'
+  | 'workflow_jobs'
+  | 'media_item'
+  | 'media_library'
+  | 'active_downloads'
+  | 'completed_downloads'
+  | 'download_plans'
+  | 'other';
+
+const contextRequiredPatterns = [
+  new RegExp(`^${workflowPath}(?:/(?:r/)?[1-9]\\d*)?/?$`),
+  new RegExp(`^${mediaPath}/[1-9]\\d*(?:/[1-9]\\d*)?/?$`)
+];
+
+const routePatterns: [RegExp, AssistantRoutePage][] = [
+  [/^\/dashboard$/, 'dashboard'],
+  [/^\/websearch\/(?:global|[1-9]\d*)\/?$/, 'web_search'],
+  [/\/graphs\/(?:r\/)?\d+\/?$/, 'workflow_designer'],
+  [/\/workflows\/graphs\/?$/, 'workflows'],
+  [new RegExp(`^${workflowJobsPath}/?$`), 'workflow_jobs'],
+  [new RegExp(`^${mediaPath}/\\d+/\\d+/?$`), 'media_item'],
+  [new RegExp(`^${mediaPath}/\\d+/?$`), 'media_library'],
+  [new RegExp(`^${downloadPaths.active_downloads}/?$`), 'active_downloads'],
+  [new RegExp(`^${downloadPaths.completed_downloads}/?$`), 'completed_downloads'],
+  [new RegExp(`^${downloadPlansPath}/?$`), 'download_plans']
+];
+
+/**
+ * Classify the active pathname into one of the assistant's supported page kinds.
+ *
+ * @param pathname - Current browser pathname.
+ * @returns Matched assistant page key, or `other` for unsupported routes.
+ */
+export function classifyAssistantRoute(pathname: string): AssistantRoutePage {
+  for (const [pattern, page] of routePatterns) {
+    if (pattern.test(pathname)) return page;
+  }
+  return 'other';
+}
+
+/**
+ * Check whether the route requires a registered live page context before sending.
+ *
+ * @param pathname - Current browser pathname.
+ * @returns Whether missing context on this route indicates an unloaded supported view.
+ */
+export function requiresAssistantContext(pathname: string): boolean {
+  return contextRequiredPatterns.some((pattern) => pattern.test(pathname));
+}
 
 /**
  * Resolve a successful navigation or creation result against the application's route registry.

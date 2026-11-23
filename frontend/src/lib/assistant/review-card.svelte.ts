@@ -105,6 +105,7 @@ export function createReviewCard<T>(options: {
       return failed;
     },
     load,
-    notify
+    notify,
+    source
   };
 }

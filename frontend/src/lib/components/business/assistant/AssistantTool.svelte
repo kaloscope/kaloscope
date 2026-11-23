@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
+  import { errorMessage } from '$lib/assistant/errors';
   import { isAssistantReview, scheduleDetail } from '$lib/assistant/reviews';
   import type { AssistantTool } from '$lib/assistant/session';
   import { _ } from '$lib/i18n';
@@ -140,23 +141,19 @@
     return icons.subtractCircle;
   });
 
+  let everOpened = $state(false);
   const answers = $derived(
     tool.name === 'ask_user' && tool.result?.ok
       ? (tool.result.data as import('$lib/types').QuestionCard | undefined)?.summary
       : null
   );
+  const hasDetail = $derived(tool.name !== 'ask_user' && !!tool.result?.data);
   const detail = $derived(
-    tool.name !== 'ask_user' && tool.result?.data
-      ? JSON.stringify(tool.result.data, tool.name.includes('workflow_schedule') ? scheduleDetail : undefined, 2)
+    everOpened && hasDetail
+      ? JSON.stringify(tool.result!.data, tool.name.includes('workflow_schedule') ? scheduleDetail : undefined, 2)
       : ''
   );
-  const error = $derived(
-    tool.result?.error
-      ? $_(`assistant.errors.${tool.result.error.code}`, {
-          default: $_(`alert.${tool.result.error.code}`, { default: $_('assistant.tool_failed') })
-        })
-      : ''
-  );
+  const error = $derived(tool.result?.error ? errorMessage($_, tool.result.error.code, 'assistant.tool_failed') : '');
 </script>
 
 {#snippet row()}
@@ -179,8 +176,13 @@
   </span>
 {/snippet}
 
-{#if detail || error}
-  <details class="group">
+{#if hasDetail || error}
+  <details
+    class="group"
+    ontoggle={(event) => {
+      if (event.currentTarget.open) everOpened = true;
+    }}
+  >
     <summary
       class="flex min-h-7 cursor-pointer list-none items-center gap-2 rounded-field px-2 text-xs text-base-content/60 transition-colors hover:text-base-content focus-visible:text-base-content focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
     >

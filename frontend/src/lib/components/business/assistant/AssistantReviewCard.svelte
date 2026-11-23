@@ -1,7 +1,9 @@
 <script lang="ts">
   import FirstCheckResult from './FirstCheckResult.svelte';
+  import ReviewCardShell from './ReviewCardShell.svelte';
   import { createReviewCard } from '$lib/assistant/review-card.svelte';
   import {
+    formatReviewValue,
     reviewChanges,
     reviewFields,
     refreshReviewTarget,
@@ -116,6 +118,7 @@
 
   /**
    * Check whether the server still accepts a decision for this download plan.
+   *
    * @returns Whether the composer should offer to review the plan.
    */
   export function needsPlanDecision(): boolean {
@@ -133,6 +136,7 @@
 
   /**
    * Submit a decision for the receipt currently on screen.
+   *
    * @param approve - Whether to create the plan or cancel the review.
    */
   async function decide(approve: boolean): Promise<void> {
@@ -150,109 +154,78 @@
 
   /**
    * Display one saved value from the immutable review.
+   *
    * @param value - A single field value.
    * @param key - Its optional localized field key.
    * @returns The readable value, with units or an explicit empty marker.
    */
   function display(value: unknown, key?: string): string {
-    if (value === null || value === undefined || value === '') return $_('assistant.plan_change.cleared');
-    if (key === 'binding_order' && Array.isArray(value))
-      return value.length ? value.map((id) => '#' + id).join(' → ') : $_('assistant.plan_change.cleared');
-    if (typeof value === 'boolean') return $_(value ? 'assistant.admin_review.yes' : 'assistant.admin_review.no');
-    if (key === 'field.state' && typeof value === 'string')
-      return $_('enum.download_state.' + value, { default: value });
-    if ((key === 'field.trigger' || key === 'trigger') && typeof value === 'string')
-      return $_('enum.job_trigger.' + value, { default: value });
-    if (key === 'state' && typeof value === 'string') return $_('enum.job_state.' + value, { default: value });
-    if ((key === 'assistant.review.interval_unit' || key === 'interval_unit') && typeof value === 'string')
-      return $_('duration.' + value, { default: value });
-    if (key === 'field.interval' && typeof value === 'number') return $_('assistant.plan_change.hours', value);
-    if (key === 'assistant.plan_change.method' && typeof value === 'string')
-      return $_('enum.transfer_method.' + value, { default: value });
-    if (
-      key &&
-      [
-        'field.interval_start',
-        'field.interval_end',
-        'field.run_date',
-        'assistant.review.next_run',
-        'interval_start',
-        'interval_end',
-        'run_date'
-      ].includes(key) &&
-      typeof value === 'string'
-    )
-      return $dateTime(value);
-    return typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return formatReviewValue(value, { t: $_, formatDate: $dateTime, key });
   }
 </script>
 
 {#snippet details()}
-  <section
-    class={['space-y-2 text-sm', tool !== 'validate_download_plan' && 'rounded-box border border-base-content/15 p-3']}
-    aria-busy={busy}
+  <ReviewCardShell
+    {busy}
+    {failed}
+    loaded={!!receipt}
+    showSpinner={true}
+    sectionClass={[
+      'space-y-2 text-sm',
+      tool !== 'validate_download_plan' && 'rounded-box border border-base-content/15 p-3'
+    ]}
+    issues={!outcome?.duplicate_plan_id ? (outcome?.issues ?? []) : []}
+    status={statusText}
+    statusClass="text-xs text-base-content/75"
+    alertClass="text-xs"
   >
-    {#if receipt}
-      {#if tool !== 'validate_download_plan'}<h4 class="font-semibold">
-          {$_('assistant.review.actions.' + action)}
-        </h4>{/if}
-      <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-        {#each fields as [key, value] (key)}
-          <dt class="text-base-content/70">{$_(key)}</dt>
-          <dd class="break-words whitespace-pre-line">{display(value, key)}</dd>
+    {#if tool !== 'validate_download_plan'}<h4 class="font-semibold">
+        {$_('assistant.review.actions.' + action)}
+      </h4>{/if}
+    <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+      {#each fields as [key, value] (key)}
+        <dt class="text-base-content/70">{$_(key)}</dt>
+        <dd class="break-words whitespace-pre-line">{display(value, key)}</dd>
+      {/each}
+    </dl>
+    {#if changes.length}
+      <dl class="space-y-1 border-t border-base-content/10 pt-2 text-xs">
+        {#each changes as change, i (i)}
+          <div>
+            <dt class="font-medium">
+              {['binding_order', 'interval_num', 'interval_unit', 'bootparams', 'repeatable', 'recoverable'].includes(
+                String(change.field)
+              )
+                ? $_('assistant.review.' + change.field)
+                : $_('field.' + change.field, {
+                    default: $_('metadata.fields.' + change.field, { default: String(change.field) })
+                  })}
+            </dt>
+            <dd class="break-words">
+              {display(change.before, String(change.field))} → {display(change.after, String(change.field))}
+              {#if Array.isArray(change.maskedChanges) && change.maskedChanges.length}
+                <span class="block">{$_('assistant.review.masked_changes', change.maskedChanges.join(', '))}</span>
+              {/if}
+            </dd>
+          </div>
         {/each}
       </dl>
-      {#if changes.length}
-        <dl class="space-y-1 border-t border-base-content/10 pt-2 text-xs">
-          {#each changes as change, i (i)}
-            <div>
-              <dt class="font-medium">
-                {['binding_order', 'interval_num', 'interval_unit', 'bootparams', 'repeatable', 'recoverable'].includes(
-                  String(change.field)
-                )
-                  ? $_('assistant.review.' + change.field)
-                  : $_('field.' + change.field, {
-                      default: $_('metadata.fields.' + change.field, { default: String(change.field) })
-                    })}
-              </dt>
-              <dd class="break-words">
-                {display(change.before, String(change.field))} → {display(change.after, String(change.field))}
-                {#if Array.isArray(change.maskedChanges) && change.maskedChanges.length}
-                  <span class="block">{$_('assistant.review.masked_changes', change.maskedChanges.join(', '))}</span>
-                {/if}
-              </dd>
-            </div>
-          {/each}
-        </dl>
-      {/if}
-      {#if impact}
-        <p class="text-xs font-medium">{$_('assistant.review.impact.' + impact)}</p>
-      {/if}
-      {#if receipt.preview.ingestion && typeof receipt.preview.ingestion === 'object' && 'binding' in receipt.preview.ingestion && receipt.preview.ingestion.binding === 'add'}
-        <p class="text-xs font-medium">{$_('assistant.review.impact.add_binding')}</p>
-      {/if}
-      {#if notes.length}
-        <details class="text-xs">
-          <summary class="cursor-pointer">{$_('assistant.review.notes')}</summary>
-          <ul class="mt-1 list-disc space-y-1 pl-4">
-            {#each notes as note, i (i)}<li class="break-words">{note}</li>{/each}
-          </ul>
-        </details>
-      {/if}
-      {#if outcome?.issues?.length && !outcome.duplicate_plan_id}
-        <ul class="list-disc pl-4 text-xs">
-          {#each outcome.issues as issue, index (index)}<li>
-              {issue.path ? issue.path + ' · ' : ''}{issue.message}
-            </li>{/each}
+    {/if}
+    {#if impact}
+      <p class="text-xs font-medium">{$_('assistant.review.impact.' + impact)}</p>
+    {/if}
+    {#if receipt?.preview.ingestion && typeof receipt.preview.ingestion === 'object' && 'binding' in receipt.preview.ingestion && receipt.preview.ingestion.binding === 'add'}
+      <p class="text-xs font-medium">{$_('assistant.review.impact.add_binding')}</p>
+    {/if}
+    {#if notes.length}
+      <details class="text-xs">
+        <summary class="cursor-pointer">{$_('assistant.review.notes')}</summary>
+        <ul class="mt-1 list-disc space-y-1 pl-4">
+          {#each notes as note, i (i)}<li class="break-words">{note}</li>{/each}
         </ul>
-      {/if}
-      <p role="status" class="text-xs text-base-content/75">
-        {statusText}
-      </p>
-    {:else if busy}<span class="loading loading-xs loading-spinner" role="status" aria-label={$_('media.loading')}
-      ></span>{/if}
-    {#if failed}<p class="text-xs" role="alert">{$_('assistant.request_failed')}</p>{/if}
-    <div class="flex flex-wrap justify-end gap-2">
+      </details>
+    {/if}
+    {#snippet actions()}
       {#if failed || receipt?.status === 'pending' || receipt?.status === 'partial' || receipt?.status === 'uncertain' || (receipt?.status === 'failed' && !receipt.retryable)}
         <button type="button" class="btn btn-ghost btn-sm" disabled={busy || $assistant.busy} onclick={() => load()}
           >{$_('action.reload')}</button
@@ -295,8 +268,8 @@
           onclick={() => decide(true)}>{$_('assistant.review.actions.' + action)}</button
         >
       {/if}
-    </div>
-  </section>
+    {/snippet}
+  </ReviewCardShell>
 {/snippet}
 
 {#if tool === 'validate_download_plan'}
