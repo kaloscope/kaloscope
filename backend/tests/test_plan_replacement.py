@@ -145,6 +145,22 @@ def test_independent_previews():
     asyncio.run(run())
 
 
+def test_concurrent_expiry_status():
+    async def run():
+        async with database() as (owner, _):
+            _, _, plan = await stored_plan()
+            card = await Replacement.review(plan.id, user=owner)
+            await DownloadPlanReplacement.filter(
+                operation_id=card["operation_id"]
+            ).update(expires_at=timezone.now() - timedelta(minutes=1))
+            results = await asyncio.gather(
+                *(Replacement.status(card["operation_id"], owner) for _ in range(8))
+            )
+            assert [entry["status"] for entry in results] == ["expired"] * 8
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("decision", [True, False], ids=["approve", "recover"])
 def test_competing_sqlite_writer(tmp_path, decision):
     async def run():

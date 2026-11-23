@@ -306,3 +306,33 @@ def test_rolled_back_review(monkeypatch, decide_again):
             )
 
     asyncio.run(run())
+
+
+def test_concurrent_expiry_status():
+    async def run():
+        async with database() as (owner, _):
+            graph, _, _ = await stored_plan()
+            await FlowGraph.filter(id=graph.id).update(draft=graph.definition)
+            change = AdminChange(action="publish_workflow", target_id=graph.id)
+            expired_card = await review_action(change, owner)
+            expired_key = UUID(expired_card["operation_id"])
+            await AgentAdminReview.filter(operation_id=expired_key).update(
+                expires_at=timezone.now() - timedelta(seconds=1)
+            )
+            expired_results = await asyncio.gather(
+                *(action_status(expired_key, owner) for _ in range(8))
+            )
+            assert [r["status"] for r in expired_results] == ["expired"] * 8
+
+            timed_out_card = await review_action(change, owner)
+            timed_out_key = UUID(timed_out_card["operation_id"])
+            await AgentAdminReview.filter(operation_id=timed_out_key).update(
+                status="executing",
+                updated_at=timezone.now() - timedelta(minutes=11),
+            )
+            timed_out_results = await asyncio.gather(
+                *(action_status(timed_out_key, owner) for _ in range(8))
+            )
+            assert [r["status"] for r in timed_out_results] == ["uncertain"] * 8
+
+    asyncio.run(run())

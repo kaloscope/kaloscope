@@ -1,9 +1,13 @@
-"""Share mechanical review locking, ownership, and supersession helpers."""
+"""Share mechanical review locking, ownership, lifecycle, and supersession helpers."""
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
+from datetime import timedelta
+from typing import Any
 from uuid import UUID
 
+from tortoise import timezone
 from tortoise.expressions import F
+from tortoise.models import Model
 from tortoise.queryset import QuerySet
 
 from app.core.exceptions import (
@@ -14,6 +18,8 @@ from app.core.exceptions import (
 )
 from app.models.assistant import AssistantToolCall
 from app.models.user import User, UserInfo, UserRole
+
+REVIEW_TTL = timedelta(minutes=30)
 
 
 async def reserve_writer(queryset: QuerySet, field: str = "updated_at") -> int:
@@ -172,3 +178,163 @@ def is_media_file_listing(
         and isinstance(preview.get("library_id"), int)
         and later_data.get("library_id") == preview["library_id"]
     )
+
+
+async def get_or_create_operation_review[T: Model](
+    model: type[T],
+    *,
+    owner_id: int,
+    digest: str,
+    active_statuses: Collection[str],
+    defaults: dict[str, Any],
+    extra_filters: dict[str, Any] | None = None,
+    ttl: timedelta = REVIEW_TTL,
+    reserve: bool = True,
+) -> T:
+    """Reuse an unexpired operation review for the same digest or create one.
+
+    Callers should invoke this inside an active database transaction.
+
+    Args:
+        model: ORM model storing durable operation reviews.
+        owner_id: Account owning the review.
+        digest: Canonical digest of the frozen review payload.
+        active_statuses: Review statuses eligible for reuse while unexpired.
+        defaults: Model fields populated when inserting a new review.
+        extra_filters: Optional scope filters narrowing active review lookup.
+        ttl: Expiry window applied when creating a new review.
+        reserve: Whether to acquire the SQLite writer lock on the active query
+            before reading.
+
+    Returns:
+        Existing unexpired review or the newly persisted row.
+    """
+    active = model.filter(
+        owner_id=owner_id,
+        digest=digest,
+        status__in=list(active_statuses),
+        expires_at__gt=timezone.now(),
+        **(extra_filters or {}),
+    )
+    if reserve:
+        # SQLite uses deferred transactions; reserve the writer before lookup
+        await reserve_writer(active)
+    row = await active.first()
+    if row is None:
+        row = await model.create(
+            owner_id=owner_id,
+            digest=digest,
+            expires_at=timezone.now() + ttl,
+            **defaults,
+        )
+    return row
+
+
+async def load_operation_review[T: Model](
+    model: type[T],
+    operation_id: UUID | str,
+    user: UserInfo,
+    *,
+    expirable_statuses: Collection[str],
+    allowed: Callable[[T], bool] | None = None,
+    stale_executing_after: timedelta | None = None,
+) -> T:
+    """Load an administrator-owned operation review and settle due expirations.
+
+    Args:
+        model: ORM model storing durable operation reviews.
+        operation_id: Opaque review identifier.
+        user: Authenticated administrator reading the review.
+        expirable_statuses: Statuses that transition to `expired` once
+            `expires_at` has passed.
+        allowed: Optional channel or domain predicate that must hold for the row.
+        stale_executing_after: Optional duration after which an `executing`
+            review transitions to `uncertain`.
+
+    Returns:
+        The refreshed owned review row.
+
+    Raises:
+        ForbiddenException: If the caller is no longer a live administrator.
+        NotFoundException: If no matching review is accessible to `user`.
+    """
+    await require_live_admin(user)
+    query = model.filter(owner_id=user.id, operation_id=operation_id)
+    row = await query.first()
+    if row is None or (allowed is not None and not allowed(row)):
+        raise NotFoundException
+    now = timezone.now()
+    refresh = False
+    if row.status in expirable_statuses and row.expires_at <= now:
+        await query.filter(
+            status__in=list(expirable_statuses), expires_at__lte=now
+        ).update(status="expired")
+        refresh = True
+    if (
+        stale_executing_after is not None
+        and row.status == "executing"
+        and row.updated_at < now - stale_executing_after
+    ):
+        await query.filter(
+            status="executing",
+            updated_at__lt=now - stale_executing_after,
+        ).update(status="uncertain")
+        refresh = True
+    if refresh:
+        await row.refresh_from_db()
+    return row
+
+
+async def lock_operation_decision[T: Model](
+    model: type[T],
+    operation_id: UUID | str,
+    digest: str,
+    user: UserInfo,
+    *,
+    lock_statuses: Collection[str],
+    expirable_statuses: Collection[str],
+    allowed: Callable[[T], bool] | None = None,
+    stale_executing_after: timedelta | None = None,
+) -> T:
+    """Acquire the SQLite writer lock, expire due state, and verify digest.
+
+    Callers should verify browser administrator access and open an active
+    database transaction before calling this helper.
+
+    Args:
+        model: ORM model storing durable operation reviews.
+        operation_id: Opaque review identifier.
+        digest: Digest displayed on the trusted confirmation surface.
+        user: Authenticated browser administrator submitting the decision.
+        lock_statuses: Active statuses scoped for writer reservation.
+        expirable_statuses: Statuses that expire when `expires_at` has passed.
+        allowed: Optional channel or domain predicate that must hold for the row.
+        stale_executing_after: Optional timeout marking stuck `executing` rows
+            as `uncertain`.
+
+    Returns:
+        The locked, refreshed operation review matching `digest`.
+
+    Raises:
+        ForbiddenException: If the caller is no longer a live administrator.
+        NotFoundException: If no accessible review exists for `operation_id`.
+        BadRequestException: If `digest` differs from the frozen review digest.
+    """
+    await reserve_writer(
+        model.filter(
+            operation_id=operation_id,
+            owner_id=user.id,
+            status__in=list(lock_statuses),
+        )
+    )
+    row = await load_operation_review(
+        model,
+        operation_id,
+        user,
+        expirable_statuses=expirable_statuses,
+        allowed=allowed,
+        stale_executing_after=stale_executing_after,
+    )
+    if row.digest != digest:
+        raise BadRequestException
+    return row

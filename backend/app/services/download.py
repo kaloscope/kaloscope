@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 from collections.abc import Collection
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, timedelta
 from pathlib import Path
@@ -3956,24 +3956,39 @@ class DownloadPlanService(BaseService[DownloadPlan], model=DownloadPlan):
         key = cls.change_key(user.id, body.request_id)
         lock = _PLAN_LOCKS.setdefault(key, asyncio.Lock())
         async with lock:
-            try:
-                with submission_lock(f"plan-change:{key}"):
-                    task = asyncio.ensure_future(cls._apply_locked(body, key, user))
-                    try:
-                        return await asyncio.shield(task)
-                    except asyncio.CancelledError:
-                        # a cancelled caller never splits a change from its receipt
-                        await task
-                        raise
-            except LockTimeout:
-                if receipt := await DownloadPlanReceipt.get_or_none(key=key):
-                    return await cls._replay_change(receipt, user)
-                return {
-                    "applied": False,
-                    "pending": True,
-                    "message": "Another call is applying this request; repeat the "
-                    "same request later to read its outcome.",
-                }
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(submission_lock(f"plan-change:{key}"))
+                except LockTimeout:
+                    if receipt := await DownloadPlanReceipt.get_or_none(key=key):
+                        return await cls._replay_change(receipt, user)
+                    return {
+                        "applied": False,
+                        "pending": True,
+                        "message": "Another call is applying this request; repeat the "
+                        "same request later to read its outcome.",
+                    }
+                except OSError:
+                    logger.exception(
+                        "Failed to acquire submission lock for plan change"
+                    )
+                    return {
+                        "applied": False,
+                        "request_id": str(body.request_id),
+                        "plan_id": body.change.plan_id,
+                        "action": body.change.action.value,
+                        "failed": True,
+                        "retryable": True,
+                        "message": "Nothing was changed; the same request may be "
+                        "repeated.",
+                    }
+                task = asyncio.ensure_future(cls._apply_locked(body, key, user))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    # a cancelled caller never splits a change from its receipt
+                    await task
+                    raise
 
     @classmethod
     async def _replay_change(

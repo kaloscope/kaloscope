@@ -1,6 +1,8 @@
 """Bind browser decisions to the exact settings shown by an assistant review."""
 
+from collections.abc import Collection
 from datetime import timedelta
+from typing import Any
 from uuid import UUID
 
 from tortoise import timezone
@@ -25,8 +27,11 @@ from app.core.exceptions import (
 from app.models.assistant import AssistantToolCall
 from app.models.download import (
     DownloadPlan,
+    DownloadPlanApply,
+    DownloadPlanChange,
     DownloadPlanCreate,
     DownloadPlanCreation,
+    DownloadPlanReceipt,
     DownloadTask,
     DownloadTaskCheck,
     DownloadTaskCreate,
@@ -42,6 +47,7 @@ from app.services.download import DownloadPlanService, DownloadTaskService
 from app.services.review_common import (
     is_media_file_listing,
     load_owned_review,
+    recent_review_calls,
     reserve_writer,
     schedule_review_target,
 )
@@ -254,6 +260,234 @@ async def _apply(call: AssistantToolCall, preview: dict, user: UserInfo) -> dict
     )
 
 
+async def _load_browser_review(
+    call_id: str,
+    names: Collection[str],
+    user: UserInfo,
+    decision: PlanReviewDecision | None,
+    *,
+    check_allowed: bool,
+    reserve_lock: bool,
+) -> tuple[AssistantToolCall, dict, UUID, str]:
+    """Verify browser administrator ownership and compute the shared receipt key.
+
+    Args:
+        call_id: Server-issued tool call identifier.
+        names: Accepted review tool names for this endpoint.
+        user: Authenticated browser account owning the conversation.
+        decision: Submitted decision payload, or `None` when refreshing status.
+        check_allowed: Whether to recheck historical turn resource access.
+        reserve_lock: Whether to acquire the SQLite writer lock before reading.
+
+    Returns:
+        The originating tool call, frozen preview data, request UUID, and
+        account-scoped receipt key.
+
+    Raises:
+        ForbiddenException: If browser administrator access is unavailable.
+        NotFoundException: If no valid owned review matches `call_id`.
+        BadRequestException: If `decision.request_id` differs from the preview.
+    """
+    if reserve_lock:
+        # obtain the SQLite writer before checking a competing decision's result
+        await reserve_writer(
+            AssistantToolCall.filter(
+                call_id=call_id,
+                turn__conversation__user_id=user.id,
+            )
+        )
+    await require_browser_admin(user)
+    call, preview, request_id = await load_owned_review(
+        call_id,
+        names,
+        user,
+        expected_request_id=decision.request_id if decision is not None else None,
+        check_allowed=check_allowed,
+    )
+    return (
+        call,
+        preview,
+        request_id,
+        DownloadPlanService.change_key(user.id, request_id),
+    )
+
+
+async def recent_plan_reviews(
+    conversation_id: int,
+) -> list[tuple[AssistantToolCall, dict]]:
+    """Load the review window shared by browser and text plan decisions.
+
+    Args:
+        conversation_id: Server-owned conversation identity.
+
+    Returns:
+        Stored plan reviews in descending creation order, including failed
+        validations.
+    """
+    return await recent_review_calls(
+        conversation_id, ("review_download_plan_change",), require_valid=True
+    )
+
+
+def _plan_review_outcome(outcome: dict[str, Any]) -> dict[str, Any]:
+    """Map a domain plan-change apply result to the browser plan-review shape.
+
+    Args:
+        outcome: Result returned by `DownloadPlanService.apply_change`.
+
+    Returns:
+        Status fields, marking pre-commit failures retryable while preserving
+        non-retryable uncertain outcomes.
+    """
+    if outcome.get("valid") is False:
+        return {
+            "status": "failed",
+            "retryable": True,
+            "issues": outcome.get("issues", []),
+        }
+    status = outcome.get("outcome")
+    if not status:
+        status = next(
+            (
+                name
+                for name in ("stale", "pending", "failed", "conflict")
+                if outcome.get(name)
+            ),
+            "superseded",
+        )
+    return {
+        "status": status,
+        **({"retryable": True} if status == "failed" else {}),
+    }
+
+
+async def _apply_plan_review(
+    call: AssistantToolCall,
+    preview: dict,
+    request_id: UUID,
+    key: str,
+    user: UserInfo,
+) -> dict[str, Any]:
+    """Dispatch an approved plan update or deletion and classify any failure.
+
+    Args:
+        call: Server-owned original review tool call.
+        preview: Frozen plan-change preview approved by the user.
+        request_id: Validated request identifier.
+        key: Account-scoped receipt key.
+        user: Currently authorized administrator.
+
+    Returns:
+        Status payload reflecting a committed receipt, retryable pre-commit
+        failure, or non-retryable uncertain outcome.
+
+    Raises:
+        ForbiddenException: If administrator access was revoked before commit.
+    """
+    try:
+        outcome = await DownloadPlanService.apply_change(
+            DownloadPlanApply(
+                request_id=request_id,
+                revision=preview["revision"],
+                change=DownloadPlanChange.model_validate_json(call.arguments),
+                confirmed=True,
+            ),
+            user,
+        )
+    except NotFoundException:
+        return {"status": "stale"}
+    except ForbiddenException:
+        raise
+    except Exception:
+        # inspect storage once before reporting an uncertain post-dispatch state
+        try:
+            receipt = await DownloadPlanReceipt.get_or_none(key=key)
+        except Exception:
+            receipt = None
+        if receipt is not None:
+            return {"status": receipt.result["outcome"]}
+        return {"status": "uncertain"}
+    return _plan_review_outcome(outcome)
+
+
+async def plan_review(
+    call_id: str, user: UserInfo, decision: PlanReviewDecision | None = None
+) -> dict[str, Any]:
+    """Read or decide the account's recorded subscription update or deletion.
+
+    The existing chat and MCP apply path checks the same unique receipt. A
+    cancellation competes with an application in the database: the mutation
+    and its receipt commit together, so only one decision can win.
+
+    Args:
+        call_id: Original server-assigned tool call.
+        user: Authenticated browser administrator.
+        decision: Exact review and decision, or `None` to refresh status.
+
+    Returns:
+        The stored review and current decision state, including a retryable
+        failure if a change could not be saved before commit.
+
+    Raises:
+        ForbiddenException: If the current account cannot decide from the browser.
+        NotFoundException: If the owned tool call has no valid recorded review.
+        BadRequestException: If the submitted decision identifies another review.
+    """
+    async with in_transaction():
+        call, preview, request_id, key = await _load_browser_review(
+            call_id,
+            ("review_download_plan_change",),
+            user,
+            decision,
+            check_allowed=False,
+            reserve_lock=decision is not None and not decision.approve,
+        )
+        result = {
+            "request_id": str(request_id),
+            "plan_id": preview["plan_id"],
+            "action": preview["action"],
+            "keyword": preview["before"]["keyword"],
+            "workflow_name": preview["workflow_name"],
+            "changes": preview["changes"],
+        }
+        receipt = await DownloadPlanReceipt.get_or_none(key=key)
+        if receipt is not None:
+            return {**result, "status": receipt.result["outcome"]}
+        if call.turn.status != "complete":
+            return {**result, "status": "incomplete"}
+        reviews = await recent_plan_reviews(call.turn.conversation_id)
+        newest = next(
+            (row for row, data in reviews if data.get("plan_id") == preview["plan_id"]),
+            None,
+        )
+        if newest is None or newest.id != call.id:
+            return {**result, "status": "superseded"}
+        current = await DownloadPlan.get_or_none(id=preview["plan_id"])
+        if current is None:
+            return {**result, "status": "absent"}
+        if DownloadPlanService.revision(current) != preview["revision"]:
+            return {**result, "status": "stale"}
+        if decision is None:
+            return {**result, "status": "reviewed"}
+        if not decision.approve:
+            receipt, _ = await DownloadPlanReceipt.get_or_create(
+                key=key,
+                defaults={
+                    "action": preview["action"],
+                    "plan_id": preview["plan_id"],
+                    "graph_id": preview["workflow_id"],
+                    "result": {
+                        "action": preview["action"],
+                        "plan_id": preview["plan_id"],
+                        "applied": False,
+                        "outcome": "cancelled",
+                    },
+                },
+            )
+            return {**result, "status": receipt.result["outcome"]}
+    return {**result, **await _apply_plan_review(call, preview, request_id, key, user)}
+
+
 async def assistant_review(
     call_id: str, user: UserInfo, decision: PlanReviewDecision | None = None
 ) -> dict:
@@ -273,24 +507,15 @@ async def assistant_review(
         BadRequestException: If the displayed and submitted request identities differ.
     """
     async with in_transaction():
-        if decision:
-            # obtain the SQLite writer before checking a competing decision's result
-            await reserve_writer(
-                AssistantToolCall.filter(
-                    call_id=call_id,
-                    turn__conversation__user_id=user.id,
-                )
-            )
-        await require_browser_admin(user)
-        call, preview, request_id = await load_owned_review(
+        call, preview, request_id, key = await _load_browser_review(
             call_id,
             REVIEW_TOOLS,
             user,
-            expected_request_id=decision.request_id if decision else None,
+            decision,
             check_allowed=True,
+            reserve_lock=decision is not None,
         )
         base = {"tool": call.name, "request_id": str(request_id), "preview": preview}
-        key = DownloadPlanService.change_key(user.id, request_id)
         if done := await _recorded(call.name, key, user):
             return {**base, **done}
         row = await AssistantReviewDecision.get_or_none(

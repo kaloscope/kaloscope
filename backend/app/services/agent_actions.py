@@ -5,7 +5,6 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
-from tortoise import timezone
 from tortoise.exceptions import TransactionManagementError
 from tortoise.transactions import in_transaction
 
@@ -41,7 +40,13 @@ from app.models.media import (
 from app.models.user import UserInfo
 from app.services.flow import FlowGraphService, FlowTemplateService
 from app.services.media import MediaItemService, MediaLibService
-from app.services.review_common import require_live_admin, reserve_writer
+from app.services.review_common import (
+    get_or_create_operation_review,
+    load_operation_review,
+    lock_operation_decision,
+    require_live_admin,
+    reserve_writer,
+)
 from app.services.workspace_queries import WORKSPACE_TOPICS, inspect_workspace
 from app.utils.asyncio import write_in_thread
 from app.utils.json import json_digest
@@ -287,20 +292,14 @@ async def review_action(change: AdminChange, user: UserInfo) -> dict:
                 "status": "invalid",
                 "preview": _visible_preview(preview, user),
             }
-        row = await AgentAdminReview.filter(
+        row = await get_or_create_operation_review(
+            AgentAdminReview,
             owner_id=user.id,
             digest=digest,
-            status__in=("pending", "failed"),
-            expires_at__gt=timezone.now(),
-        ).first()
-        if row is None:
-            row = await AgentAdminReview.create(
-                owner_id=user.id,
-                request=request,
-                preview=preview,
-                digest=digest,
-                expires_at=timezone.now() + timedelta(minutes=30),
-            )
+            active_statuses=("pending", "failed"),
+            defaults={"request": request, "preview": preview},
+            reserve=False,
+        )
         return _receipt(row, user)
 
 
@@ -317,18 +316,14 @@ async def action_status(key: UUID, user: UserInfo) -> dict:
     Raises:
         NotFoundException: If the receipt is absent or outside the caller's grant.
     """
-    await require_live_admin(user)
-    query = AgentAdminReview.filter(owner_id=user.id, operation_id=key)
-    row = await query.first()
-    if row is None or not _allows_review(row.request["action"], user):
-        raise NotFoundException
-    await query.filter(
-        status__in=("pending", "failed"), expires_at__lte=timezone.now()
-    ).update(status="expired")
-    await query.filter(
-        status="executing", updated_at__lt=timezone.now() - timedelta(minutes=10)
-    ).update(status="uncertain")
-    await row.refresh_from_db()
+    row = await load_operation_review(
+        AgentAdminReview,
+        key,
+        user,
+        expirable_statuses=("pending", "failed"),
+        allowed=lambda item: _allows_review(item.request["action"], user),
+        stale_executing_after=timedelta(minutes=10),
+    )
     return _receipt(row, user)
 
 
@@ -425,13 +420,19 @@ async def decide_action(key: UUID, digest: str, approve: bool, user: UserInfo) -
     await require_browser_admin(user)
     query = AgentAdminReview.filter(operation_id=key, owner_id=user.id)
     async with in_transaction():
-        await reserve_writer(query.filter(status__in=("pending", "failed")))
-        receipt = await action_status(key, user)
-        if receipt["digest"] != digest:
-            raise BadRequestException
-        if receipt["status"] not in {"pending", "failed"}:
-            return receipt
-        row = await query.get()
+        row = await lock_operation_decision(
+            AgentAdminReview,
+            key,
+            digest,
+            user,
+            lock_statuses=("pending", "failed"),
+            expirable_statuses=("pending", "failed"),
+            allowed=lambda item: _allows_review(item.request["action"], user),
+            stale_executing_after=timedelta(minutes=10),
+        )
+        if row.status not in {"pending", "failed"}:
+            return _receipt(row, user)
+        previous = row.status
         change = AdminChange.model_validate(row.request)
         status = "cancelled"
         if approve:
@@ -442,7 +443,7 @@ async def decide_action(key: UUID, digest: str, approve: bool, user: UserInfo) -
             except (KaloscopeException, ValueError):
                 same = False
             status = "executing" if same else "conflict"
-        await query.filter(status=receipt["status"]).update(status=status)
+        await query.filter(status=previous).update(status=status)
         if status != "executing":
             return await action_status(key, user)
         if change.action in ("publish_workflow", "copy_template"):

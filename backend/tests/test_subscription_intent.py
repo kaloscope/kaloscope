@@ -950,6 +950,72 @@ def test_legacy_release_card():
             assert resolved["plan"]["dir"] == body.plan.dir
             assert resolved["plan"]["transfer_lib_id"] is None
 
+            from app.models.download import DownloadPlanCheck
+            from app.services.download import DownloadPlanService
+
+            validated = await DownloadPlanService.validate_creation(
+                DownloadPlanCheck(plan=body.plan), owner, check_duplicate=False
+            )
+            conv = await AssistantConversation.create(user_id=owner.id, title="legacy")
+            turn = await AssistantTurn.create(
+                conversation=conv,
+                request_id="legacy-turn",
+                prompt="subscribe Lantern",
+                status="complete",
+                resource_ids=[body.plan.graph_id],
+            )
+            legacy_card = {
+                "version": "legacy-v1",
+                "state": "pending",
+                "resources": [body.plan.graph_id],
+                "subscription": {
+                    "plan": validated["plan"],
+                    "title": "Lantern",
+                },
+                "questions": [
+                    {
+                        "id": "q1",
+                        "title": "Release",
+                        "multiple": False,
+                        "required": True,
+                        "format": "choice",
+                        "options": [
+                            {
+                                "id": "o1",
+                                "label": "Tea",
+                                "terms": ["Tea"],
+                                "observed": True,
+                            }
+                        ],
+                    }
+                ],
+            }
+            await AssistantToolCall.create(
+                turn=turn,
+                call_id="legacy-card",
+                name="ask_user",
+                arguments="{}",
+                status="complete",
+                result={"ok": True, "data": legacy_card},
+            )
+            answered = await answer_card(
+                conv.id,
+                "legacy-card",
+                AnswerGroup(
+                    version="legacy-v1",
+                    items=[
+                        {"id": "q1", "selected": ["o1"], "custom": "", "skipped": False}
+                    ],
+                ),
+                owner,
+            )
+            submission = answered["card"]["subscription"]["submission"]
+            assert submission["created"] is True
+            plan = await DownloadPlan.get(id=submission["plan_id"])
+            assert plan.keyword == "Lantern Tea"
+            await turn.refresh_from_db()
+            assert "admin:downloads" in turn.resource_ids
+
     asyncio.run(run())
 
 
