@@ -2,17 +2,30 @@
   import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { api } from '$lib/api';
-  import { requestDeviceAction } from '$lib/assistant/device';
   import { tooltip } from '$lib/actions';
   import { assistantCanvas } from '$lib/assistant/canvas';
-  import { assistantDestination } from '$lib/assistant/navigation';
+  import { requestDeviceAction } from '$lib/assistant/device';
+  import { errorMessage } from '$lib/assistant/errors';
+  import { classifyAssistantRoute } from '$lib/assistant/navigation';
+  import {
+    clampPanelPosition,
+    contextLabel,
+    decodeModelSelection,
+    encodeModelKey,
+    encodeModelSelection,
+    followedPlans,
+    turnDestinations,
+    turnSegments,
+    type AssistantDestinationAction
+  } from '$lib/assistant/panel';
+  import { isAssistantReview, refreshDomainTarget } from '$lib/assistant/reviews';
   import {
     assistant,
     assistantHandoff,
     assistantRestoring,
     closeAssistant,
-    loadAssistantModels,
     loadAssistantConversation,
+    loadAssistantModels,
     releaseAssistantHandoff,
     sendAssistant,
     stopAssistant,
@@ -24,22 +37,20 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores.svelte';
-  import type { AssistantDestination, DownloadPlanPreview, QuestionCard, Resp } from '$lib/types';
+  import type { DownloadPlanPreview, QuestionCard, Resp } from '$lib/types';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { normalizePathname } from '$lib/utils/url';
   import { onMount, tick, untrack } from 'svelte';
-  import AssistantActivity from './AssistantActivity.svelte';
-  import AssistantHistory from './AssistantHistory.svelte';
-  import FirstCheckResult from './FirstCheckResult.svelte';
-  import AssistantChanges from './AssistantChanges.svelte';
-  import AssistantQuestions from './AssistantQuestions.svelte';
-  import AssistantMarkdown from './AssistantMarkdown.svelte';
-  import AssistantTool from './AssistantTool.svelte';
   import AdminReviewCard from './AdminReviewCard.svelte';
-  import PlanReplacementCard from './PlanReplacementCard.svelte';
-  import PlanReviewCard from './PlanReviewCard.svelte';
+  import AssistantActivity from './AssistantActivity.svelte';
+  import AssistantChanges from './AssistantChanges.svelte';
+  import AssistantHistory from './AssistantHistory.svelte';
+  import AssistantMarkdown from './AssistantMarkdown.svelte';
+  import AssistantQuestions from './AssistantQuestions.svelte';
   import AssistantReviewCard from './AssistantReviewCard.svelte';
-  import { isAssistantReview } from '$lib/assistant/reviews';
+  import AssistantTool from './AssistantTool.svelte';
+  import FirstCheckResult from './FirstCheckResult.svelte';
+  import PlanReplacementCard from './PlanReplacementCard.svelte';
 
   let panel: HTMLDivElement | undefined = $state();
   let composer: HTMLTextAreaElement | undefined = $state();
@@ -110,82 +121,16 @@
       !!input.trim() &&
       !!$assistant.model
   );
-  const modelValue = $derived($assistant.model ? JSON.stringify($assistant.model) : null);
-
-  const currentPage = $derived.by(() => {
-    const pathname = page.url.pathname;
-    if (pathname === '/dashboard') return 'dashboard';
-    if (/^\/websearch\/(?:global|[1-9]\d*)\/?$/.test(pathname)) return 'web_search';
-    if (/\/graphs\/(r\/)?\d+\/?$/.test(pathname)) return 'workflow_designer';
-    if (/\/workflows\/graphs\/?$/.test(pathname)) return 'workflows';
-    if (/^\/settings\/workflows\/schedules\/?$/.test(pathname)) return 'workflow_jobs';
-    if (/^\/medialibs\/\d+\/\d+\/?$/.test(pathname)) return 'media_item';
-    if (/^\/medialibs\/\d+\/?$/.test(pathname)) return 'media_library';
-    if (/^\/downloads\/downloading\/?$/.test(pathname)) return 'active_downloads';
-    if (/^\/downloads\/completed\/?$/.test(pathname)) return 'completed_downloads';
-    if (/^\/downloads\/plans\/?$/.test(pathname)) return 'download_plans';
-    return 'other';
-  });
-
+  const modelValue = $derived(encodeModelSelection($assistant.model));
+  const currentPage = $derived(classifyAssistantRoute(page.url.pathname));
   const incomplete = $derived(!!lastTurn && lastTurn.status !== 'complete' && lastTurn.status !== 'streaming');
   const retryable = $derived(incomplete || !!lastTurn?.canvasError);
-
-  const destinations = $derived.by(() => {
-    const items: { path: string; label: string; target: AssistantDestination; id?: string }[] = [];
-    const pathname = normalizePathname(page.url.pathname);
-    for (const { result } of lastTurn?.tools ?? []) {
-      const destination = result && assistantDestination(result);
-      if (!destination) continue;
-      const { path, target } = destination;
-      const device = target.page === 'resume_reading' || target.page === 'play_video';
-      if (
-        result?.data?.device_outcome === 'opened' ||
-        (path === pathname && !device) ||
-        items.some((item) => item.path === path && item.target.page === target.page)
-      )
-        continue;
-      const name = $_(`assistant.pages.${target.page}`);
-      const label = device ? name : $_('action.open', target.resource_id ? `${name} #${target.resource_id}` : name);
-      items.push({ path, label, target, id: result?.name === 'navigate' ? result.id : undefined });
-    }
-    return items;
-  });
+  const destinations = $derived(turnDestinations(lastTurn, page.url.pathname, $_));
 
   // a created draft waiting for its designer belongs to the conversation that created it
   const handoff = $derived(
     $assistantHandoff?.conversationId === $assistant.conversation?.id ? $assistantHandoff : null
   );
-
-  /**
-   * Find creations whose first result still belongs in this reply.
-   * @param turn - Current or restored turn, including older creation receipts.
-   * @returns Distinct plan IDs to follow independently of subsequent checks.
-   */
-  function followedPlans(turn: AssistantTurn): number[] {
-    const ids: number[] = [];
-    for (const tool of turn.tools) {
-      const data = tool.result?.data;
-      if (
-        tool.name !== 'create_download_plan' ||
-        !tool.result?.ok ||
-        !data?.created ||
-        data.already_exists ||
-        typeof data.plan_id !== 'number'
-      )
-        continue;
-      const receipt = data.first_execution;
-      const olderPending =
-        data.follow_first_check === undefined &&
-        receipt &&
-        typeof receipt === 'object' &&
-        'status' in receipt &&
-        ['queued', 'waiting', 'unconfirmed'].includes(String(receipt.status));
-      if ((data.follow_first_check || data.show_first_check || olderPending) && !ids.includes(data.plan_id)) {
-        ids.push(data.plan_id);
-      }
-    }
-    return ids;
-  }
 
   /**
    * Keep a dragged panel inside the visible viewport, including after resizing.
@@ -195,15 +140,7 @@
    */
   function move(x: number, y: number): void {
     if (!panel) return;
-    const viewport = window.visualViewport;
-    const left = viewport?.offsetLeft ?? 0;
-    const top = viewport?.offsetTop ?? 0;
-    const width = viewport?.width ?? window.innerWidth;
-    const height = viewport?.height ?? window.innerHeight;
-    position = {
-      x: Math.max(left + 8, Math.min(x, left + width - panel.offsetWidth - 8)),
-      y: Math.max(top + 8, Math.min(y, top + height - panel.offsetHeight - 8))
-    };
+    position = clampPanelPosition(x, y, panel.offsetWidth, panel.offsetHeight);
   }
 
   /**
@@ -341,10 +278,11 @@
 
   /**
    * Open a registered destination and record what this device observed.
+   *
    * @param destination - Checked tool result and route.
    * @param turnId - Turn offering the navigation action.
    */
-  async function openDestination(destination: (typeof destinations)[number], turnId: string) {
+  async function openDestination(destination: AssistantDestinationAction, turnId: string) {
     const { path, target, id } = destination;
     const conversationId = $assistant.conversation?.id;
     const ownerId = user.current?.id;
@@ -429,78 +367,6 @@
   function closeMenu(target?: HTMLElement): void {
     closeDropdowns();
     (target ?? panel?.querySelector<HTMLElement>('.assistant-menu > summary'))?.focus({ preventScroll: true });
-  }
-
-  /**
-   * Choose which consecutive tool calls can share a collapsed activity entry.
-   *
-   * @param tool - Tool call as displayed in the conversation.
-   * @returns A group key, or `null` for a call that needs its own visible status.
-   */
-  function activityGroup(tool: Tool): string | null {
-    if (tool.status !== 'complete') return null;
-    // keep search results and plan checks identifiable beside their previews
-    if (['search_indexer', 'validate_download_plan', 'discover_actions'].includes(tool.name)) return tool.name;
-    if (/^(get|list|read|validate|inspect|diagnose)_/.test(tool.name) || tool.name === 'probe_http_request') {
-      return 'lookup';
-    }
-    return null;
-  }
-
-  /**
-   * Split a reply into text and tool runs in the order they were streamed.
-   *
-   * @param turn - Conversation turn with tool start offsets.
-   * @returns Text segments and consecutive tool groups with stable keys.
-   */
-  function segments(turn: AssistantTurn): ({ key: string; text: string } | { key: string; tools: Tool[] })[] {
-    const parts: ({ key: string; text: string } | { key: string; tools: Tool[] })[] = [];
-    let offset = 0;
-
-    for (const tool of turn.tools) {
-      const text = turn.content.slice(offset, tool.offset);
-      if (text.trim()) parts.push({ key: `text-${offset}`, text });
-      offset = Math.max(offset, tool.offset);
-      const previous = parts.at(-1);
-      const group = activityGroup(tool);
-      if (group && previous && 'tools' in previous && group === activityGroup(previous.tools[0])) {
-        previous.tools.push(tool);
-      } else {
-        parts.push({ key: tool.id, tools: [tool] });
-      }
-    }
-
-    const rest = turn.content.slice(offset);
-    if (rest.trim()) parts.push({ key: `text-${offset}`, text: rest });
-    return parts;
-  }
-
-  /**
-   * Describe the captured page before or after its snapshot upload.
-   *
-   * @param context - Snapshot captured when the turn was sent.
-   * @returns A short localized label with the resource and draft state.
-   */
-  function contextLabel(context: NonNullable<AssistantTurn['context']>): string {
-    const parts = [$_(`assistant.pages.${context.page_type}`)];
-    if (context.page_type === 'workflow_designer') {
-      parts.push(`#${context.resource_id}`, $_(context.unsaved ? 'assistant.unsaved' : 'assistant.saved'));
-    } else if (context.page_type === 'media_library' || context.page_type === 'media_item') {
-      parts.push(`#${context.resource_id}`);
-    }
-    return parts.join(' · ');
-  }
-
-  /**
-   * Describe failures with recovery steps that apply to the assistant.
-   *
-   * @param code - Public application error code.
-   * @returns Assistant-specific guidance, a shared message, or a generic fallback.
-   */
-  function errorMessage(code: string): string {
-    return $_(`assistant.errors.${code}`, {
-      default: $_(`alert.${code}`, { default: $_('assistant.request_failed') })
-    });
   }
 
   beforeNavigate(() => {
@@ -665,13 +531,13 @@
             {#if turn.context}
               <p class="flex items-center gap-1 text-[0.6875rem] leading-4 text-base-content/50">
                 <iconify-icon icon={icons.contentView} width="0.75rem" class="size-3" aria-hidden="true"></iconify-icon>
-                {contextLabel(turn.context)}
+                {contextLabel(turn.context, $_)}
               </p>
             {/if}
           </div>
           <div class="min-w-0 space-y-2">
             <p class="sr-only">{$_('assistant.title')}</p>
-            {#each segments(turn) as segment (segment.key)}
+            {#each turnSegments(turn) as segment (segment.key)}
               {#if 'tools' in segment}
                 {@const lastPlanRecord = segment.tools.findLast(
                   (entry) => entry.name === 'validate_download_plan' && isAssistantReview(entry.result, asksForChoices)
@@ -714,8 +580,6 @@
                       {/if}
                     {:else if operation.name === 'review_plan_replacement' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
                       <PlanReplacementCard id={operation.result.data.operation_id} />
-                    {:else if operation.name === 'review_download_plan_change' && operation.result?.ok && typeof operation.result.data?.request_id === 'string'}
-                      <PlanReviewCard id={operation.id} />
                     {:else if operation.name === 'review_workspace_change' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
                       <AdminReviewCard id={operation.result.data.operation_id} />
                     {/if}
@@ -750,7 +614,7 @@
                     'assistant.incomplete'
                   )}
                   {#if turn.error}
-                    <span class="block">{errorMessage(turn.error)}</span>
+                    <span class="block">{errorMessage($_, turn.error)}</span>
                   {/if}
                 </p>
               </div>
@@ -758,7 +622,7 @@
               <div class="flex items-start gap-2 text-xs leading-5 text-base-content/60">
                 <iconify-icon icon={icons.warning} width="0.875rem" class="mt-0.75 size-3.5 shrink-0" aria-hidden="true"
                 ></iconify-icon>
-                <p>{errorMessage(turn.canvasError)}</p>
+                <p>{errorMessage($_, turn.canvasError)}</p>
               </div>
             {/if}
           </div>
@@ -903,11 +767,11 @@
             <div class="space-y-0.5 px-3 pt-1 text-xs leading-5 text-base-content/60">
               {#if $assistant.modelsError}
                 <p role="alert">
-                  {errorMessage($assistant.modelsError)}
+                  {errorMessage($_, $assistant.modelsError)}
                 </p>
               {/if}
               {#if $assistant.error}
-                <p role="alert">{errorMessage($assistant.error)}</p>
+                <p role="alert">{errorMessage($_, $assistant.error)}</p>
               {/if}
             </div>
           {/if}
@@ -940,7 +804,10 @@
                 class="field-sizing-content h-7 min-h-7 w-auto max-w-full min-w-0 select-ghost pr-7 pl-2 text-xs select-sm disabled:border-transparent disabled:bg-transparent disabled:text-base-content/60"
                 disabled={$assistant.busy || modelsBusy || $assistantRestoring || !$assistant.models.length}
                 value={modelValue}
-                onchange={(event) => ($assistant.model = JSON.parse((event.currentTarget as HTMLSelectElement).value))}
+                onchange={(event) => {
+                  const selected = decodeModelSelection((event.currentTarget as HTMLSelectElement).value);
+                  if (selected) $assistant.model = selected;
+                }}
               >
                 <option value={null} disabled>
                   {$assistant.modelsLoaded && !$assistant.models.length
@@ -950,7 +817,7 @@
                 {#each $assistant.models as provider (provider.id)}
                   <optgroup label={provider.name}>
                     {#each provider.model_ids as model (model)}
-                      <option value={JSON.stringify({ provider_id: provider.id, model_id: model })}>{model}</option>
+                      <option value={encodeModelKey(provider.id, model)}>{model}</option>
                     {/each}
                   </optgroup>
                 {/each}
@@ -1030,7 +897,7 @@
     reviewCallId={planCallId}
     oncreated={() => {
       window.dispatchEvent(new Event('assistant-review-changed'));
-      window.dispatchEvent(new Event('download-plan-created'));
+      refreshDomainTarget({ kind: 'download_plan_created' });
     }}
   />
 {/if}

@@ -14,7 +14,7 @@ from app.core.dl.config import encrypt_config
 from app.models.agent_actions import AdminChange, WorkspaceQuery
 from app.models.download import Downloader, DownloadPlanAttempt, DownloadTask
 from app.models.media import MediaEvent, MediaFormat, MediaLib
-from app.services import agent_actions, media
+from app.services import agent_actions, media, workspace_queries
 from tests.test_agent_actions import decide
 from tests.test_agent_actions import isolate as isolate
 from tests.test_assistant_persistence import database
@@ -184,8 +184,8 @@ def test_health_cleanup(monkeypatch, supports, failed, status):
                 close=AsyncMock(),
             )
             factory = Mock(return_value=driver)
-            monkeypatch.setattr(agent_actions, "load_driver", factory)
-            report = await agent_actions.inspect_workspace(
+            monkeypatch.setattr(workspace_queries, "load_driver", factory)
+            report = await workspace_queries.inspect_workspace(
                 WorkspaceQuery(topic="downloaders"), owner
             )
             assert report["items"] == [

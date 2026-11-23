@@ -5,6 +5,7 @@
     keepAssistantCanvas,
     retryAssistantCanvas
   } from '$lib/assistant/canvas';
+  import { errorMessage } from '$lib/assistant/errors';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
 </script>
@@ -46,9 +47,7 @@
     {#if state.phase !== 'editing'}
       {#if state.error}
         <p class="mt-2 text-error" role="alert">
-          {$_(`assistant.errors.${state.error}`, {
-            default: $_(`alert.${state.error}`, { default: $_('assistant.errors.assistant_canvas_save_failed') })
-          })}
+          {errorMessage($_, state.error, 'assistant.errors.assistant_canvas_save_failed')}
         </p>
       {/if}
       <div class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3">

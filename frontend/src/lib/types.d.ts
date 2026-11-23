@@ -517,8 +517,6 @@ export interface MCPAccessToken {
   name: string;
   prefix: string;
   scope: 'read_only' | 'read_write';
-  domain: 'all' | 'media' | 'downloads' | 'workflows' | 'system';
-  library_ids: number[] | null;
   expires_at: string;
   last_used_at: string | null;
   status: 'active' | 'expired';
@@ -529,8 +527,6 @@ export interface MCPAccessTokenCreate {
   name: string;
   expires_in_days: 30 | 90 | 365;
   scope: MCPAccessToken['scope'];
-  domain?: MCPAccessToken['domain'];
-  library_ids?: number[];
 }
 
 /** A creation response containing the credential shown only once. */
@@ -1084,31 +1080,6 @@ export type DownloadPlan = {
   transfer_method: keyof typeof TransferMethod | null;
   sub_pattern: string | null;
   sub_repl: string | null;
-};
-
-/** Frozen assistant review and the recorded decision for one plan change. */
-export type PlanReview = {
-  retryable?: boolean;
-  issues?: { path?: string; message: string }[];
-  request_id: string;
-  plan_id: number;
-  action: 'update' | 'delete';
-  keyword: string;
-  workflow_name: string;
-  changes: { field: string; before: unknown; after: unknown }[];
-  status:
-    | 'reviewed'
-    | 'updated'
-    | 'deleted'
-    | 'cancelled'
-    | 'incomplete'
-    | 'superseded'
-    | 'absent'
-    | 'stale'
-    | 'pending'
-    | 'conflict'
-    | 'failed'
-    | 'uncertain';
 };
 
 /** Frozen replacement options and their durable approval state. */

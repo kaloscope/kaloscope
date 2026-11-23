@@ -12,6 +12,7 @@ from tortoise import Tortoise, connections, timezone
 from app.core.dl import syncer
 from app.core.exceptions import (
     BadRequestException,
+    ErrorCode,
     ForbiddenException,
     NotFoundException,
 )
@@ -99,8 +100,17 @@ def test_decision(reason):
             elif reason == "mcp":
                 owner.mcp_scope = "read_write"
             if reason in {"revoked", "mcp"}:
-                with pytest.raises(ForbiddenException):
+                with pytest.raises(ForbiddenException) as exc:
                     await decide(a, owner)
+                assert exc.value.message == ErrorCode.FORBIDDEN
+                if reason == "revoked":
+                    with pytest.raises(ForbiddenException) as demoted:
+                        await Replacement.status(a["operation_id"], owner)
+                    assert demoted.value.message == ErrorCode.FORBIDDEN
+                    non_admin = SimpleNamespace(id=owner.id, role="user")
+                    with pytest.raises(ForbiddenException) as regular:
+                        await Replacement.review(plan.id, user=non_admin)
+                    assert regular.value.message == ErrorCode.PERMISSION_DENIED
             else:
                 result = await decide(a, owner, approve=reason != "cancel")
                 assert result["status"] == {
@@ -131,6 +141,22 @@ def test_independent_previews():
             results = await asyncio.gather(decide(a, owner), decide(b, owner))
             assert {entry["status"] for entry in results} == {"applied", "conflict"}
             assert await DownloadPlan.all().count() == 1
+
+    asyncio.run(run())
+
+
+def test_concurrent_expiry_status():
+    async def run():
+        async with database() as (owner, _):
+            _, _, plan = await stored_plan()
+            card = await Replacement.review(plan.id, user=owner)
+            await DownloadPlanReplacement.filter(
+                operation_id=card["operation_id"]
+            ).update(expires_at=timezone.now() - timedelta(minutes=1))
+            results = await asyncio.gather(
+                *(Replacement.status(card["operation_id"], owner) for _ in range(8))
+            )
+            assert [entry["status"] for entry in results] == ["expired"] * 8
 
     asyncio.run(run())
 

@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Any
 
 from tortoise import timezone
-from tortoise.expressions import F, Q
+from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
 from app.core.dl.access import ADMIN_PREVIEW
@@ -34,6 +34,7 @@ from app.models.flow import FlowJob, GraphDocument
 from app.models.user import UserInfo, UserRole
 from app.services.flow import FlowGraphService
 from app.services.media import MediaLibService
+from app.services.review_common import reserve_writer
 from app.services.subscription_choices import first_check_pending, first_check_summary
 from app.utils.json import dumps
 
@@ -82,9 +83,10 @@ class AssistantSessionService:
             ForbiddenException: If access to the originating turn was revoked.
         """
         # reserve the SQLite writer before reading an answer another worker can update
-        locked = await AssistantConversation.filter(
-            id=conversation_id, user_id=user.id
-        ).update(active_request=F("active_request"))
+        locked = await reserve_writer(
+            AssistantConversation.filter(id=conversation_id, user_id=user.id),
+            field="active_request",
+        )
         if not locked:
             raise NotFoundException
         record = await AssistantToolCall.filter(

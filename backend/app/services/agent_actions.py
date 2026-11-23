@@ -1,19 +1,14 @@
-"""Expose bounded administrator diagnostics and human-approved domain operations."""
+"""Expose human-approved administrator domain operations and durable receipts."""
 
 import asyncio
-from collections import Counter
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
-from sanic import Sanic
-from tortoise import timezone
 from tortoise.exceptions import TransactionManagementError
-from tortoise.expressions import F
 from tortoise.transactions import in_transaction
 
 from app.core.decorators import require_browser_admin
-from app.core.dl.config import decrypt_config, load_driver
 from app.core.exceptions import (
     BadRequestException,
     ErrorCode,
@@ -26,9 +21,8 @@ from app.core.media.common import ContentError
 from app.core.media.coordination import library_lock
 from app.core.media.shelver import update_metadata
 from app.core.media.title import nfo_title
-from app.core.transcode.tasks import list_tasks
-from app.models.agent_actions import AdminChange, AgentAdminReview, WorkspaceQuery
-from app.models.download import Downloader, DownloadPlan
+from app.models.agent_actions import AdminChange, AgentAdminReview
+from app.models.download import DownloadPlan
 from app.models.flow import (
     FlowGraph,
     FlowJob,
@@ -37,185 +31,31 @@ from app.models.flow import (
     GraphDocument,
     GraphWrite,
 )
-from app.models.mcp import MCPTokenDomain
 from app.models.media import (
     LibType,
-    MediaAction,
-    MediaChangeReceipt,
     MediaLib,
     MediaLibUpsert,
 )
-from app.models.user import User, UserInfo, UserRole
+from app.models.user import UserInfo
 from app.services.flow import FlowGraphService, FlowTemplateService
 from app.services.media import MediaItemService, MediaLibService
+from app.services.review_common import (
+    get_or_create_operation_review,
+    load_operation_review,
+    lock_operation_decision,
+    require_live_admin,
+    reserve_writer,
+)
+from app.services.workspace_queries import inspect_workspace
 from app.utils.asyncio import write_in_thread
 from app.utils.json import json_digest
 
-WORKSPACE_TOPICS = {
-    MCPTokenDomain.SYSTEM: frozenset({"logs", "transcoding", "downloaders"}),
-    MCPTokenDomain.WORKFLOWS: frozenset({"workflow_templates", "receipt"}),
-}
-WORKFLOW_REVIEW_ACTIONS = frozenset({"copy_template", "publish_workflow"})
-
-
-def _allows_review(action: str, user: UserInfo) -> bool:
-    """Check the requested action against the caller's token domain.
-
-    Args:
-        action: Administrative action being reviewed or reread.
-        user: Authenticated account with an optional MCP grant.
-
-    Returns:
-        Whether this domain may inspect a review for the action.
-    """
-    domain = getattr(user, "mcp_domain", MCPTokenDomain.ALL)
-    return domain == MCPTokenDomain.ALL or (
-        domain == MCPTokenDomain.WORKFLOWS and action in WORKFLOW_REVIEW_ACTIONS
-    )
-
-
-def _visible_preview(preview: dict, user: UserInfo) -> dict:
-    """Hide other domains' resource IDs from a workflow credential.
-
-    Args:
-        preview: Complete impact shown to the administrator in the assistant panel.
-        user: Account reading the preview through this channel.
-
-    Returns:
-        Authorized workflow details without modifying the frozen review.
-    """
-    if getattr(user, "mcp_domain", None) != MCPTokenDomain.WORKFLOWS:
-        return preview
-    foreign = {"bound_resources", "download_plans"}
-    visible = {key: value for key, value in preview.items() if key not in foreign}
-    if "additional" in visible:
-        visible["additional"] = {
-            key: count
-            for key, count in visible["additional"].items()
-            if key not in foreign
-        }
-    return visible
-
-
-async def _admin(user: UserInfo) -> None:
-    """Check the account's current administrator grant.
-
-    Args:
-        user: Identity supplied by the authenticated transport.
-
-    Raises:
-        ForbiddenException: If administrator access was revoked.
-    """
-    FlowGraphService.require_editor(user)
-    if not await User.exists(id=user.id, role=UserRole.ADMIN):
-        raise ForbiddenException
-
-
-async def _health(row: Downloader) -> dict:
-    """Probe one configured driver without exposing connection details.
-
-    Args:
-        row: Saved downloader configuration.
-
-    Returns:
-        Name, ID and observed version-check outcome.
-    """
-    version = None
-    try:
-        driver = load_driver(decrypt_config(row.config))
-        try:
-            if driver.supports_version:
-                version = await asyncio.wait_for(driver.version(), 3)
-                status = "up" if version else "down"
-            else:
-                status = "unsupported"
-        finally:
-            await driver.close()
-    except Exception:
-        status = "unavailable"
-    return {"id": row.id, "name": row.name, "status": status, "version": version}
-
-
-async def inspect_workspace(query: WorkspaceQuery, user: UserInfo) -> dict:
-    """Query operational facts with bounded pages and server-defined fields.
-
-    Args:
-        query: Diagnostic topic or template page.
-        user: Authenticated administrator.
-
-    Returns:
-        Facts observed by the backend for the selected topic.
-
-    Raises:
-        ForbiddenException: If the role or token domain cannot read this topic.
-        BadRequestException: If a receipt query omits its operation ID.
-    """
-    await _admin(user)
-    domain = getattr(user, "mcp_domain", MCPTokenDomain.ALL)
-    if domain != MCPTokenDomain.ALL and query.topic not in WORKSPACE_TOPICS.get(
-        domain, ()
-    ):
-        raise ForbiddenException
-    offset = (query.page - 1) * 20
-    if query.topic == "receipt":
-        if query.operation_id is None:
-            raise BadRequestException
-        return await action_status(query.operation_id, user)
-    if query.topic == "batches":
-        rows = MediaChangeReceipt.filter(action=MediaAction.BATCH).order_by("-id")
-        return {
-            "total": await rows.count(),
-            "items": await rows.offset(offset)
-            .limit(20)
-            .values("id", "lib_id", "updated_at"),
-        }
-    if query.topic == "workflow_templates":
-        rows = FlowTemplate.filter(newest=True).order_by("name", "id")
-        return {
-            "total": await rows.count(),
-            "items": await rows.offset(offset)
-            .limit(20)
-            .values("id", "name", "category", "revision"),
-        }
-    if query.topic == "downloaders":
-        rows = await Downloader.all().offset(offset).limit(20)
-        return {
-            "total": await Downloader.all().count(),
-            "items": await asyncio.gather(*(_health(row) for row in rows)),
-        }
-    if query.topic == "transcoding":
-        rows = await list_tasks()
-        return {
-            "total": len(rows),
-            "items": [
-                {
-                    k: row.get(k)
-                    for k in ("id", "state", "profile", "progress", "hwaccel")
-                }
-                for row in rows[offset : offset + 20]
-            ],
-        }
-    if query.topic == "logs":
-        shared = getattr(Sanic.get_app().shared_ctx, "log_snapshot", {})
-        snapshot = shared.get("value")
-        if snapshot is None:
-            return {"available": False}
-        return {
-            "available": True,
-            "paused": snapshot.paused,
-            "levels": dict(Counter(r["level"] for r in snapshot.records)),
-            "retained": len(snapshot.records),
-        }
-    return {
-        "actions": [
-            "copy_template",
-            "publish_workflow",
-            "create_library",
-            "delete_library",
-            "edit_metadata",
-        ],
-        "approval": "browser",
-    }
+__all__ = [
+    "action_status",
+    "decide_action",
+    "inspect_workspace",
+    "review_action",
+]
 
 
 async def _preview(change: AdminChange, user: UserInfo) -> dict:
@@ -360,12 +200,11 @@ async def _preview(change: AdminChange, user: UserInfo) -> dict:
     }
 
 
-def _receipt(row: AgentAdminReview, user: UserInfo) -> dict:
+def _receipt(row: AgentAdminReview) -> dict:
     """Expose the essential review fields and current durable outcome.
 
     Args:
         row: Owned review.
-        user: Account and channel receiving the receipt.
 
     Returns:
         Operation ID, visible impact and current decision state.
@@ -375,7 +214,7 @@ def _receipt(row: AgentAdminReview, user: UserInfo) -> dict:
         "action": row.request["action"],
         "status": row.status,
         "digest": row.digest,
-        "preview": _visible_preview(row.preview, user),
+        "preview": row.preview,
         "result": row.result,
         "expires_at": row.expires_at.isoformat(),
     }
@@ -392,15 +231,11 @@ async def review_action(change: AdminChange, user: UserInfo) -> dict:
         Reusable account-owned pending review or a validation failure.
 
     Raises:
-        ForbiddenException: If the role or token domain cannot prepare this action.
+        ForbiddenException: If the account is no longer an administrator.
     """
-    await _admin(user)
-    if not _allows_review(change.action, user):
-        raise ForbiddenException
+    await require_live_admin(user)
     async with in_transaction():
-        await AgentAdminReview.filter(owner_id=user.id, id=0).update(
-            updated_at=F("updated_at")
-        )
+        await reserve_writer(AgentAdminReview.filter(owner_id=user.id, id=0))
         preview = await _preview(change, user)
         request = change.model_dump(mode="json", exclude_none=True)
         digest = json_digest({"request": request, "preview": preview})
@@ -408,23 +243,17 @@ async def review_action(change: AdminChange, user: UserInfo) -> dict:
             return {
                 "action": change.action,
                 "status": "invalid",
-                "preview": _visible_preview(preview, user),
+                "preview": preview,
             }
-        row = await AgentAdminReview.filter(
+        row = await get_or_create_operation_review(
+            AgentAdminReview,
             owner_id=user.id,
             digest=digest,
-            status__in=("pending", "failed"),
-            expires_at__gt=timezone.now(),
-        ).first()
-        if row is None:
-            row = await AgentAdminReview.create(
-                owner_id=user.id,
-                request=request,
-                preview=preview,
-                digest=digest,
-                expires_at=timezone.now() + timedelta(minutes=30),
-            )
-        return _receipt(row, user)
+            active_statuses=("pending", "failed"),
+            defaults={"request": request, "preview": preview},
+            reserve=False,
+        )
+        return _receipt(row)
 
 
 async def action_status(key: UUID, user: UserInfo) -> dict:
@@ -440,19 +269,14 @@ async def action_status(key: UUID, user: UserInfo) -> dict:
     Raises:
         NotFoundException: If the receipt is absent or outside the caller's grant.
     """
-    await _admin(user)
-    query = AgentAdminReview.filter(owner_id=user.id, operation_id=key)
-    row = await query.first()
-    if row is None or not _allows_review(row.request["action"], user):
-        raise NotFoundException
-    await query.filter(
-        status__in=("pending", "failed"), expires_at__lte=timezone.now()
-    ).update(status="expired")
-    await query.filter(
-        status="executing", updated_at__lt=timezone.now() - timedelta(minutes=10)
-    ).update(status="uncertain")
-    await row.refresh_from_db()
-    return _receipt(row, user)
+    row = await load_operation_review(
+        AgentAdminReview,
+        key,
+        user,
+        expirable_statuses=("pending", "failed"),
+        stale_executing_after=timedelta(minutes=10),
+    )
+    return _receipt(row)
 
 
 async def _apply(change: AdminChange, preview: dict, user: UserInfo) -> dict:
@@ -548,15 +372,18 @@ async def decide_action(key: UUID, digest: str, approve: bool, user: UserInfo) -
     await require_browser_admin(user)
     query = AgentAdminReview.filter(operation_id=key, owner_id=user.id)
     async with in_transaction():
-        await query.filter(status__in=("pending", "failed")).update(
-            updated_at=F("updated_at")
+        row = await lock_operation_decision(
+            AgentAdminReview,
+            key,
+            digest,
+            user,
+            lock_statuses=("pending", "failed"),
+            expirable_statuses=("pending", "failed"),
+            stale_executing_after=timedelta(minutes=10),
         )
-        receipt = await action_status(key, user)
-        if receipt["digest"] != digest:
-            raise BadRequestException
-        if receipt["status"] not in {"pending", "failed"}:
-            return receipt
-        row = await query.get()
+        if row.status not in {"pending", "failed"}:
+            return _receipt(row)
+        previous = row.status
         change = AdminChange.model_validate(row.request)
         status = "cancelled"
         if approve:
@@ -567,7 +394,7 @@ async def decide_action(key: UUID, digest: str, approve: bool, user: UserInfo) -
             except (KaloscopeException, ValueError):
                 same = False
             status = "executing" if same else "conflict"
-        await query.filter(status=receipt["status"]).update(status=status)
+        await query.filter(status=previous).update(status=status)
         if status != "executing":
             return await action_status(key, user)
         if change.action in ("publish_workflow", "copy_template"):

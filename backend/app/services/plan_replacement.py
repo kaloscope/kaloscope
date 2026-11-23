@@ -8,16 +8,11 @@ from pydantic import ValidationError
 from sanic.log import logger
 from tortoise import timezone
 from tortoise.exceptions import OperationalError
-from tortoise.expressions import F
 from tortoise.transactions import in_transaction
 
 from app.core.decorators import require_browser_admin
 from app.core.dl.syncer import notify_download_changes
-from app.core.exceptions import (
-    BadRequestException,
-    ForbiddenException,
-    NotFoundException,
-)
+from app.core.exceptions import NotFoundException
 from app.models.download import (
     DownloadPlan,
     DownloadPlanCheck,
@@ -27,7 +22,13 @@ from app.models.download import (
 )
 from app.models.user import User, UserInfo, UserRole
 from app.services.download import DownloadPlanService
-from app.services.flow import FlowGraphService
+from app.services.review_common import (
+    get_or_create_operation_review,
+    load_operation_review,
+    lock_operation_decision,
+    require_live_admin,
+    reserve_writer,
+)
 from app.utils.json import dumps, json_digest, loads
 
 
@@ -137,9 +138,7 @@ class PlanReplacementService:
             ForbiddenException: If current editor access is unavailable.
             NotFoundException: If the plan is unavailable.
         """
-        FlowGraphService.require_editor(user)
-        if not await User.exists(id=user.id, role=UserRole.ADMIN):
-            raise ForbiddenException
+        await require_live_admin(user)
         plan = await DownloadPlan.get_or_none(id=plan_id)
         if not plan:
             raise NotFoundException
@@ -148,25 +147,18 @@ class PlanReplacementService:
             return {**preview, "status": "invalid"}
         digest = json_digest(preview)
         async with in_transaction():
-            active = DownloadPlanReplacement.filter(
+            operation = await get_or_create_operation_review(
+                DownloadPlanReplacement,
                 owner_id=user.id,
-                plan_id=plan.id,
                 digest=digest,
-                status="pending",
-                expires_at__gt=timezone.now(),
+                active_statuses=("pending",),
+                extra_filters={"plan_id": plan.id},
+                defaults={
+                    "plan_id": plan_id,
+                    "operation_id": str(uuid4()),
+                    "preview": preview,
+                },
             )
-            # SQLite uses deferred transactions; reserve the writer before the lookup
-            await active.update(updated_at=F("updated_at"))
-            operation = await active.first()
-            if operation is None:
-                operation = await DownloadPlanReplacement.create(
-                    owner_id=user.id,
-                    plan_id=plan_id,
-                    operation_id=str(uuid4()),
-                    preview=preview,
-                    digest=digest,
-                    expires_at=timezone.now() + timedelta(minutes=30),
-                )
         return await cls._result(operation)
 
     @staticmethod
@@ -191,31 +183,6 @@ class PlanReplacementService:
             result["first_execution"] = operation.first_execution
         return result
 
-    @staticmethod
-    async def _owned(operation_id: str, user: UserInfo) -> DownloadPlanReplacement:
-        """Read a review after checking current ownership and administrator access.
-
-        Args:
-            operation_id: Opaque review identity.
-            user: Authenticated caller.
-
-        Returns:
-            The caller's review.
-
-        Raises:
-            ForbiddenException: If the account is no longer an administrator.
-            NotFoundException: If the review is unavailable.
-        """
-        FlowGraphService.require_editor(user)
-        if not await User.exists(id=user.id, role=UserRole.ADMIN):
-            raise ForbiddenException
-        operation = await DownloadPlanReplacement.get_or_none(
-            operation_id=operation_id, owner_id=user.id
-        )
-        if not operation:
-            raise NotFoundException
-        return operation
-
     @classmethod
     async def status(cls, operation_id: str, user: UserInfo) -> dict:
         """Read the latest decision and execution state without applying a change.
@@ -227,12 +194,12 @@ class PlanReplacementService:
         Returns:
             Current state including expiry and a committed replacement's new ID.
         """
-        operation = await cls._owned(operation_id, user)
-        if operation.status == "pending" and operation.expires_at <= timezone.now():
-            await DownloadPlanReplacement.filter(
-                id=operation.id, status="pending"
-            ).update(status="expired")
-            await operation.refresh_from_db()
+        operation = await load_operation_review(
+            DownloadPlanReplacement,
+            operation_id,
+            user,
+            expirable_statuses=("pending",),
+        )
         return await cls._result(operation)
 
     @classmethod
@@ -257,20 +224,16 @@ class PlanReplacementService:
         """
         await require_browser_admin(user)
         async with in_transaction():
-            await DownloadPlanReplacement.filter(
-                operation_id=operation_id,
-                owner_id=user.id,
-                status__in=["pending", "approved", "uncertain"],
-            ).update(updated_at=F("updated_at"))
-            operation = await cls._owned(operation_id, user)
-            if operation.digest != digest:
-                raise BadRequestException
+            operation = await lock_operation_decision(
+                DownloadPlanReplacement,
+                operation_id,
+                digest,
+                user,
+                lock_statuses=("pending", "approved", "uncertain"),
+                expirable_statuses=("pending",),
+            )
             previous = operation.status
-            if operation.status == "pending" and operation.expires_at <= timezone.now():
-                operation.status = "expired"
-            elif (
-                operation.status in {"pending", "approved", "uncertain"} and not approve
-            ):
+            if operation.status in {"pending", "approved", "uncertain"} and not approve:
                 operation.status = "cancelled"
             elif operation.status == "pending":
                 busy = await DownloadPlanReplacement.filter(
@@ -278,12 +241,9 @@ class PlanReplacementService:
                 ).exists()
                 operation.status = "conflict" if busy else "approved"
             if previous != operation.status:
-                changes = {"status": operation.status}
-                if operation.status != "expired":
-                    changes["decided_at"] = timezone.now()
                 await DownloadPlanReplacement.filter(
                     id=operation.id, status=previous
-                ).update(**changes)
+                ).update(status=operation.status, decided_at=timezone.now())
         if operation.status in {"approved", "uncertain"}:
             await cls._advance(operation)
         return await cls.status(operation_id, user)
@@ -326,7 +286,7 @@ class PlanReplacementService:
             update = DownloadPlanReplacement.filter(
                 id=operation_pk, status__in=["approved", "uncertain"]
             )
-            if not await update.update(updated_at=F("updated_at")):
+            if not await reserve_writer(update):
                 return
             operation = await DownloadPlanReplacement.get(id=operation_pk)
             owner = await User.get_or_none(id=operation.owner_id, role=UserRole.ADMIN)

@@ -161,7 +161,7 @@ Sign in as an administrator and create a token under **Personal → Access Token
 | MCP URL              | `http://127.0.0.1:8000/_api/mcp`, replaced with an instance address reachable by your client |
 | Authorization header | `Authorization: Bearer <token>`, replacing `<token>` with the full token                     |
 
-Tokens created on this page default to read-only. Choose read-write access when needed. Available tools and libraries follow the account’s permissions. Use `tools/list` to see the operations available to the current account and token. Running searches and changing favorites require the appropriate read-write grant.
+Every active token grants either read-only or read-write access across all domains and media libraries. New tokens default to read-write. Choose read-only when creating a token if desired. Use `tools/list` to see the tools available to the token. Running indexer searches and changing favorites require read-write access.
 
 When an administrator asks the web assistant to rebuild a plan, publish a workflow, or remove a library, they review the impact and confirm in the same chat. MCP clients can preview these operations and use the returned operation ID to check their status. The complete token appears once at creation. If your client has a **Bearer Token** field, enter the token itself.
 

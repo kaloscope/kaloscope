@@ -147,7 +147,8 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
 - Reuse application HTTP clients and `backend/app/core/network.py` for ordinary external requests to retain proxy, DNS,
   cookie, and cache behavior. Keep specialized clients within their existing lifecycle management.
 - Assistant tools in `backend/app/core/ai/tools.py` and MCP tools in `backend/app/mcp.py` bypass route decorators. Require
-  an administrator for both catalogs and tool dispatch. Preserve MCP token scopes, domains and library restrictions.
+  an administrator for both catalogs and tool dispatch. MCP tokens grant read-only or read-write access across all
+  domains and media libraries. Apply ordinary web users' media-library permissions to their web requests.
   The system prompt and tool schemas consume a fixed context budget. `test_floor_catalog` in `backend/tests/test_core_ai_tools.py`
   caps fixed text at 24,796 bytes per catalog state.
   Measure growth with `fixed_size(...)` and offset it instead of loosening assertions.
@@ -155,8 +156,8 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
 ### Assistant interactions and MCP scopes
 
 - Use `discover_actions` for role-aware tool discovery and keep newly unlocked schemas inside the catalog budget.
-  Download grants live in `backend/app/core/dl/access.py`. Keep MCP discovery, call-time checks,
-  scoped tool schemas, and historical resource checks consistent when adding actions. Require a verified token for both
+  Download grants live in `backend/app/core/dl/access.py`. Keep MCP discovery and dispatch aligned with each tool's
+  declared read or write access. Recheck access to historical resources. Require a verified token for both
   discovery and execution. Previews that run an external workflow, including media rescraping, require a read-write token.
 - Use `ask_user` and the signed-in conversation's answer endpoint for missing values. Options, custom text, skipped
   questions, and retries carry no execution grant. Keep device actions tied to a validated target and browser acknowledgement.

@@ -16,6 +16,7 @@ from app.core.ai.tools import execute_tool
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
     BadRequestException,
+    ErrorCode,
     ForbiddenException,
     KaloscopeException,
     NotFoundException,
@@ -25,7 +26,7 @@ from app.models.agent_actions import AdminChange, AgentAdminReview, WorkspaceQue
 from app.models.download import DownloadPlan
 from app.models.flow import FlowGraph, FlowRepository, FlowTemplate
 from app.models.media import MediaFormat, MediaItem, MediaLib
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.agent_actions import (
     action_status,
     decide_action,
@@ -189,10 +190,19 @@ def test_permission_expiry():
             with pytest.raises(ForbiddenException):
                 await decide(card, owner)
             await User.filter(id=owner.id).update(role="user")
-            with pytest.raises(ForbiddenException):
+            with pytest.raises(ForbiddenException) as demoted:
                 await review_action(change, owner)
-            with pytest.raises(ForbiddenException):
+            assert demoted.value.message == ErrorCode.FORBIDDEN
+            with pytest.raises(ForbiddenException) as demoted_inspect:
                 await inspect_workspace(WorkspaceQuery(topic="actions"), owner)
+            assert demoted_inspect.value.message == ErrorCode.FORBIDDEN
+            non_admin = SimpleNamespace(id=owner.id, role=UserRole.USER)
+            with pytest.raises(ForbiddenException) as regular:
+                await review_action(change, non_admin)
+            assert regular.value.message == ErrorCode.PERMISSION_DENIED
+            with pytest.raises(ForbiddenException) as regular_inspect:
+                await inspect_workspace(WorkspaceQuery(topic="actions"), non_admin)
+            assert regular_inspect.value.message == ErrorCode.PERMISSION_DENIED
 
     asyncio.run(run())
 
@@ -294,5 +304,35 @@ def test_rolled_back_review(monkeypatch, decide_again):
                     decide_again
                 ]
             )
+
+    asyncio.run(run())
+
+
+def test_concurrent_expiry_status():
+    async def run():
+        async with database() as (owner, _):
+            graph, _, _ = await stored_plan()
+            await FlowGraph.filter(id=graph.id).update(draft=graph.definition)
+            change = AdminChange(action="publish_workflow", target_id=graph.id)
+            expired_card = await review_action(change, owner)
+            expired_key = UUID(expired_card["operation_id"])
+            await AgentAdminReview.filter(operation_id=expired_key).update(
+                expires_at=timezone.now() - timedelta(seconds=1)
+            )
+            expired_results = await asyncio.gather(
+                *(action_status(expired_key, owner) for _ in range(8))
+            )
+            assert [r["status"] for r in expired_results] == ["expired"] * 8
+
+            timed_out_card = await review_action(change, owner)
+            timed_out_key = UUID(timed_out_card["operation_id"])
+            await AgentAdminReview.filter(operation_id=timed_out_key).update(
+                status="executing",
+                updated_at=timezone.now() - timedelta(minutes=11),
+            )
+            timed_out_results = await asyncio.gather(
+                *(action_status(timed_out_key, owner) for _ in range(8))
+            )
+            assert [r["status"] for r in timed_out_results] == ["uncertain"] * 8
 
     asyncio.run(run())

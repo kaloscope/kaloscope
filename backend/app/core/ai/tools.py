@@ -1,7 +1,7 @@
 """Expose bounded, permission-checked workflow, media, and download tools."""
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
@@ -19,6 +19,28 @@ from pydantic import (
 from pydantic.json_schema import SkipJsonSchema
 from tortoise.transactions import in_transaction
 
+from app.core.ai.catalog import (
+    BATCH_FOCUS as BATCH_FOCUS,
+)
+from app.core.ai.catalog import (
+    DOMAIN_TOOLS,
+    MEDIA_REVIEW_TOOLS,
+    ActionDomain,
+    CatalogProfile,
+    is_tool_visible,
+)
+from app.core.ai.catalog import (
+    MEDIA_CHANGE_TOOLS as MEDIA_CHANGE_TOOLS,
+)
+from app.core.ai.catalog import (
+    PLAN_CHANGE_TOOLS as PLAN_CHANGE_TOOLS,
+)
+from app.core.ai.catalog import (
+    SCHEDULE_TOOLS as SCHEDULE_TOOLS,
+)
+from app.core.ai.catalog import (
+    TASK_ACTION_TOOLS as TASK_ACTION_TOOLS,
+)
 from app.core.ai.documents import (
     GraphProposal,
     GraphReference,
@@ -102,7 +124,7 @@ from app.models.flow import (
     ScheduleApply,
     ScheduleChange,
 )
-from app.models.mcp import NodeTypesResult
+from app.models.mcp_results import NodeTypesResult
 from app.models.media import (
     FileOwner,
     Language,
@@ -121,7 +143,7 @@ from app.models.user import (
     UserRole,
 )
 from app.models.workflow_authoring import HTTPProbe, TemplateValidation
-from app.services.agent_actions import inspect_workspace, review_action
+from app.services.agent_actions import review_action
 from app.services.assistant_questions import build_card
 from app.services.download import DownloadPlanService, DownloadTaskService, open_source
 from app.services.download_diagnostics import IngestionQuery, diagnose_ingestion
@@ -130,6 +152,11 @@ from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.services.plan_replacement import PlanReplacementService
+from app.services.review_common import (
+    is_media_file_listing,
+    recent_review_calls,
+    schedule_review_target,
+)
 from app.services.subscription_intent import (
     accepts_offer,
     has_release_question,
@@ -142,46 +169,18 @@ from app.services.workflow_authoring import (
     probe_http_request,
     validate_workflow_template,
 )
+from app.services.workspace_queries import inspect_workspace
 from app.utils.json import JSONType, dumps, loads
 
 MAX_TOOL_RESULT_BYTES = 32 * 1024
 TOOL_TIMEOUT = 15
 CREATE_TOOL = "create_workflow_draft"
-SCHEDULE_TOOLS = frozenset({"review_workflow_schedule", "apply_workflow_schedule"})
-PLAN_CHANGE_TOOLS = frozenset(
-    {
-        "review_download_plan_change",
-        "apply_download_plan_change",
-        "review_plan_replacement",
-    }
-)
-TASK_ACTION_TOOLS = frozenset(
-    {"review_download_task_action", "apply_download_task_action"}
-)
 MEDIA_REVIEWS = {
     "review_library_scan": LibraryScan,
     "review_media_rescrape": MediaRescrape,
     "review_library_config": LibraryConfig,
     "review_media_batch": MediaBatch,
 }
-MEDIA_REVIEW_TOOLS = frozenset(MEDIA_REVIEWS)
-MEDIA_CHANGE_TOOLS = MEDIA_REVIEW_TOOLS | {"apply_media_change"}
-# a file conversation keeps library management available without unrelated domains
-BATCH_FOCUS = MEDIA_CHANGE_TOOLS | frozenset(
-    {
-        "ask_user",
-        "discover_actions",
-        "get_media_batch",
-        "cancel_media_batch",
-        "list_media_libraries",
-        "list_media_items",
-        "get_media_item",
-        "list_workflows",
-        "get_workflow",
-        "read_conversation_history",
-        "navigate",
-    }
-)
 SAFE_INTEGER = 2**53 - 1
 
 
@@ -209,51 +208,6 @@ class ToolArguments(BaseModel):
     """Reject unknown arguments without echoing model-generated content."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-
-
-type ActionDomain = Literal[
-    "questions", "personal", "workspace", "search", "downloads", "workflows", "media"
-]
-
-DOMAIN_TOOLS = {
-    "questions": {"ask_user"},
-    "personal": {"get_personal_preferences", "set_personal_preference"},
-    "workspace": {
-        "inspect_workspace",
-        "review_workspace_change",
-        "get_media_batch",
-        "cancel_media_batch",
-    },
-    "workflows": {
-        "list_workflows",
-        "get_workflow",
-        "create_workflow_draft",
-        "get_workflow_reference",
-        "list_workflow_jobs",
-    },
-    "media": {
-        "list_media_libraries",
-        "list_media_items",
-        "get_media_item",
-        "review_media_batch",
-    },
-    "search": {
-        "list_workflows",
-        "search_indexer",
-        "list_indexer_favorites",
-        "set_indexer_favorite",
-    },
-    "downloads": {
-        "list_download_plans",
-        "get_download_plan",
-        "review_download_plan_change",
-        "list_download_tasks",
-        "get_download_task",
-        "diagnose_download_ingestion",
-        "get_plan_replacement",
-        "review_plan_replacement",
-    },
-}
 
 
 class ActionDiscovery(ToolArguments):
@@ -1141,6 +1095,7 @@ def compact_schema(value: Any, definitions: dict | None = None) -> Any:
 def tool_schemas(
     user: UserInfo,
     *,
+    profile: CatalogProfile | None = None,
     domain: ActionDomain | None = None,
     authoring: bool = False,
     plan_authoring: bool = False,
@@ -1158,6 +1113,8 @@ def tool_schemas(
 
     Args:
         user: Account whose tool catalog is being requested.
+        profile: Declarative catalog profile; when omitted, constructed from the
+            keyword flags below.
         domain: Explicitly discovered domain whose full tools are offered.
         authoring: Focus this recipe turn on workflow construction. Other tools
             return next turn; this changes model context, never authorization.
@@ -1183,149 +1140,25 @@ def tool_schemas(
         argument model's own summary is omitted because the tool description
         already states its purpose.
     """
+    active = profile or CatalogProfile(
+        domain=domain,
+        authoring=authoring,
+        plan_authoring=plan_authoring,
+        plan_only=plan_only,
+        ingestion=ingestion,
+        trial=trial,
+        schedule=schedule,
+        plan_change=plan_change,
+        task_action=task_action,
+        media_change=media_change,
+        batch=batch,
+        workspace=workspace,
+    )
     schemas = []
     for tool in available_tools(user).values():
-        if workspace and tool.name not in {
-            "discover_actions",
-            "inspect_workspace",
-            "review_workspace_change",
-            "get_media_batch",
-            "cancel_media_batch",
-            "ask_user",
-            "get_workflow",
-            "list_workflows",
-            "list_media_libraries",
-            "get_media_item",
-            "navigate",
-        }:
+        if not is_tool_visible(tool.name, active):
             continue
-        if tool.name == "review_workspace_change" and not (
-            workspace or domain == "workspace"
-        ):
-            continue
-        if tool.name in {"get_media_batch", "cancel_media_batch"} and not (
-            batch or workspace or domain == "workspace"
-        ):
-            continue
-        if domain:
-            if tool.name not in DOMAIN_TOOLS[domain] | {
-                "discover_actions",
-                "navigate",
-                "ask_user",
-            }:
-                continue
-        else:
-            if tool.name in DOMAIN_TOOLS["personal"] or (
-                tool.name == "inspect_workspace" and not workspace
-            ):
-                continue
-            # graph authors can request the full question schema through discovery
-            if tool.name in {"ask_user", "get_plan_replacement"} and not (
-                plan_only or plan_change or task_action or batch or workspace
-            ):
-                continue
-            # re-enter graph editing through its reference recipe when switching domains
-            if (
-                tool.name == "preview_workflow_draft"
-                and not authoring
-                and (plan_authoring or task_action or schedule or media_change is True)
-            ):
-                continue
-            if batch and tool.name not in BATCH_FOCUS:
-                continue
-            if tool.name == "run_workflow" and not trial:
-                continue
-            if tool.name in {"set_indexer_favorite", "list_indexer_favorites"}:
-                continue
-            if tool.name == "diagnose_download_ingestion" and not (
-                plan_change or task_action
-            ):
-                continue
-            if tool.name in SCHEDULE_TOOLS and not schedule:
-                continue
-            if tool.name in PLAN_CHANGE_TOOLS and not plan_change:
-                continue
-            if tool.name in TASK_ACTION_TOOLS and not task_action:
-                continue
-            if (
-                not batch
-                and tool.name in MEDIA_CHANGE_TOOLS
-                and (
-                    not media_change
-                    or (media_change is not True and tool.name not in media_change)
-                )
-            ):
-                continue
-            if tool.name in {
-                "get_download_plan_options",
-                "validate_download_plan",
-                "create_download_plan",
-                "get_library_ingestion",
-                "validate_download_task",
-                "create_download_task",
-            } and not (plan_authoring or plan_only):
-                continue
-            if tool.name == "search_indexer" and not (plan_authoring or plan_only):
-                continue
-            if (
-                plan_only
-                and tool.name
-                not in {
-                    "discover_actions",
-                    "ask_user",
-                    "diagnose_download_ingestion",
-                    "list_workflows",
-                    "get_workflow",
-                    "get_download_plan_options",
-                    "search_indexer",
-                    "validate_download_plan",
-                    "create_download_plan",
-                    "get_download_plan",
-                    "list_download_plans",
-                    "get_library_ingestion",
-                    "validate_download_task",
-                    "create_download_task",
-                    "list_media_libraries",
-                    "list_media_items",
-                    "get_workflow_logs",
-                    "read_workflow_log",
-                    "read_conversation_history",
-                    "create_workflow_draft",
-                    "navigate",
-                    "get_plan_replacement",
-                    *PLAN_CHANGE_TOOLS,
-                }
-                and not (
-                    (ingestion or plan_change) and tool.name == "get_workflow_reference"
-                )
-            ):
-                continue
-            if (
-                authoring
-                and not (
-                    trial
-                    and tool.name
-                    in {"run_workflow", "get_workflow_logs", "read_workflow_log"}
-                )
-                and tool.name
-                not in {
-                    "discover_actions",
-                    "list_workflows",
-                    "get_workflow",
-                    "list_node_types",
-                    "get_workflow_reference",
-                    "probe_http_request",
-                    "validate_workflow_template",
-                    "validate_workflow",
-                    "preview_workflow_draft",
-                    "create_workflow_draft",
-                    "read_workflow_snapshot",
-                    "read_conversation_history",
-                    "navigate",
-                }
-            ):
-                continue
-        short = tool.brief is not None and not batch
+        short = tool.brief is not None and not active.batch
         parameters = compact_schema(
             (tool.brief if short else tool.arguments).model_json_schema()
         )
@@ -2563,6 +2396,63 @@ async def create_task(
     raise NotFoundException
 
 
+async def _apply_reviewed_change(
+    request_id: UUID,
+    confirmed: bool,
+    conversation_id: int,
+    *,
+    names: Collection[str],
+    require_valid: bool,
+    is_superseded: Callable[
+        [int, AssistantToolCall, dict, list[tuple[AssistantToolCall, dict]]], bool
+    ],
+    apply_fn: Callable[[AssistantToolCall, dict, bool], Awaitable[dict]],
+) -> dict:
+    """Apply a stored review after verifying turn completion and supersession.
+
+    Args:
+        request_id: Reviewed request identity submitted for confirmation.
+        confirmed: Whether the user confirmed applying the review.
+        conversation_id: Server-owned conversation containing the review calls.
+        names: Review tool names sharing the supersession window.
+        require_valid: Whether to ignore calls whose data lacks a `valid` field.
+        is_superseded: Predicate checking whether newer calls in the window replace
+            the matched review.
+        apply_fn: Domain callback receiving `(record, data, ready)` to execute.
+
+    Returns:
+        Shared domain outcome, or a confirmation prompt when the review is not ready.
+
+    Raises:
+        NotFoundException: If no matching review exists in the recent window.
+    """
+    reviews = await recent_review_calls(
+        conversation_id, names, require_valid=require_valid
+    )
+    for index, (record, data) in enumerate(reviews):
+        if data.get("request_id") != str(request_id):
+            continue
+
+        reviewed = await AssistantTurn.get(id=record.turn_id)
+        superseded = is_superseded(index, record, data, reviews)
+        ready = not superseded and reviewed.status == "complete"
+
+        result = await apply_fn(record, data, confirmed and ready)
+        if not ready and not result.get("replayed"):
+            return {
+                **result,
+                "applied": False,
+                "confirmation_required": True,
+                "message": "A newer review replaced this one; confirm that one."
+                if superseded
+                else "Show this review, finish the turn and wait for the user's "
+                "confirmation.",
+            }
+        return result
+
+    raise NotFoundException
+
+
 async def apply_schedule(
     args: ScheduleConfirm, conversation_id: int, user: UserInfo
 ) -> dict:
@@ -2584,48 +2474,26 @@ async def apply_schedule(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = []
-    for record in (
-        await AssistantToolCall.filter(
-            turn__conversation_id=conversation_id, name="review_workflow_schedule"
-        )
-        .order_by("-id")
-        .limit(30)
-    ):
-        data = (record.result or {}).get("data") or {}
-        if "valid" in data:
-            target = (data["job_id"], None if data["job_id"] else data["workflow_id"])
-            reviews.append((record, data, target))
-    for index, (record, data, target) in enumerate(reviews):
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        superseded = any(other == target for _, _, other in reviews[:index])
-        ready = not superseded and reviewed.status == "complete"
-
-        result = await FlowJobService.apply_change(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=("review_workflow_schedule",),
+        require_valid=True,
+        is_superseded=lambda index, _, data, reviews: any(
+            schedule_review_target(other) == schedule_review_target(data)
+            for _, other in reviews[:index]
+        ),
+        apply_fn=lambda record, data, confirmed: FlowJobService.apply_change(
             ScheduleApply(
                 request_id=args.request_id,
                 change=ScheduleChange.model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if superseded
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def apply_plan_change(
@@ -2649,41 +2517,25 @@ async def apply_plan_change(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    from app.services.assistant_plan_review import recent_plan_reviews
-
-    reviews = await recent_plan_reviews(conversation_id)
-    for index, (record, data) in enumerate(reviews):
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        superseded = any(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=("review_download_plan_change",),
+        require_valid=True,
+        is_superseded=lambda index, _, data, reviews: any(
             other["plan_id"] == data["plan_id"] for _, other in reviews[:index]
-        )
-        ready = not superseded and reviewed.status == "complete"
-
-        result = await DownloadPlanService.apply_change(
+        ),
+        apply_fn=lambda record, data, confirmed: DownloadPlanService.apply_change(
             DownloadPlanApply(
                 request_id=args.request_id,
                 change=DownloadPlanChange.model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if superseded
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def apply_task_action(
@@ -2708,46 +2560,23 @@ async def apply_task_action(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = [
-        (record, (record.result or {}).get("data") or {})
-        for record in (
-            await AssistantToolCall.filter(
-                turn__conversation_id=conversation_id,
-                name="review_download_task_action",
-            )
-            .order_by("-id")
-            .limit(30)
-        )
-    ]
-    for index, (record, data) in enumerate(reviews):
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        ready = index == 0 and reviewed.status == "complete"
-
-        result = await DownloadTaskService.apply_action(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=("review_download_task_action",),
+        require_valid=False,
+        is_superseded=lambda index, *_: index > 0,
+        apply_fn=lambda record, data, confirmed: DownloadTaskService.apply_action(
             DownloadTaskActionApply(
                 request_id=args.request_id,
                 change=DownloadTaskAction.model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if index
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def apply_media_change(
@@ -2773,59 +2602,26 @@ async def apply_media_change(
     Raises:
         NotFoundException: If the review record is unavailable.
     """
-    reviews = (
-        await AssistantToolCall.filter(
-            turn__conversation_id=conversation_id, name__in=list(MEDIA_REVIEW_TOOLS)
-        )
-        .order_by("-id")
-        .limit(30)
-    )
-    for index, record in enumerate(reviews):
-        data = (record.result or {}).get("data") or {}
-        if data.get("request_id") != str(args.request_id):
-            continue
-
-        reviewed = await AssistantTurn.get(id=record.turn_id)
-        superseded = False
-        for later in reviews[:index]:
-            later_result = later.result or {}
-            later_data = later_result.get("data") or {}
-            if not (
-                later.turn_id == record.turn_id
-                and later.name == "review_media_batch"
-                and later_result.get("ok")
-                and "matched" in later_data
-                and "operation" not in later_data
-                and isinstance(data.get("library_id"), int)
-                and later_data.get("library_id") == data["library_id"]
-            ):
-                superseded = True
-                break
-
-        ready = not superseded and reviewed.status == "complete"
-        change = MEDIA_REVIEWS[record.name].model_validate_json(record.arguments)
-        result = await MediaChangeService.apply_change(
+    return await _apply_reviewed_change(
+        args.request_id,
+        args.confirmed,
+        conversation_id,
+        names=MEDIA_REVIEW_TOOLS,
+        require_valid=False,
+        is_superseded=lambda index, record, data, reviews: any(
+            not is_media_file_listing(later, record, data)
+            for later, _ in reviews[:index]
+        ),
+        apply_fn=lambda record, data, confirmed: MediaChangeService.apply_change(
             MediaChangeApply(
                 request_id=args.request_id,
-                change=change,
+                change=MEDIA_REVIEWS[record.name].model_validate_json(record.arguments),
                 revision=data["revision"],
-                confirmed=args.confirmed and ready,
+                confirmed=confirmed,
             ),
             user,
-        )
-        if not ready and not result.get("replayed"):
-            return {
-                **result,
-                "applied": False,
-                "confirmation_required": True,
-                "message": "A newer review replaced this one; confirm that one."
-                if superseded
-                else "Show this review, finish the turn and wait for the user's "
-                "confirmation.",
-            }
-        return result
-
-    raise NotFoundException
+        ),
+    )
 
 
 async def create_workflow(

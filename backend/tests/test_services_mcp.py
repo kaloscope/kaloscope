@@ -43,7 +43,8 @@ def test_create(days):
             listed = await MCPAccessTokenService.list_tokens(user.id)
 
             assert issued["name"] == "Codex"
-            assert issued["scope"] == MCPTokenScope.READ_ONLY
+            assert issued["scope"] == stored.scope == MCPTokenScope.READ_WRITE
+            assert not {"domain", "library_ids"} & issued.keys()
             assert issued["status"] == "active"
             assert issued["last_used_at"] is None
             token = issued.pop("token")
@@ -61,18 +62,19 @@ def test_create(days):
 
 def test_defaults():
     assert MCPAccessTokenCreate(name="Codex").expires_in_days == 90
-    assert MCPAccessTokenCreate(name="Codex").scope == MCPTokenScope.READ_ONLY
+    assert MCPAccessTokenCreate(name="Codex").scope == MCPTokenScope.READ_WRITE
 
 
-def test_read_write_grant():
+@pytest.mark.parametrize("scope", list(MCPTokenScope))
+def test_explicit_scope(scope):
     async def run():
         async with database() as user:
-            body = MCPAccessTokenCreate(name="Writer", scope=MCPTokenScope.READ_WRITE)
+            body = MCPAccessTokenCreate(name="Codex", scope=scope)
             issued = await MCPAccessTokenService.create(user.id, body)
             identity = await MCPAccessTokenService.authenticate(
                 issued["token"], client_ip="127.0.0.1", user_agent=None
             )
-            assert identity.mcp_scope == MCPTokenScope.READ_WRITE
+            assert identity.mcp_scope == scope
             assert identity.role == "admin"
 
     asyncio.run(run())
@@ -91,6 +93,9 @@ def test_read_write_grant():
         {"name": "Codex", "expires_in_days": True},
         {"name": "Codex", "expires_in_days": "90"},
         {"name": "Codex", "scope": "write"},
+        {"name": "Codex", "domain": "media"},
+        {"name": "Codex", "library_ids": None},
+        {"name": "Codex", "domain": "media", "library_ids": [1]},
         {"name": "Codex", "user_id": 42},
     ],
 )

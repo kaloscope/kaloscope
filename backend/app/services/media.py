@@ -1828,7 +1828,7 @@ def _binding_fact(row: FlowTrigger, lib_type: LibType) -> dict[str, Any]:
 
 
 def accessible_library_ids(user: UserInfo) -> set[int] | None:
-    """Intersect the account's current library permissions with its token grant.
+    """Return the account's current media library permissions.
 
     Args:
         user: Authenticated browser account or MCP identity.
@@ -1836,11 +1836,9 @@ def accessible_library_ids(user: UserInfo) -> set[int] | None:
     Returns:
         Allowed library IDs, or `None` for unrestricted administrator access.
     """
-    granted = getattr(user, "mcp_library_ids", None)
     if user.role == UserRole.ADMIN:
-        return set(granted) if granted is not None else None
-    account = set(user.perms.media_lib_ids if user.perms else ())
-    return account if granted is None else account.intersection(granted)
+        return None
+    return set(user.perms.media_lib_ids if user.perms else ())
 
 
 class MediaLibService(BaseService[MediaLib], model=MediaLib):
@@ -1853,7 +1851,6 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         watcher: LibWatcher,
         *,
         stored_bindings: bool = False,
-        include_bindings: bool = True,
     ) -> list[dict[str, Any]]:
         """List accessible libraries with their triggers and current scan status.
 
@@ -1863,7 +1860,6 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             stored_bindings: Whether administrators also receive bindings to
                 unpublished workflows, flagged by `published`, so the library editor
                 can save them back. Others keep the executable bindings only.
-            include_bindings: Whether this caller may read workflow references.
 
         Returns:
             Libraries visible to the account, without starting a scan.
@@ -1881,12 +1877,8 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
         }
         unpublished = stored_bindings and user.role == UserRole.ADMIN
         for lib in libraries:
-            lib["triggers"] = (
-                await FlowTriggerService.get_triggers(
-                    GraphCategory.INGEST, lib["id"], unpublished=unpublished
-                )
-                if include_bindings
-                else []
+            lib["triggers"] = await FlowTriggerService.get_triggers(
+                GraphCategory.INGEST, lib["id"], unpublished=unpublished
             )
             lib["scanning"] = watcher.is_scanning(lib["dir"]) or lib["id"] in scanning
         return libraries
@@ -1906,10 +1898,6 @@ class MediaLibService(BaseService[MediaLib], model=MediaLib):
             NotFoundException: If the library does not exist.
             ForbiddenException: If the user cannot access the library.
         """
-        if (
-            granted := getattr(user, "mcp_library_ids", None)
-        ) is not None and id not in granted:
-            raise NotFoundException
         library = await MediaLib.get_or_none(id=id)
         if library is None:
             raise NotFoundException
@@ -3914,7 +3902,7 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
 
         Args:
             id: Requested media item ID.
-            user: Authenticated user with permissions loaded by authorize.
+            user: Authenticated user with permissions loaded by `authorize`.
 
         Returns:
             Item with its library and optional parent loaded.
@@ -3923,10 +3911,11 @@ class MediaItemService(BaseService[MediaItem], model=MediaItem):
             NotFoundException: If the item or its valid visible parent is missing.
             ForbiddenException: If the user cannot access the library.
         """
-        candidates = MediaItem.filter(id=id, visible=True)
-        if getattr(user, "mcp_library_ids", None) is not None:
-            candidates = candidates.filter(cls.path_filter(user))
-        item = await candidates.select_related("lib", "parent").first()
+        item = (
+            await MediaItem.filter(id=id, visible=True)
+            .select_related("lib", "parent")
+            .first()
+        )
         if item is None:
             raise NotFoundException
         if (
