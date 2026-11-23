@@ -4,6 +4,7 @@ import type { AssistantTranslator } from './errors';
 const reviewTools = [
   'validate_download_plan',
   'validate_download_task',
+  'review_download_plan_change',
   'review_download_task_action',
   'review_workflow_schedule',
   'review_library_scan',
@@ -284,6 +285,12 @@ export function reviewFields(receipt: AssistantReview): [string, unknown][] {
       );
       break;
     }
+    case 'review_download_plan_change':
+      fields.push(
+        ['assistant.pages.download_plans', identity(p.keyword, p.plan_id)],
+        [planFieldLabels.graph_id, p.workflow_name]
+      );
+      break;
     case 'review_download_task_action':
       fields.push(
         ['entity.task', identity(p.name, p.task_id)],
@@ -440,11 +447,15 @@ export function refreshDomainTarget(target: DomainRefreshTarget): void {
  * Refresh the open application view after a committed or dispatched decision.
  *
  * @param receipt - Server response to an explicit confirmation.
+ * @param source - Optional card symbol to avoid refreshing the initiating card twice.
  */
-export function refreshReviewTarget(receipt: AssistantReview): void {
+export function refreshReviewTarget(receipt: AssistantReview, source?: symbol): void {
   switch (receipt.tool) {
     case 'validate_download_plan':
       refreshDomainTarget({ kind: 'download_plan_created' });
+      break;
+    case 'review_download_plan_change':
+      refreshDomainTarget({ kind: 'download_plan_changed', source });
       break;
     case 'validate_download_task':
     case 'review_download_task_action':

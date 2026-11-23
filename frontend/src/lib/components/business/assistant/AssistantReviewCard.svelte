@@ -4,6 +4,7 @@
   import { createReviewCard } from '$lib/assistant/review-card.svelte';
   import {
     formatReviewValue,
+    planChangeFieldLabels,
     reviewChanges,
     reviewFields,
     refreshReviewTarget,
@@ -32,19 +33,32 @@
     onview?: () => void;
   } = $props();
   let modal: Modal | undefined = $state();
+  const headingId = $props.id();
   const card = createReviewCard<AssistantReview>({
     path: () => `assistant/reviews/${id}`,
     decision: (_receipt, approve) => ({ request_id: requestId, approve }),
     get events() {
-      return tool === 'validate_download_plan'
-        ? ['assistant-review-changed', 'download-plan-created']
-        : ['assistant-review-changed'];
+      if (tool === 'validate_download_plan') return ['assistant-review-changed', 'download-plan-created'];
+      if (tool === 'review_download_plan_change') return ['assistant-review-changed', 'download-plan-changed'];
+      return ['assistant-review-changed'];
     },
-    received(data, _previous, approve) {
+    received(data, previous, approve) {
       if (data.request_id !== requestId || data.tool !== tool || !data.preview) throw new Error('review_mismatch');
       if (approve !== undefined) {
         card.notify('assistant-review-changed');
-        if (approve && ['applied', 'pending', 'partial', 'uncertain'].includes(data.status)) refreshReviewTarget(data);
+        if (
+          (approve && ['applied', 'pending', 'partial', 'uncertain'].includes(data.status)) ||
+          (!approve && data.status === 'applied' && previous?.status !== 'applied')
+        ) {
+          refreshReviewTarget(data, card.source);
+        }
+      } else if (
+        tool === 'review_download_plan_change' &&
+        data.status === 'applied' &&
+        previous &&
+        previous.status !== 'applied'
+      ) {
+        refreshReviewTarget(data, card.source);
       }
     }
   });
@@ -55,9 +69,20 @@
   const pending = $derived(
     receipt?.status === 'reviewed' || (receipt?.status === 'failed' && receipt.retryable === true)
   );
+  const outcome = $derived(receipt?.outcome);
+  const showRefresh = $derived(
+    failed ||
+      receipt?.status === 'pending' ||
+      receipt?.status === 'partial' ||
+      receipt?.status === 'uncertain' ||
+      (receipt?.status === 'failed' && !receipt.retryable)
+  );
+  const showView = $derived(!!(onview && outcome?.created && receipt?.status === 'applied'));
+  const hasActions = $derived(showRefresh || showView || pending);
   const action = $derived.by(() => {
     if (tool === 'review_workflow_schedule') return 'schedule_' + String(receipt?.preview.action);
     if (tool === 'review_download_task_action') return 'task_' + String(receipt?.preview.action);
+    if (tool === 'review_download_plan_change') return 'plan_' + String(receipt?.preview.action);
     return tool;
   });
   const fields = $derived(receipt ? reviewFields(receipt) : []);
@@ -71,6 +96,7 @@
     if (!p) return '';
     if (tool === 'validate_download_plan') return p.first_execution === 'scheduled' ? 'scheduled' : 'first_check';
     if (tool === 'validate_download_task') return 'submit_download';
+    if (tool === 'review_download_plan_change' && p.action === 'delete') return 'delete_plan';
     if (tool === 'review_download_task_action' && p.action === 'delete')
       return p.delete_files ? 'delete_files' : 'keep_files';
     if (tool === 'review_download_task_action' && p.dispatch === 'deferred') return 'deferred';
@@ -80,7 +106,6 @@
     if (tool === 'review_library_config' && Array.isArray(p.proposed_binding_order)) return 'binding_change';
     return '';
   });
-  const outcome = $derived(receipt?.outcome);
   const statusText = $derived.by(() => {
     if (!receipt) return '';
     if (tool === 'validate_download_plan' && (receipt.status === 'reviewed' || receipt.status === 'superseded'))
@@ -88,6 +113,11 @@
     const fallback = $_(
       'assistant.review.states.' + (receipt.status === 'failed' && receipt.retryable ? 'retryable' : receipt.status)
     );
+    if (tool === 'review_download_plan_change') {
+      const planStatus = typeof outcome?.outcome === 'string' ? outcome.outcome : receipt.status;
+      const planId = typeof outcome?.plan_id === 'number' ? outcome.plan_id : Number(receipt.preview.plan_id);
+      return $_(`assistant.plan_change.${planStatus}`, { values: { 0: planId }, default: fallback });
+    }
     if (receipt.status === 'partial') {
       if (tool === 'validate_download_plan') return $_('assistant.review.partial_plan');
       if (tool === 'validate_download_task') return $_('assistant.review.partial_download');
@@ -160,7 +190,12 @@
    * @returns The readable value, with units or an explicit empty marker.
    */
   function display(value: unknown, key?: string): string {
-    return formatReviewValue(value, { t: $_, formatDate: $dateTime, key });
+    return formatReviewValue(value, {
+      t: $_,
+      formatDate: $dateTime,
+      key,
+      intervalAsHours: tool === 'review_download_plan_change'
+    });
   }
 </script>
 
@@ -169,19 +204,18 @@
     {busy}
     {failed}
     loaded={!!receipt}
-    showSpinner={true}
+    {hasActions}
+    labelledBy={tool !== 'validate_download_plan' && receipt ? headingId : undefined}
     sectionClass={[
       'space-y-2 text-sm',
       tool !== 'validate_download_plan' && 'rounded-box border border-base-content/15 p-3'
     ]}
     issues={!outcome?.duplicate_plan_id ? (outcome?.issues ?? []) : []}
     status={statusText}
-    statusClass="text-xs text-base-content/75"
-    alertClass="text-xs"
   >
-    {#if tool !== 'validate_download_plan'}<h4 class="font-semibold">
+    {#if tool !== 'validate_download_plan'}<h3 id={headingId} class="font-semibold">
         {$_('assistant.review.actions.' + action)}
-      </h4>{/if}
+      </h3>{/if}
     <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
       {#each fields as [key, value] (key)}
         <dt class="text-base-content/70">{$_(key)}</dt>
@@ -192,14 +226,20 @@
       <dl class="space-y-1 border-t border-base-content/10 pt-2 text-xs">
         {#each changes as change, i (i)}
           <div>
-            <dt class="font-medium">
-              {['binding_order', 'interval_num', 'interval_unit', 'bootparams', 'repeatable', 'recoverable'].includes(
-                String(change.field)
-              )
-                ? $_('assistant.review.' + change.field)
-                : $_('field.' + change.field, {
-                    default: $_('metadata.fields.' + change.field, { default: String(change.field) })
-                  })}
+            <dt class="font-medium text-base-content/70">
+              {#if tool === 'review_download_plan_change'}
+                {$_(planChangeFieldLabels[String(change.field)] ?? `field.${change.field}`, {
+                  default: String(change.field)
+                })}
+              {:else}
+                {['binding_order', 'interval_num', 'interval_unit', 'bootparams', 'repeatable', 'recoverable'].includes(
+                  String(change.field)
+                )
+                  ? $_('assistant.review.' + change.field)
+                  : $_('field.' + change.field, {
+                      default: $_('metadata.fields.' + change.field, { default: String(change.field) })
+                    })}
+              {/if}
             </dt>
             <dd class="break-words">
               {display(change.before, String(change.field))} → {display(change.after, String(change.field))}
@@ -226,11 +266,11 @@
       </details>
     {/if}
     {#snippet actions()}
-      {#if failed || receipt?.status === 'pending' || receipt?.status === 'partial' || receipt?.status === 'uncertain' || (receipt?.status === 'failed' && !receipt.retryable)}
+      {#if showRefresh}
         <button type="button" class="btn btn-ghost btn-sm" disabled={busy || $assistant.busy} onclick={() => load()}
-          >{$_('action.reload')}</button
+          >{$_('assistant.review.refresh')}</button
         >
-      {:else if onview && outcome?.created && receipt?.status === 'applied'}
+      {:else if showView}
         <button
           type="button"
           class="btn btn-ghost btn-sm"
@@ -262,8 +302,8 @@
         <button
           type="button"
           class="btn btn-sm"
-          class:btn-error={action === 'task_delete' || action === 'schedule_delete'}
-          class:btn-primary={action !== 'task_delete' && action !== 'schedule_delete'}
+          class:btn-error={action === 'task_delete' || action === 'schedule_delete' || action === 'plan_delete'}
+          class:btn-primary={action !== 'task_delete' && action !== 'schedule_delete' && action !== 'plan_delete'}
           disabled={busy || $assistant.busy}
           onclick={() => decide(true)}>{$_('assistant.review.actions.' + action)}</button
         >

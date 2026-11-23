@@ -14,6 +14,7 @@
     expires_at: string;
   };
   const { id }: { id: string } = $props();
+  const headingId = $props.id();
   const card = createReviewCard<Review>({
     path: () => `assistant/operations/${id}`,
     decision: (receipt, approve) => ({ digest: receipt.digest, approve }),
@@ -34,6 +35,11 @@
   const busy = $derived(card.busy);
   const failed = $derived(card.failed);
   const load = card.load;
+  const showRefresh = $derived(
+    failed || review?.status === 'executing' || review?.status === 'uncertain' || review?.status === 'partial'
+  );
+  const showDecision = $derived(!failed && (review?.status === 'pending' || review?.status === 'failed'));
+  const hasActions = $derived(showRefresh || showDecision);
 
   /**
    * Format the bounded identifiers and scalar values returned in a review.
@@ -51,12 +57,12 @@
   {busy}
   {failed}
   loaded={!!review}
-  sectionClass="space-y-3 rounded-box border border-base-content/15 p-4 text-sm"
-  ariaLabel={$_('assistant.admin_review.title')}
+  {hasActions}
+  labelledBy={headingId}
   status={review ? $_(`assistant.admin_review.states.${review.status}`) : ''}
 >
   {#snippet header()}
-    <h3 class="font-semibold">
+    <h3 id={headingId} class="font-semibold">
       {review ? $_(`assistant.admin_review.actions.${review.action}`) : $_('assistant.admin_review.title')}
     </h3>
   {/snippet}
@@ -64,12 +70,12 @@
     <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
       {#each Object.entries({ ...review.preview, ...review.result }) as [key, value] (key)}
         {#if !['revision', 'source_digest', 'valid', 'issues'].includes(key) && (key !== 'additional' || Object.keys(value as object).length > 0)}
-          <dt>{$_(`assistant.admin_review.fields.${key}`, { default: key })}</dt>
+          <dt class="text-base-content/70">{$_(`assistant.admin_review.fields.${key}`, { default: key })}</dt>
           <dd class="break-words">{display(value, key)}</dd>
         {/if}
       {/each}
       {#if review.status === 'pending'}
-        <dt>{$_('assistant.replacement.expires')}</dt>
+        <dt class="text-base-content/70">{$_('assistant.replacement.expires')}</dt>
         <dd>{$dateTime(review.expires_at)}</dd>
       {/if}
     </dl>
@@ -80,13 +86,13 @@
     {/if}
   {/if}
   {#snippet actions()}
-    {#if failed || review?.status === 'executing' || review?.status === 'uncertain' || review?.status === 'partial'}
+    {#if showRefresh}
       <button class="btn btn-ghost btn-sm" type="button" disabled={busy || $assistant.busy} onclick={() => load()}
-        >{$_('assistant.replacement.refresh')}</button
+        >{$_('assistant.review.refresh')}</button
       >
-    {:else if review?.status === 'pending' || review?.status === 'failed'}
+    {:else if showDecision && review}
       <button class="btn btn-ghost btn-sm" type="button" disabled={busy || $assistant.busy} onclick={() => load(false)}
-        >{$_('assistant.admin_review.cancel')}</button
+        >{$_('message.cancel')}</button
       >
       <button
         class="btn btn-sm"

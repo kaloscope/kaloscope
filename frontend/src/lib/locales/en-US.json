@@ -1329,6 +1329,8 @@
       "actions": {
         "validate_download_plan": "Create download plan",
         "validate_download_task": "Submit this download",
+        "plan_update": "Update download plan",
+        "plan_delete": "Delete download plan",
         "task_pause": "Pause task",
         "task_resume": "Resume task",
         "task_retry": "Retry task",
@@ -1342,6 +1344,7 @@
         "review_media_rescrape": "Apply metadata changes",
         "review_library_config": "Save library settings"
       },
+      "refresh": "Refresh status",
       "states": {
         "reviewed": "Awaiting your decision.",
         "cancelled": "Cancelled.",
@@ -1359,6 +1362,7 @@
         "first_check": "The first search and download check will be queued after creation.",
         "scheduled": "The first check follows the configured schedule.",
         "submit_download": "This submits one task. Download and transfer progress can be followed in Downloads.",
+        "delete_plan": "Deleting the plan removes its deduplication history. Existing tasks and files stay. A running check may still submit downloads.",
         "keep_files": "Removes the task and keeps its files.",
         "delete_files": "Removes the task and asks the downloader to delete its files.",
         "deferred": "The downloader will handle this action during synchronization.",
@@ -1385,7 +1389,6 @@
     "admin_review": {
       "open_draft": "Open full workflow draft",
       "title": "Review operation",
-      "cancel": "Cancel",
       "yes": "Yes",
       "no": "No",
       "actions": {
@@ -1462,8 +1465,6 @@
       "next": "Next check",
       "immediate": "Queue after approval",
       "expires": "Review expires",
-      "refresh": "Refresh status",
-      "cancel": "Cancel rebuild",
       "confirm": "Confirm rebuild",
       "states": {
         "failed": "Rebuild failed. The original plan was kept.",
@@ -1686,11 +1687,6 @@
       "refused": "Not applied; nothing was saved."
     },
     "plan_change": {
-      "delete_title": "Delete download plan",
-      "update_title": "Update download plan",
-      "delete_effect": "Deleting the plan removes its deduplication history. Existing tasks and files stay. A running check may still submit downloads.",
-      "confirm_delete": "Delete plan",
-      "confirm_update": "Apply changes",
       "cancelled": "Review cancelled.",
       "superseded": "A newer review replaced this one.",
       "incomplete": "This review did not finish. Request a new review.",

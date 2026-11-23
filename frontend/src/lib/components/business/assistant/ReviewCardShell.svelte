@@ -7,13 +7,14 @@
     busy,
     failed,
     loaded,
-    showSpinner = false,
+    showSpinner = true,
+    hasActions = true,
+    labelledBy,
     sectionClass = 'space-y-2 rounded-box border border-base-content/15 p-3 text-sm',
-    ariaLabel,
     issues = [],
     status = '',
-    statusClass,
-    alertClass,
+    statusClass = 'text-xs text-base-content/75',
+    alertClass = 'text-xs text-error',
     header,
     children,
     extraStatus,
@@ -23,8 +24,9 @@
     failed: boolean;
     loaded: boolean;
     showSpinner?: boolean;
+    hasActions?: boolean;
+    labelledBy?: string;
     sectionClass?: ClassValue;
-    ariaLabel?: string;
     issues?: { path?: string; message: string }[];
     status?: string;
     statusClass?: ClassValue;
@@ -36,7 +38,7 @@
   } = $props();
 </script>
 
-<section class={sectionClass} aria-busy={busy} aria-label={ariaLabel}>
+<section class={sectionClass} aria-busy={busy} aria-labelledby={labelledBy}>
   {@render header?.()}
   {#if loaded}
     {@render children?.()}
@@ -50,10 +52,12 @@
     {/if}
     {@render extraStatus?.()}
   {:else if showSpinner && busy}
-    <span class="loading loading-xs loading-spinner" role="status" aria-label={$_('media.loading')}></span>
+    <span class="loading loading-xs loading-spinner" role="progressbar" aria-label={$_('media.loading')}></span>
   {/if}
   {#if failed}<p class={alertClass} role="alert">{$_('assistant.request_failed')}</p>{/if}
-  <div class="flex flex-wrap justify-end gap-2">
-    {@render actions?.()}
-  </div>
+  {#if hasActions && actions}
+    <div class="flex flex-wrap justify-end gap-2">
+      {@render actions()}
+    </div>
+  {/if}
 </section>

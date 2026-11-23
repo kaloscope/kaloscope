@@ -51,7 +51,6 @@
   import AssistantTool from './AssistantTool.svelte';
   import FirstCheckResult from './FirstCheckResult.svelte';
   import PlanReplacementCard from './PlanReplacementCard.svelte';
-  import PlanReviewCard from './PlanReviewCard.svelte';
 
   let panel: HTMLDivElement | undefined = $state();
   let composer: HTMLTextAreaElement | undefined = $state();
@@ -581,8 +580,6 @@
                       {/if}
                     {:else if operation.name === 'review_plan_replacement' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
                       <PlanReplacementCard id={operation.result.data.operation_id} />
-                    {:else if operation.name === 'review_download_plan_change' && operation.result?.ok && typeof operation.result.data?.request_id === 'string'}
-                      <PlanReviewCard id={operation.id} />
                     {:else if operation.name === 'review_workspace_change' && operation.result?.ok && typeof operation.result.data?.operation_id === 'string'}
                       <AdminReviewCard id={operation.result.data.operation_id} />
                     {/if}

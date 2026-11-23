@@ -1329,6 +1329,8 @@
       "actions": {
         "validate_download_plan": "创建下载计划",
         "validate_download_task": "提交本次下载",
+        "plan_update": "更新下载计划",
+        "plan_delete": "删除下载计划",
         "task_pause": "暂停下载任务",
         "task_resume": "继续下载任务",
         "task_retry": "重试下载任务",
@@ -1342,6 +1344,7 @@
         "review_media_rescrape": "应用元数据变更",
         "review_library_config": "保存媒体库设置"
       },
+      "refresh": "刷新状态",
       "states": {
         "reviewed": "待确认",
         "cancelled": "已取消",
@@ -1359,6 +1362,7 @@
         "first_check": "计划创建后，首轮检查将加入后台队列",
         "scheduled": "首轮检查将在计划设定的时间执行",
         "submit_download": "将提交 1 个下载任务，可在下载页查看下载和入库进度",
+        "delete_plan": "删除计划会清除去重历史，保留已有下载任务和文件。正在执行的检查仍可能提交新的下载任务",
         "keep_files": "移除任务并保留文件",
         "delete_files": "移除任务，并请求下载器删除文件",
         "deferred": "将在下次与下载器同步时执行",
@@ -1385,7 +1389,6 @@
     "admin_review": {
       "open_draft": "查看完整工作流草稿",
       "title": "操作确认",
-      "cancel": "取消",
       "yes": "是",
       "no": "否",
       "actions": {
@@ -1462,8 +1465,6 @@
       "next": "下次检查",
       "immediate": "确认后排队",
       "expires": "确认有效期至",
-      "refresh": "刷新状态",
-      "cancel": "取消重建",
       "confirm": "确认重建",
       "states": {
         "failed": "重建失败，原计划仍保留",
@@ -1686,11 +1687,6 @@
       "refused": "未应用，未保存任何更改"
     },
     "plan_change": {
-      "delete_title": "删除下载计划",
-      "update_title": "更新下载计划",
-      "delete_effect": "删除计划会清除去重历史，保留已有下载任务和文件。正在执行的检查仍可能提交新的下载任务",
-      "confirm_delete": "删除计划",
-      "confirm_update": "应用更改",
       "cancelled": "已取消",
       "superseded": "预览已更新，请查看最新预览",
       "incomplete": "预览尚未完成，请重新预览",

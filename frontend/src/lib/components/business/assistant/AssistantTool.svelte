@@ -261,7 +261,7 @@
       livePlan.counts.remaining
     ])}
   </p>
-{:else if changeKind && changeKind !== 'plan_change' && !isAssistantReview(tool.result) && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
+{:else if changeKind && !isAssistantReview(tool.result) && tool.name.startsWith('review_') && tool.result?.ok && tool.result.data?.valid}
   <p class="ml-8 text-xs leading-5 text-base-content/60">{changeMessage(changeKind, 'reviewed')}</p>
 {/if}
 {#if batchId !== null}

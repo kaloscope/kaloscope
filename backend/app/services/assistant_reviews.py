@@ -488,6 +488,45 @@ async def plan_review(
     return {**result, **await _apply_plan_review(call, preview, request_id, key, user)}
 
 
+def _plan_review_envelope(result: dict[str, Any]) -> dict[str, Any]:
+    """Adapt a plan-change review result to the unified assistant review envelope.
+
+    Args:
+        result: Flat review or decision payload returned by `plan_review`.
+
+    Returns:
+        Unified `{tool, request_id, preview, status, outcome}` payload preserving
+        the domain-specific plan-change outcome and retryability flag.
+    """
+    raw_status = result["status"]
+    if raw_status in {"updated", "deleted"}:
+        status = "applied"
+    elif raw_status in {"absent", "conflict"}:
+        status = "stale"
+    else:
+        status = raw_status
+    outcome: dict[str, Any] = {
+        "outcome": raw_status,
+        "plan_id": result["plan_id"],
+    }
+    if "issues" in result:
+        outcome["issues"] = result["issues"]
+    return {
+        "tool": "review_download_plan_change",
+        "request_id": result["request_id"],
+        "preview": {
+            "plan_id": result["plan_id"],
+            "action": result["action"],
+            "keyword": result["keyword"],
+            "workflow_name": result["workflow_name"],
+            "changes": result["changes"],
+        },
+        "status": status,
+        **({"retryable": result["retryable"]} if "retryable" in result else {}),
+        "outcome": outcome,
+    }
+
+
 async def assistant_review(
     call_id: str, user: UserInfo, decision: PlanReviewDecision | None = None
 ) -> dict:
@@ -506,6 +545,13 @@ async def assistant_review(
         NotFoundException: If this account has no valid review with that identity.
         BadRequestException: If the displayed and submitted request identities differ.
     """
+    if await AssistantToolCall.filter(
+        call_id=call_id,
+        name="review_download_plan_change",
+        status="complete",
+        turn__conversation__user_id=user.id,
+    ).exists():
+        return _plan_review_envelope(await plan_review(call_id, user, decision))
     async with in_transaction():
         call, preview, request_id, key = await _load_browser_review(
             call_id,

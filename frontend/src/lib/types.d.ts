@@ -1082,31 +1082,6 @@ export type DownloadPlan = {
   sub_repl: string | null;
 };
 
-/** Frozen assistant review and the recorded decision for one plan change. */
-export type PlanReview = {
-  retryable?: boolean;
-  issues?: { path?: string; message: string }[];
-  request_id: string;
-  plan_id: number;
-  action: 'update' | 'delete';
-  keyword: string;
-  workflow_name: string;
-  changes: { field: string; before: unknown; after: unknown }[];
-  status:
-    | 'reviewed'
-    | 'updated'
-    | 'deleted'
-    | 'cancelled'
-    | 'incomplete'
-    | 'superseded'
-    | 'absent'
-    | 'stale'
-    | 'pending'
-    | 'conflict'
-    | 'failed'
-    | 'uncertain';
-};
-
 /** Frozen replacement options and their durable approval state. */
 export type PlanReplacement = {
   plan_id: number;
