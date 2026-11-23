@@ -183,7 +183,7 @@ def test_management(monkeypatch, expired):
             assert issued["token"] not in listed.text
             assert "token_hash" not in listed.text
             assert "user_id" not in records[0]
-            assert records[0]["scope"] == "read_only"
+            assert issued["scope"] == records[0]["scope"] == "read_write"
             assert records[0]["status"] == ("expired" if expired else "active")
 
             for owner, id in (("other", issued["id"]), ("admin", other["id"])):
@@ -300,7 +300,15 @@ def test_cookie_denied(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("body", [{"name": " "}, {"name": "Codex", "scope": "write"}])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": " "},
+        {"name": "Codex", "scope": "write"},
+        {"name": "Codex", "domain": "downloads"},
+        {"name": "Codex", "domain": "media", "library_ids": [1]},
+    ],
+)
 def test_invalid_create(monkeypatch, body):
     async def run():
         async with client(monkeypatch) as (http, _):

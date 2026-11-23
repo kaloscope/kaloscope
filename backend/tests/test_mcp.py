@@ -52,7 +52,6 @@ from app.models.flow import (
 from app.models.mcp import (
     MCPAccessToken,
     MCPAccessTokenCreate,
-    MCPTokenDomain,
     MCPTokenScope,
 )
 from app.models.mcp_results import WorkflowLogs
@@ -103,7 +102,7 @@ async def application():
                 expire_at=now + timedelta(hours=1),
             )
             issued = await MCPAccessTokenService.create(
-                user.id, MCPAccessTokenCreate(name=name)
+                user.id, MCPAccessTokenCreate(name=name, scope=MCPTokenScope.READ_ONLY)
             )
             app.ctx.mcp_tokens[name] = issued["token"]
             if role != UserRole.ADMIN:
@@ -238,7 +237,7 @@ def test_catalog():
         async with application() as app:
             token = await MCPAccessTokenService.create(
                 app.shared_ctx.sessions["admin"].id,
-                MCPAccessTokenCreate(name="catalog", scope="read_write"),
+                MCPAccessTokenCreate(name="catalog"),
             )
             reply = response_json(await post(app, "tools/list", token=token["token"]))
             catalog = [Tool.model_validate(t) for t in reply["result"]["tools"]]
@@ -298,6 +297,8 @@ def test_catalog():
                 "cancel_media_batch",
             }
 
+            readonly = response_json(await post(app, "tools/list"))
+            readonly_names = {tool["name"] for tool in readonly["result"]["tools"]}
             for tool in catalog:
                 assert tool.annotations is not None
                 assert tool.output_schema is not None
@@ -320,6 +321,11 @@ def test_catalog():
                     "cancel_media_batch",
                 }
                 assert tool.annotations.read_only_hint is (not writes)
+                assert (tool.name in readonly_names) is (not writes)
+                if writes:
+                    denied = await call(app, tool.name)
+                    assert denied["isError"]
+                    assert "only permits read-only" in denied["content"][0]["text"]
                 assert tool.annotations.destructive_hint is (
                     tool.name
                     in {
@@ -502,7 +508,6 @@ def test_declarative_grants():
 
     @server.tool(
         access="write",
-        domains=MCPTokenDomain.WORKFLOWS,
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=True,
@@ -514,19 +519,15 @@ def test_declarative_grants():
         await operation()
         return "done"
 
-    with pytest.raises(ValueError, match="explicit access grant"):
-        server.tool(domains=MCPTokenDomain.MEDIA)
     with pytest.raises(ValueError, match="ToolAnnotations"):
         server.tool(access="write")
-    with pytest.raises(ValueError, match="specific MCPTokenDomain"):
-        server.tool(access="read", domains=MCPTokenDomain.ALL)
     with pytest.raises(ValueError, match="already registered"):
 
         @server.tool(access="read", name="spoofed_hint")
         async def duplicate_granted() -> str:
             return "shadow"
 
-    assert server._grants["spoofed_hint"].access == "write"
+    assert server._grants["spoofed_hint"] == "write"
 
     @server.tool()
     async def ungranted_tool() -> str:
@@ -551,7 +552,7 @@ def test_declarative_grants():
         if name == "get_download_task":
             continue
         registered = server._grants[name]
-        assert (registered.access == "write") is grant.read_write
+        assert (registered == "write") is grant.read_write
 
     async def run():
         async with application() as app:
@@ -1157,9 +1158,9 @@ def test_media_reads(tmp_path):
             library = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
-            private = await MediaLib.create(
-                name="Private",
-                dir=str(tmp_path / "private"),
+            other_lib = await MediaLib.create(
+                name="Other",
+                dir=str(tmp_path / "other"),
                 lib_type=LibType.MOVIE,
                 priority=2,
             )
@@ -1171,19 +1172,12 @@ def test_media_reads(tmp_path):
                 path=str(tmp_path / "movie.mp4"),
                 nfo_path=str(nfo),
             )
-            hidden = await MediaItem.create(
-                lib=private,
-                name="Private.mp4",
-                dir=private.dir,
-                path=f"{private.dir}/Private.mp4",
+            other_item = await MediaItem.create(
+                lib=other_lib,
+                name="Other.mp4",
+                dir=other_lib.dir,
+                path=f"{other_lib.dir}/Other.mp4",
             )
-            scoped = await MCPAccessTokenService.create(
-                app.shared_ctx.sessions["admin"].id,
-                MCPAccessTokenCreate(
-                    name="one library", domain="media", library_ids=[library.id]
-                ),
-            )
-            token = scoped["token"]
             await MediaEvent.create(
                 lib=library,
                 src_path=library.dir,
@@ -1193,44 +1187,46 @@ def test_media_reads(tmp_path):
             before = await MediaItem.all().values()
             events_before = await MediaEvent.all().values()
 
-            libraries = (await call(app, "list_media_libraries", token=token))[
-                "structuredContent"
-            ]["items"]
-            assert [lib["id"] for lib in libraries] == [library.id]
-            assert libraries[0]["scanning"] is True
+            libraries = (await call(app, "list_media_libraries"))["structuredContent"][
+                "items"
+            ]
+            assert {lib["id"]: lib["scanning"] for lib in libraries} == {
+                library.id: True,
+                other_lib.id: False,
+            }
 
             listed = await call(
                 app,
                 "list_media_items",
                 {"keyword": "mcp", "library_id": library.id, "page_size": 1},
-                token=token,
             )
             assert [row["id"] for row in listed["structuredContent"]["items"]] == [
                 item.id
             ]
 
             empty_page = await call(
-                app, "list_media_items", {"page_num": 2, "page_size": 1}, token=token
+                app, "list_media_items", {"page_num": 3, "page_size": 1}
             )
-            assert empty_page["structuredContent"] == {"total": 1, "items": []}
+            assert empty_page["structuredContent"] == {"total": 2, "items": []}
 
-            excluded = await call(
-                app, "list_media_items", {"library_id": private.id}, token=token
+            other_page = await call(
+                app, "list_media_items", {"library_id": other_lib.id}
             )
-            assert excluded["structuredContent"]["total"] == 0
+            assert [row["id"] for row in other_page["structuredContent"]["items"]] == [
+                other_item.id
+            ]
 
-            details = (
-                await call(app, "get_media_item", {"item_id": item.id}, token=token)
-            )["structuredContent"]
+            details = (await call(app, "get_media_item", {"item_id": item.id}))[
+                "structuredContent"
+            ]
             assert details["metadata"]["title"] == "MCP Movie"
             assert details["metadata_state"] == "ready"
-            assert (
-                await call(app, "get_media_item", {"item_id": hidden.id}, token=token)
-            )["isError"]
+            other_details = await call(
+                app, "get_media_item", {"item_id": other_item.id}
+            )
+            assert other_details["structuredContent"]["lib"]["id"] == other_lib.id
             assert (await call(app, "get_media_item", {"item_id": 9999}))["isError"]
 
-            admin = await call(app, "list_media_libraries", token="admin")
-            assert len(admin["structuredContent"]["items"]) == 2
             assert await MediaItem.all().values() == before
             assert await MediaEvent.all().values() == events_before
 
@@ -1284,21 +1280,17 @@ def test_inaccessible_media(tmp_path, parent_state):
                 path=f"{parent.path}/child.mp4",
                 name="Child",
             )
-            issued = await MCPAccessTokenService.create(
-                app.shared_ctx.sessions["admin"].id,
-                MCPAccessTokenCreate(
-                    name="series", domain="media", library_ids=[lib.id]
-                ),
-            )
-            token = issued["token"]
             for item in (parent, child):
-                assert (
-                    await call(app, "get_media_item", {"item_id": item.id}, token=token)
-                )["isError"]
-                page = await call(
-                    app, "list_media_items", {"path": item.path}, token=token
-                )
-                assert page["structuredContent"]["items"] == []
+                details = await call(app, "get_media_item", {"item_id": item.id})
+                page = await call(app, "list_media_items", {"path": item.path})
+                if item == parent and parent_state == "foreign":
+                    assert details["structuredContent"]["id"] == parent.id
+                    assert [
+                        row["id"] for row in page["structuredContent"]["items"]
+                    ] == [parent.id]
+                else:
+                    assert details["isError"]
+                    assert page["structuredContent"]["items"] == []
 
     asyncio.run(run())
 

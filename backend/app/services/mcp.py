@@ -16,11 +16,9 @@ from app.core.exceptions import (
 from app.models.mcp import (
     MCPAccessToken,
     MCPAccessTokenCreate,
-    MCPTokenDomain,
     MCPTokenScope,
     MCPUserInfo,
 )
-from app.models.media import MediaLib
 from app.models.user import User, UserRole
 from app.services.base import BaseService
 
@@ -43,13 +41,9 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             Public token metadata plus the one-time `token` value.
 
         Raises:
-            ForbiddenException: If the owner lacks the role or a library is missing.
+            ForbiddenException: If the owner is not a current administrator.
         """
         if not await User.exists(id=user_id, role=UserRole.ADMIN):
-            raise ForbiddenException
-        if body.library_ids is not None and await MediaLib.filter(
-            id__in=body.library_ids
-        ).count() != len(body.library_ids):
             raise ForbiddenException
         token = _TOKEN_PREFIX + secrets.token_urlsafe(32)
         record = await MCPAccessToken.create(
@@ -58,8 +52,6 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
             prefix=token[:17],
             scope=body.scope,
-            domain=body.domain,
-            library_ids=body.library_ids,
             expires_at=timezone.now() + timedelta(days=body.expires_in_days),
         )
         return {**await cls.dump(record), "token": token}
@@ -119,7 +111,6 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         active = MCPAccessToken.filter(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
             scope__in=list(MCPTokenScope),
-            domain__in=list(MCPTokenDomain),
             expires_at__gt=now,
         )
         record = await active.select_related("user").first()
@@ -136,8 +127,6 @@ class MCPAccessTokenService(BaseService[MCPAccessToken], model=MCPAccessToken):
         user = record.user
         return MCPUserInfo(
             mcp_scope=record.scope,
-            mcp_domain=record.domain,
-            mcp_library_ids=record.library_ids,
             id=user.id,
             login_id=f"mcp:{record.id}",
             username=user.username,

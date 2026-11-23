@@ -1,9 +1,9 @@
 """Define MCP access tokens, grants, and creation requests."""
 
 from enum import StrEnum, auto
-from typing import Annotated, Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from tortoise import timezone
 from tortoise.fields import (
     CharEnumField,
@@ -26,7 +26,7 @@ class MCPTokenScope(StrEnum):
 
 
 class MCPTokenDomain(StrEnum):
-    """Limit an MCP credential to one operational tool catalog."""
+    """Represent the domain column defined by the released `0011` migration."""
 
     ALL = auto()
     MEDIA = auto()
@@ -39,8 +39,6 @@ class MCPUserInfo(UserInfo):
     """Carry a verified token grant alongside its owner's current identity."""
 
     mcp_scope: MCPTokenScope
-    mcp_domain: MCPTokenDomain = MCPTokenDomain.ALL
-    mcp_library_ids: list[int] | None = None
 
 
 class MCPAccessToken(TortoiseModel):
@@ -54,8 +52,9 @@ class MCPAccessToken(TortoiseModel):
     token_hash = CharField(max_length=64, unique=True)
     prefix = CharField(max_length=17)
     scope = CharEnumField(
-        enum_type=MCPTokenScope, max_length=32, default=MCPTokenScope.READ_ONLY
+        enum_type=MCPTokenScope, max_length=32, default=MCPTokenScope.READ_WRITE
     )
+    # retain the columns from `0011` solely to describe the existing database schema
     domain = CharEnumField(
         enum_type=MCPTokenDomain,
         max_length=16,
@@ -79,7 +78,7 @@ class MCPAccessToken(TortoiseModel):
         ordering = ["-created_at", "-id"]
 
     class PydanticMeta:
-        exclude = ("user", "user_id", "token_hash")
+        exclude = ("user", "user_id", "token_hash", "domain", "library_ids")
         computed = ("status",)
 
 
@@ -92,25 +91,4 @@ class MCPAccessTokenCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=64)
     expires_in_days: Literal[30, 90, 365] = 90
-    scope: MCPTokenScope = MCPTokenScope.READ_ONLY
-    domain: MCPTokenDomain = MCPTokenDomain.ALL
-    library_ids: list[Annotated[int, Field(strict=True, gt=0)]] | None = Field(
-        default=None, min_length=1, max_length=128
-    )
-
-    @model_validator(mode="after")
-    def validate_libraries(self) -> Self:
-        """Bind an explicit library selection to the media domain.
-
-        Returns:
-            The validated grant.
-
-        Raises:
-            ValueError: If the requested domain or library list is invalid.
-        """
-        if self.library_ids is not None and (
-            self.domain != MCPTokenDomain.MEDIA
-            or len(set(self.library_ids)) != len(self.library_ids)
-        ):
-            raise ValueError("Select distinct libraries for a media-domain token.")
-        return self
+    scope: MCPTokenScope = MCPTokenScope.READ_WRITE

@@ -1,6 +1,6 @@
 """Share mechanical review locking, ownership, lifecycle, and supersession helpers."""
 
-from collections.abc import Callable, Collection
+from collections.abc import Collection
 from datetime import timedelta
 from typing import Any
 from uuid import UUID
@@ -236,7 +236,6 @@ async def load_operation_review[T: Model](
     user: UserInfo,
     *,
     expirable_statuses: Collection[str],
-    allowed: Callable[[T], bool] | None = None,
     stale_executing_after: timedelta | None = None,
 ) -> T:
     """Load an administrator-owned operation review and settle due expirations.
@@ -247,7 +246,6 @@ async def load_operation_review[T: Model](
         user: Authenticated administrator reading the review.
         expirable_statuses: Statuses that transition to `expired` once
             `expires_at` has passed.
-        allowed: Optional channel or domain predicate that must hold for the row.
         stale_executing_after: Optional duration after which an `executing`
             review transitions to `uncertain`.
 
@@ -261,7 +259,7 @@ async def load_operation_review[T: Model](
     await require_live_admin(user)
     query = model.filter(owner_id=user.id, operation_id=operation_id)
     row = await query.first()
-    if row is None or (allowed is not None and not allowed(row)):
+    if row is None:
         raise NotFoundException
     now = timezone.now()
     refresh = False
@@ -293,7 +291,6 @@ async def lock_operation_decision[T: Model](
     *,
     lock_statuses: Collection[str],
     expirable_statuses: Collection[str],
-    allowed: Callable[[T], bool] | None = None,
     stale_executing_after: timedelta | None = None,
 ) -> T:
     """Acquire the SQLite writer lock, expire due state, and verify digest.
@@ -308,7 +305,6 @@ async def lock_operation_decision[T: Model](
         user: Authenticated browser administrator submitting the decision.
         lock_statuses: Active statuses scoped for writer reservation.
         expirable_statuses: Statuses that expire when `expires_at` has passed.
-        allowed: Optional channel or domain predicate that must hold for the row.
         stale_executing_after: Optional timeout marking stuck `executing` rows
             as `uncertain`.
 
@@ -332,7 +328,6 @@ async def lock_operation_decision[T: Model](
         operation_id,
         user,
         expirable_statuses=expirable_statuses,
-        allowed=allowed,
         stale_executing_after=stale_executing_after,
     )
     if row.digest != digest:

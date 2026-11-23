@@ -17,13 +17,14 @@
   const schema = createFormSchema(({ text }) => ({ name: text().maxlength(64) }));
   const endpoint = `${window.location.origin}/_api/mcp`;
   const authHeader = 'Authorization: Bearer <token>';
+  const defaultScope = 'read_write';
 
   let tokens: MCPAccessToken[] = $state([]);
   let initialized = $state(false);
   let loadError = $state(false);
   let name = $state('');
   let expiresInDays: MCPAccessTokenCreate['expires_in_days'] = $state(90);
-  let scope: MCPAccessToken['scope'] = $state('read_only');
+  let scope: MCPAccessToken['scope'] = $state(defaultScope);
   let secret = $state('');
   let modal: Modal;
   let modalContent: HTMLDivElement;
@@ -69,12 +70,12 @@
     creating.end();
   }
 
-  /** Open a new token form with read-only access and the default lifetime. */
+  /** Open a new token form with the default access and lifetime. */
   function showCreator() {
     reset();
     name = '';
     expiresInDays = 90;
-    scope = 'read_only';
+    scope = defaultScope;
     modal.show();
   }
 

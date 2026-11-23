@@ -6,20 +6,14 @@ from collections import Counter
 from sanic import Sanic
 
 from app.core.dl.config import decrypt_config, load_driver
-from app.core.exceptions import BadRequestException, ForbiddenException
+from app.core.exceptions import BadRequestException
 from app.core.transcode.tasks import list_tasks
 from app.models.agent_actions import WorkspaceQuery
 from app.models.download import Downloader
 from app.models.flow import FlowTemplate
-from app.models.mcp import MCPTokenDomain
 from app.models.media import MediaAction, MediaChangeReceipt
 from app.models.user import UserInfo
 from app.services.review_common import require_live_admin
-
-WORKSPACE_TOPICS = {
-    MCPTokenDomain.SYSTEM: frozenset({"logs", "transcoding", "downloaders"}),
-    MCPTokenDomain.WORKFLOWS: frozenset({"workflow_templates", "receipt"}),
-}
 
 
 async def _health(row: Downloader) -> dict:
@@ -58,15 +52,10 @@ async def inspect_workspace(query: WorkspaceQuery, user: UserInfo) -> dict:
         Facts observed by the backend for the selected topic.
 
     Raises:
-        ForbiddenException: If the role or token domain cannot read this topic.
+        ForbiddenException: If the account is no longer an administrator.
         BadRequestException: If a receipt query omits its operation ID.
     """
     await require_live_admin(user)
-    domain = getattr(user, "mcp_domain", MCPTokenDomain.ALL)
-    if domain != MCPTokenDomain.ALL and query.topic not in WORKSPACE_TOPICS.get(
-        domain, ()
-    ):
-        raise ForbiddenException
     offset = (query.page - 1) * 20
     if query.topic == "receipt":
         if query.operation_id is None:

@@ -1416,11 +1416,6 @@ class MediaChangeService(BaseService[MediaChangeReceipt], model=MediaChangeRecei
             ForbiddenException: If the account cannot change media.
         """
         _require_admin(user)
-        if (
-            isinstance(body.change, MediaBatch)
-            and getattr(user, "mcp_library_ids", None) is not None
-        ):
-            await MediaLibService.get_accessible(body.change.library_id, user)
         nonce = body.request_id.bytes[:8]
         if (
             cls.change_request(user.id, body.change, body.revision, nonce)

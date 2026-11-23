@@ -31,7 +31,6 @@ from app.models.flow import (
     GraphDocument,
     GraphWrite,
 )
-from app.models.mcp import MCPTokenDomain
 from app.models.media import (
     LibType,
     MediaLib,
@@ -47,59 +46,16 @@ from app.services.review_common import (
     require_live_admin,
     reserve_writer,
 )
-from app.services.workspace_queries import WORKSPACE_TOPICS, inspect_workspace
+from app.services.workspace_queries import inspect_workspace
 from app.utils.asyncio import write_in_thread
 from app.utils.json import json_digest
 
 __all__ = [
-    "WORKFLOW_REVIEW_ACTIONS",
-    "WORKSPACE_TOPICS",
     "action_status",
     "decide_action",
     "inspect_workspace",
     "review_action",
 ]
-
-WORKFLOW_REVIEW_ACTIONS = frozenset({"copy_template", "publish_workflow"})
-
-
-def _allows_review(action: str, user: UserInfo) -> bool:
-    """Check the requested action against the caller's token domain.
-
-    Args:
-        action: Administrative action being reviewed or reread.
-        user: Authenticated account with an optional MCP grant.
-
-    Returns:
-        Whether this domain may inspect a review for the action.
-    """
-    domain = getattr(user, "mcp_domain", MCPTokenDomain.ALL)
-    return domain == MCPTokenDomain.ALL or (
-        domain == MCPTokenDomain.WORKFLOWS and action in WORKFLOW_REVIEW_ACTIONS
-    )
-
-
-def _visible_preview(preview: dict, user: UserInfo) -> dict:
-    """Hide other domains' resource IDs from a workflow credential.
-
-    Args:
-        preview: Complete impact shown to the administrator in the assistant panel.
-        user: Account reading the preview through this channel.
-
-    Returns:
-        Authorized workflow details without modifying the frozen review.
-    """
-    if getattr(user, "mcp_domain", None) != MCPTokenDomain.WORKFLOWS:
-        return preview
-    foreign = {"bound_resources", "download_plans"}
-    visible = {key: value for key, value in preview.items() if key not in foreign}
-    if "additional" in visible:
-        visible["additional"] = {
-            key: count
-            for key, count in visible["additional"].items()
-            if key not in foreign
-        }
-    return visible
 
 
 async def _preview(change: AdminChange, user: UserInfo) -> dict:
@@ -244,12 +200,11 @@ async def _preview(change: AdminChange, user: UserInfo) -> dict:
     }
 
 
-def _receipt(row: AgentAdminReview, user: UserInfo) -> dict:
+def _receipt(row: AgentAdminReview) -> dict:
     """Expose the essential review fields and current durable outcome.
 
     Args:
         row: Owned review.
-        user: Account and channel receiving the receipt.
 
     Returns:
         Operation ID, visible impact and current decision state.
@@ -259,7 +214,7 @@ def _receipt(row: AgentAdminReview, user: UserInfo) -> dict:
         "action": row.request["action"],
         "status": row.status,
         "digest": row.digest,
-        "preview": _visible_preview(row.preview, user),
+        "preview": row.preview,
         "result": row.result,
         "expires_at": row.expires_at.isoformat(),
     }
@@ -276,11 +231,9 @@ async def review_action(change: AdminChange, user: UserInfo) -> dict:
         Reusable account-owned pending review or a validation failure.
 
     Raises:
-        ForbiddenException: If the role or token domain cannot prepare this action.
+        ForbiddenException: If the account is no longer an administrator.
     """
     await require_live_admin(user)
-    if not _allows_review(change.action, user):
-        raise ForbiddenException
     async with in_transaction():
         await reserve_writer(AgentAdminReview.filter(owner_id=user.id, id=0))
         preview = await _preview(change, user)
@@ -290,7 +243,7 @@ async def review_action(change: AdminChange, user: UserInfo) -> dict:
             return {
                 "action": change.action,
                 "status": "invalid",
-                "preview": _visible_preview(preview, user),
+                "preview": preview,
             }
         row = await get_or_create_operation_review(
             AgentAdminReview,
@@ -300,7 +253,7 @@ async def review_action(change: AdminChange, user: UserInfo) -> dict:
             defaults={"request": request, "preview": preview},
             reserve=False,
         )
-        return _receipt(row, user)
+        return _receipt(row)
 
 
 async def action_status(key: UUID, user: UserInfo) -> dict:
@@ -321,10 +274,9 @@ async def action_status(key: UUID, user: UserInfo) -> dict:
         key,
         user,
         expirable_statuses=("pending", "failed"),
-        allowed=lambda item: _allows_review(item.request["action"], user),
         stale_executing_after=timedelta(minutes=10),
     )
-    return _receipt(row, user)
+    return _receipt(row)
 
 
 async def _apply(change: AdminChange, preview: dict, user: UserInfo) -> dict:
@@ -427,11 +379,10 @@ async def decide_action(key: UUID, digest: str, approve: bool, user: UserInfo) -
             user,
             lock_statuses=("pending", "failed"),
             expirable_statuses=("pending", "failed"),
-            allowed=lambda item: _allows_review(item.request["action"], user),
             stale_executing_after=timedelta(minutes=10),
         )
         if row.status not in {"pending", "failed"}:
-            return _receipt(row, user)
+            return _receipt(row)
         previous = row.status
         change = AdminChange.model_validate(row.request)
         status = "cancelled"

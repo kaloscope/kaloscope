@@ -517,8 +517,6 @@ export interface MCPAccessToken {
   name: string;
   prefix: string;
   scope: 'read_only' | 'read_write';
-  domain: 'all' | 'media' | 'downloads' | 'workflows' | 'system';
-  library_ids: number[] | null;
   expires_at: string;
   last_used_at: string | null;
   status: 'active' | 'expired';
@@ -529,8 +527,6 @@ export interface MCPAccessTokenCreate {
   name: string;
   expires_in_days: 30 | 90 | 365;
   scope: MCPAccessToken['scope'];
-  domain?: MCPAccessToken['domain'];
-  library_ids?: number[];
 }
 
 /** A creation response containing the credential shown only once. */
