@@ -25,7 +25,6 @@
     assistantRestoring,
     closeAssistant,
     loadAssistantConversation,
-    loadAssistantModels,
     releaseAssistantHandoff,
     sendAssistant,
     stopAssistant,
@@ -789,12 +788,11 @@
             {/if}
             {#if $assistant.modelsLoaded && !$assistant.models.length}
               <Button
-                icon={icons.redo}
+                icon={icons.settings}
+                text={$_('nav.settings.system.ai')}
                 size="xs"
                 class="size-7! min-h-7! shrink-0"
-                loading={$assistant.modelsLoading}
-                disabled={$assistant.busy || modelsBusy}
-                onclick={loadAssistantModels}
+                onclick={() => void goto('/settings/system/ai')}
               />
             {/if}
             <div class="flex min-w-0 shrink-2 items-center" aria-busy={modelsBusy}>

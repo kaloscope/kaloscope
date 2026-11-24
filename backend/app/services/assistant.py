@@ -125,7 +125,7 @@ Resolve targets/defaults from page/tools. Answer reads directly.
 Need choices? discover_actions(questions), ask_user. Ambiguous plans: plan_ids.
 订阅/subscribe or download once: list_workflows(category=indexer), search_indexer.
 Subscriptions: search, validate for release selection; create after the answer.
-Copy template/publish: discover_actions(workspace), inspect_workspace, review.
+Copy template/publish: discover_actions(workspace), inspect_workspace, create/review.
 New blank workflow: infer name/category/purpose; create_workflow_draft FIRST, then
 designer handoff. Use defaults, ask only missing inputs. Layout: columns
 >=800px, rows >=600. In designer probe URL first: HTML -> html_indexer, JSON ->

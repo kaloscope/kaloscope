@@ -1201,6 +1201,7 @@
     "invalid_key": "API Key 只能包含可打印的 ASCII 字符，且不能含空格",
     "invalid_models": "最多填写 100 个模型 ID，每个不超过 255 个字符，且不能包含控制字符",
     "duplicate_models": "模型 ID 不能重复",
+    "models_required": "启用此提供商前请至少添加一个模型",
     "endpoint_key_hint": "地址已修改，请填写新密钥，或留空以在保存时清除原密钥",
     "endpoint_key_required_hint": "地址已修改，请填写新 API Key",
     "models_fetch": "获取模型",

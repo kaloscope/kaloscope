@@ -24,9 +24,7 @@ from app.core.media.title import nfo_title
 from app.models.agent_actions import AdminChange, AgentAdminReview
 from app.models.download import DownloadPlan
 from app.models.flow import (
-    FlowGraph,
     FlowJob,
-    FlowTemplate,
     FlowTrigger,
     GraphDocument,
     GraphWrite,
@@ -37,7 +35,7 @@ from app.models.media import (
     MediaLibUpsert,
 )
 from app.models.user import UserInfo
-from app.services.flow import FlowGraphService, FlowTemplateService
+from app.services.flow import FlowGraphService
 from app.services.media import MediaItemService, MediaLibService
 from app.services.review_common import (
     get_or_create_operation_review,
@@ -70,10 +68,9 @@ async def _preview(change: AdminChange, user: UserInfo) -> dict:
 
     Raises:
         BadRequestException: If the inputs or current target are invalid.
-        NotFoundException: If a template or library is missing.
+        NotFoundException: If a library is missing.
     """
     fields = {
-        "copy_template": {"target_id", "name"},
         "publish_workflow": {"target_id"},
         "create_library": {"name", "directory", "library_type"},
         "delete_library": {"target_id"},
@@ -83,19 +80,6 @@ async def _preview(change: AdminChange, user: UserInfo) -> dict:
         k for k, v in change.model_dump(exclude={"action"}).items() if v is not None
     } != fields[change.action]:
         raise BadRequestException
-    if change.action == "copy_template":
-        tmpl = await FlowTemplate.get_or_none(id=change.target_id)
-        if tmpl is None:
-            raise NotFoundException
-        if await FlowGraph.exists(name=change.name):
-            raise BadRequestException
-        return {
-            "template": tmpl.name,
-            "template_id": tmpl.id,
-            "source_digest": json_digest(tmpl.definition),
-            "revision": tmpl.revision,
-            "name": change.name,
-        }
     if change.action == "publish_workflow":
         graph = await FlowGraphService.get_accessible(change.target_id, user)
         document = GraphDocument.model_validate(
@@ -290,9 +274,6 @@ async def _apply(change: AdminChange, preview: dict, user: UserInfo) -> dict:
     Returns:
         The resulting object identity or deletion outcome.
     """
-    if change.action == "copy_template":
-        graph = await FlowTemplateService.copy_template(change.target_id, change.name)
-        return {"workflow_id": graph.id, "draft_version": graph.draft_version}
     if change.action == "publish_workflow":
         graph = await FlowGraphService.get_accessible(change.target_id, user)
         document = GraphWrite.model_validate(
@@ -397,7 +378,7 @@ async def decide_action(key: UUID, digest: str, approve: bool, user: UserInfo) -
         await query.filter(status=previous).update(status=status)
         if status != "executing":
             return await action_status(key, user)
-        if change.action in ("publish_workflow", "copy_template"):
+        if change.action == "publish_workflow":
             action_error = None
             try:
                 async with in_transaction():

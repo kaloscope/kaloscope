@@ -1201,6 +1201,7 @@
     "invalid_key": "Use an API key containing only printable ASCII characters, without spaces.",
     "invalid_models": "Use up to 100 model IDs, each no longer than 255 characters, without control characters.",
     "duplicate_models": "Model IDs must be unique.",
+    "models_required": "Add at least one model to enable this provider.",
     "endpoint_key_hint": "The URL changed. Enter a new key, or leave blank to clear the saved key on save.",
     "endpoint_key_required_hint": "The URL changed. Enter a new API key.",
     "models_fetch": "Fetch Models",

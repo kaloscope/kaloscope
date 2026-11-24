@@ -108,41 +108,52 @@ def test_workflow_reviews(monkeypatch):
             assert [row["id"] for row in listed["structuredContent"]["items"]] == [
                 template.id
             ]
-            for change in [
-                {"action": "copy_template", "target_id": template.id, "name": "Copy"},
-                {"action": "publish_workflow", "target_id": graph.id},
-            ]:
-                reviewed = (
-                    await call(app, "review_workspace_change", {"change": change})
-                )["structuredContent"]
-                key = reviewed["operation_id"]
-                assert reviewed["action"] == change["action"]
-                assert reviewed["status"] == "pending"
-                assert "review_path" not in reviewed
-                page = browser_request(app, body={})
-                page.ctx.user = admin
-                full = loads((await get_operation(page, UUID(key))).body)
-                assert reviewed["preview"] == full["preview"]
-                if change["action"] == "publish_workflow":
-                    assert full["preview"]["download_plans"] == [plan.id]
-                else:
-                    assert not await FlowGraph.exists(name="Copy")
-                approval = browser_request(
-                    app, body={"digest": full["digest"], "approve": True}
+            copy = {"template_id": template.id, "name": " Copy "}
+            assert (await call(app, "copy_workflow_template", copy))["isError"]
+            assert not await FlowGraph.exists(name="Copy")
+            writer = await MCPAccessTokenService.create(
+                admin.id, MCPAccessTokenCreate(name="writer", scope="read_write")
+            )
+            copied = (
+                await call(app, "copy_workflow_template", copy, token=writer["token"])
+            )["structuredContent"]
+            draft = await FlowGraph.get(name="Copy")
+            assert copied["workflow_id"] == draft.id
+            assert (draft.state, draft.draft) == ("draft", graph.definition)
+            duplicate = await call(
+                app, "copy_workflow_template", copy, token=writer["token"]
+            )
+            assert duplicate["isError"]
+            assert await FlowGraph.filter(name="Copy").count() == 1
+            change = {"action": "publish_workflow", "target_id": graph.id}
+            reviewed = (await call(app, "review_workspace_change", {"change": change}))[
+                "structuredContent"
+            ]
+            key = reviewed["operation_id"]
+            assert reviewed["action"] == change["action"]
+            assert reviewed["status"] == "pending"
+            assert "review_path" not in reviewed
+            page = browser_request(app, body={})
+            page.ctx.user = admin
+            full = loads((await get_operation(page, UUID(key))).body)
+            assert reviewed["preview"] == full["preview"]
+            assert full["preview"]["download_plans"] == [plan.id]
+            approval = browser_request(
+                app, body={"digest": full["digest"], "approve": True}
+            )
+            approval.ctx.user = admin
+            confirmed = loads((await decide_operation(approval, UUID(key))).body)
+            assert confirmed["status"] == "applied"
+            receipt = (
+                await call(
+                    app,
+                    "inspect_workspace",
+                    {"query": {"topic": "receipt", "operation_id": key}},
                 )
-                approval.ctx.user = admin
-                confirmed = loads((await decide_operation(approval, UUID(key))).body)
-                assert confirmed["status"] == "applied"
-                receipt = (
-                    await call(
-                        app,
-                        "inspect_workspace",
-                        {"query": {"topic": "receipt", "operation_id": key}},
-                    )
-                )["structuredContent"]
-                assert receipt["status"] == "applied"
-                assert receipt["preview"] == reviewed["preview"]
-                assert "review_path" not in receipt
+            )["structuredContent"]
+            assert receipt["status"] == "applied"
+            assert receipt["preview"] == reviewed["preview"]
+            assert "review_path" not in receipt
 
             await User.filter(id=admin.id).update(role="user")
             with pytest.raises(ForbiddenException):

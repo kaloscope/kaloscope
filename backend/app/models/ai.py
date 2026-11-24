@@ -12,6 +12,7 @@ from pydantic import (
     SecretStr,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 from tortoise.fields import BooleanField, CharEnumField, CharField, JSONField, TextField
 
@@ -149,8 +150,9 @@ class AIProviderUpsert(AIProviderConnection):
 
     Omit `api_key` or use `null` to retain an existing credential. An empty string
     clears it. Changing `base_url` with a stored credential requires an explicit
-    replacement or an empty string. An empty `model_ids` list is valid while the
-    connection is being configured. A `null` preset represents a custom provider.
+    replacement or an empty string. An empty `model_ids` list is valid only for a
+    disabled connection that is still being configured. A `null` preset represents
+    a custom provider.
     """
 
     name: str = Field(min_length=1, max_length=64)
@@ -177,6 +179,20 @@ class AIProviderUpsert(AIProviderConnection):
         if any(ord(char) < 32 or ord(char) == 127 for item in value for char in item):
             raise ValueError("Model IDs must not contain control characters")
         return value
+
+    @model_validator(mode="after")
+    def require_enabled_models(self) -> "AIProviderUpsert":
+        """Keep enabled connections selectable by requiring at least one model.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ValueError: If an enabled connection has no model IDs.
+        """
+        if self.enabled and not self.model_ids:
+            raise ValueError("An enabled provider requires at least one model ID")
+        return self
 
 
 class AIModelSelection(BaseModel):

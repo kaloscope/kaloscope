@@ -152,9 +152,9 @@
   }
 
   /**
-   * Fetch model candidates or test connectivity independently of other actions.
+   * Fetch model candidates, optionally reporting a successful connection test.
    *
-   * @param action - Whether to populate model candidates or report the connection test result.
+   * @param action - Whether to only list model candidates or also confirm the connection.
    * @returns A promise that resolves when the request finishes or is cancelled.
    */
   async function fetchModels(action: 'discover' | 'test'): Promise<void> {
@@ -180,11 +180,8 @@
 
       if (connectionRequests[action] !== controller || !modal.isOpen()) return;
 
-      if (action === 'test') {
-        alert({ level: 'success', message: $_('ai.test_success') });
-      } else {
-        availableModels = data;
-      }
+      availableModels = data;
+      if (action === 'test') alert({ level: 'success', message: $_('ai.test_success') });
     } catch (cause) {
       if (connectionRequests[action] !== controller || !modal.isOpen()) return;
 
@@ -236,14 +233,15 @@
         ? $_('ai.invalid_models')
         : new Set(models).size !== models.length
           ? $_('ai.duplicate_models')
-          : ''
+          : enabled && !models.length
+            ? $_('ai.models_required')
+            : ''
     );
     if (!form.reportValidity()) return;
 
     const payload: AIProviderUpsert = {
       ...draft,
       name,
-      protocol: 'chat_completions',
       model_ids: models,
       enabled
     };
