@@ -27,10 +27,9 @@ from app.models.download import PlanReviewDecision, ReplacementDecision
 from app.models.user import UserRole
 from app.services.agent_actions import action_status, decide_action
 from app.services.assistant import AssistantService
-from app.services.assistant_plan_review import plan_review
 from app.services.assistant_proposals import AssistantProposalService
 from app.services.assistant_questions import answer_card
-from app.services.assistant_reviews import assistant_review
+from app.services.assistant_reviews import assistant_review, plan_review
 from app.services.assistant_sessions import AssistantSessionService
 from app.utils.json import dumps
 

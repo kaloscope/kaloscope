@@ -29,8 +29,7 @@ from app.routes.assistant import (
     get_review,
     read_plan_review,
 )
-from app.services.assistant_plan_review import plan_review
-from app.services.assistant_reviews import assistant_review
+from app.services.assistant_reviews import assistant_review, plan_review
 from app.services.download import DownloadPlanService
 from app.utils.json import loads
 from tests.test_assistant_persistence import database
