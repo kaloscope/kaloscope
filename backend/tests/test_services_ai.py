@@ -1,14 +1,12 @@
 """Unit tests for AI provider persistence and credential updates."""
 
 import asyncio
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import (
@@ -23,21 +21,7 @@ from app.models.user import UserInfo, UserRole
 from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.utils.crypto import fernet_decrypt
-
-
-@asynccontextmanager
-async def database():
-    """Open an isolated database for provider service tests.
-
-    Yields:
-        Control while the temporary database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
-        yield
-    finally:
-        await Tortoise.close_connections()
+from tests.helpers import memory_db
 
 
 @pytest.fixture
@@ -81,7 +65,7 @@ def test_list_forbidden():
 
 def test_save_and_read(key_path):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="test-secret"))
             saved = await AIProviderService.get(provider.id)
             public = await AIProviderService.dump(saved)
@@ -115,7 +99,7 @@ def test_existing_secret_key(key_path):
     key_path.write_bytes(existing_key)
 
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="new-secret"))
 
             assert key_path.read_bytes() == existing_key
@@ -128,7 +112,7 @@ def test_existing_secret_key(key_path):
 @pytest.mark.parametrize("update", [{}, {"api_key": None}])
 def test_retain_key(key_path, update):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="test-secret"))
             original = provider.api_key
 
@@ -150,7 +134,7 @@ def test_retain_key(key_path, update):
 @pytest.mark.parametrize("replacement", ["new-secret", "", "   "])
 def test_replace_key(key_path, replacement):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="old-secret"))
 
             saved = await AIProviderService.upsert(
@@ -169,7 +153,7 @@ def test_replace_key(key_path, replacement):
 
 def test_keyless_provider(key_path):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(
                 settings(preset="ollama", base_url="http://localhost:11434/v1")
             )
@@ -183,7 +167,7 @@ def test_keyless_provider(key_path):
 
 def test_endpoint_change(key_path):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="old-secret"))
 
             with pytest.raises(BadRequestException):
@@ -218,7 +202,7 @@ def test_endpoint_change(key_path):
 
 def test_duplicate_name(key_path):
     async def run():
-        async with database():
+        async with memory_db():
             first = await AIProviderService.upsert(settings(api_key="first-key"))
             other = await AIProviderService.upsert(settings(name="Other"))
 
@@ -240,7 +224,7 @@ def test_duplicate_name(key_path):
 
 def test_missing_provider(key_path):
     async def run():
-        async with database():
+        async with memory_db():
             with pytest.raises(NotFoundException):
                 await AIProviderService.upsert(settings(id=99, api_key="new-key"))
 
@@ -252,7 +236,7 @@ def test_missing_provider(key_path):
 
 def test_lost_key(key_path):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="original"))
             key_path.unlink()
 
@@ -291,7 +275,7 @@ def test_discovery_credentials(key_path, monkeypatch, changes, expected):
     )
 
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="saved-key"))
             original = provider.api_key
             draft = AIProviderConnection.model_validate(
@@ -336,7 +320,7 @@ def test_draft_discovery(key_path, monkeypatch):
     )
 
     async def run():
-        async with database():
+        async with memory_db():
             draft = AIProviderConnection(base_url="http://localhost:11434/v1")
 
             assert await AIProviderService.discover_models(draft) == ["model-1"]
@@ -354,7 +338,7 @@ def test_unsafe_discovery(key_path, monkeypatch):
     monkeypatch.setattr(ai_service, "fetch_models", fetch)
 
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(settings(api_key="saved-key"))
 
             with pytest.raises(BadRequestException):

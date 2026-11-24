@@ -2,7 +2,6 @@
 
 import asyncio
 import shutil
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -10,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sanic import Sanic
-from tortoise import Tortoise
 from tortoise.exceptions import OperationalError
 
 from app.core.ai import tools
@@ -46,6 +44,7 @@ from app.services.media import MediaItemService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
 from app.utils.json import dumps
+from tests.helpers import memory_db
 from tests.test_core_media_reading_organizer import _source as reading_source
 from tests.test_core_media_reading_organizer import _work as reading_work
 from tests.test_download_plan_changes import latest_request
@@ -82,21 +81,6 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(
         KaloscopeConfig, "get", lambda: SimpleNamespace(filesystem_trash_mode=False)
     )
-
-
-@asynccontextmanager
-async def database():
-    """Provide an isolated schema.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 def write(root: Path, *names: str):
@@ -170,7 +154,7 @@ async def confirm(review: dict, change: MediaBatch, user: UserInfo = ADMIN) -> d
 
 def test_listing(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
 
             result = await MediaBatchService.review(
@@ -193,7 +177,7 @@ def test_listing(tmp_path):
 
 def test_delete_loose(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             change = MediaBatch(
@@ -236,7 +220,7 @@ def test_delete_loose(tmp_path):
 @pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
 def test_delete_last_child(tmp_path, lib_type):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             lib.lib_type = lib_type
             await lib.save(update_fields=["lib_type"])
@@ -268,7 +252,7 @@ def test_delete_last_child(tmp_path, lib_type):
 
 def test_delete_items(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             root = Path(lib.dir)
             change = MediaBatch(
@@ -291,7 +275,7 @@ def test_delete_items(tmp_path):
 
 def test_delete_with_companions(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             change = deletion(
                 lib,
@@ -328,7 +312,7 @@ def test_delete_with_companions(tmp_path):
 )
 def test_units(tmp_path, last, unit, children):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, episodes = await show(tmp_path)
             if last:
                 Path(episodes[1].path).unlink()
@@ -366,7 +350,7 @@ def test_units(tmp_path, last, unit, children):
 @pytest.mark.parametrize("missing", [False, True])
 def test_hide_items(tmp_path, missing):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             if missing:
                 Path(episodes[0].path).unlink()
@@ -416,7 +400,7 @@ def test_hide_needs_items(fields):
 
 def test_indexed_by_filter(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, _ = await show(tmp_path)
             change = MediaBatch(
                 library_id=lib.id,
@@ -443,7 +427,7 @@ def test_indexed_by_filter(tmp_path):
 @pytest.mark.parametrize("selection", ["children", "parent"])
 def test_parent_unindexed(tmp_path, name, selection):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             root = Path(lib.dir)
             write(root, f"Show/{name}", "Show/poster.jpg")
@@ -472,7 +456,7 @@ def test_parent_unindexed(tmp_path, name, selection):
 @pytest.mark.parametrize("selection", ["children", "parent"])
 def test_parent_changed(tmp_path, edit, selection):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             root = Path(lib.dir)
             change = deletion(
@@ -512,7 +496,7 @@ def test_parent_changed(tmp_path, edit, selection):
 
 def test_changed_file_skipped(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             change = MediaBatch(
@@ -537,7 +521,7 @@ def test_changed_file_skipped(tmp_path):
 
 def test_stale_and_conflict(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             change = MediaBatch(
                 library_id=lib.id, operation="delete", extensions=["url"]
@@ -570,7 +554,7 @@ def test_stale_and_conflict(tmp_path):
 
 def test_invalid_reviews(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
 
             nothing = await MediaBatchService.review(
@@ -599,7 +583,7 @@ def test_invalid_reviews(tmp_path):
 
 def test_cancel_and_details(tmp_path, monkeypatch):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             change = MediaBatch(
                 library_id=lib.id, operation="delete", extensions=["url"]
@@ -639,7 +623,7 @@ def test_cancel_and_details(tmp_path, monkeypatch):
 
 def test_interrupted(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             change = MediaBatch(
@@ -666,7 +650,7 @@ def test_interrupted(tmp_path):
 
 def test_retention(tmp_path, monkeypatch):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             monkeypatch.setattr(service, "PLAN_KEEP", 2)
             change = MediaBatch(
@@ -690,7 +674,7 @@ def test_retention(tmp_path, monkeypatch):
 
 def test_comic_pages(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "comics"
             write(root, "Pages/001.jpg", "Pages/credit.jpg", "Pages/cover.jpg")
             lib = await MediaLib.create(
@@ -933,7 +917,7 @@ def test_mcp(monkeypatch, tmp_path):
 
 def test_routes(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             review = await MediaBatchService.review(
                 deletion(lib, extensions=["url"]), ADMIN
@@ -964,7 +948,7 @@ def test_routes(tmp_path):
 
 def test_dialog_confirmation(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             body = {"library_id": lib.id, "operation": "delete", "extensions": ["url"]}
@@ -1234,7 +1218,7 @@ def test_organize_changed(monkeypatch, tmp_path):
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.CBZ, MediaFormat.DIR])
 def test_organize_reading(tmp_path, format):
     async def run():
-        async with database():
+        async with memory_db():
             lib, item = await reading_work(tmp_path, format)
             root = Path(lib.dir)
             change = MediaBatch(library_id=lib.id, operation="organize")
@@ -1587,7 +1571,7 @@ async def comics(tmp_path: Path) -> SimpleNamespace:
 
 def test_comic_rename(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             root = Path(env.lib.dir)
             change = renaming(
@@ -1623,7 +1607,7 @@ def test_comic_rename(tmp_path):
 
 def test_comic_merge(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             root = Path(env.lib.dir)
             change = moving(
@@ -1653,7 +1637,7 @@ def test_comic_merge(tmp_path):
 
 def test_reading_work_move(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             root = tmp_path / "books"
             write(root, "Old Title/Book.txt", "Old Title/Book.opf", "Old Title/a.url")
@@ -1704,7 +1688,7 @@ def test_reading_work_move(tmp_path):
 
 def test_comic_split(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             root = Path(env.lib.dir)
             change = moving(
@@ -1804,7 +1788,7 @@ def reverting(lib: MediaLib, batch_id: int) -> MediaBatch:
 
 def test_empty_folders(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             root = Path(env.lib.dir)
             for name in ("Gone/Deep/Deeper", "Kept"):
@@ -1905,7 +1889,7 @@ def test_revert_merge(monkeypatch, tmp_path):
 
 def test_revert_comics(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             root = Path(env.lib.dir)
             rename = renaming(
@@ -1932,7 +1916,7 @@ def test_revert_comics(tmp_path):
 
 def test_revert_refusals(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             delete = deletion(lib, extensions=["url"])
             reviewed = await MediaBatchService.review(delete, ADMIN)
@@ -2090,7 +2074,7 @@ def test_undo_conversation(monkeypatch, tmp_path):
 @pytest.mark.parametrize("mutation", ["rename", "replace", "rewrite"])
 def test_leftover_changes(tmp_path, mutation):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             write(root, "Junk/old.url")
@@ -2114,7 +2098,7 @@ def test_leftover_changes(tmp_path, mutation):
 
 def test_legacy_leftover(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             write(root, "Junk/old.url")
@@ -2142,7 +2126,7 @@ def test_legacy_leftover(tmp_path):
 )
 def test_delete_guards(tmp_path, guard, reason):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             root = Path(lib.dir)
             write(root, "Staged/episode.zh.srt")
@@ -2182,7 +2166,7 @@ def test_delete_guards(tmp_path, guard, reason):
 
 def test_last_page_guard(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "comics"
             write(root, "Book/001.png", "Book/002.png")
             lib = await MediaLib.create(
@@ -2210,7 +2194,7 @@ def test_last_page_guard(tmp_path):
 @pytest.mark.parametrize("trash", [False, True])
 def test_deletion_mode_changed(tmp_path, monkeypatch, trash):
     async def run():
-        async with database():
+        async with memory_db():
             lib, _, _ = await show(tmp_path)
             config = SimpleNamespace(filesystem_trash_mode=trash)
             monkeypatch.setattr(KaloscopeConfig, "get", lambda: config)
@@ -2230,7 +2214,7 @@ def test_deletion_mode_changed(tmp_path, monkeypatch, trash):
 
 def test_reading_recovery(tmp_path, monkeypatch):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "books"
             write(root, "Book/old.txt", "Book/old.opf")
             lib = await MediaLib.create(
@@ -2277,7 +2261,7 @@ def test_reading_recovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize("stage", ["before_files", "after_files", "index"])
 def test_reading_interruption(tmp_path, monkeypatch, stage):
     async def run():
-        async with database():
+        async with memory_db():
             lib, item = await reading_work(tmp_path, MediaFormat.TXT)
             lib.rename_template = None
             await lib.save(update_fields=["rename_template"])
@@ -2332,7 +2316,7 @@ def test_reading_interruption(tmp_path, monkeypatch, stage):
 
 def test_reading_collection_recovery(tmp_path, monkeypatch):
     async def run():
-        async with database():
+        async with memory_db():
             env = await comics(tmp_path)
             item = env.chapters[2]
             root = Path(env.lib.dir)
@@ -2370,7 +2354,7 @@ def test_reading_collection_recovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize("occupied", [False, True])
 def test_reading_rollback(tmp_path, monkeypatch, occupied):
     async def run():
-        async with database():
+        async with memory_db():
             lib, item = await reading_work(tmp_path, MediaFormat.TXT)
             lib.rename_template = None
             await lib.save(update_fields=["rename_template"])
@@ -2412,7 +2396,7 @@ def test_reading_rollback(tmp_path, monkeypatch, occupied):
 @pytest.mark.parametrize("folder", [False, True])
 def test_item_download_guard(tmp_path, folder):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             change = deletion(lib, item_ids=[parent.id if folder else episodes[0].id])
             review = await MediaBatchService.review(change, ADMIN)
@@ -2439,7 +2423,7 @@ def test_item_download_guard(tmp_path, folder):
 @pytest.mark.parametrize("mutation", ["replace", "rewrite"])
 def test_revert_identity(tmp_path, kind, mutation):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "library"
             name = (
                 "Book/old.txt"
@@ -2491,7 +2475,7 @@ def test_revert_identity(tmp_path, kind, mutation):
 @pytest.mark.parametrize("format", [MediaFormat.CBZ, MediaFormat.ZIP])
 def test_archive_chapter_rename(tmp_path, format):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "library"
             directory = root / "Series/Chapter"
             reading_source(directory, format, "Chapter")
@@ -2528,7 +2512,7 @@ def test_archive_chapter_rename(tmp_path, format):
 @pytest.mark.parametrize("reference", ["absolute", "relative", "remote"])
 def test_folder_artwork(tmp_path, reference):
     async def run():
-        async with database():
+        async with memory_db():
             lib, parent, episodes = await show(tmp_path)
             root = Path(lib.dir)
             write(root, "Show/poster.jpg", "Show/fanart.jpg", "Show/episode-thumb.jpg")
@@ -2573,7 +2557,7 @@ def test_folder_artwork(tmp_path, reference):
 @pytest.mark.parametrize("nested", [False, True])
 def test_empty_work_move(tmp_path, nested):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "library"
             source = root / "Empty"
             (source / "A/B" if nested else source).mkdir(parents=True)
@@ -2605,7 +2589,7 @@ def test_empty_work_move(tmp_path, nested):
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
 def test_reading_case_rename(tmp_path, format):
     async def run():
-        async with database():
+        async with memory_db():
             lib, item = await reading_work(tmp_path, format)
             lib.rename_template = None
             await lib.save(update_fields=["rename_template"])
@@ -2647,7 +2631,7 @@ def test_reading_case_rename(tmp_path, format):
 @pytest.mark.parametrize("allowed", [False, True])
 def test_move_owners(tmp_path, kind, allowed):
     async def run():
-        async with database():
+        async with memory_db():
             if kind == "tv":
                 lib, _, _ = await show(tmp_path)
                 extension = "mkv"
@@ -2680,7 +2664,7 @@ def test_move_owners(tmp_path, kind, allowed):
 
 def test_archive_parent_revert(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "library"
             directory = root / "Series/Chapter"
             reading_source(directory, MediaFormat.CBZ, "Chapter")
@@ -2717,7 +2701,7 @@ def test_archive_parent_revert(tmp_path):
 @pytest.mark.parametrize("checkpoint", [1, 2, 4])
 def test_case_recovery(tmp_path, monkeypatch, checkpoint):
     async def run():
-        async with database():
+        async with memory_db():
             lib, item = await reading_work(tmp_path, MediaFormat.TXT)
             lib.rename_template = None
             await lib.save(update_fields=["rename_template"])
@@ -2765,7 +2749,7 @@ def test_case_recovery(tmp_path, monkeypatch, checkpoint):
 
 def test_case_recovery_conflict(tmp_path, monkeypatch):
     async def run():
-        async with database():
+        async with memory_db():
             lib, item = await reading_work(tmp_path, MediaFormat.TXT)
             lib.rename_template = None
             await lib.save(update_fields=["rename_template"])
@@ -2805,7 +2789,7 @@ def test_case_recovery_conflict(tmp_path, monkeypatch):
 
 def test_empty_work_link(tmp_path):
     async def run():
-        async with database():
+        async with memory_db():
             root = tmp_path / "library"
             source = root / "Empty"
             (source / "Child").mkdir(parents=True)

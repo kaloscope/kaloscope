@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -11,7 +10,6 @@ from zipfile import ZipFile
 import pytest
 from lxml import etree
 from sanic import Sanic
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.media import events, organizer, watcher
@@ -31,6 +29,7 @@ from app.models.user import HistoryEntry, User, UserHistory, UserRole
 from app.services import media as media_service
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 from tests.test_services_media_reading import _user
 from tests.test_services_user_history import _entry
 
@@ -50,21 +49,6 @@ def workspace(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     cache.mkdir()
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(cache))
-
-
-@asynccontextmanager
-async def _database():
-    """Provide an isolated media schema without starting application workers.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 def _source(directory: Path, format: MediaFormat, title: str):
@@ -159,7 +143,7 @@ async def _work(tmp_path: Path, format: MediaFormat) -> tuple[MediaLib, MediaIte
 @pytest.mark.parametrize("legacy", [False, True])
 def test_standalone(tmp_path, format, legacy):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, format)
             if legacy:
                 lib.rename_template = "{{collection_title}}/{{title}} - {{authors}}"
@@ -218,7 +202,7 @@ def test_standalone(tmp_path, format, legacy):
 
 def test_collection(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "library"
             source_dir = root / "original"
             source_dir.mkdir(parents=True)
@@ -283,7 +267,7 @@ def test_collection(tmp_path):
 @pytest.mark.parametrize("interruption", ["first_move", "after_files"])
 def test_opf_recovery(tmp_path, monkeypatch, interruption):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             directory = Path(item.dir)
             opf = directory / "old.opf"
@@ -338,7 +322,7 @@ def test_opf_recovery(tmp_path, monkeypatch, interruption):
 )
 def test_invalid_work(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             original_path = item.path
             directory = Path(item.dir)
@@ -374,7 +358,7 @@ def test_invalid_work(tmp_path, problem):
 
 def test_unused_unit_name(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.DIR)
             lib.rename_template = "{{parent.title}}/{{number}}"
             async with library_lock(lib.dir):
@@ -389,7 +373,7 @@ def test_unused_unit_name(tmp_path):
 @pytest.mark.parametrize("state", ["original", "pending", "complete"])
 def test_download_source(tmp_path, state):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             source = Path(item.path)
             downloads = source.parent if state == "original" else tmp_path / "downloads"
@@ -449,7 +433,7 @@ def test_download_source(tmp_path, state):
 
 def test_source_change(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             read = organizer._reading_metadata
             source = Path(item.path)
@@ -480,7 +464,7 @@ def test_saved_work(tmp_path, monkeypatch, format):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, format)
             original_path = item.path
             assert await MediaItemService.save_metadata(
@@ -518,7 +502,7 @@ def test_saved_work(tmp_path, monkeypatch, format):
 @pytest.mark.parametrize("change", ["existing", "external", "disabled"])
 def test_save_without_organization(tmp_path, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             original_path = item.path
             assert not await MediaEvent.filter(event_type="ingest").exists()
@@ -544,7 +528,7 @@ def test_save_without_organization(tmp_path, change):
 @pytest.mark.parametrize("stage", ["none", "published", "summary", "handoff"])
 def test_metadata_handoff(tmp_path, monkeypatch, format, stage):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, format)
             name = "metadata.opf" if format == MediaFormat.TXT else "ComicInfo.xml"
             (Path(item.dir) / name).unlink()
@@ -601,7 +585,7 @@ def test_metadata_handoff(tmp_path, monkeypatch, format, stage):
 @pytest.mark.parametrize("stage", ["files", "database"])
 def test_organization_restart(tmp_path, monkeypatch, stage):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             assert await MediaItemService.save_metadata(
                 item.id, {"title": "Saved", "authors": ["Writer"]}, overwrite=True
@@ -652,7 +636,7 @@ def test_organization_restart(tmp_path, monkeypatch, stage):
 )
 def test_organization_payload(tmp_path, payload):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _work(tmp_path, MediaFormat.TXT)
             event = await MediaEvent.create(
                 lib_id=lib.id, event_type="ingest", src_path=item.path, payload=payload

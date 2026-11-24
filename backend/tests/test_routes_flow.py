@@ -5,19 +5,16 @@ import io
 import json
 import multiprocessing
 import zipfile
-from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
-from sanic import HTTPResponse, Request, Sanic
+from sanic import Request, Sanic
 from sanic.compat import Header
 from sanic.models.protocol_types import TransportProtocol
 from sanic.response.types import BaseHTTPResponse
 from sanic_ext.exceptions import ValidationError
-from tortoise import Tortoise
 
 from app.core.cookiejar import SQLiteCookieJar
 from app.core.exceptions import (
@@ -42,6 +39,7 @@ from app.models.general import GlobalCookie
 from app.models.user import PermType, User, UserPermission, UserRole
 from app.routes import flow as routes
 from app.utils.json import dumps
+from tests.helpers import call_route, memory_db, response_json
 
 
 @pytest.fixture(autouse=True)
@@ -53,51 +51,6 @@ def application():
     finally:
         Sanic.unregister_app(app)
         BaseHTTPResponse._dumps = original_dumps
-
-
-@asynccontextmanager
-async def database():
-    """Open an isolated database for workflow permission checks.
-
-    Yields:
-        Control while the temporary database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
-        yield
-    finally:
-        await Tortoise.close_connections()
-
-
-async def call_route(
-    handler: object, request: Request, **arguments: object
-) -> HTTPResponse:
-    """Call a decorated route using its runtime asynchronous handler contract.
-
-    Args:
-        handler: Route callable whose signature is obscured by Sanic decorators.
-        request: Request passed through authorization and validation.
-        **arguments: URL parameters supplied by the router.
-
-    Returns:
-        Response produced by the decorated route.
-    """
-    callback = cast(Callable[..., Awaitable[HTTPResponse]], handler)
-    return await callback(request, **arguments)
-
-
-def response_json(response: HTTPResponse):
-    """Decode a route response after verifying that it contains a body.
-
-    Args:
-        response: Response returned by the decorated route.
-
-    Returns:
-        Decoded JSON payload.
-    """
-    assert response.body is not None
-    return json.loads(response.body)
 
 
 def request(user=None, path="/_api/flow/graph/list", body=None):
@@ -189,7 +142,7 @@ def test_missing_session(handler, arguments):
 
 def test_visibility():
     async def run():
-        async with database():
+        async with memory_db():
             user = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -269,7 +222,7 @@ def test_version_required(handler):
 
 def test_versioned_write():
     async def run():
-        async with database():
+        async with memory_db():
             user = await User.create(
                 username="admin", password="unused", role=UserRole.ADMIN
             )
@@ -311,7 +264,7 @@ def test_versioned_write():
 
 def test_admin():
     async def run():
-        async with database():
+        async with memory_db():
             user = await User.create(
                 username="admin", password="unused", role=UserRole.ADMIN
             )
@@ -338,7 +291,7 @@ def test_admin():
 @pytest.mark.parametrize("granted", [False, True])
 def test_missing(granted):
     async def run():
-        async with database():
+        async with memory_db():
             user = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -373,7 +326,7 @@ def test_indexer_login_access(application):
     login = {"$start": "auth_start", "username": "intruder", "password": "fixture"}
 
     async def run():
-        async with database():
+        async with memory_db():
             reader = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -462,7 +415,7 @@ def test_job_control(application):
     application.ctx.flow_engine = engine
 
     async def run():
-        async with database():
+        async with memory_db():
             reader = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -506,7 +459,7 @@ def test_execution_access(application):
     application.ctx.flow_engine = engine
 
     async def run():
-        async with database():
+        async with memory_db():
             reader = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -615,7 +568,7 @@ def test_bootparams(application, body, kept):
     application.ctx.flow_engine = engine
 
     async def run():
-        async with database():
+        async with memory_db():
             reader = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -662,7 +615,7 @@ def test_bootparams(application, body, kept):
 
 def test_template_access():
     async def run():
-        async with database():
+        async with memory_db():
             reader = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )
@@ -706,7 +659,7 @@ def test_template_access():
 
 def test_graph_transfer():
     async def run():
-        async with database():
+        async with memory_db():
             reader = await User.create(
                 username="reader", password="unused", role=UserRole.USER
             )

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import cast
 
 from pydantic import SecretStr
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.dl import syncer as syncer_module
@@ -35,6 +34,7 @@ from app.models.download import (
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
 )
+from tests.helpers import memory_db
 
 
 def test_submission_process_exit(tmp_path, monkeypatch):
@@ -204,11 +204,7 @@ def test_submission_recovery(tmp_path, monkeypatch):
     now = datetime(2026, 8, 5, tzinfo=UTC)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -264,8 +260,6 @@ def test_submission_recovery(tmp_path, monkeypatch):
             for job in (job1, job2, job3):
                 await job.refresh_from_db()
             return snapshots, client, tasks, (job1, job2, job3)
-        finally:
-            await Tortoise.close_connections()
 
     snapshots, client, tasks, jobs = asyncio.run(run())
 
@@ -291,11 +285,7 @@ def test_poll_batching(monkeypatch):
     now = datetime(2026, 8, 4, tzinfo=UTC)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -324,8 +314,6 @@ def test_poll_batching(monkeypatch):
             for job in jobs:
                 await job.refresh_from_db()
             return snapshots, gated, client, tasks, jobs
-        finally:
-            await Tortoise.close_connections()
 
     snapshots, gated, client, tasks, jobs = asyncio.run(run())
 
@@ -371,11 +359,7 @@ def test_task_errors(monkeypatch):
     now = datetime(2026, 8, 4, tzinfo=UTC)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -409,8 +393,6 @@ def test_task_errors(monkeypatch):
             for job in (remote_job, transfer_job):
                 await job.refresh_from_db()
             return snapshots, tasks, (remote_job, transfer_job)
-        finally:
-            await Tortoise.close_connections()
 
     snapshots, tasks, jobs = asyncio.run(run())
 
@@ -432,11 +414,7 @@ def test_job_isolation(monkeypatch):
     current = datetime(2026, 8, 4, tzinfo=UTC)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -485,8 +463,6 @@ def test_job_isolation(monkeypatch):
             for job in jobs:
                 await job.refresh_from_db()
             return snapshots, client, tasks, jobs
-        finally:
-            await Tortoise.close_connections()
 
     snapshots, client, tasks, jobs = asyncio.run(run())
 
@@ -508,11 +484,7 @@ def test_auth_block(monkeypatch):
     now = datetime(2026, 8, 4, tzinfo=UTC)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -538,8 +510,6 @@ def test_auth_block(monkeypatch):
             await task.refresh_from_db()
             await job.refresh_from_db()
             return failed, blocked, recovered, client, task, job
-        finally:
-            await Tortoise.close_connections()
 
     failed, blocked, recovered, client, task, job = asyncio.run(run())
 
@@ -557,11 +527,7 @@ def test_rate_limit(monkeypatch):
     current = [now]
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -588,8 +554,6 @@ def test_rate_limit(monkeypatch):
             await job1.refresh_from_db()
             await job2.refresh_from_db()
             return snapshots, gated, client, task1, task2, job1, job2
-        finally:
-            await Tortoise.close_connections()
 
     snapshots, gated, client, task1, task2, job1, job2 = asyncio.run(run())
 
@@ -608,11 +572,7 @@ def test_transient_backoff(monkeypatch):
     current = [now]
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -638,8 +598,6 @@ def test_transient_backoff(monkeypatch):
             await coordinator.sync((identity,))
             await job.refresh_from_db()
             return task, backed_off, job
-        finally:
-            await Tortoise.close_connections()
 
     task, backed_off, job = asyncio.run(run())
 

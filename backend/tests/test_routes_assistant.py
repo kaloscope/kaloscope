@@ -15,7 +15,7 @@ from sanic.compat import Header
 from sanic.models.protocol_types import TransportProtocol
 from sanic.response.types import BaseHTTPResponse
 from sanic_ext.exceptions import ValidationError
-from tortoise import Tortoise, timezone
+from tortoise import timezone
 
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.middleware import on_request, on_response
@@ -25,6 +25,7 @@ from app.models.flow import FlowGraph, GraphDocument
 from app.models.user import User, UserRole
 from app.routes import assistant as routes
 from app.utils.json import dumps
+from tests.helpers import memory_db
 
 BODY = {
     "model": {"provider_id": 1, "model_id": "test"},
@@ -225,11 +226,7 @@ def test_http_contract(application, monkeypatch):
     monkeypatch.setattr(routes.AssistantService, "stream", stream)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        try:
-            await Tortoise.generate_schemas()
+        async with memory_db():
             await User.create(id=1, username="owner", password="unused", role="admin")
             await User.create(id=2, username="other", password="unused", role="admin")
             provider = await AIProvider.create(
@@ -477,8 +474,6 @@ def test_http_contract(application, monkeypatch):
                     "/_api/assistant/conversations", headers=headers
                 )
                 assert listing.json()["data"]["items"] == []
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -511,11 +506,7 @@ def test_canvas_edit_routes(application):
     owner = {"authorization": "Bearer owner"}
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        try:
-            await Tortoise.generate_schemas()
+        async with memory_db():
             for user_id, name in ((1, "owner"), (2, "other")):
                 await User.create(id=user_id, username=name, password="x", role="admin")
             graph = await FlowGraph.create(
@@ -678,7 +669,5 @@ def test_canvas_edit_routes(application):
                 recovered = await client.get(path + "/outcome", headers=owner)
                 assert recovered.json()["data"]["proposal"]["status"] == "saved"
                 assert recovered.json()["data"]["workflow"] is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())

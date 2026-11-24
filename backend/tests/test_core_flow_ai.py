@@ -3,14 +3,12 @@
 import asyncio
 import copy
 import json
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import KaloscopeException
@@ -26,18 +24,9 @@ from app.services import ai as ai_service
 from app.services.ai import AIProviderService
 from app.services.flow import FlowGraphService, FlowLogService
 from app.utils.dict import TrackableDict
+from tests.helpers import memory_db
 
 ADMIN = cast(UserInfo, SimpleNamespace(role="admin"))
-
-
-@asynccontextmanager
-async def database():
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 def context():
@@ -105,7 +94,7 @@ def network(monkeypatch, tmp_path):
 @pytest.mark.parametrize("temperature", [None, 0, 0.7, 2])
 def test_execution(network, temperature):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProviderService.upsert(
                 AIProviderUpsert.model_validate(
                     {
@@ -159,7 +148,7 @@ def test_execution(network, temperature):
 )
 def test_published_dependency(network, change, code):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProvider.create(
                 name="Example",
                 base_url="https://example.com/v1",
@@ -216,7 +205,7 @@ def test_published_dependency(network, change, code):
 
 def test_reenable_and_reconfigure(network):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProvider.create(
                 name="Example",
                 base_url="https://example.com/v1",
@@ -300,7 +289,7 @@ def test_missing_prompt_variable(monkeypatch):
 
 def test_failed_output_does_not_continue(network):
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProvider.create(
                 name="Example",
                 base_url="https://example.com/v1",
@@ -369,7 +358,7 @@ def test_retry_context(succeeds, monkeypatch):
     )
 
     async def run():
-        async with database():
+        async with memory_db():
             provider = await AIProvider.create(
                 name="Example",
                 base_url="https://example.com/v1",

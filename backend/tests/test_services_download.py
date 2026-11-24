@@ -35,6 +35,7 @@ from app.models.download import (
     OfflineDownloadJob,
 )
 from app.services import download as download_service
+from tests.helpers import memory_db
 
 
 @pytest.fixture(autouse=True)
@@ -168,11 +169,7 @@ tool: Future Tool
     monkeypatch.setattr(download_service, "load_driver", lambda _config: driver)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config=config, name="OpenList", priority=1
             )
@@ -186,8 +183,6 @@ tool: Future Tool
             task = await DownloadTask.get(id=created_task.id)
             job = await OfflineDownloadJob.get(download_id=task.id)
             return task, job, await DownloadTask.all().count()
-        finally:
-            await Tortoise.close_connections()
 
     task, job, task_count = asyncio.run(run())
 
@@ -213,11 +208,7 @@ def test_add_rollback(monkeypatch):
     monkeypatch.setattr(download_service, "load_driver", lambda _config: driver)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="invalid", name="OpenList", priority=1
             )
@@ -233,8 +224,6 @@ def test_add_rollback(monkeypatch):
                 await DownloadTask.all().count(),
                 await OfflineDownloadJob.all().count(),
             )
-        finally:
-            await Tortoise.close_connections()
 
     assert asyncio.run(run()) == (0, 0)
 
@@ -321,26 +310,22 @@ def test_rpc_source(monkeypatch, methods, http_source, expected):
 
 def test_concurrent_rpc_add(monkeypatch):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        submitted = []
+        async with memory_db():
+            submitted = []
 
-        class Client:
-            async def call(self, method, variables):
-                submitted.append(variables["link"])
-                await asyncio.sleep(0.05)
-                return {"unique_id": "remote-1"}
+            class Client:
+                async def call(self, method, variables):
+                    submitted.append(variables["link"])
+                    await asyncio.sleep(0.05)
+                    return {"unique_id": "remote-1"}
 
-        driver = RpcDriver(
-            RpcConfig(
-                name="RPC", host="localhost", port=80, methods={"add_link": API()}
+            driver = RpcDriver(
+                RpcConfig(
+                    name="RPC", host="localhost", port=80, methods={"add_link": API()}
+                )
             )
-        )
-        monkeypatch.setattr(driver, "client", Client())
-        monkeypatch.setattr(download_service, "load_driver", lambda _: driver)
-        try:
+            monkeypatch.setattr(driver, "client", Client())
+            monkeypatch.setattr(download_service, "load_driver", lambda _: driver)
             downloaders = [
                 await Downloader.create(config="rpc", name=str(i), priority=i)
                 for i in (1, 2)
@@ -364,8 +349,6 @@ def test_concurrent_rpc_add(monkeypatch):
             assert len(errors) == 1
             assert isinstance(errors[0], KaloscopeException)
             assert errors[0].message == ErrorCode.INFO_HASH_COLLISION
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -461,17 +444,11 @@ def test_deferred_delete(monkeypatch):
     monkeypatch.setattr(download_service, "load_driver", lambda _config: driver)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task = await _create_offline_task(DownloadState.REMOTE)
             command = await download_service.DownloadTaskService.delete(task.id, True)
             stored = await DownloadTask.get_or_none(id=task.id)
             return command, stored.state if stored else None
-        finally:
-            await Tortoise.close_connections()
 
     command, stored_state = asyncio.run(run())
 
@@ -487,11 +464,7 @@ def test_retry_target(monkeypatch):
     monkeypatch.setattr(download_service, "load_driver", lambda _config: driver)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task = await _create_offline_task(
                 DownloadState.ERROR,
                 error_kind=OfflineDownloadErrorKind.PULL_FAILED,
@@ -499,8 +472,6 @@ def test_retry_target(monkeypatch):
             command = await download_service.DownloadTaskService.retry(task.id)
             await task.refresh_from_db()
             return command, task
-        finally:
-            await Tortoise.close_connections()
 
     command, task = asyncio.run(run())
 
@@ -535,11 +506,7 @@ tool: Future Tool
     )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config=config, name="Cloud", priority=1
             )
@@ -562,8 +529,6 @@ tool: Future Tool
                 )
                 tasks.append(task)
             return await download_service.DownloadTaskService.dump_list(tasks)
-        finally:
-            await Tortoise.close_connections()
 
     data = asyncio.run(run())
 

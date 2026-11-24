@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -10,7 +9,7 @@ from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
 import pytest
-from sanic import HTTPResponse, Request, Sanic, empty
+from sanic import Request, Sanic, empty
 from sanic.compat import Header
 from sanic.models.protocol_types import TransportProtocol
 
@@ -27,7 +26,8 @@ from app.routes import subtitle as subtitle_routes
 from app.routes import user as user_routes
 from app.services.danmaku import DanmakuService, DanmakuWrapper
 from app.services.subtitle import SubtitleService
-from tests.test_services_media_reading import _database, _user
+from tests.helpers import call_route, memory_db
+from tests.test_services_media_reading import _user
 
 APP_NAME = "permission-route-test"
 VIDEO = "Show.S01E01.mkv"
@@ -74,21 +74,6 @@ def request(
         result.body = json.dumps(payload or {}).encode()
     result.ctx.user = user
     return result
-
-
-async def call(handler: object, request: Request, **arguments: object) -> HTTPResponse:
-    """Call a decorated route using its runtime asynchronous handler contract.
-
-    Args:
-        handler: Route callable whose signature is obscured by Sanic decorators.
-        request: Request passed through authorization and validation.
-        **arguments: URL parameters supplied by the router.
-
-    Returns:
-        Response produced by the decorated route.
-    """
-    callback = cast(Callable[..., Awaitable[HTTPResponse]], handler)
-    return await callback(request, **arguments)
 
 
 async def library(directory: Path, access: str) -> UserInfo:
@@ -156,7 +141,7 @@ def test_admin_only(handler, arguments, role, error, code):
     session = SimpleNamespace(role=role) if role else None
 
     with pytest.raises(error) as exc_info:
-        asyncio.run(call(handler, request(session), **arguments))
+        asyncio.run(call_route(handler, request(session), **arguments))
 
     assert exc_info.value.message == code
 
@@ -262,16 +247,16 @@ def test_library_access(
     async def run():
         if access == "anonymous":
             with pytest.raises(UnauthorizedException):
-                await call(handler, request(None, method, payload))
+                await call_route(handler, request(None, method, payload))
             return None
-        async with _database():
+        async with memory_db():
             session = await library(directory, access)
             if access == "denied":
                 with pytest.raises(ForbiddenException) as exc_info:
-                    await call(handler, request(session, method, payload))
+                    await call_route(handler, request(session, method, payload))
                 assert exc_info.value.message == ErrorCode.PERMISSION_DENIED
                 return None
-            return await call(handler, request(session, method, payload))
+            return await call_route(handler, request(session, method, payload))
 
     response = asyncio.run(run())
 
@@ -302,9 +287,11 @@ def test_external_subtitle(tmp_path, monkeypatch, name, access, allowed):
     payload = {"path": f"{directory}/{name}"}
 
     async def run():
-        async with _database():
+        async with memory_db():
             session = await library(directory, access)
-            await call(subtitle_routes.load_content, request(session, "GET", payload))
+            await call_route(
+                subtitle_routes.load_content, request(session, "GET", payload)
+            )
 
     if allowed:
         asyncio.run(run())

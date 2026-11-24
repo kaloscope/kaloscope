@@ -2,14 +2,13 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from sanic import HTTPResponse, Request, Sanic
+from sanic import Request, Sanic
 from sanic.compat import Header
 from sanic.models.protocol_types import TransportProtocol
 from sanic.response.types import BaseHTTPResponse
@@ -23,6 +22,7 @@ from app.models.ai import AIProviderConnection, AIProviderUpsert
 from app.models.user import UserRole
 from app.routes import ai as routes
 from app.utils.json import dumps
+from tests.helpers import call_route, response_json
 
 
 @pytest.fixture(autouse=True)
@@ -34,36 +34,6 @@ def application():
     finally:
         Sanic.unregister_app(app)
         BaseHTTPResponse._dumps = original_dumps
-
-
-async def call_route(
-    handler: object, request: Request, **arguments: object
-) -> HTTPResponse:
-    """Call a decorated route using its runtime asynchronous handler contract.
-
-    Args:
-        handler: Route callable whose signature is obscured by Sanic decorators.
-        request: Request passed through authorization and validation.
-        **arguments: URL parameters supplied by the router.
-
-    Returns:
-        Response produced by the decorated route.
-    """
-    callback = cast(Callable[..., Awaitable[HTTPResponse]], handler)
-    return await callback(request, **arguments)
-
-
-def response_json(response: HTTPResponse):
-    """Decode a route response after verifying that it contains a body.
-
-    Args:
-        response: Response returned by the decorated route.
-
-    Returns:
-        Decoded JSON payload.
-    """
-    assert response.body is not None
-    return json.loads(response.body)
 
 
 def request(body=None, role=UserRole.ADMIN):

@@ -65,6 +65,7 @@ from app.services.flow import FlowGraphService, FlowJobService, FlowLogService
 from app.services.mcp import MCPAccessTokenService
 from app.services.media import MediaItemService, MediaLibService
 from app.utils.json import dumps, loads
+from tests.helpers import response_json
 
 
 @asynccontextmanager
@@ -168,19 +169,6 @@ async def post(
     wrapped = await on_response(request, response)
     assert wrapped is not None
     return wrapped
-
-
-def response_json(response: HTTPResponse):
-    """Decode a response after verifying that it contains a body.
-
-    Args:
-        response: Response produced by the MCP test transport.
-
-    Returns:
-        Decoded JSON payload.
-    """
-    assert response.body is not None
-    return loads(response.body)
 
 
 async def call(app, name, arguments=None, *, token="admin"):

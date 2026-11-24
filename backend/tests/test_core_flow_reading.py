@@ -3,8 +3,6 @@
 import asyncio
 import base64
 import zipfile
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,7 +12,6 @@ import httpx
 import pytest
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import error_handler
@@ -38,6 +35,7 @@ from app.routes.flow import flow as flow_blueprint
 from app.services.media import MediaItemService
 from app.utils import json
 from app.utils.dict import TrackableDict
+from tests.helpers import memory_db
 
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
@@ -61,21 +59,6 @@ def _context(params: dict) -> Context:
     context.storage = TrackableDict()
     context.union()
     return context
-
-
-@asynccontextmanager
-async def _database() -> AsyncGenerator[None]:
-    """Provide an in-memory schema without starting application workers.
-
-    Yields:
-        Control while the isolated schema is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 @pytest.fixture(
@@ -262,7 +245,7 @@ def test_reading_source(tmp_path, monkeypatch, problem, reading_node):
     monkeypatch.setattr(MediaItemService, "save_metadata", save)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Source",
                 dir=str(tmp_path),
@@ -296,7 +279,7 @@ def test_reading_source(tmp_path, monkeypatch, problem, reading_node):
 @pytest.mark.parametrize("category", list(GraphCategory))
 def test_ingest_execution_mode(role, category):
     async def run():
-        async with _database():
+        async with memory_db():
             graph = await FlowGraph.create(
                 name="Execution", category=category, state=GraphState.PUBLISHED
             )
@@ -375,7 +358,7 @@ def test_reading_graph(tmp_path, monkeypatch, format, mode):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(cache))
 
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "Library"
             directory = root / "Work"
             directory.mkdir(parents=True)

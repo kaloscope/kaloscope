@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import cast, overload
 
 import pytest
-from tortoise import Tortoise
 
 from app.core.ai import tools
 from app.core.exceptions import (
@@ -37,6 +36,7 @@ from app.services.assistant_proposals import AssistantProposalService as Proposa
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.services.flow import FlowGraphService
 from app.utils.json import dumps
+from tests.helpers import memory_db
 
 MODEL = {"provider_id": 1, "model_id": "fixture"}
 SCRIPT = "# keep this script\n" * 200 + "def execute(node_id, node_data, context):\n"
@@ -84,9 +84,7 @@ async def database(db_url="sqlite://:memory:"):
     Yields:
         Account principals, the workflow, and an owned conversation identifier.
     """
-    await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db(db_url):
         owner, other = [
             await User.create(username=name, password="unused", role="admin")
             for name in ("owner", "other")
@@ -117,8 +115,6 @@ async def database(db_url="sqlite://:memory:"):
             graph=graph,
             conversation=conversation["id"],
         )
-    finally:
-        await Tortoise.close_connections()
 
 
 async def preview(env, changes, *, snapshot_id=None, version=0, key="call"):

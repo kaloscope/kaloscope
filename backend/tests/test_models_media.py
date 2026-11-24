@@ -4,7 +4,6 @@ import asyncio
 
 import pytest
 from pydantic import ValidationError
-from tortoise import Tortoise
 
 from app.models.media import (
     IndexState,
@@ -16,16 +15,13 @@ from app.models.media import (
 )
 from app.models.user import HistoryEntry, HistoryQuery, HistoryType
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 
 
 @pytest.mark.parametrize("media_format", [MediaFormat.CBZ, MediaFormat.DIR])
 def test_content_fields(media_format):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir="/media", lib_type=LibType.COMIC, priority=1
             )
@@ -90,8 +86,6 @@ def test_content_fields(media_format):
             assert "extra" not in detail["children"][0]
             assert detail["format"] is None
             assert detail["index_state"] is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 

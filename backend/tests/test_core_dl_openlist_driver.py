@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 from pydantic import SecretStr
-from tortoise import Tortoise, timezone
+from tortoise import timezone
 
 from app.core.dl.driver import (
     DownloadIdentity,
@@ -30,6 +30,7 @@ from app.models.download import (
     OfflineDownloadErrorKind,
     OfflineDownloadJob,
 )
+from tests.helpers import memory_db
 
 _JOB_UUID = "1234567890ab4def81234567890abcde"
 _OTHER_JOB_UUID = "abcdefabcdef4def8abcdefabcdefabc"
@@ -223,11 +224,7 @@ def test_cleanup():
 @pytest.mark.parametrize("valid", [True, False])
 def test_cleanup_recovery(valid):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="OpenList", priority=1
             )
@@ -262,19 +259,13 @@ def test_cleanup_recovery(valid):
                 assert client.calls == []
                 assert job.last_error_kind is OfflineDownloadErrorKind.CLEANUP_FAILED
                 assert job.next_poll_at is not None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
 
 def test_delete_failed_transfer():
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="OpenList", priority=1
             )
@@ -305,19 +296,13 @@ def test_delete_failed_transfer():
             )
             await _driver(_config(), client).delete(DownloadIdentity.from_task(task))
             assert client.canceled_transfers == [_JOB_UUID]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
 
 def test_delete_local(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -354,8 +339,6 @@ def test_delete_local(tmp_path):
                 DownloadIdentity.from_task(task), local=True
             )
             return part, kept
-        finally:
-            await Tortoise.close_connections()
 
     part, kept = asyncio.run(run())
 
@@ -367,11 +350,7 @@ def test_delete_local(tmp_path):
 
 def test_delete_artifacts(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -401,8 +380,6 @@ def test_delete_artifacts(tmp_path):
                 DownloadIdentity.from_task(task), local=False
             )
             return final, part, marker
-        finally:
-            await Tortoise.close_connections()
 
     final, part, marker = asyncio.run(run())
 
@@ -413,11 +390,7 @@ def test_delete_artifacts(tmp_path):
 
 def test_delete_unknown(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -463,19 +436,13 @@ def test_delete_unknown(tmp_path):
 
             await _driver(_config(), client).delete(DownloadIdentity.from_task(task))
             return client.canceled, client.canceled_transfers
-        finally:
-            await Tortoise.close_connections()
 
     assert asyncio.run(run()) == (["accepted"], ["active-transfer"])
 
 
 def test_transfer_actions(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -526,8 +493,6 @@ def test_transfer_actions(tmp_path):
             state = await driver.retry(DownloadIdentity.from_task(failed))
             await driver.delete(DownloadIdentity.from_task(settling))
             return state, client.calls
-        finally:
-            await Tortoise.close_connections()
 
     state, calls = asyncio.run(run())
 

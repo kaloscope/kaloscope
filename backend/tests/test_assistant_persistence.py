@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from openai import AsyncOpenAI
-from tortoise import Tortoise, timezone
+from tortoise import timezone
 
 from app.core.ai import history, tools
 from app.core.ai.documents import GraphProposal, apply_changes, tool_facts
@@ -41,6 +41,7 @@ from app.services import workflow_authoring as authoring
 from app.services.assistant import SYSTEM_PROMPT, AssistantService
 from app.services.assistant_sessions import AssistantSessionService as Sessions
 from app.utils.json import dumps, loads
+from tests.helpers import memory_db
 from tests.test_services_assistant import (
     EventStream,
     call_delta,
@@ -133,9 +134,7 @@ async def database():
     Yields:
         Owner and other-account principals with the fields used by the services.
     """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db():
         accounts = [
             await User.create(username=name, password="unused", role="admin")
             for name in ("owner", "other")
@@ -144,8 +143,6 @@ async def database():
             cast(UserInfo, SimpleNamespace(id=account.id, role="admin"))
             for account in accounts
         ]
-    finally:
-        await Tortoise.close_connections()
 
 
 def request(key="request", **values):

@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
-from tortoise import Tortoise, timezone
+from tortoise import timezone
 
 from app.core.exceptions import error_handler
 from app.core.middleware import SessionHolder, on_request, on_response
@@ -29,21 +29,7 @@ from app.routes.user import user as user_blueprint
 from app.services.user import UserHistoryService, UserService
 from app.utils.crypto import encrypt
 from app.utils.json import dumps
-
-
-@asynccontextmanager
-async def _database() -> AsyncGenerator[None]:
-    """Provide an isolated user database.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
+from tests.helpers import memory_db
 
 
 @asynccontextmanager
@@ -98,7 +84,7 @@ def test_retention_invalid(value):
 )
 def test_retention_defaults(preferences):
     async def run():
-        async with _database():
+        async with memory_db():
             user = await User.create(
                 username="Reader",
                 password="unused",
@@ -125,7 +111,7 @@ def test_retention_defaults(preferences):
 @pytest.mark.parametrize("value", [True, False, "3", -2, None])
 def test_retention_stored_invalid(value):
     async def run():
-        async with _database():
+        async with memory_db():
             user = await User.create(
                 username="Reader",
                 password="unused",
@@ -147,7 +133,7 @@ def test_history_cleanup(monkeypatch, rel_type, days):
     monkeypatch.setattr(timezone, "now", lambda: now)
 
     async def run():
-        async with _database():
+        async with memory_db():
             user = await User.create(
                 username="Reader",
                 password="unused",
@@ -191,7 +177,7 @@ def test_history_record(monkeypatch, rel_type, days):
     monkeypatch.setattr(timezone, "now", lambda: now)
 
     async def run():
-        async with _database():
+        async with memory_db():
             user = await User.create(
                 username="Reader",
                 password="unused",
@@ -253,7 +239,7 @@ def test_history_record(monkeypatch, rel_type, days):
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.USER])
 def test_profile_role(monkeypatch, role):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             user = await User.create(
                 username="Member", password=encrypt("test-password"), role=role
             )
@@ -275,7 +261,7 @@ def test_profile_role(monkeypatch, role):
 @pytest.mark.parametrize("via_route", [True, False])
 def test_deleted_sessions(monkeypatch, via_route):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, app):
+        async with memory_db(), _client(monkeypatch) as (client, app):
             password = "test-password"
             for name in ("removed", "keeper"):
                 await User.create(
@@ -321,7 +307,7 @@ def test_deleted_sessions(monkeypatch, via_route):
 )
 def test_preferences_http(monkeypatch, preferences):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, app):
+        async with memory_db(), _client(monkeypatch) as (client, app):
             user = await User.create(
                 username="Reader",
                 password=encrypt("test-password"),

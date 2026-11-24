@@ -23,12 +23,8 @@ from app.models.flow import (
 from app.models.media import LibType, MediaEvent, MediaFormat, MediaItem, MediaLib
 from app.services import media as media_service
 from app.services.media import MediaItemService
-from tests.test_services_media_index import (
-    _database,
-    _ingest_engine,
-    _ingest_trigger,
-    _source,
-)
+from tests.helpers import memory_db
+from tests.test_services_media_index import _ingest_engine, _ingest_trigger, _source
 from tests.test_services_media_reading import _client, _user
 
 
@@ -48,7 +44,7 @@ def workspace(tmp_path, monkeypatch):
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_manual_recovery(tmp_path, monkeypatch, asynchronous):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             graph = await _ingest_trigger(lib, asynchronous=asynchronous)
             definition = graph.definition
@@ -110,7 +106,7 @@ def test_manual_recovery(tmp_path, monkeypatch, asynchronous):
 
 def test_manual_save_scope(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             item = await MediaItemService.create_reading(lib.id, source)
             other = await MediaItem.create(
@@ -156,7 +152,7 @@ def test_manual_save_scope(tmp_path):
 @pytest.mark.parametrize("failure", [False, True])
 def test_workflow_chain(tmp_path, monkeypatch, failure):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             first = await _ingest_trigger(lib, asynchronous=True)
             await FlowTrigger.filter(graph_id=first.id).update(priority=0)
@@ -206,7 +202,7 @@ def test_workflow_chain(tmp_path, monkeypatch, failure):
 @pytest.mark.parametrize("pending", [False, True])
 def test_save_status(tmp_path, pending):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             item = await MediaItemService.create_reading(lib.id, source)
             await MediaEvent.create(
@@ -246,7 +242,7 @@ def test_save_status(tmp_path, pending):
 
 def test_concurrent_dispatch(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib, asynchronous=True)
             _ingest_engine(monkeypatch)
@@ -289,7 +285,7 @@ def test_concurrent_dispatch(tmp_path, monkeypatch):
 
 def test_completed_dispatch(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             graph = await _ingest_trigger(lib, asynchronous=True)
             definition = graph.definition
@@ -342,7 +338,7 @@ def test_completed_dispatch(tmp_path, monkeypatch):
 
 def test_reserved_dispatch_recovery(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             engine = _ingest_engine(monkeypatch)
@@ -375,7 +371,7 @@ def test_reserved_dispatch_recovery(tmp_path, monkeypatch):
 
 def test_running_ingests():
     async def run():
-        async with _database():
+        async with memory_db():
             graph = await FlowGraph.create(
                 name="Ingest",
                 category=GraphCategory.INGEST,
@@ -404,7 +400,7 @@ def test_running_ingests():
 
 def test_running_unbound(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib, asynchronous=True)
             engine = _ingest_engine(monkeypatch)
@@ -433,7 +429,7 @@ def test_running_unbound(tmp_path, monkeypatch):
 @pytest.mark.parametrize("empty", [False, True])
 def test_existing_workflow(tmp_path, monkeypatch, empty):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             graph = await _ingest_trigger(lib, asynchronous=True)
             if empty:
@@ -476,7 +472,7 @@ def test_existing_workflow(tmp_path, monkeypatch, empty):
 @pytest.mark.parametrize("deleted", [False, True])
 def test_obsolete_failure(tmp_path, deleted):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             item = await MediaItemService.create_reading(lib.id, source)
@@ -497,7 +493,7 @@ def test_obsolete_failure(tmp_path, deleted):
 
 def test_manual_save_recovery(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             _ingest_engine(monkeypatch)
@@ -531,7 +527,7 @@ def test_manual_save_recovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize("valid", [False, True])
 def test_video_save_http(tmp_path, valid):
     async def run():
-        async with _database():
+        async with memory_db():
             video = tmp_path / "Movie.mkv"
             video.write_bytes(b"video")
             nfo = video.with_suffix(".nfo")
@@ -588,7 +584,7 @@ def test_video_save_http(tmp_path, valid):
 @pytest.mark.parametrize("existing", [False, True])
 def test_video_ingest(tmp_path, monkeypatch, asynchronous, multipart, existing):
     async def run():
-        async with _database():
+        async with memory_db():
             directory = tmp_path / "Movies"
             directory.mkdir()
             container = directory / "Film" if multipart else directory
@@ -656,7 +652,7 @@ def test_video_ingest(tmp_path, monkeypatch, asynchronous, multipart, existing):
 )
 def test_video_workflow(tmp_path, node, kind, mode):
     async def run():
-        async with _database():
+        async with memory_db():
             path = tmp_path / "video.nfo"
             original = b"original"
             if mode == "existing":

@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from lxml import etree
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.exceptions import BadRequestException, ErrorCode
@@ -18,7 +17,8 @@ from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaMetadata
 from app.models.user import PermType, User, UserPermission
 from app.routes import media as media_routes
-from tests.test_services_media_reading import _client, _database, _user
+from tests.helpers import memory_db
+from tests.test_services_media_reading import _client, _user
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +31,7 @@ def workspace(monkeypatch, tmp_path_factory):
 @pytest.mark.parametrize("access", ["admin", "granted", "denied"])
 def test_list_permissions(tmp_path, lib_type, access):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -82,7 +82,7 @@ def test_list_permissions(tmp_path, lib_type, access):
 @pytest.mark.parametrize("admin", [False, True])
 def test_foreign_parent(tmp_path, admin):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library",
                 dir=str(tmp_path / "library"),
@@ -134,7 +134,7 @@ def test_foreign_parent(tmp_path, admin):
 @pytest.mark.parametrize("admin", [False, True])
 def test_library_management_permissions(tmp_path, admin):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=LibType.NOVEL, priority=1
             )
@@ -156,7 +156,7 @@ def test_library_management_permissions(tmp_path, admin):
 @pytest.mark.parametrize("lib_type", list(LibType))
 def test_scan_library(tmp_path, lib_type):
     async def run():
-        async with _database(), _client(_user()) as client:
+        async with memory_db(), _client(_user()) as client:
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -178,7 +178,7 @@ def test_scan_library(tmp_path, lib_type):
 @pytest.mark.parametrize("admin", [False, True])
 def test_library_scan_status(tmp_path, admin):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=LibType.NOVEL, priority=1
             )
@@ -230,7 +230,7 @@ def test_library_scan_status(tmp_path, admin):
 )
 def test_video_stream_range(tmp_path, range_header, expected):
     async def run():
-        async with _database(), _client(_user()) as client:
+        async with memory_db(), _client(_user()) as client:
             path = tmp_path / "video.mp4"
             data = bytes(range(251)) * 1024
             path.write_bytes(data)
@@ -268,11 +268,7 @@ def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
     monkeypatch.setattr(media_routes.MediaItemService, "refresh_episodes", refresh)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -313,8 +309,6 @@ def test_nfo_episode_refresh(tmp_path, monkeypatch, lib_type, written):
                 refresh.assert_awaited_once_with(item, body, episode_ids=[child.id])
             else:
                 refresh.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -328,11 +322,7 @@ def test_episode_scope(tmp_path, monkeypatch, change):
     monkeypatch.setattr("app.services.media.Sanic.get_app", lambda: app)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
             )
@@ -399,19 +389,13 @@ def test_episode_scope(tmp_path, monkeypatch, change):
                 assert params["site"] == "tmdb" and params["series_id"] == "42"
                 assert params["name"] == "Original"
                 assert {"item_path", "item_name", "nfo_source"}.isdisjoint(params)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
 
 def test_nfo_parent_recovery(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -462,7 +446,5 @@ def test_nfo_parent_recovery(tmp_path):
             assert not nfo.exists()
             assert not folder.exists()
             assert not await MediaEvent.filter(event_type="organize").exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
