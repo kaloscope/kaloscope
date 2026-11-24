@@ -1001,11 +1001,12 @@ async def prepare_context(
                 raise ValueError("Summary exceeds the available history budget")
 
             facts = list(conversation.summary.get("facts", []))
+            calls = await AssistantToolCall.filter(
+                turn_id__in=[record.id for record in batch]
+            ).exclude(status="running")
             for record in batch:
-                for call in await AssistantToolCall.filter(turn_id=record.id).exclude(
-                    status="running"
-                ):
-                    if call.result:
+                for call in calls:
+                    if call.turn_id == record.id and call.result:
                         facts.append({"turn_id": record.id, **tool_facts(call.result)})
 
             omitted = conversation.summary.get("omitted_fact_records", 0)

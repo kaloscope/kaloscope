@@ -28,6 +28,7 @@
     releaseAssistantHandoff,
     sendAssistant,
     stopAssistant,
+    updateAssistantTool,
     type AssistantTool as Tool,
     type AssistantTurn
   } from '$lib/assistant/session';
@@ -302,17 +303,11 @@
         })
         .json<Resp<string>>();
       if ($assistant.conversation?.id === conversationId)
-        assistant.update((state) => ({
-          ...state,
-          turns: state.turns.map((turn) => ({
-            ...turn,
-            tools: turn.tools.map((tool) =>
-              tool.id === id && tool.result
-                ? { ...tool, result: { ...tool.result, data: { ...tool.result.data, device_outcome: data } } }
-                : tool
-            )
-          }))
-        }));
+        updateAssistantTool(id, (tool) =>
+          tool.result
+            ? { ...tool, result: { ...tool.result, data: { ...tool.result.data, device_outcome: data } } }
+            : tool
+        );
     } catch {
       navigationFailure = turnId;
     } finally {
@@ -724,16 +719,10 @@
                   dismissedQuestion = questionTool?.id ?? null;
                 }}
                 oncard={(value) => {
-                  const id = questionTool?.id;
-                  assistant.update((state) => ({
-                    ...state,
-                    turns: state.turns.map((turn) => ({
-                      ...turn,
-                      tools: turn.tools.map((tool) =>
-                        tool.id === id && tool.result ? { ...tool, result: { ...tool.result, data: value } } : tool
-                      )
-                    }))
-                  }));
+                  if (questionTool)
+                    updateAssistantTool(questionTool.id, (tool) =>
+                      tool.result ? { ...tool, result: { ...tool.result, data: value } } : tool
+                    );
                 }}
               />
             {/key}

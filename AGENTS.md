@@ -170,8 +170,8 @@ environment in `backend/.venv`. Confirm `node --version` first; an older default
   runs the first check and the assistant follows its recorded outcome. Use the shared creation receipt for HTTP and MCP
   retries. Keep earlier single-question cards readable and supersede a preliminary validation when a later question revises it.
 - Reuse the domain service's request ID, revision, and receipt for browser approvals.
-  `assistant_reviews.py` handles subscriptions, downloads, schedules, and media changes. Existing plan edits use
-  `assistant_plan_review.py`. Rebuilds use `plan_replacement.py`, and other administrator reviews use `agent_actions.py`.
+  `assistant_reviews.py` handles subscriptions, downloads, schedules, media changes, and existing plan edits.
+  Rebuilds use `plan_replacement.py`, and other administrator reviews use `agent_actions.py`.
   Keep confirmation for plan rebuilds and administrator actions inside the assistant panel. MCP previews return an
   operation ID for status checks. Recheck the owner and role on every read and decision. Reserve the SQLite writer
   before reading a decision for update.

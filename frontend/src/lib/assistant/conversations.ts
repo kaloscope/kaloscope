@@ -96,6 +96,23 @@ function initialState(): AssistantState {
 
 export const assistant = writable<AssistantState>(initialState());
 
+/**
+ * Replace one recorded tool call in the loaded turns.
+ *
+ * @param id - Tool call to change.
+ * @param change - Builds the updated call from the current one.
+ */
+export function updateAssistantTool(id: string, change: (tool: AssistantTool) => AssistantTool): void {
+  assistant.update((value) => ({
+    ...value,
+    turns: value.turns.map((turn) =>
+      turn.tools.some((tool) => tool.id === id)
+        ? { ...turn, tools: turn.tools.map((tool) => (tool.id === id ? change(tool) : tool)) }
+        : turn
+    )
+  }));
+}
+
 export const assistantRestoring = derived(
   assistant,
   (state) =>

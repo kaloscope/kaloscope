@@ -249,6 +249,58 @@ def test_owned_history():
     asyncio.run(run())
 
 
+def test_turn_tool_calls():
+    async def run():
+        async with database() as (owner, _):
+            conversation = await Sessions.create(
+                ConversationCreate.model_validate({"model": MODEL}), owner
+            )
+            calls = {}
+            # the missing workflow hides the last turn's tool records
+            for index, resources in enumerate([[], [], [999]]):
+                turn = await AssistantTurn.create(
+                    conversation_id=conversation["id"],
+                    request_id=f"request-{index}",
+                    prompt=f"Prompt {index}",
+                    status="complete",
+                    resource_ids=resources,
+                )
+                calls[turn.id] = [f"call-{index}-{n}" for n in range(index + 1)]
+                for call_id in calls[turn.id]:
+                    await AssistantToolCall.create(
+                        turn_id=turn.id,
+                        call_id=call_id,
+                        name="list_workflows",
+                        arguments="{}",
+                        status="complete",
+                    )
+            first, second, hidden = calls
+
+            restored = (await Sessions.turns(conversation["id"], owner))["items"]
+            listed = await tools.read_history(
+                tools.HistoryQuery(), conversation["id"], owner
+            )
+
+            assert [[tool["id"] for tool in item["tools"]] for item in restored] == [
+                calls[first],
+                calls[second],
+                [],
+            ]
+            assert restored[-1]["error"] == "permission_denied"
+            assert [
+                (item["turn_id"], [call["call_id"] for call in item["tool_calls"]])
+                for item in listed["items"]
+            ] == [(second, calls[second]), (first, calls[first])]
+            assert listed["items"][0]["tool_calls"][0] == {
+                "call_id": calls[second][0],
+                "name": "list_workflows",
+                "status": "complete",
+            }
+            assert hidden not in {item["turn_id"] for item in listed["items"]}
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("expired", [False, True])
 def test_batch_delete(expired):
     async def run():

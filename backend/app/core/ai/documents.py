@@ -278,6 +278,19 @@ RUN_FACTS = (
     "output_log_id",
 )
 
+# confirmation outcome shared by plan changes, task actions and media changes
+DECISION_FACTS = (
+    "applied",
+    "outcome",
+    "replayed",
+    "confirmation_required",
+    "stale",
+    "conflict",
+    "pending",
+    "failed",
+    "message",
+)
+
 # plan change identities and outcomes retained; settings stay in the original record
 PLAN_CHANGE_FACTS = (
     "valid",
@@ -290,16 +303,7 @@ PLAN_CHANGE_FACTS = (
     "request_id",
     "changes",
     "timing",
-    "applied",
-    "outcome",
-    "replayed",
-    "confirmation_required",
-    "stale",
-    "conflict",
-    "pending",
-    "failed",
-    "message",
-)
+) + DECISION_FACTS
 
 # task action identities, effects and outcomes retained for confirmation
 TASK_ACTION_FACTS = (
@@ -314,16 +318,7 @@ TASK_ACTION_FACTS = (
     "dispatch",
     "revision",
     "request_id",
-    "applied",
-    "outcome",
-    "replayed",
-    "confirmation_required",
-    "stale",
-    "conflict",
-    "pending",
-    "failed",
-    "message",
-)
+) + DECISION_FACTS
 
 # media change identities, choices and outcomes retained for confirmation
 MEDIA_CHANGE_FACTS = (
@@ -363,16 +358,7 @@ MEDIA_CHANGE_FACTS = (
     "reasons",
     "revision",
     "request_id",
-    "applied",
-    "outcome",
-    "replayed",
-    "confirmation_required",
-    "stale",
-    "conflict",
-    "pending",
-    "failed",
-    "message",
-)
+) + DECISION_FACTS
 
 
 def tool_facts(result: dict) -> dict:

@@ -24,6 +24,7 @@ import {
   openAssistant,
   recoverStoppedConversation,
   rememberConversation,
+  updateAssistantTool,
   type AssistantTool,
   type AssistantTurn
 } from './conversations';
@@ -70,17 +71,7 @@ export function abortActiveChat(): void {
  * @param proposal - Recorded canvas edit returned by the server.
  */
 function recordAssistantProposal(proposal: AssistantProposal): void {
-  assistant.update((value) => {
-    const turns = value.turns.map((turn) => {
-      if (!turn.tools.some((tool) => tool.id === proposal.call_id)) return turn;
-      const tools = turn.tools.map((tool) => {
-        if (tool.id !== proposal.call_id) return tool;
-        return { ...tool, proposal };
-      });
-      return { ...turn, tools };
-    });
-    return { ...value, turns };
-  });
+  updateAssistantTool(proposal.call_id, (tool) => ({ ...tool, proposal }));
 }
 
 /**

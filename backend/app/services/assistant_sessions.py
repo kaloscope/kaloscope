@@ -350,11 +350,21 @@ class AssistantSessionService:
             else set()
         )
 
+        page = list(reversed(records[:20]))
+        access = {turn.id: await cls.allowed(turn.resource_ids, user) for turn in page}
+        readable = [turn_id for turn_id, allowed in access.items() if allowed]
+        calls_by_turn: dict[int, list[AssistantToolCall]] = {}
+        # one query for the page; the model orders calls by ID
+        for call in (
+            await AssistantToolCall.filter(turn_id__in=readable) if readable else []
+        ):
+            calls_by_turn.setdefault(call.turn_id, []).append(call)
+
         items = []
         visible = []
-        for turn in reversed(records[:20]):
-            allowed = await cls.allowed(turn.resource_ids, user)
-            calls = await AssistantToolCall.filter(turn_id=turn.id) if allowed else []
+        for turn in page:
+            allowed = access[turn.id]
+            calls = calls_by_turn.get(turn.id, [])
             visible.extend(call.call_id for call in calls)
             items.append(
                 {

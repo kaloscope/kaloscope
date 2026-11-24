@@ -20,6 +20,7 @@ export {
   newAssistantConversation,
   openAssistant,
   toggleAssistant,
+  updateAssistantTool,
   type AssistantTool,
   type AssistantTurn
 } from './conversations';

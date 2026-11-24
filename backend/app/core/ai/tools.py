@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, cast
 from uuid import UUID
 
 from openai.types.chat import ChatCompletionFunctionToolParam
@@ -2686,15 +2686,8 @@ async def create_workflow(
         raise NotFoundException
 
     FlowGraphService.require_editor(user)
-    turn_ids: list[int] = []
-    turn_id = call.turn_id
     # a retry repeats its original request, so include every earlier attempt
-    while turn_id is not None and turn_id not in turn_ids:
-        turn_ids.append(turn_id)
-        turn = await AssistantTurn.get_or_none(
-            id=turn_id, conversation_id=conversation_id
-        )
-        turn_id = turn.retry_of if turn else None
+    turn_ids = await retry_chain(call.turn_id, conversation_id)
 
     earlier = (
         await AssistantToolCall.filter(
@@ -2717,7 +2710,8 @@ async def create_workflow(
                 GraphDraftCreate(
                     name=args.name,
                     description=args.description,
-                    category=args.category,
+                    # the validator requires a category for a blank draft
+                    category=cast(GraphCategory, args.category),
                     document=GraphDocument(nodes=[], edges=[]),
                 ),
                 user,
@@ -2782,19 +2776,33 @@ async def read_history(
             query = query.filter(id__lt=args.before)
         turns = await query.order_by("-id").limit(6)
 
-        items = []
-        for record in turns[:5]:
-            if await AssistantSessionService.allowed(record.resource_ids, user):
-                items.append(
-                    {
-                        "turn_id": record.id,
-                        "prompt": value_summary(record.prompt),
-                        "status": record.status,
-                        "tool_calls": await AssistantToolCall.filter(
-                            turn_id=record.id
-                        ).values("call_id", "name", "status"),
-                    }
-                )
+        readable = [
+            record
+            for record in turns[:5]
+            if await AssistantSessionService.allowed(record.resource_ids, user)
+        ]
+        calls = (
+            await AssistantToolCall.filter(
+                turn_id__in=[record.id for record in readable]
+            )
+            .order_by("id")
+            .values("turn_id", "call_id", "name", "status")
+            if readable
+            else []
+        )
+        items = [
+            {
+                "turn_id": record.id,
+                "prompt": value_summary(record.prompt),
+                "status": record.status,
+                "tool_calls": [
+                    {key: call[key] for key in ("call_id", "name", "status")}
+                    for call in calls
+                    if call["turn_id"] == record.id
+                ],
+            }
+            for record in readable
+        ]
         return {
             "items": items,
             "next_before": turns[4].id if len(turns) > 5 else None,
