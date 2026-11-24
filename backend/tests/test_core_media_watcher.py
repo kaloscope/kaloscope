@@ -36,6 +36,7 @@ from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services.danmaku import DanmakuService
 from app.services.flow import FlowTriggerService
+from tests.helpers import memory_db
 
 
 @pytest.fixture(autouse=True)
@@ -87,11 +88,7 @@ def test_event_thread(monkeypatch, event):
 
 def test_idle_wakeup(tmp_path, monkeypatch):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -138,8 +135,6 @@ def test_idle_wakeup(tmp_path, monkeypatch):
             assert scans == [1, 1, 1, 2, 2]
             consumer.assert_awaited_once()
             assert not await query(lib_id=lib.id).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -296,11 +291,7 @@ def test_initial_scan(tmp_path, monkeypatch, startup, scan_on_startup):
 @pytest.mark.parametrize("enabled", [False, True, None])
 def test_delayed_scan(tmp_path, monkeypatch, enabled):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -324,8 +315,6 @@ def test_delayed_scan(tmp_path, monkeypatch, enabled):
                 )
             else:
                 scan.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -391,11 +380,7 @@ def test_scan_recovery(tmp_path, monkeypatch, stage, by_path):
     mapping = {str(source): str(destination), str(nfo): str(target_nfo)}
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -477,8 +462,6 @@ def test_scan_recovery(tmp_path, monkeypatch, stage, by_path):
             assert not await MediaEvent.filter(lib=lib).exists()
             assert events.empty()
             assert not monitor.is_scanning(lib.dir)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -489,11 +472,7 @@ def test_scan_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, "_enqueue_events", enqueue)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -506,8 +485,6 @@ def test_scan_retry(tmp_path, monkeypatch):
 
             assert not monitor.is_scanning(lib.dir)
             assert enqueue.await_count == 2
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -565,11 +542,7 @@ def test_move_source(tmp_path, monkeypatch, suffix, source_state, destination_ex
         destination_nfo.write_text("<movie><title>Moved</title></movie>")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -641,8 +614,6 @@ def test_move_source(tmp_path, monkeypatch, suffix, source_state, destination_ex
             else:
                 assert result is None
                 assert not await MediaItem.filter(path=str(destination)).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -665,11 +636,7 @@ def test_hash_scan(tmp_path, monkeypatch, backfill_nfo_events, missing):
     cached_meta = {"episode_id": 42}
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -709,8 +676,6 @@ def test_hash_scan(tmp_path, monkeypatch, backfill_nfo_events, missing):
             assert cache.read_text() == "[]"
             assert not await MediaEvent.filter(lib=lib).exists()
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -748,11 +713,7 @@ def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
     monkeypatch.setattr(watcher.asyncio, "sleep", pause)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Original", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -791,8 +752,6 @@ def test_event_reload(tmp_path, monkeypatch, delivery, fail_once):
                 [5] if fail_once else [1] if delivery == "duplicate" else []
             )
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -840,11 +799,7 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -873,8 +828,6 @@ def test_synchronous_ingest(tmp_path, monkeypatch, state, lib_type, relative_pat
                 )
                 if item.id in snapshots:
                     assert item.original == snapshots[item.id]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -894,11 +847,7 @@ def test_event_recovery(tmp_path, monkeypatch, stage, event_type):
     mapping = {str(source): str(destination), str(nfo): str(target_nfo)}
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1009,8 +958,6 @@ def test_event_recovery(tmp_path, monkeypatch, stage, event_type):
                 }
             else:
                 fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1131,11 +1078,7 @@ def test_event_retry(tmp_path, monkeypatch, event_type, error):
     monkeypatch.setattr(watcher, "update_metadata", interrupted)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1166,8 +1109,6 @@ def test_event_retry(tmp_path, monkeypatch, event_type, error):
             assert item.nfo_path == str(nfo)
             assert not await MediaEvent.filter(id=event.id).exists()
             assert fire.await_count == (1 if event_type == "created" else 0)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1205,11 +1146,7 @@ def test_replaced_video(
     cached_meta = {"episode_id": 42}
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1291,8 +1228,6 @@ def test_replaced_video(
                 assert current.danmaku_meta is None
             assert not await MediaEvent.filter(lib=lib).exists()
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1317,11 +1252,7 @@ def test_missing_nfo(tmp_path, monkeypatch, missing_parent):
         )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
             )
@@ -1353,8 +1284,6 @@ def test_missing_nfo(tmp_path, monkeypatch, missing_parent):
                 p["item_id"] == expected_id and p["nfo_type"] == expected_type
                 for p in params
             )
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1370,11 +1299,7 @@ def test_recreated_link(tmp_path, monkeypatch):
     nfo.write_text(nfo_content)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1402,8 +1327,6 @@ def test_recreated_link(tmp_path, monkeypatch):
             assert not source.exists()
             assert not await MediaEvent.filter(id=event.id).exists()
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1520,11 +1443,7 @@ def test_ingest_persistence(tmp_path, monkeypatch, error):
             raise error("journal interrupted")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1551,8 +1470,6 @@ def test_ingest_persistence(tmp_path, monkeypatch, error):
             assert fire.await_count == 1
             assert fire.call_args.kwargs["bootparams"]["item_id"] == item.id
             assert not await MediaEvent.filter(id=event.id).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1583,11 +1500,7 @@ def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo, legacy):
             path.write_text("<metadata/>")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -1682,8 +1595,6 @@ def test_ingest_parameters(tmp_path, monkeypatch, lib_type, nfo, legacy):
             }
             assert not await MediaEvent.filter(id=event.id).exists()
             assert old.read_bytes() == b"unrelated replacement"
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1694,11 +1605,7 @@ def test_ingest_scope(tmp_path, monkeypatch, state):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1739,8 +1646,6 @@ def test_ingest_scope(tmp_path, monkeypatch, state):
             assert not await MediaEvent.filter(id=event.id).exists()
             if state == "other_library":
                 assert await MediaItem.filter(id=item.id, lib=other).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1830,11 +1735,7 @@ def test_ingest_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "organize_items", organize)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1868,8 +1769,6 @@ def test_ingest_paths(tmp_path, monkeypatch):
             assert (await MediaItem.get(lib_id=lib.id)).id == original_id
             assert fire.await_count == 1
             assert await MediaEvent.all().count() == 0
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1888,11 +1787,7 @@ def test_organization_arrival(tmp_path, monkeypatch, arrival, recovery):
     destination = tmp_path / "New.mkv"
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -1968,8 +1863,6 @@ def test_organization_arrival(tmp_path, monkeypatch, arrival, recovery):
             params = fire.call_args.kwargs["bootparams"]
             assert params["item_id"] == incoming.id
             assert params["path"] == str(source)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1992,11 +1885,7 @@ def test_reused_move_source(tmp_path, monkeypatch, suffix, destination_removed):
     nfo.write_text("<movie><title>New</title><year>2026</year></movie>")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -2071,8 +1960,6 @@ def test_reused_move_source(tmp_path, monkeypatch, suffix, destination_removed):
             assert nfo.read_text() == nfo_content
             assert not await MediaEvent.filter(lib=lib).exists()
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2097,11 +1984,7 @@ def test_missing_move_source(tmp_path, monkeypatch, suffix):
     destination_nfo.write_text("<movie><title>Movie</title></movie>")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -2147,8 +2030,6 @@ def test_missing_move_source(tmp_path, monkeypatch, suffix):
             assert destination.is_file()
             assert destination_nfo.is_file()
             assert not await MediaEvent.filter(lib=lib).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2183,11 +2064,7 @@ def test_organized_cache(
     organized_cache = cache if explicit_cache else tmp_path / ".New.json"
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -2237,8 +2114,6 @@ def test_organized_cache(
                 assert item.danmaku_path is None
             assert not await MediaEvent.filter(lib=lib).exists()
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2259,11 +2134,7 @@ def test_reused_cache(tmp_path, monkeypatch, cache_name, organized_cache):
     cache.write_text('[{"text":"Original movie comment","start":1000}]')
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -2303,8 +2174,6 @@ def test_reused_cache(tmp_path, monkeypatch, cache_name, organized_cache):
             assert item.danmaku_path == str(tmp_path / organized_cache)
             assert not (tmp_path / ".old.json").exists()
             assert not await MediaEvent.filter(lib=lib).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2321,11 +2190,7 @@ def test_ingest_shared_nfo(tmp_path, monkeypatch):
     )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -2344,8 +2209,6 @@ def test_ingest_shared_nfo(tmp_path, monkeypatch):
             assert params["path"] == str(folder / "Film.mkv")
             assert params["nfo_path"] == str(folder / "Film (2026).nfo")
             assert Path(params["nfo_path"]).is_file()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2398,11 +2261,7 @@ def test_organization_rescan(
         )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -2465,8 +2324,6 @@ def test_organization_rescan(
                 Path(row.path).exists() for row in await MediaItem.filter(lib_id=lib.id)
             )
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2489,11 +2346,7 @@ def test_unindexed_season(tmp_path, monkeypatch, season_nfo):
     (artwork / "poster.jpg").write_bytes(b"poster")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2534,8 +2387,6 @@ def test_unindexed_season(tmp_path, monkeypatch, season_nfo):
             items = await MediaItem.filter(lib_id=lib.id, parent_id__not_isnull=True)
             assert {item.path: item.id for item in items} == ids
             assert not await MediaEvent.filter(lib_id=lib.id).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2546,11 +2397,7 @@ def test_persisted_event(tmp_path, monkeypatch):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -2587,8 +2434,6 @@ def test_persisted_event(tmp_path, monkeypatch):
             assert not source.exists()
             assert not await MediaEvent.filter(lib=lib).exists()
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2599,11 +2444,7 @@ def test_deferred_events(tmp_path, monkeypatch):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -2647,8 +2488,6 @@ def test_deferred_events(tmp_path, monkeypatch):
             assert pending.payload["organize_ids"] == [1]
             assert await MediaEvent.filter(lib=lib).count() == 1
             fire.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2694,11 +2533,7 @@ def test_ingest_recovery(tmp_path, monkeypatch, restart, interruption):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2754,8 +2589,6 @@ def test_ingest_recovery(tmp_path, monkeypatch, restart, interruption):
             assert organized.with_suffix(".nfo").is_file()
             assert len(fired) == 2
             assert await MediaEvent.filter(lib=lib).count() == 0
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 

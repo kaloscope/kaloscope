@@ -33,6 +33,7 @@ from app.models.media import (
 )
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 
 
 @pytest.fixture(autouse=True)
@@ -363,11 +364,7 @@ def test_publish_cancellation(
 
 def test_current_path(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -398,8 +395,6 @@ def test_current_path(tmp_path):
                 await MediaItemService.refresh_hash_and_size(item)
             await item.refresh_from_db()
             assert item.hash == hashlib.md5(b"video").hexdigest()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -412,11 +407,7 @@ def test_episode_path(tmp_path, monkeypatch, change):
     destination = source.with_name("new.mkv")
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
             )
@@ -464,8 +455,6 @@ def test_episode_path(tmp_path, monkeypatch, change):
                 assert destination.read_bytes() == b"video"
             else:
                 assert not current_nfo.exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -485,11 +474,7 @@ def test_metadata_fallback(tmp_path, monkeypatch, written, refresh):
     monkeypatch.setattr(shelver, "update_metadata", update)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
             )
@@ -529,8 +514,6 @@ def test_metadata_fallback(tmp_path, monkeypatch, written, refresh):
                 assert item.title == "Original"
             assert not (tmp_path / "Old").exists()
             assert not await MediaEvent.all().exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -548,11 +531,7 @@ def test_metadata_fallback(tmp_path, monkeypatch, written, refresh):
 )
 def test_fallback_validation(tmp_path, fields, valid, season):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows", dir=str(tmp_path), lib_type=LibType.TV_SHOW, priority=1
             )
@@ -597,8 +576,6 @@ def test_fallback_validation(tmp_path, fields, valid, season):
             assert item.title == ("Updated" if valid else "Original")
             assert item.year == (None if valid else 2000)
             assert item.season == season
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -613,11 +590,7 @@ def test_fallback_validation(tmp_path, fields, valid, season):
 )
 def test_child_nfo(tmp_path, lib_type, nfo_type, explicit_nfo):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Library", dir=str(tmp_path), lib_type=lib_type, priority=1
             )
@@ -664,8 +637,6 @@ def test_child_nfo(tmp_path, lib_type, nfo_type, explicit_nfo):
             assert item.title == "Child"
             assert parent.title == "Parent"
             assert parent_nfo.read_text() == parent_content
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -674,11 +645,7 @@ def test_child_nfo(tmp_path, lib_type, nfo_type, explicit_nfo):
 @pytest.mark.parametrize("refresh", [False, True])
 def test_nfo_recovery(tmp_path, stage, refresh):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -774,8 +741,6 @@ def test_nfo_recovery(tmp_path, stage, refresh):
             assert not source.exists()
             assert not old_nfo.exists()
             assert not await MediaEvent.filter(id=event.id).exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -922,11 +887,7 @@ def test_metadata_event_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(shelver.MediaEvent, "create", create_event)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -958,8 +919,6 @@ def test_metadata_event_failure(tmp_path, monkeypatch):
             assert item.nfo_mtime is None
             assert etree.parse(nfo).getroot().findtext("title") == "New"
             assert not await MediaEvent.all().exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 

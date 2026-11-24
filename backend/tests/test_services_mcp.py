@@ -7,12 +7,13 @@ from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
-from tortoise import Tortoise, timezone
+from tortoise import timezone
 
 from app.core.exceptions import NotFoundException, UnauthorizedException
 from app.models.mcp import MCPAccessToken, MCPAccessTokenCreate, MCPTokenScope
 from app.models.user import User
 from app.services.mcp import MCPAccessTokenService
+from tests.helpers import memory_db
 
 
 @asynccontextmanager
@@ -22,12 +23,8 @@ async def database():
     Yields:
         The account owning test tokens.
     """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db():
         yield await User.create(username="owner", password="unused", role="admin")
-    finally:
-        await Tortoise.close_connections()
 
 
 @pytest.mark.parametrize("days", [30, 90, 365])

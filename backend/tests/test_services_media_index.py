@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from filelock import Timeout
-from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
 from tortoise.expressions import Q
 from tortoise.queryset import QuerySet
@@ -59,6 +58,7 @@ from app.models.media import (
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services import media as media_service
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 from tests.test_services_media_reading import _user
 
 _PNG = b"\x89PNG\r\n\x1a\nimage"
@@ -75,21 +75,6 @@ def workspace(tmp_path, monkeypatch):
     directory = tmp_path / "cache"
     directory.mkdir()
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
-
-
-@asynccontextmanager
-async def _database() -> AsyncGenerator[None]:
-    """Provide an isolated schema without starting application resources.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 async def _source(
@@ -219,7 +204,7 @@ def _cache(item: MediaItem) -> Path:
 )
 def test_ingest_work(tmp_path, format, chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             before = {
@@ -263,7 +248,7 @@ def test_ingest_work(tmp_path, format, chapter):
 @pytest.mark.parametrize("format", list(MediaFormat))
 def test_ingest_metadata(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             first = await MediaItem.get(lib_id=lib.id, path=str(source.path))
@@ -309,7 +294,7 @@ def test_ingest_metadata(tmp_path, format):
 
 def test_ingest_chapter_errors(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.parent_path
             assert work is not None
@@ -358,7 +343,7 @@ def test_ingest_chapter_errors(tmp_path):
 @pytest.mark.parametrize("whole_work", [False, True])
 def test_ingest_targets(tmp_path, whole_work):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.parent_path
             assert work is not None
@@ -408,7 +393,7 @@ def test_ingest_body_events(tmp_path, monkeypatch, format, chapter):
     monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -476,7 +461,7 @@ def test_ingest_metadata_events(tmp_path, monkeypatch, format):
     monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             original = await MediaItem.get(lib_id=lib.id, path=str(source.path))
@@ -531,7 +516,7 @@ def test_ingest_forced_scope(tmp_path, monkeypatch, scope):
     monkeypatch.setattr(media_events, "notify_media_events", lambda _id: None)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.parent_path
             assert work is not None
@@ -603,7 +588,7 @@ def test_ingest_forced_invalid(tmp_path, novel, selection, forced):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(
                 tmp_path,
                 MediaFormat.TXT if novel else MediaFormat.DIR,
@@ -627,7 +612,7 @@ def test_ingest_forced_invalid(tmp_path, novel, selection, forced):
 )
 def test_ingest_undiscovered(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             before = await MediaItem.all().values()
@@ -669,7 +654,7 @@ def test_ingest_undiscovered(tmp_path, problem):
 @pytest.mark.parametrize("hidden", [False, True])
 def test_ingest_empty_images(tmp_path, monkeypatch, chapter, hidden):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=chapter)
             work = source.parent_path or source.directory
             metadata = source.directory / "ComicInfo.xml"
@@ -747,7 +732,7 @@ def test_ingest_file_events(tmp_path, monkeypatch, format, chapter):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             content = source.path.read_bytes()
@@ -817,7 +802,7 @@ def test_ingest_replacement(tmp_path, format, chapter):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -848,7 +833,7 @@ def test_ingest_missing_sibling(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.CBZ, chapter=True)
             work = source.directory.parent
             other = work / "Other"
@@ -904,7 +889,7 @@ def test_consume_file_move(
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             novel = lib.lib_type == LibType.NOVEL
@@ -1026,7 +1011,7 @@ def test_consume_directory_move(tmp_path, monkeypatch, format, scope, reverse, c
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             chapter = scope in (
                 "collection",
                 "chapter",
@@ -1177,7 +1162,7 @@ def test_consume_mixed_move(tmp_path, monkeypatch, format, chapter, reverse):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             if chapter:
@@ -1298,7 +1283,7 @@ def test_consume_mixed_chapter(tmp_path, monkeypatch, format):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=True)
             assert source.parent_path is not None
             assert not await MediaItemService.ingest_reading_work(
@@ -1355,7 +1340,7 @@ def test_consume_mixed_chapter(tmp_path, monkeypatch, format):
 
 def test_ingest_empty_scope(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.parent_path
             assert work is not None
@@ -1389,7 +1374,7 @@ def test_ingest_empty_scope(tmp_path):
 @pytest.mark.parametrize("existing", [False, True])
 def test_ingest_empty_collection(tmp_path, existing):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.parent_path
             assert work is not None
@@ -1427,7 +1412,7 @@ def test_ingest_empty_collection(tmp_path, existing):
 @pytest.mark.parametrize("problem", ["missing", "symlink", "inaccessible", "ambiguous"])
 def test_ingest_directory_unavailable(tmp_path, monkeypatch, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             from app.core.media.handlers import reading
 
             lib, source = await _source(tmp_path, MediaFormat.DIR)
@@ -1471,7 +1456,7 @@ def test_ingest_directory_unavailable(tmp_path, monkeypatch, problem):
 @pytest.mark.parametrize("change", ["delete", "move", "refill"])
 def test_ingest_empty_changed(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             first = await MediaItem.get(path=str(source.path))
@@ -1541,7 +1526,7 @@ def test_ingest_empty_changed(tmp_path, monkeypatch, change):
 )
 def test_ingest_invalid(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             work, targets = source.directory, None
             if problem == "root":
@@ -1580,7 +1565,7 @@ def test_ingest_invalid(tmp_path, problem):
 @pytest.mark.parametrize("cancel", [False, True])
 def test_ingest_interrupted(tmp_path, monkeypatch, cancel):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.parent_path
             assert work is not None
@@ -1604,7 +1589,7 @@ def test_ingest_interrupted(tmp_path, monkeypatch, cancel):
 @pytest.mark.parametrize("change", ["directory", "type", "delete"])
 def test_ingest_library_changed(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             worker = media_service.to_thread
 
@@ -1645,7 +1630,7 @@ def test_ingest_library_changed(tmp_path, monkeypatch, change):
 )
 def test_create_reading(tmp_path, format, chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             before = {
                 path: path.read_bytes()
@@ -1722,7 +1707,7 @@ def test_create_reading(tmp_path, format, chapter):
 @pytest.mark.parametrize("legacy", [False, True])
 def test_create_preserves(tmp_path, monkeypatch, state, legacy):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR)
             item = await MediaItemService.create_reading(lib.id, source)
             assert item.original is not None
@@ -1754,7 +1739,7 @@ def test_create_preserves(tmp_path, monkeypatch, state, legacy):
 @pytest.mark.parametrize("field", ["format", "dir", "parent"])
 def test_create_conflict(tmp_path, field):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR)
             item = await MediaItemService.create_reading(lib.id, source)
             if field == "format":
@@ -1780,7 +1765,7 @@ def test_create_conflict(tmp_path, field):
 @pytest.mark.parametrize("state", ["missing", "foreign", "format", "nested", "hidden"])
 def test_create_parent(tmp_path, state):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             assert source.parent_path is not None
             parent = None
@@ -1834,7 +1819,7 @@ def test_create_parent(tmp_path, state):
 )
 def test_create_source(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(
                 tmp_path,
                 MediaFormat.DIR
@@ -1870,7 +1855,7 @@ def test_create_source(tmp_path, problem):
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.CBZ])
 def test_create_invalid_body(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             source.path.write_bytes(b"\x00invalid")
             item = await MediaItemService.create_reading(lib.id, source)
@@ -1889,7 +1874,7 @@ def test_create_invalid_body(tmp_path, format):
 @pytest.mark.parametrize("missing", [False, True])
 def test_create_library(tmp_path, missing):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             if missing:
                 await lib.delete()
@@ -1918,7 +1903,7 @@ def test_create_library(tmp_path, missing):
 @pytest.mark.parametrize("cross_container", [False, True])
 def test_move_reading_file(tmp_path, monkeypatch, format, chapter, cross_container):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             novel = lib.lib_type == LibType.NOVEL
@@ -2022,7 +2007,7 @@ def test_move_reading_file(tmp_path, monkeypatch, format, chapter, cross_contain
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB])
 def test_rename_metadata(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             metadata = source.path.with_suffix(".opf")
             xml = (
@@ -2062,7 +2047,7 @@ def test_rename_metadata(tmp_path, format):
 
 def test_rename_case(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.create_reading(lib.id, source)
             destination = source.path.with_name(source.path.name.lower())
@@ -2092,7 +2077,7 @@ def test_rename_case(tmp_path):
 )
 def test_rename_conflict(tmp_path, problem, code):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             destination = source.path.with_name("Renamed.txt")
@@ -2140,7 +2125,7 @@ def test_rename_conflict(tmp_path, problem, code):
 )
 def test_move_file_paths(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.create_reading(lib.id, source)
             previous, destination = source.path, source.path.with_name("Renamed.txt")
@@ -2171,7 +2156,7 @@ def test_move_file_paths(tmp_path, problem):
 @pytest.mark.parametrize("kind", ["unknown", "image_directory", "collection", "video"])
 def test_rename_source_type(tmp_path, kind):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(
                 tmp_path,
                 MediaFormat.DIR
@@ -2209,7 +2194,7 @@ def test_rename_source_type(tmp_path, kind):
 @pytest.mark.parametrize("work", [False, True])
 def test_rename_library_changed(tmp_path, monkeypatch, change, work):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.create_reading(lib.id, source)
             previous = source.directory if work else source.path
@@ -2255,7 +2240,7 @@ def test_rename_library_changed(tmp_path, monkeypatch, change, work):
 @pytest.mark.parametrize("move", [False, True])
 def test_move_file_unstable(tmp_path, monkeypatch, change, move):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.create_reading(lib.id, source)
             destination = source.path.with_name("Renamed.txt")
@@ -2320,7 +2305,7 @@ def test_move_file_unstable(tmp_path, monkeypatch, change, move):
 )
 def test_move_file_conflict(tmp_path, problem, code):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.create_reading(lib.id, source)
             directory = source.directory.with_name("Moved")
@@ -2364,7 +2349,7 @@ def test_move_file_conflict(tmp_path, problem, code):
 @pytest.mark.parametrize("change", ["removed", "case", "new_body"])
 def test_move_file_source_container(tmp_path, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.create_reading(lib.id, source)
             directory = source.directory.with_name("Moved")
@@ -2398,7 +2383,7 @@ def test_move_file_source_container(tmp_path, change):
 
 def test_move_file_standalone(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.ZIP, chapter=True)
             await MediaItemService.ingest_reading_work(lib.id, source.directory.parent)
             other = Path(lib.dir) / "Other"
@@ -2425,7 +2410,7 @@ def test_move_file_standalone(tmp_path):
 )
 def test_rename_reading_work(tmp_path, monkeypatch, format, chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             novel = lib.lib_type == LibType.NOVEL
@@ -2536,7 +2521,7 @@ def test_rename_reading_work(tmp_path, monkeypatch, format, chapter):
 )
 def test_rename_directory_empty(tmp_path, chapter, only_chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=chapter)
             work = source.parent_path or source.directory
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -2568,7 +2553,7 @@ def test_rename_directory_empty(tmp_path, chapter, only_chapter):
 @pytest.mark.parametrize("chapter", [False, True])
 def test_rename_directory_case(tmp_path, chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(
                 tmp_path,
                 MediaFormat.ZIP if chapter else MediaFormat.TXT,
@@ -2619,7 +2604,7 @@ def test_rename_directory_case(tmp_path, chapter):
 )
 def test_rename_work_conflict(tmp_path, problem, code):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -2669,7 +2654,7 @@ def test_rename_work_conflict(tmp_path, problem, code):
 )
 def test_rename_work_paths(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.create_reading(lib.id, source)
             work, destination = source.directory, source.directory.with_name("Renamed")
@@ -2696,7 +2681,7 @@ def test_rename_work_paths(tmp_path, problem):
 @pytest.mark.parametrize("video", [False, True])
 def test_rename_work_unregistered(tmp_path, video):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             work = source.directory
             destination = work.with_name("Renamed")
@@ -2721,7 +2706,7 @@ def test_rename_work_unregistered(tmp_path, video):
 @pytest.mark.parametrize("scope", ["work", "chapter", "other_work"])
 def test_move_directory_unstable(tmp_path, monkeypatch, change, scope):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -2801,7 +2786,7 @@ def test_move_directory_unstable(tmp_path, monkeypatch, change, scope):
 @pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
 def test_rename_reading_chapter(tmp_path, monkeypatch, format):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=True)
             work = source.directory.parent
             sibling = work / "Chapter 2"
@@ -2899,7 +2884,7 @@ def test_rename_reading_chapter(tmp_path, monkeypatch, format):
 )
 def test_rename_chapter_conflict(tmp_path, problem, code):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.ZIP, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -2950,7 +2935,7 @@ def test_rename_chapter_conflict(tmp_path, problem, code):
 @pytest.mark.parametrize("problem", ["standalone", "deep", "hidden_parent"])
 def test_rename_chapter_paths(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -2980,7 +2965,7 @@ def test_rename_chapter_paths(tmp_path, problem):
 @pytest.mark.parametrize("visible", [False, True])
 def test_move_chapter_work(tmp_path, monkeypatch, format, directory_move, visible):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=True)
             work = source.directory.parent
             assert not await MediaItemService.ingest_reading_work(lib.id, work)
@@ -3094,7 +3079,7 @@ def test_move_chapter_work(tmp_path, monkeypatch, format, directory_move, visibl
 )
 def test_move_chapter_conflict(tmp_path, directory_move, problem, code):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.ZIP, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -3168,7 +3153,7 @@ def test_move_chapter_conflict(tmp_path, directory_move, problem, code):
 @pytest.mark.parametrize("parent_body", [False, True])
 def test_move_empty_chapter(tmp_path, parent_body):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -3225,7 +3210,7 @@ def test_consume_directory_delete(tmp_path, monkeypatch, format, scope, scan):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=scope != "work")
             work = source.parent_path or source.directory
             if scope in ("chapter", "collection"):
@@ -3322,7 +3307,7 @@ def test_consume_directory_delete(tmp_path, monkeypatch, format, scope, scan):
 @pytest.mark.parametrize("scan", [False, True])
 def test_consume_file_cleanup(tmp_path, monkeypatch, format, chapter, scan):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             work = source.parent_path or source.directory
             novel = lib.lib_type == LibType.NOVEL
@@ -3433,7 +3418,7 @@ def test_consume_file_cleanup(tmp_path, monkeypatch, format, chapter, scan):
 )
 def test_companion_ownership(tmp_path, monkeypatch, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -3484,7 +3469,7 @@ def test_companion_ownership(tmp_path, monkeypatch, problem):
 @pytest.mark.parametrize("change", ["restore", "replace", "metadata", "permission"])
 def test_companion_retry(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -3539,7 +3524,7 @@ def test_companion_retry(tmp_path, monkeypatch, change):
 @pytest.mark.parametrize("trash", [False, True])
 def test_companion_trash(tmp_path, monkeypatch, trash):
     async def run():
-        async with _database():
+        async with memory_db():
             from app.utils import disk
 
             lib, source = await _source(tmp_path, MediaFormat.TXT)
@@ -3580,7 +3565,7 @@ def test_companion_trash(tmp_path, monkeypatch, trash):
 
 def test_companion_interrupted(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -3638,7 +3623,7 @@ def test_companion_interrupted(tmp_path, monkeypatch):
 @pytest.mark.parametrize("local", [False, True])
 def test_delete_reading(tmp_path, monkeypatch, format, scope, local):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=scope != "work")
             work = source.parent_path or source.directory
             novel = lib.lib_type == LibType.NOVEL
@@ -3796,7 +3781,7 @@ def test_delete_reading(tmp_path, monkeypatch, format, scope, local):
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.DIR])
 def test_delete_reading_shared_cover(tmp_path, monkeypatch, format):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             metadata = source.directory / (
                 "metadata.opf" if format == MediaFormat.TXT else "ComicInfo.xml"
@@ -3834,7 +3819,7 @@ def test_delete_reading_shared_cover(tmp_path, monkeypatch, format):
 @pytest.mark.parametrize("trash", [False, True])
 def test_delete_empty_container(tmp_path, monkeypatch, format, trash):
     async def run():
-        async with _database():
+        async with memory_db():
             from app.utils import disk
 
             lib, source = await _source(tmp_path, format or MediaFormat.DIR)
@@ -3890,7 +3875,7 @@ def test_delete_empty_container(tmp_path, monkeypatch, format, trash):
 @pytest.mark.parametrize("stage", ["body", "companion", "cache", "database", "cancel"])
 def test_delete_reading_retry(tmp_path, monkeypatch, stage):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             metadata = source.directory / "ComicInfo.xml"
@@ -4014,7 +3999,7 @@ def test_delete_reading_retry(tmp_path, monkeypatch, stage):
 @pytest.mark.parametrize("change", ["new_child", "moved_child", "library"])
 def test_delete_reading_scope(tmp_path, monkeypatch, local, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             metadata = work / "ComicInfo.xml"
@@ -4127,7 +4112,7 @@ def test_delete_reading_scope(tmp_path, monkeypatch, local, change):
 )
 def test_delete_reading_guard(tmp_path, monkeypatch, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4198,7 +4183,7 @@ def test_delete_reading_guard(tmp_path, monkeypatch, problem):
 )
 def test_delete_reading_changed(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4262,7 +4247,7 @@ def test_delete_reading_changed(tmp_path, monkeypatch, change):
 )
 def test_remove_missing_reading(tmp_path, format, directory):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4314,7 +4299,7 @@ def test_remove_missing_reading(tmp_path, format, directory):
 @pytest.mark.parametrize("format", [MediaFormat.DIR, MediaFormat.CBZ, MediaFormat.ZIP])
 def test_remove_missing_comic(tmp_path, format, collection):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=True)
             work = source.directory.parent
             sibling = work / "Sibling"
@@ -4413,7 +4398,7 @@ def test_remove_reading_library(tmp_path, monkeypatch, format, problem):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             if problem != "last_work":
@@ -4514,7 +4499,7 @@ def test_remove_reading_library_change(tmp_path, monkeypatch, stage):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             other = source.directory.with_name("Other")
@@ -4590,7 +4575,7 @@ def test_remove_directory_guard(tmp_path, monkeypatch, stage):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             other = source.directory.with_name("Other")
@@ -4655,7 +4640,7 @@ def test_remove_directory_guard(tmp_path, monkeypatch, stage):
 )
 def test_remove_reading_present(tmp_path, kind):
     async def run():
-        async with _database():
+        async with memory_db():
             format = (
                 MediaFormat.TXT if kind in ("file", "replacement") else MediaFormat.DIR
             )
@@ -4694,7 +4679,7 @@ def test_remove_reading_present(tmp_path, kind):
 )
 def test_remove_reading_unavailable(tmp_path, monkeypatch, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4745,7 +4730,7 @@ def test_remove_reading_unavailable(tmp_path, monkeypatch, problem):
 )
 def test_remove_reading_ownership(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.DIR, chapter=True)
             work = source.directory.parent
             await MediaItemService.ingest_reading_work(lib.id, work)
@@ -4793,7 +4778,7 @@ def test_remove_reading_ownership(tmp_path, problem):
 )
 def test_remove_reading_failure(tmp_path, monkeypatch, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4896,7 +4881,7 @@ def test_remove_reading_failure(tmp_path, monkeypatch, problem):
 @pytest.mark.parametrize("base", [False, True])
 def test_remove_reading_cache_link(tmp_path, base):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4916,7 +4901,7 @@ def test_remove_reading_cache_link(tmp_path, base):
 
 def test_remove_reading_cancel(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             item = await MediaItem.get(path=str(source.path))
@@ -4962,7 +4947,7 @@ def test_remove_reading_cancel(tmp_path, monkeypatch):
 
 def test_create_concurrent(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             first, second = await asyncio.gather(
                 MediaItemService.create_reading(lib.id, source),
@@ -4980,7 +4965,7 @@ def test_create_concurrent(tmp_path):
 @pytest.mark.parametrize("cancel", [False, True])
 def test_create_worker(tmp_path, monkeypatch, cancel):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             started, finish, stopped = (
                 threading.Event(),
@@ -5039,7 +5024,7 @@ def test_create_worker(tmp_path, monkeypatch, cancel):
 )
 def test_publish_content(tmp_path, format, chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format, chapter=chapter)
             await MediaItem.filter(id=item.id).update(visible=False)
             source = Path(item.path)
@@ -5096,7 +5081,7 @@ def test_publish_content(tmp_path, format, chapter):
 @pytest.mark.parametrize("legacy", [False, True])
 def test_rebuild_content(tmp_path, legacy):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             original = (
                 None
@@ -5134,7 +5119,7 @@ def test_rebuild_content(tmp_path, legacy):
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.CBZ])
 def test_prune_indexes(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await MediaItemService.index_content(
                 (await _item(tmp_path, format)).id
             )
@@ -5160,7 +5145,7 @@ def test_prune_indexes(tmp_path, format):
 
 def test_prune_active_build(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             started, released = threading.Event(), threading.Event()
             build = media_service._build_index
@@ -5197,7 +5182,7 @@ def test_prune_active_build(tmp_path, monkeypatch):
 
 def test_prune_active_read(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await MediaItemService.index_content(
                 (await _item(tmp_path, MediaFormat.TXT)).id
             )
@@ -5247,7 +5232,7 @@ def test_prune_active_read(tmp_path, monkeypatch):
 )
 def test_reuse_content(tmp_path, monkeypatch, format, chapter):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format, chapter=chapter)
             await MediaItem.filter(id=item.id).update(visible=False)
             first = await MediaItemService.index_content(item.id)
@@ -5287,7 +5272,7 @@ def test_reuse_content(tmp_path, monkeypatch, format, chapter):
 @pytest.mark.parametrize("change", ["size", "mtime"])
 def test_reuse_changed_source(tmp_path, format, change):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             first = await MediaItemService.index_content(item.id)
             path = Path(item.path)
@@ -5325,7 +5310,7 @@ def test_reuse_changed_source(tmp_path, format, change):
 @pytest.mark.parametrize("change", ["add", "remove", "rename"])
 def test_reuse_changed_pages(tmp_path, change):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.DIR)
             second = Path(item.path) / "2.png"
             second.write_bytes(_PNG)
@@ -5367,7 +5352,7 @@ def test_reuse_changed_pages(tmp_path, change):
 )
 def test_reuse_invalid_cache(tmp_path, format, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             first = await MediaItemService.index_content(item.id)
             cache = _cache(first)
@@ -5408,7 +5393,7 @@ def test_reuse_invalid_cache(tmp_path, format, problem):
 )
 def test_reuse_unready(tmp_path, state):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.index_content(item.id)
             await MediaItem.filter(id=item.id).update(
@@ -5427,7 +5412,7 @@ def test_reuse_unstable(tmp_path, monkeypatch):
     from app.core.media import text
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.index_content(item.id)
             load = text.load_text_index
@@ -5475,7 +5460,7 @@ def test_reuse_unstable(tmp_path, monkeypatch):
 @pytest.mark.parametrize("force", [False, True])
 def test_failed_rebuild(tmp_path, format, problem, state, code, force):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             first = await MediaItemService.index_content(item.id)
             path = Path(item.path)
@@ -5501,7 +5486,7 @@ def test_failed_rebuild(tmp_path, format, problem, state, code, force):
 @pytest.mark.parametrize("phase", ["build", "publish", "database"])
 def test_publish_failure(tmp_path, monkeypatch, phase):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.index_content(item.id)
             save = MediaItem.save
@@ -5567,7 +5552,7 @@ def test_publish_failure(tmp_path, monkeypatch, phase):
 @pytest.mark.parametrize("change", ["edit", "move", "delete", "page"])
 def test_changed_build(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(
                 tmp_path, MediaFormat.DIR if change == "page" else MediaFormat.TXT
             )
@@ -5625,7 +5610,7 @@ def test_changed_build(tmp_path, monkeypatch, change):
 @pytest.mark.parametrize("phase", ["build", "publish"])
 def test_cancel_publication(tmp_path, monkeypatch, phase):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             first = await MediaItemService.index_content(item.id)
             started, finish = threading.Event(), threading.Event()
@@ -5687,7 +5672,7 @@ def test_cancel_publication(tmp_path, monkeypatch, phase):
 @pytest.mark.parametrize("kind", ["video", "collection", "missing"])
 def test_unindexable_item(tmp_path, kind):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             if kind == "missing":
                 await item.delete()
@@ -5729,7 +5714,7 @@ def test_unindexable_item(tmp_path, kind):
 )
 def test_collection_state(tmp_path, states, expected):
     async def run():
-        async with _database():
+        async with memory_db():
             child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
             collection = await MediaItem.get(id=child.parent_id)
             await child.delete()
@@ -5792,7 +5777,7 @@ def test_collection_state(tmp_path, states, expected):
 )
 def test_collection_children(tmp_path, kind):
     async def run():
-        async with _database():
+        async with memory_db():
             child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
             collection = await MediaItem.get(id=child.parent_id)
             await MediaItem.filter(id=child.id).update(
@@ -5835,7 +5820,7 @@ def test_collection_children(tmp_path, kind):
 
 def test_collection_recovery(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
             assert child.parent_id is not None
             page = Path(child.path) / "1.png"
@@ -5882,7 +5867,7 @@ def test_collection_recovery(tmp_path):
 @pytest.mark.parametrize("kind", ["video", "novel", "body", "nested", "missing"])
 def test_invalid_collection(tmp_path, kind):
     async def run():
-        async with _database():
+        async with memory_db():
             child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
             assert child.parent_id is not None
             if kind in ("video", "novel"):
@@ -5907,7 +5892,7 @@ def test_invalid_collection(tmp_path, kind):
 
 def test_collection_errors(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
             assert child.parent_id is not None
             await MediaItem.filter(id=child.id).update(
@@ -5939,7 +5924,7 @@ def test_collection_errors(tmp_path):
 )
 def test_collection_lock(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             child = await _item(tmp_path, MediaFormat.DIR, chapter=True)
             assert child.parent_id is not None
             lock = media_service.library_lock
@@ -6089,7 +6074,7 @@ def _ingest_engine(monkeypatch: pytest.MonkeyPatch) -> FlowEngine:
 )
 def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchronous):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, format, chapter=chapter)
             await _ingest_trigger(lib, asynchronous=asynchronous)
             engine = _ingest_engine(monkeypatch)
@@ -6176,7 +6161,7 @@ def test_reading_ingest_workflow(tmp_path, monkeypatch, format, chapter, asynchr
 )
 def test_reading_ingest_wait(tmp_path, monkeypatch, state):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             _ingest_engine(monkeypatch)
@@ -6198,7 +6183,7 @@ def test_reading_ingest_wait(tmp_path, monkeypatch, state):
 @pytest.mark.parametrize("local", ["external", "embedded", "parent", "invalid"])
 def test_reading_ingest_local(tmp_path, monkeypatch, local):
     async def run():
-        async with _database():
+        async with memory_db():
             format = MediaFormat.CBZ if local == "embedded" else MediaFormat.DIR
             lib, source = await _source(tmp_path, format, chapter=local == "parent")
             await _ingest_trigger(lib)
@@ -6252,7 +6237,7 @@ def test_reading_ingest_local(tmp_path, monkeypatch, local):
 )
 def test_reading_ingest_current(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             _ingest_engine(monkeypatch)
@@ -6301,7 +6286,7 @@ def test_reading_ingest_current(tmp_path, monkeypatch, change):
 @pytest.mark.parametrize("phase", ["before", "prepared", "after", "failed"])
 def test_reading_ingest_interrupted(tmp_path, monkeypatch, phase):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             engine = _ingest_engine(monkeypatch)
@@ -6355,7 +6340,7 @@ def test_reading_ingest_interrupted(tmp_path, monkeypatch, phase):
 
 def test_reading_ingest_binding(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await MediaItemService.ingest_reading_work(lib.id, source.directory)
             assert not await MediaEvent.exists()
@@ -6374,7 +6359,7 @@ def test_reading_ingest_binding(tmp_path):
 
 def test_reading_ingest_atomic(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, source = await _source(tmp_path, MediaFormat.TXT)
             await _ingest_trigger(lib)
             with monkeypatch.context() as patcher:

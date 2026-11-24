@@ -7,13 +7,13 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from tortoise import Tortoise
 
 from app.core.ai import queries, tools
 from app.core.exceptions import ErrorCode
 from app.models.flow import FlowGraph, FlowTrigger, GraphCategory, GraphState
 from app.models.media import MediaItem, MediaLib
 from app.models.user import Permissions, UserInfo, UserRole
+from tests.helpers import memory_db
 
 ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN))
 PLOT = "A linguist decodes an alien language. " * 20
@@ -29,9 +29,7 @@ async def media(tmp_path):
     Yields:
         Library and item fixtures plus a reader limited to the movie library.
     """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db():
         movies = await MediaLib.create(
             lib_type="movie", dir=str(tmp_path / "movies"), name="Movies", priority=1
         )
@@ -112,8 +110,6 @@ async def media(tmp_path):
             reader=reader,
             ingest=ingest,
         )
-    finally:
-        await Tortoise.close_connections()
 
 
 @pytest.fixture(autouse=True)

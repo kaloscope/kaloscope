@@ -9,7 +9,6 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
-from tortoise import Tortoise
 
 from app.core.exceptions import (
     ForbiddenException,
@@ -28,6 +27,7 @@ from app.models.flow import (
 from app.models.user import UserInfo
 from app.services import flow
 from app.services.flow import FlowGraphService
+from tests.helpers import memory_db
 
 ADMIN = cast(UserInfo, SimpleNamespace(role="admin"))
 READER = cast(UserInfo, SimpleNamespace(role="user"))
@@ -35,17 +35,13 @@ READER = cast(UserInfo, SimpleNamespace(role="user"))
 
 @asynccontextmanager
 async def database(db_url="sqlite://:memory:"):
-    await Tortoise.init(db_url=db_url, modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db(db_url):
         yield await FlowGraph.create(
             name="Test",
             category=GraphCategory.SCHEDULE,
             state=GraphState.DRAFT,
             draft={"nodes": [], "edges": []},
         )
-    finally:
-        await Tortoise.close_connections()
 
 
 def draft(version=0, url="https://example.test"):

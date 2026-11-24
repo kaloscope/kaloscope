@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from filelock import Timeout
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.core.media import organizer
 from app.core.media.coordination import library_lock
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.services import danmaku
+from tests.helpers import memory_db
 
 
 @pytest.fixture
@@ -25,26 +25,22 @@ def library(monkeypatch, tmp_path):
 
     @asynccontextmanager
     async def create(handler, lib_type=LibType.TV_SHOW, server="https://danmaku.test"):
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
-            async with httpx.AsyncClient(
+        async with (
+            memory_db(),
+            httpx.AsyncClient(
                 transport=httpx.MockTransport(handler), follow_redirects=True
-            ) as client:
-                app = SimpleNamespace(ctx=SimpleNamespace(httpx=client))
-                monkeypatch.setattr(danmaku.Sanic, "get_app", lambda: app)
-                lib = await MediaLib.create(
-                    name="Anime",
-                    dir=str(tmp_path),
-                    priority=1,
-                    lib_type=lib_type,
-                    danmaku_server=server,
-                )
-                yield lib
-        finally:
-            await Tortoise.close_connections()
+            ) as client,
+        ):
+            app = SimpleNamespace(ctx=SimpleNamespace(httpx=client))
+            monkeypatch.setattr(danmaku.Sanic, "get_app", lambda: app)
+            lib = await MediaLib.create(
+                name="Anime",
+                dir=str(tmp_path),
+                priority=1,
+                lib_type=lib_type,
+                danmaku_server=server,
+            )
+            yield lib
 
     return create
 

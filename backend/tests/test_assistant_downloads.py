@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from tortoise import Tortoise
 
 from app.core.ai import tools
 from app.core.config import KaloscopeConfig
@@ -20,6 +19,7 @@ from app.models.download import (
     OfflineDownloadJob,
 )
 from app.models.user import Permissions, UserInfo, UserRole
+from tests.helpers import memory_db
 
 ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN))
 READER = cast(UserInfo, SimpleNamespace(id=2, role=UserRole.USER, perms=Permissions()))
@@ -54,9 +54,7 @@ async def downloads():
     Yields:
         The downloaders and tasks used by the queries.
     """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db():
         alpha = await Downloader.create(
             name="Alpha", config=CONFIG.format(name="Alpha"), priority=1
         )
@@ -102,8 +100,6 @@ async def downloads():
         )
 
         yield SimpleNamespace(alpha=alpha, beta=beta, tasks=tasks)
-    finally:
-        await Tortoise.close_connections()
 
 
 def tasks(result):

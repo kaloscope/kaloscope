@@ -67,6 +67,7 @@ from app.models.flow import FlowGraph, GraphCategory, GraphState
 from app.models.general import Notification
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.services import download as download_service
+from tests.helpers import memory_db
 
 
 def _openlist_runner(downloader, driver):
@@ -97,11 +98,7 @@ def _openlist_runner(downloader, driver):
 @pytest.mark.parametrize("fast", [False, True])
 def test_idle_wakeup(monkeypatch, fast):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="Downloader", priority=1
             )
@@ -150,8 +147,6 @@ def test_idle_wakeup(monkeypatch, fast):
             assert scans == [(1, 1), (1, 1), (1, 1), (2, 2), (2, 2)]
             synchronize.assert_awaited_once()
             assert await DownloadTask.filter(state=DownloadState.COMPLETED).count() == 1
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -161,13 +156,9 @@ def test_idle_wakeup(monkeypatch, fast):
 )
 def test_future_work(monkeypatch, deadline):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        current = datetime.now(UTC)
-        monkeypatch.setattr(syncer.timezone, "now", lambda: current)
-        try:
+        async with memory_db():
+            current = datetime.now(UTC)
+            monkeypatch.setattr(syncer.timezone, "now", lambda: current)
             downloader = await Downloader.create(
                 config="config", name="Downloader", priority=1
             )
@@ -224,8 +215,6 @@ def test_future_work(monkeypatch, deadline):
                 synchronize.assert_awaited_once()
                 await job.refresh_from_db()
                 assert getattr(job, deadline) is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -689,9 +678,7 @@ class FailingPlanOpenListClient(PlanOpenListClient):
 
 async def _run_download_plan(monkeypatch, driver, *, source=None, http=None):
     magnet = source or f"magnet:?xt=urn:btih:{'a' * 40}"
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
+    async with memory_db():
         downloader = await Downloader.create(
             config="config", name="downloader", priority=1
         )
@@ -724,8 +711,6 @@ async def _run_download_plan(monkeypatch, driver, *, source=None, http=None):
         job = await OfflineDownloadJob.get_or_none()
         history_count = await DownloadPlanHistory.all().count()
         return magnet, plan, task, job, history_count
-    finally:
-        await Tortoise.close_connections()
 
 
 def test_download_plan(monkeypatch):
@@ -830,11 +815,7 @@ def test_plan_log(monkeypatch, caplog):
 
 def test_driver_error():
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -863,8 +844,6 @@ def test_driver_error():
 
             await syncer.sync_tasks([task], cast(DownloaderDriver, driver))
             return await Notification.get()
-        finally:
-            await Tortoise.close_connections()
 
     notification = asyncio.run(run())
 
@@ -1056,11 +1035,7 @@ def test_cleanup_retry(monkeypatch):
                 raise OpenListClientError(OpenListErrorKind.TRANSIENT)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -1115,8 +1090,6 @@ def test_cleanup_retry(monkeypatch):
             await runner.interval()
             await job.refresh_from_db()
             return job, client, scheduled, retry_count
-        finally:
-            await Tortoise.close_connections()
 
     job, client, scheduled, retry_count = asyncio.run(run())
 
@@ -1156,11 +1129,7 @@ def test_actions():
             self.calls.append(("delete", identity.task_id, local, task.state))
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="openlist", priority=1
             )
@@ -1219,8 +1188,6 @@ def test_actions():
             await retry_job.refresh_from_db()
             deleted = await DownloadTask.get_or_none(id=tasks[-1].id)
             return actions, driver, tasks, retry_job, deleted
-        finally:
-            await Tortoise.close_connections()
 
     actions, driver, tasks, retry_job, deleted = asyncio.run(run())
 
@@ -1328,11 +1295,7 @@ def test_rpc_files_lookup(source, files, paths):
         return httpx.Response(200, json=item)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="RPC", priority=1
             )
@@ -1364,8 +1327,6 @@ def test_rpc_files_lookup(source, files, paths):
             assert task.unique_id == remote_id
             assert task.files == files
             assert requests == paths
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1392,11 +1353,7 @@ def test_rpc_error_precedes_file_lookup():
         return httpx.Response(503)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="RPC", priority=1
             )
@@ -1433,8 +1390,6 @@ def test_rpc_error_precedes_file_lookup():
             await task.refresh_from_db()
             assert task.state == DownloadState.DOWNLOADING
             assert task.completed_at is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1531,11 +1486,7 @@ def test_xunlei_waits_for_files(tmp_path, monkeypatch, listed, availability):
 
     async def run():
         nonlocal unreadable
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config=config, name="NAS Xunlei", priority=1
             )
@@ -1594,8 +1545,6 @@ def test_xunlei_waits_for_files(tmp_path, monkeypatch, listed, availability):
                 assert (
                     await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 2
                 )
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1648,11 +1597,7 @@ def test_xunlei_file_paths(tmp_path, monkeypatch, directory, paths):
         )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config=config, name="NAS Xunlei", priority=1
             )
@@ -1690,8 +1635,6 @@ def test_xunlei_file_paths(tmp_path, monkeypatch, directory, paths):
                     await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 1
                 )
             assert source.read_bytes() == b"done"
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1721,11 +1664,7 @@ def test_rpc_file_retention(
     monkeypatch.setattr(syncer, "transfer_files", transfer_files)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             downloader = await Downloader.create(
                 config="config", name="RPC", priority=1
             )
@@ -1764,8 +1703,6 @@ def test_rpc_file_retention(
             else:
                 transfer_files.assert_not_awaited()
             assert call.await_count == (2 if source == "details" else 1)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1931,11 +1868,7 @@ def test_transfer_lock(tmp_path, monkeypatch, method, job_id):
 )
 def test_atomic_transfer(tmp_path, monkeypatch, method, cross_device):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             source = Path(task.dir) / "movie.mkv"
             destination = Path(library.dir) / "movie.mkv"
@@ -1977,8 +1910,6 @@ def test_atomic_transfer(tmp_path, monkeypatch, method, cross_device):
             assert destination.read_bytes() == b"movie.mkv"
             assert source.exists() is (method is TransferMethod.COPY)
             assert list(destination.parent.iterdir()) == [destination]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2070,11 +2001,7 @@ def test_transfer_retry(tmp_path, method, stage):
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             assert await syncer.transfer_files(task, task.files)
             original = Path(library.dir) / "movie.mkv"
@@ -2159,19 +2086,13 @@ def test_transfer_retry(tmp_path, method, stage):
             elif method is TransferMethod.SYMLINK:
                 assert organized.is_symlink()
                 assert organized.readlink() == source
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
 
 def test_partial_transfer(tmp_path, monkeypatch):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["first.mkv", "second.mkv"]
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, files
@@ -2201,19 +2122,13 @@ def test_partial_transfer(tmp_path, monkeypatch):
                 files[1]: str(second),
             }
             assert second.read_bytes() == b"second.mkv"
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
 
 def test_transfer_backfill(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["movie.mkv", "missing.mkv", "organized.mkv"]
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, files
@@ -2243,8 +2158,6 @@ def test_transfer_backfill(tmp_path):
             await task.refresh_from_db()
             assert task.transfer_targets is None
             assert destination.read_bytes() == b"existing"
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2252,11 +2165,7 @@ def test_transfer_backfill(tmp_path):
 @pytest.mark.parametrize("method", [TransferMethod.HARDLINK, TransferMethod.SYMLINK])
 def test_transfer_backfill_links(tmp_path, method):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             source = Path(task.dir) / "movie.mkv"
             destination = Path(library.dir) / "movie.mkv"
@@ -2279,8 +2188,6 @@ def test_transfer_backfill_links(tmp_path, method):
             await task.refresh_from_db()
             assert task.transfer_targets == {"movie.mkv": str(destination)}
             assert destination.samefile(source)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2288,11 +2195,7 @@ def test_transfer_backfill_links(tmp_path, method):
 @pytest.mark.parametrize("partial", [False, True])
 def test_transfer_backfill_recorded(tmp_path, monkeypatch, caplog, partial):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["movie.mkv", "missing.mkv"] if partial else ["movie.mkv"]
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.MOVE, files
@@ -2327,8 +2230,6 @@ def test_transfer_backfill_recorded(tmp_path, monkeypatch, caplog, partial):
             assert ("Skipping transfer target backfill" in caplog.text) is partial
             if partial:
                 assert (Path(task.dir) / "missing.mkv").read_bytes() == b"missing.mkv"
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2348,11 +2249,7 @@ def test_transfer_persistence(
     tmp_path, monkeypatch, method, cross_device, job_id, failure, recovery
 ):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             if job_id:
                 await OfflineDownloadJob.create(
@@ -2420,8 +2317,6 @@ def test_transfer_persistence(
             assert source.exists() is (method is TransferMethod.COPY)
             assert not puller.owns_local_transfer(destination, transfer_id)
             assert list(destination.parent.iterdir()) == [destination]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2431,11 +2326,7 @@ def test_transfer_persistence(
 @pytest.mark.parametrize("blocked", ["first.mkv", "second.mkv"])
 def test_transfer_result(tmp_path, method, obstacle, blocked):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["first.mkv", "second.mkv"]
             task, library = await _create_transfer_task(tmp_path, method, files)
             source = Path(task.dir) / blocked
@@ -2474,8 +2365,6 @@ def test_transfer_result(tmp_path, method, obstacle, blocked):
             for name in files:
                 assert (Path(library.dir) / name).read_bytes() == name.encode()
             assert source.exists() is (method is not TransferMethod.MOVE)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2483,11 +2372,7 @@ def test_transfer_result(tmp_path, method, obstacle, blocked):
 @pytest.mark.parametrize("method", list(TransferMethod))
 def test_transfer_same_path(tmp_path, method):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             library.dir = task.dir
             await library.save(update_fields=["dir"])
@@ -2499,8 +2384,6 @@ def test_transfer_same_path(tmp_path, method):
             assert task.transfer_targets == {"movie.mkv": str(source)}
             assert source.read_bytes() == b"movie.mkv"
             assert list(source.parent.iterdir()) == [source]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2597,11 +2480,7 @@ def test_transfer_cancel_failure(tmp_path, monkeypatch, method, failure):
 
 def test_rpc_transfer_known_files(tmp_path):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["movie.mkv"]
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, files
@@ -2635,8 +2514,6 @@ def test_rpc_transfer_known_files(tmp_path):
             assert destination.read_bytes() == files[0].encode()
             assert task.transfer_targets == {files[0]: str(destination)}
             assert await Notification.filter(title="DOWNLOAD_COMPLETED").count() == 1
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2647,11 +2524,7 @@ def test_rpc_transfer_known_files(tmp_path):
 @pytest.mark.parametrize("blocked", ["first.mkv", "second.mkv"])
 def test_rpc_transfer_pending(tmp_path, method, obstacle, entry, blocked):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["first.mkv", "second.mkv"]
             task, library = await _create_transfer_task(tmp_path, method, files)
             task.state = (
@@ -2723,8 +2596,6 @@ def test_rpc_transfer_pending(tmp_path, method, obstacle, entry, blocked):
                 await Notification.filter(title="DOWNLOAD_COMPLETED").count()
                 == notifications
             )
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2732,11 +2603,7 @@ def test_rpc_transfer_pending(tmp_path, method, obstacle, entry, blocked):
 @pytest.mark.parametrize("field", ["transfer_lib_id", "transfer_method", "files"])
 def test_rpc_transfer_disabled(tmp_path, field):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, ["movie.mkv"]
             )
@@ -2751,8 +2618,6 @@ def test_rpc_transfer_disabled(tmp_path, field):
             assert task.transfer_targets is None
             assert not Path(library.dir).exists()
             assert (Path(task.dir) / "movie.mkv").read_bytes() == b"movie.mkv"
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2908,11 +2773,7 @@ def test_transfer_template(tmp_path, suffix):
     template = "{{title}}.{{year}}.S{{season}}E{{episode}}"
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, files
             )
@@ -2942,8 +2803,6 @@ def test_transfer_template(tmp_path, suffix):
             assert stale.transfer_targets == targets
             assert sorted(path.name for path in root.iterdir()) == sorted(expected)
             assert {name: (root / name).stat().st_ino for name in expected} == inodes
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -2961,11 +2820,7 @@ def test_transfer_conflict_organization(tmp_path, method, state, attempted):
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             task.state = state
             await task.save()
@@ -3012,8 +2867,6 @@ def test_transfer_conflict_organization(tmp_path, method, state, attempted):
             assert destination.read_bytes() == b"new video"
             assert task.transfer_targets == {"movie.mkv": str(destination)}
             assert source.exists() is (method is not TransferMethod.MOVE)
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -3026,11 +2879,7 @@ def test_transfer_backfill_invalid(tmp_path, pattern, replacement):
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, ["movie.mkv"]
             )
@@ -3090,8 +2939,6 @@ def test_transfer_backfill_invalid(tmp_path, pattern, replacement):
                 "<movie><title>Do Not Rename</title></movie>"
             )
             assert not (root / "Do Not Rename.mkv").exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -3100,11 +2947,7 @@ def test_organization_legacy_transfer(tmp_path):
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.MOVE, ["movie.mkv"]
             )
@@ -3153,8 +2996,6 @@ def test_organization_legacy_transfer(tmp_path):
             assert Path(item.path).read_bytes() == b"other movie"
             assert not target.marker_path.exists()
             assert not await MediaEvent.filter(event_type="organize").exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -3165,11 +3006,7 @@ def test_organization_transfer_recovery(tmp_path, monkeypatch, method, offline):
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             library.rename_template = "{{title}}"
             await library.save()
@@ -3247,8 +3084,6 @@ def test_organization_transfer_recovery(tmp_path, monkeypatch, method, offline):
                 "Renamed.mkv",
                 "Renamed.nfo",
             ]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -3395,11 +3230,7 @@ def test_partial_transfer_unrelated(tmp_path, pending):
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             files = ["movie.mkv", "movie.nfo", "movie.zh-CN.srt"]
             task, library = await _create_transfer_task(
                 tmp_path, TransferMethod.COPY, files
@@ -3452,8 +3283,6 @@ def test_partial_transfer_unrelated(tmp_path, pending):
                 "movie.mkv": str(root / f"{name}.mkv"),
                 "movie.nfo": str(root / f"{name}.nfo"),
             }
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -3473,11 +3302,7 @@ def test_transfer_target_persistence(
     from app.core.media import organizer
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             task, library = await _create_transfer_task(tmp_path, method, ["movie.mkv"])
             source = Path(task.dir) / "movie.mkv"
             destination = Path(library.dir) / "movie.mkv"
@@ -3553,8 +3378,6 @@ def test_transfer_target_persistence(
                 "Organized.mkv",
                 "Organized.nfo",
             ]
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 

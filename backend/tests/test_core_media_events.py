@@ -4,7 +4,6 @@ import asyncio
 import os
 import shutil
 import threading
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
@@ -16,7 +15,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from filelock import Timeout
 from sanic import Sanic
-from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
 from watchdog.events import (
     DirMovedEvent,
@@ -50,6 +48,7 @@ from app.models.media import (
     MediaLib,
 )
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 from tests.test_services_media_reading import _indexed_epub, _user
 
 
@@ -65,21 +64,6 @@ def workspace(tmp_path, monkeypatch):
     cache.mkdir()
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(cache))
     monkeypatch.setattr(media_events, "notify_media_events", Mock())
-
-
-@asynccontextmanager
-async def _database() -> AsyncGenerator[None]:
-    """Provide an isolated schema without starting application resources.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 async def _library(tmp_path: Path, lib_type: LibType = LibType.COMIC) -> MediaLib:
@@ -127,7 +111,7 @@ def test_reading_scan(tmp_path, monkeypatch, lib_type, initial):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, lib_type)
             root = Path(lib.dir)
             for name in ("New", "Empty", ".hidden", "copy.part"):
@@ -226,7 +210,7 @@ def test_scan_pending(tmp_path, monkeypatch):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             work = Path(lib.dir) / "Work"
             work.mkdir(parents=True)
@@ -296,7 +280,7 @@ def test_scan_unavailable(tmp_path, monkeypatch, problem):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             root = Path(lib.dir)
             if problem == "file":
@@ -340,7 +324,7 @@ def test_scan_ownership(tmp_path, monkeypatch, change):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             (Path(lib.dir) / "Work").mkdir(parents=True)
             monitor = _monitor(monkeypatch, lib)
@@ -387,7 +371,7 @@ def test_scan_scope(tmp_path, scope):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             await MediaEvent.create(
                 lib=lib,
@@ -415,7 +399,7 @@ def test_scan_ingest(tmp_path, monkeypatch, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, lib_type)
             work = Path(lib.dir) / "Work"
             work.mkdir(parents=True)
@@ -459,7 +443,7 @@ def test_coalesce_burst(tmp_path, monkeypatch, lib_type, entry):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, lib_type)
             work = Path(lib.dir) / "Work"
             target = work / "Chapter" if lib_type == LibType.COMIC else work
@@ -580,7 +564,7 @@ def test_consume_reading_scope(tmp_path, kind):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             root = Path(lib.dir)
             pending = []
@@ -658,7 +642,7 @@ def test_consume_reading_pending(tmp_path, monkeypatch, kind):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, LibType.NOVEL)
             task = await MediaEvent.create(
                 lib=lib,
@@ -700,7 +684,7 @@ def test_coalesce_scopes(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             work = Path(lib.dir) / "Work"
             other = Path(lib.dir) / "Other"
@@ -769,7 +753,7 @@ def test_coalesce_content(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             work = Path(lib.dir) / "Work"
             for path in (
@@ -806,7 +790,7 @@ def test_coalesce_content(tmp_path):
 @pytest.mark.parametrize("state", ["deferred", "failed"])
 def test_coalesce_repair(tmp_path, state):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, LibType.COMIC)
             work = Path(lib.dir) / "Work"
             first, second = work / "A", work / "B"
@@ -858,7 +842,7 @@ def test_coalesce_legacy(tmp_path, legacy):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             work = Path(lib.dir) / "Work"
             payload = {"targets": [str(work)], "moves": [], "schema_version": 1}
@@ -896,7 +880,7 @@ def test_coalesce_moves(tmp_path, is_directory):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             root = Path(lib.dir)
             suffix = "Chapter" if is_directory else "Chapter/1.png"
@@ -954,7 +938,7 @@ def test_coalesce_isolation(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             other = await MediaLib.create(
                 name="Other",
@@ -1014,7 +998,7 @@ def test_coalesce_transaction(tmp_path, monkeypatch, failure, consumer):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             path = str(Path(lib.dir) / "Work/Chapter/1.png")
             original = await MediaEvent.create(
@@ -1105,7 +1089,7 @@ def test_coalesce_invalid_payload(tmp_path, payload):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             for name in ("A", "B"):
                 await MediaEvent.create(
@@ -1138,7 +1122,7 @@ def test_coalesce_video(tmp_path, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, lib_type)
             original = await MediaEvent.create(
                 lib=lib, src_path=lib.dir, event_type="deleted"
@@ -1163,7 +1147,7 @@ def test_coalesce_library_change(tmp_path, monkeypatch, change):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path)
             original = await MediaEvent.create(
                 lib=lib,
@@ -1254,7 +1238,7 @@ async def _ready(task: MediaEvent, moment: list[float]) -> MediaEvent:
 
 def test_scan_body_update(tmp_path, monkeypatch, moment):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             item = await MediaItem.get(path=str(body))
@@ -1288,7 +1272,7 @@ def test_scan_body_update(tmp_path, monkeypatch, moment):
 
 def test_scan_handoff(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, LibType.NOVEL)
             monitor = _monitor(monkeypatch, lib)
             monkeypatch.setattr(monitor, "_observers", {})
@@ -1302,7 +1286,7 @@ def test_scan_handoff(tmp_path, monkeypatch):
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
 def test_missing_cache_recovery(tmp_path, moment, lib_type):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, lib_type)
             assert await consume_event(await _ready(task, moment))
             unit = await MediaItem.get(lib=lib, format__isnull=False)
@@ -1346,7 +1330,7 @@ def test_missing_cache_recovery(tmp_path, moment, lib_type):
 @pytest.mark.parametrize("queued", [False, True])
 def test_corrupt_cache_recovery(tmp_path, moment, queued):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_epub(tmp_path)
             cache = (
                 Path(KaloscopeConfig.get_workspace("temp"))
@@ -1401,7 +1385,7 @@ def test_corrupt_cache_recovery(tmp_path, moment, queued):
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
 def test_scan_layout_issue(tmp_path, monkeypatch, moment, lib_type):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await _library(tmp_path, lib_type)
             root = Path(lib.dir)
             root.mkdir()
@@ -1445,7 +1429,7 @@ def test_consume_reading_ready(tmp_path, monkeypatch, moment, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, lib_type)
             video = AsyncMock(side_effect=AssertionError("unexpected video processing"))
             monkeypatch.setattr(media_watcher, "_consume_event", video)
@@ -1512,7 +1496,7 @@ def test_consume_reading_ready(tmp_path, monkeypatch, moment, lib_type):
 @pytest.mark.parametrize("invalid_metadata", [False, True])
 def test_consume_empty_body(tmp_path, moment, lib_type, invalid_metadata):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, lib_type)
             assert await consume_event(await _ready(task, moment))
             item = await MediaItem.get(lib=lib, format__isnull=False)
@@ -1575,7 +1559,7 @@ def test_consume_empty_body(tmp_path, moment, lib_type, invalid_metadata):
 
 def test_consume_empty_and_invalid(tmp_path, moment):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, LibType.COMIC)
             assert await consume_event(await _ready(task, moment))
             item = await MediaItem.get(lib=lib, format=MediaFormat.DIR)
@@ -1611,7 +1595,7 @@ def test_consume_reading_stale(tmp_path, monkeypatch, moment, change):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             if change == "move":
                 destination = tmp_path / "Moved"
@@ -1666,7 +1650,7 @@ def test_consume_reading_asset_move(tmp_path, moment, lib_type, asset):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, lib_type)
             assert await consume_event(await _ready(task, moment))
             item = await MediaItem.get(lib=lib, format__isnull=False)
@@ -1716,7 +1700,7 @@ def test_consume_reading_page_move(tmp_path, moment, cross_chapter):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, page, task = await _pending(tmp_path, LibType.COMIC)
             (page.parent / "2.png").write_bytes(page.read_bytes())
             if cross_chapter:
@@ -1767,7 +1751,7 @@ def test_consume_file_publish(tmp_path, moment, existing, temporary):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             first = None
             if existing:
@@ -1803,7 +1787,7 @@ def test_consume_file_conflict(tmp_path, moment, problem):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             destination = body.with_name(
@@ -1865,7 +1849,7 @@ def test_consume_move_chain(tmp_path, moment, order, reverse):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             original = await MediaItem.get(path=str(body))
@@ -1929,7 +1913,7 @@ def test_consume_chain_order(tmp_path, moment, directory, first):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             original = await MediaItem.get(path=str(body))
@@ -1981,7 +1965,7 @@ def test_consume_mixed_failure(tmp_path, monkeypatch, moment, failure):
     from app.services import media as media_service
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             original = await MediaItem.get(path=str(body))
@@ -2093,7 +2077,7 @@ def test_consume_move_swap(tmp_path, monkeypatch, moment, directory, interrupt):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             other = body.parent.with_name("Other") / body.name
@@ -2170,7 +2154,7 @@ def test_consume_chain_boundary(tmp_path, moment, directory, shape):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             before = await MediaItem.all().values()
@@ -2246,7 +2230,7 @@ def test_consume_chain_boundary(tmp_path, moment, directory, shape):
 @pytest.mark.parametrize("linked", [False, True])
 def test_consume_cross_library(tmp_path, moment, lib_type, reverse, linked):
     async def run():
-        async with _database():
+        async with memory_db():
             origin, body, task = await _pending(tmp_path, lib_type)
             assert await consume_event(await _ready(task, moment))
             original_ids = await MediaItem.all().values_list("id", flat=True)
@@ -2321,7 +2305,7 @@ def test_consume_chain_conflict(tmp_path, monkeypatch, moment, directory, proble
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             paths = [body.parent if directory else body]
@@ -2423,7 +2407,7 @@ def test_consume_chain_recovery(
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             original = await MediaItem.get(path=str(body))
@@ -2495,7 +2479,7 @@ def test_consume_observed_directory(tmp_path, moment, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, lib_type)
             assert await consume_event(await _ready(task, moment))
             before = {item.id: item.path for item in await MediaItem.all()}
@@ -2537,7 +2521,7 @@ def test_consume_deleted_library(tmp_path, moment, lib_type, problem):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, lib_type)
             assert await consume_event(await _ready(task, moment))
             root, work = Path(lib.dir), Path(task.src_path)
@@ -2570,7 +2554,7 @@ def test_consume_delete_scope(tmp_path, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, LibType.COMIC)
             work = Path(task.src_path)
             sibling = work / "Other"
@@ -2614,7 +2598,7 @@ def test_consume_delete_recovery(tmp_path, monkeypatch, moment, failure):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             work = body.parent
@@ -2667,7 +2651,7 @@ def test_consume_missing_body(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             from app.services import media as media_service
 
             monkeypatch.setattr(
@@ -2708,7 +2692,7 @@ def test_consume_directory_publish(tmp_path, moment, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, lib_type)
             destination = Path(task.src_path)
             temporary = destination.with_name(".incoming")
@@ -2743,7 +2727,7 @@ def test_consume_directory_conflict(tmp_path, moment, problem):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             source, destination = body.parent, body.parent.with_name("Moved")
@@ -2808,7 +2792,7 @@ def test_consume_directory_recovery(tmp_path, monkeypatch, moment, failure):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, LibType.COMIC)
             assert await consume_event(await _ready(task, moment))
             original = {item.id: item.path for item in await MediaItem.all()}
@@ -2884,7 +2868,7 @@ def test_consume_move_interrupted(tmp_path, monkeypatch, moment, cancel):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert await consume_event(await _ready(task, moment))
             item = await MediaItem.get(lib=lib)
@@ -2939,7 +2923,7 @@ def test_consume_reading_interrupted(tmp_path, monkeypatch, moment, change):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             task = await _ready(task, moment)
             ingest = MediaItemService.ingest_reading_work
@@ -3030,7 +3014,7 @@ def test_reading_execution_retry(tmp_path, monkeypatch, moment, restart, recover
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, LibType.COMIC)
             image = body.read_bytes()
             body.write_bytes(b"not an image")
@@ -3120,7 +3104,7 @@ def test_reading_execution_recheck(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path)
             monitor = _monitor(monkeypatch, lib)
             handler = get_handler(lib.lib_type)
@@ -3192,7 +3176,7 @@ def test_reading_schedule(tmp_path, monkeypatch, moment, lib_type, restart):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, lib_type)
             if restart:
                 assert not await prepare_reading_event(task.id)
@@ -3279,7 +3263,7 @@ def test_reading_schedule_retry(tmp_path, monkeypatch, moment, lib_type, restart
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, lib_type)
             other = Path(lib.dir) / "Other" / body.name
             other.parent.mkdir()
@@ -3375,7 +3359,7 @@ def test_reading_schedule_update(tmp_path, monkeypatch, moment, change):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             if change == "retry":
                 payload = ReadingReconcile.model_validate(task.payload)
@@ -3515,7 +3499,7 @@ def test_reading_schedule_error(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path)
             payload = ReadingReconcile.model_validate(task.payload)
             payload.state, payload.attempts = "deferred", 1
@@ -3551,7 +3535,7 @@ def test_prepare_stable(tmp_path, monkeypatch, moment, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path, lib_type)
             handler = get_handler(lib_type)
             assert isinstance(handler, ReadingMediaHandler)
@@ -3594,7 +3578,7 @@ def test_prepare_growth(tmp_path, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             other = Path(lib.dir) / "Other/Book.txt"
             other.parent.mkdir()
@@ -3626,7 +3610,7 @@ def test_prepare_new_events(tmp_path, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert not await prepare_reading_event(task.id)
             moment[0] = 101.0
@@ -3654,7 +3638,7 @@ def test_prepare_unavailable(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             _, _, task = await _pending(tmp_path)
             assert not await prepare_reading_event(task.id)
             handler = get_handler(LibType.NOVEL)
@@ -3707,7 +3691,7 @@ def test_prepare_backoff(tmp_path, monkeypatch, moment, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path, lib_type)
             initial = ReadingReconcile.model_validate(task.payload)
             handler = get_handler(lib_type)
@@ -3770,7 +3754,7 @@ def test_prepare_failed_isolation(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _, task = await _pending(tmp_path)
             payload = ReadingReconcile.model_validate(task.payload)
             payload.state = "failed"
@@ -3811,7 +3795,7 @@ def test_reading_event_interrupted(tmp_path, monkeypatch, moment, failure, finis
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             _, _, task = await _pending(tmp_path)
             if finishing:
                 task = await _ready(task, moment)
@@ -3866,7 +3850,7 @@ def test_reading_event_race(tmp_path, monkeypatch, moment, change, failed, finis
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             if finishing:
                 task = await _ready(task, moment)
@@ -3956,7 +3940,7 @@ def test_prepare_boundaries(tmp_path, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, task = await _pending(tmp_path)
             assert not await prepare_reading_event(task.id + 1)
             raw = await MediaEvent.create(
@@ -3992,7 +3976,7 @@ def test_finish_ingested(tmp_path, moment, lib_type):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, pending = await _pending(tmp_path, lib_type)
             task = await _ready(pending, moment)
             payload = ReadingReconcile.model_validate(task.payload)
@@ -4034,7 +4018,7 @@ def test_finish_changed(tmp_path, moment, change, failed):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, pending = await _pending(tmp_path, LibType.COMIC)
             sibling = Path(lib.dir) / "Work/Sibling/1.png"
             sibling.parent.mkdir()
@@ -4084,7 +4068,7 @@ def test_finish_retry(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, body, pending = await _pending(tmp_path, LibType.COMIC)
             image = body.read_bytes()
             body.write_bytes(b"not an image")
@@ -4150,7 +4134,7 @@ def test_finish_unavailable(tmp_path, monkeypatch, moment):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             _, _, pending = await _pending(tmp_path)
             task = await _ready(pending, moment)
             handler = get_handler(LibType.NOVEL)
@@ -4188,7 +4172,7 @@ def test_finish_unprepared(tmp_path, monkeypatch, moment, state):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             _, _, pending = await _pending(tmp_path)
             if state == "waiting":
                 assert not await prepare_reading_event(pending.id)
@@ -4223,7 +4207,7 @@ def test_finish_write_failure(tmp_path, monkeypatch, moment, failed):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             _, _, pending = await _pending(tmp_path)
             task = await _ready(pending, moment)
             before = await MediaEvent.all().values()

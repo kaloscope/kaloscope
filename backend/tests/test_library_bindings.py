@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 from sanic.response.types import BaseHTTPResponse
-from tortoise import Tortoise
 
 from app.core.config import KaloscopeConfig
 from app.models.flow import FlowGraph, FlowTrigger, GraphCategory, GraphRef
@@ -17,6 +16,7 @@ from app.routes import media as routes
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaLibService
 from app.utils.json import dumps, loads
+from tests.helpers import memory_db
 
 WATCHER = SimpleNamespace(is_scanning=lambda _: False)
 ADMIN = SimpleNamespace(id=1, role=UserRole.ADMIN, perms=None)
@@ -41,9 +41,7 @@ async def library(tmp_path, layout):
     Yields:
         The library and its bound workflows in stored order.
     """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db():
         lib = await MediaLib.create(
             lib_type=LibType.MOVIE, dir=str(tmp_path), name="Movies", priority=1
         )
@@ -63,8 +61,6 @@ async def library(tmp_path, layout):
             graphs.append(graph)
 
         yield lib, graphs
-    finally:
-        await Tortoise.close_connections()
 
 
 async def stored(lib_id):

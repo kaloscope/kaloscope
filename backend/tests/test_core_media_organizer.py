@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import mimetypes
 import threading
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
@@ -36,16 +35,7 @@ from app.services.danmaku import (
 )
 from app.services.flow import FlowTriggerService
 from app.utils.disk import original_file_info
-
-
-@asynccontextmanager
-async def _database():
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
+from tests.helpers import memory_db
 
 
 def _nfo(path: Path, title: str, tag="movie", extra=""):
@@ -236,7 +226,7 @@ def test_empty_journal(tmp_path, monkeypatch, event_type):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             original_path = item.path
             nfo = _path(item.nfo_path)
@@ -361,7 +351,7 @@ def test_journal_conflict(tmp_path, monkeypatch, conflict):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(root)
             journal = await _journal(lib, item)
             source, destination = Path(item.path), root / "New Movie.mkv"
@@ -407,7 +397,7 @@ def test_journal_cancellation(tmp_path, monkeypatch, cancel_count, failure):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             journal = await _journal(lib, item)
             entered, release, finished = (
@@ -471,7 +461,7 @@ def test_journal_files(tmp_path, monkeypatch, mode):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             journal = await _journal(lib, item)
             nfo, copied, alias = (
@@ -587,7 +577,7 @@ async def _episode(root: Path):
 
 def test_movie_rename(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             user = await User.create(
                 username="viewer", password="test", role=UserRole.USER
@@ -618,7 +608,7 @@ def test_movie_rename(tmp_path):
 
 def test_movie_hierarchy(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             original = item.original
             await organizer.organize_items(lib, [item.id])
@@ -649,7 +639,7 @@ def test_movie_hierarchy(tmp_path):
 @pytest.mark.parametrize("conflict", [None, ".mkv", ".nfo"])
 def test_movie_flatten(tmp_path, conflict):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "Movies"
             root.mkdir()
             lib, item = await _movie(root, "{{title}}/{{title}}")
@@ -710,7 +700,7 @@ def test_movie_flatten(tmp_path, conflict):
 @pytest.mark.parametrize("template", ["{{title}}", "{{title}}/{{title}}"])
 def test_shared_movie_companions(tmp_path, indexed, template):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, template)
             other_video = tmp_path / "original.mp4"
             other_video.write_bytes(b"other version")
@@ -748,7 +738,7 @@ def test_shared_movie_companions(tmp_path, indexed, template):
 @pytest.mark.parametrize("filename", ["New Movie.mp4", "Another Edition.mkv"])
 def test_movie_destination(tmp_path, indexed, layout, filename):
     async def run():
-        async with _database():
+        async with memory_db():
             template = "{{title}}/{{title}}" if layout == "directory" else "{{title}}"
             lib, item = await _movie(tmp_path, template)
             destination = tmp_path / "New Movie" if layout == "directory" else tmp_path
@@ -812,7 +802,7 @@ def test_companion_rename(tmp_path, monkeypatch, companion, relocated, collision
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(tmp_path))
 
     async def run():
-        async with _database():
+        async with memory_db():
             target_name = "Renamed" if relocated else "Show"
             lib = await MediaLib.create(
                 name="Shows",
@@ -909,7 +899,7 @@ def test_companion_rename(tmp_path, monkeypatch, companion, relocated, collision
 )
 def test_unsafe_plan(tmp_path, invalid):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             if invalid == "collision":
                 (tmp_path / "New Movie.mkv").write_bytes(b"other")
@@ -930,7 +920,7 @@ def test_unsafe_plan(tmp_path, invalid):
 @pytest.mark.parametrize("conflict", ["existing_file", "planned_file"])
 def test_destination_ancestor(tmp_path, conflict):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             source = Path(parent.path)
             destination = tmp_path / "Show" / "Season 01"
@@ -975,7 +965,7 @@ def test_destination_ancestor(tmp_path, conflict):
 
 def test_recovery(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             original = item.original
             cache = tmp_path / ".original.json"
@@ -1015,7 +1005,7 @@ def test_recovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize("episode", [None, 1])
 def test_episode_recovery(tmp_path, monkeypatch, known_nfo, episode):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             nfo = _path(item.nfo_path)
             shared = tmp_path / "shared"
@@ -1088,7 +1078,7 @@ def test_episode_recovery(tmp_path, monkeypatch, known_nfo, episode):
 @pytest.mark.parametrize("invalid", [False, True])
 def test_episode_metadata(tmp_path, invalid):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             original_path = item.path
             title = "x" * 256 if invalid else "New title"
@@ -1125,7 +1115,7 @@ def test_episode_metadata(tmp_path, invalid):
 
 def test_legacy_episode_recovery(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             _nfo(
                 _path(item.nfo_path),
@@ -1171,7 +1161,7 @@ def test_legacy_episode_recovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize("directory", [False, True])
 def test_show_originaltitle(tmp_path, originaltitle, directory):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             source = Path(parent.path)
             old_path = item.path
@@ -1221,7 +1211,7 @@ def test_show_originaltitle(tmp_path, originaltitle, directory):
 
 def test_tvshow_missing_nfo(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -1289,7 +1279,7 @@ def test_tvshow_missing_nfo(tmp_path):
 @pytest.mark.parametrize("indexed", [False, True])
 def test_pending_episode_nfo(tmp_path, show_title, basename, indexed):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             lib.rename_template = "{{parent.title}}/{{code}} - {{title}}"
             source = Path(parent.path)
@@ -1360,7 +1350,7 @@ def test_missing_companion(tmp_path, monkeypatch, companion, recovery):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(root)
             source = Path(item.dir)
             if companion == "nfo":
@@ -1455,7 +1445,7 @@ def test_season_fallback(
     expected,
 ):
     async def run():
-        async with _database():
+        async with memory_db():
             template = "{{parent.title}}/"
             if season_directory:
                 template += "Season {{season}}/"
@@ -1526,7 +1516,7 @@ def test_season_fallback(
 @pytest.mark.parametrize("original_source", [False, True])
 def test_transfer_mapping(tmp_path, original_source):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             downloader = await Downloader.create(name="Test", config="{}", priority=1)
             source = tmp_path if original_source else tmp_path / "downloads"
@@ -1557,7 +1547,7 @@ def test_transfer_mapping(tmp_path, original_source):
 
 def test_relative_symlink(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "library"
             root.mkdir()
             original = tmp_path / "download.mkv"
@@ -1587,7 +1577,7 @@ def test_external_symlink(tmp_path, monkeypatch, absolute, chained, target_name)
     monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             source = Path(item.path)
             target = source.with_name(target_name)
@@ -1644,7 +1634,7 @@ def test_external_directory_symlink(tmp_path, monkeypatch, absolute, relocated):
     monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             directory = "Renamed" if relocated else "Original"
             lib.rename_template = directory + "/{{code}} - {{title}}"
@@ -1741,7 +1731,7 @@ def test_directory_link_scope(tmp_path, reference):
 @pytest.mark.parametrize("suffix", [".nfo", ".srt"])
 def test_external_companion_link(tmp_path, suffix):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             source = Path(item.path).with_suffix(suffix)
             if suffix == ".srt":
@@ -1770,7 +1760,7 @@ def test_retained_symlink(tmp_path, monkeypatch, absolute, interruption, target_
     monkeypatch.setattr(FlowTriggerService, "fire", AsyncMock())
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             lib.rename_template = "Original/{{code}} - {{title}}"
             await lib.save(update_fields=["rename_template"])
@@ -1852,7 +1842,7 @@ def test_retained_symlink(tmp_path, monkeypatch, absolute, interruption, target_
 @pytest.mark.parametrize("relocated", [False, True])
 def test_symlink_target_alias(tmp_path, reference, relocated):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "library"
             root.mkdir()
             lib, parent, item = await _episode(root)
@@ -1900,7 +1890,7 @@ def test_symlink_target_alias(tmp_path, reference, relocated):
 @pytest.mark.parametrize("pending", [False, True])
 def test_retained_download_symlink(tmp_path, pending):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             lib.rename_template = "Original/{{code}} - {{title}}"
             source = Path(item.path)
@@ -1944,7 +1934,7 @@ def test_retained_download_symlink(tmp_path, pending):
 
 def test_movie_artwork(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             artwork = tmp_path / "poster.jpg"
             artwork.write_bytes(b"picture")
@@ -1972,7 +1962,7 @@ def test_movie_artwork(tmp_path):
 @pytest.mark.parametrize("suffix", [".srt", ".zh-Hans.forced.ass"])
 def test_subtitle_owner(tmp_path, linked, suffix):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             other_video = tmp_path / "original.Extended.mkv"
             if linked:
@@ -2005,7 +1995,7 @@ def test_subtitle_owner(tmp_path, linked, suffix):
 @pytest.mark.parametrize("absolute", [False, True])
 def test_shared_artwork(tmp_path, nested, indexed, absolute):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             if nested:
                 await organizer.organize_items(lib, [item.id])
@@ -2062,7 +2052,7 @@ def test_shared_artwork(tmp_path, nested, indexed, absolute):
 @pytest.mark.parametrize("absolute", [False, True])
 def test_whitespace_artwork(tmp_path, absolute):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             artwork = tmp_path / "poster.jpg"
             artwork.write_bytes(b"shared poster")
@@ -2106,7 +2096,7 @@ def test_whitespace_artwork(tmp_path, absolute):
 )
 def test_nfo_symlink(tmp_path, template, reference, organized):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "library"
             root.mkdir()
             lib, item = await _movie(root, template)
@@ -2152,7 +2142,7 @@ def test_nfo_symlink(tmp_path, template, reference, organized):
 )
 def test_season_nfo_symlink(tmp_path, season, organized):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "library"
             source = root / "Original"
             source.mkdir(parents=True)
@@ -2219,7 +2209,7 @@ def test_season_nfo_symlink(tmp_path, season, organized):
 @pytest.mark.parametrize("listed", [False, True])
 def test_download_nfo(tmp_path, listed):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2287,7 +2277,7 @@ def test_indexed_events(tmp_path, monkeypatch):
     monkeypatch.setattr(FlowTriggerService, "fire", fire)
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             media_event = await MediaEvent.create(
                 lib=lib,
@@ -2323,7 +2313,7 @@ def test_indexed_events(tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", [None, "before", "after"])
 def test_cancelled_writer(tmp_path, monkeypatch, failure):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             entered, release = threading.Event(), threading.Event()
             original = organizer._move_files
@@ -2358,7 +2348,7 @@ def test_cancelled_writer(tmp_path, monkeypatch, failure):
 
 def test_season_merge(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2422,7 +2412,7 @@ def test_season_merge(tmp_path):
 @pytest.mark.parametrize("source_first", [False, True])
 def test_season_split(tmp_path, seasons, existing_directory, source_first):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2524,7 +2514,7 @@ def test_season_split(tmp_path, seasons, existing_directory, source_first):
 @pytest.mark.parametrize("published", [False, True])
 def test_split_nfo_permissions(tmp_path, monkeypatch, mode, published):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             parent_nfo = _path(parent.nfo_path)
             parent_nfo.chmod(mode if mode is not None else 0o644)
@@ -2582,7 +2572,7 @@ def test_split_season_fallback(
     tmp_path, monkeypatch, source_first, interrupted, fallback_season
 ):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2677,7 +2667,7 @@ def test_split_season_fallback(
 
 def test_shared_image(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             await organizer.organize_items(lib, [item.id])
             await item.refresh_from_db()
@@ -2714,7 +2704,7 @@ def test_shared_image(tmp_path):
 )
 def test_download_source_alias(tmp_path, filename, recorded):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "library"
             root.mkdir()
             lib, item = await _movie(root)
@@ -2751,7 +2741,7 @@ def test_download_source_alias(tmp_path, filename, recorded):
 
 def test_artwork_symlink(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             await organizer.organize_items(lib, [item.id])
             await item.refresh_from_db()
@@ -2770,7 +2760,7 @@ def test_artwork_symlink(tmp_path):
 
 def test_episode_case_collision(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2818,7 +2808,7 @@ def test_episode_case_collision(tmp_path):
 
 def test_metadata_length(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             artwork = tmp_path / "poster.jpg"
             artwork.write_bytes(b"picture")
@@ -2846,7 +2836,7 @@ def test_metadata_length(tmp_path):
 @pytest.mark.parametrize("template", ["{{title}}", "{{title}}/{{title}}"])
 def test_subtitle_symlink(tmp_path, absolute, template):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, template)
             subtitle = tmp_path / "original.en.srt"
             subtitle.write_text("subtitles")
@@ -2869,7 +2859,7 @@ def test_subtitle_symlink(tmp_path, absolute, template):
 @pytest.mark.parametrize("different_visibility", [False, True])
 def test_parent_merge(tmp_path, visible, different_visibility):
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -2951,7 +2941,7 @@ def test_parent_merge(tmp_path, visible, different_visibility):
 
 def test_hidden_movie(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path, "{{title}}/{{title}}")
             item.visible = False
             await item.save(update_fields=["visible"])
@@ -2979,7 +2969,7 @@ def test_hidden_movie(tmp_path):
 @pytest.mark.parametrize("parent_collision", [False, True])
 def test_indexed_destination(tmp_path, parent_collision):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(
                 tmp_path, "{{title}}/{{title}}" if parent_collision else "{{title}}"
             )
@@ -3006,7 +2996,7 @@ def test_indexed_destination(tmp_path, parent_collision):
 
 def test_planned_path_collision(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(tmp_path)
             destination = str(tmp_path / "same-target")
             with pytest.raises(ValueError, match="same database path"):
@@ -3034,7 +3024,7 @@ def test_danmaku_response(tmp_path, monkeypatch, operation, has_comments):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(root, "{{title}}/{{title}}")
             async with library_lock(lib.dir):
                 await organizer.organize_items(lib, [item.id])
@@ -3113,7 +3103,7 @@ def test_danmaku_deletion(tmp_path, monkeypatch):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(root, "{{title}}/{{title}}")
             async with library_lock(lib.dir):
                 await organizer.organize_items(lib, [item.id])
@@ -3162,7 +3152,7 @@ def test_danmaku_scope(tmp_path, monkeypatch, operation):
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _: str(locks))
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(root),
@@ -3317,7 +3307,7 @@ def test_danmaku_cancellation(tmp_path, monkeypatch):
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
 
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _movie(root)
             lib.danmaku_server = "https://danmaku.example"
             await lib.save(update_fields=["danmaku_server"])
@@ -3465,7 +3455,7 @@ def test_shared_references(tmp_path, invalid):
 
 def test_season_groups(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, parent, item = await _episode(tmp_path)
             _nfo(
                 _path(item.nfo_path), "Special", "episodedetails", "<season>0</season>"
@@ -3498,7 +3488,7 @@ def test_season_groups(tmp_path):
 @pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
 def test_plan(tmp_path, lib_type):
     async def run():
-        async with _database():
+        async with memory_db():
             if lib_type == LibType.TV_SHOW:
                 lib, parent, item = await _episode(tmp_path)
             else:

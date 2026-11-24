@@ -10,7 +10,6 @@ import httpx
 import pytest
 from jinja2.defaults import DEFAULT_FILTERS
 from jinja2.exceptions import TemplateSyntaxError
-from tortoise import Tortoise
 
 from app.core.ai import history, tools
 from app.core.config import KaloscopeConfig
@@ -31,6 +30,7 @@ from app.services.assistant import SYSTEM_PROMPT
 from app.services.flow import FlowGraphService
 from app.utils.dict import TrackableDict
 from app.utils.json import dumps, loads, try_loads
+from tests.helpers import memory_db
 
 ROOT = Path(__file__).parents[1] / "static" / "flow"
 USER = SimpleNamespace(id=1, role=UserRole.ADMIN)
@@ -400,11 +400,7 @@ def test_auth_output(monkeypatch, name):
     example["name"] = name
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        try:
-            await Tortoise.generate_schemas()
+        async with memory_db():
             await FlowGraph.create(
                 id=1, name="Authentication fixture", category="indexer", state="draft"
             )
@@ -429,8 +425,6 @@ def test_auth_output(monkeypatch, name):
                 assert ctx["$retval"] == example
                 assert cached.value == {"name": "Previous"}
                 assert cached.expires is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 

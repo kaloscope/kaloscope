@@ -23,6 +23,7 @@ from app.models.flow import FlowGraph, GraphCategory, GraphRef, GraphState
 from app.models.media import LibType, MediaEvent, MediaItem, MediaLib, MediaLibUpsert
 from app.services.flow import FlowTriggerService
 from app.services.media import MediaItemService, MediaLibService
+from tests.helpers import memory_db
 
 
 @pytest.fixture(autouse=True)
@@ -47,11 +48,7 @@ def test_startup_scan(tmp_path, library_services, initial):
     settings = {} if initial is None else {"scan_on_startup": initial}
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             library = await MediaLibService.upsert(
                 MediaLibUpsert(
                     dir=str(tmp_path),
@@ -84,8 +81,6 @@ def test_startup_scan(tmp_path, library_services, initial):
             assert library.scan_on_startup is enabled
             assert (await MediaLibService.dump(library))["scan_on_startup"] is enabled
             observer.assert_awaited_once()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -98,18 +93,12 @@ def test_observer_outside_transaction(tmp_path, library_services):
     )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             await MediaLibService.upsert(
                 MediaLibUpsert(
                     dir=str(tmp_path), lib_type=LibType.MOVIE, name="Library"
                 )
             )
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -136,11 +125,7 @@ def test_directory_alias(tmp_path, library_services, relationship, existing_alia
         requested /= "child"
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             library = await MediaLib.create(
                 name="Existing", dir=str(existing), lib_type=LibType.MOVIE, priority=1
             )
@@ -163,8 +148,6 @@ def test_directory_alias(tmp_path, library_services, relationship, existing_alia
             assert await MediaLib.all().count() == 1
             observer.assert_not_awaited()
             bind.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -235,11 +218,7 @@ def test_rename_template(
     observer, bind = library_services
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             library = await MediaLibService.upsert(
                 MediaLibUpsert(
                     dir=str(tmp_path),
@@ -290,8 +269,6 @@ def test_rename_template(
             assert bind.await_count == 4
             assert not await MediaEvent.filter(event_type="organize").exists()
             assert not await MediaEvent.filter(event_type="ingest").exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -346,11 +323,7 @@ def test_template_lib_type(
     observer, bind = library_services
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             library = await MediaLib.create(
                 dir=str(tmp_path),
                 lib_type=lib_type,
@@ -373,8 +346,6 @@ def test_template_lib_type(
             assert library.name == "Existing library"
             observer.assert_not_awaited()
             bind.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -391,11 +362,7 @@ def test_local_delete_lock(tmp_path, monkeypatch, delete_parent, pending_recover
     monkeypatch.setattr("app.services.media.delete_path", delete)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -469,8 +436,6 @@ def test_local_delete_lock(tmp_path, monkeypatch, delete_parent, pending_recover
             assert not await MediaItem.filter(id=item.id).exists()
             assert not await MediaEvent.filter(event_type="organize").exists()
             assert not (tmp_path / "New.mkv").exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -569,11 +534,7 @@ def test_library_delete_lock(tmp_path, monkeypatch):
 @pytest.mark.parametrize("pending_recovery", [False, True])
 def test_hide_lock(tmp_path, monkeypatch, flatten, pending_recovery):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -641,8 +602,6 @@ def test_hide_lock(tmp_path, monkeypatch, flatten, pending_recovery):
                 assert parent.visible is False
                 assert (tmp_path / "New" / "New.mkv").read_bytes() == b"video"
             assert not await MediaEvent.filter(event_type="organize").exists()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -659,11 +618,7 @@ def test_delete_split(tmp_path, monkeypatch, local, merge):
     monkeypatch.setattr("app.services.media.delete_path", remove)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Shows",
                 dir=str(tmp_path),
@@ -767,8 +722,6 @@ def test_delete_split(tmp_path, monkeypatch, local, merge):
                 await child.refresh_from_db()
                 assert child.visible is True
                 assert Path(child.path).read_bytes() == Path(child.path).name.encode()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -778,11 +731,7 @@ def test_delete_new_parent(tmp_path, monkeypatch, local):
     monkeypatch.setattr("app.services.media.delete_path", lambda path: path.unlink())
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies",
                 dir=str(tmp_path),
@@ -831,8 +780,6 @@ def test_delete_new_parent(tmp_path, monkeypatch, local):
                 assert item.visible is False
                 assert parent.visible is False
                 assert Path(item.path).is_file()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1041,18 +988,12 @@ def test_item_delete_scope(tmp_path, monkeypatch, local, layout):
 @pytest.mark.parametrize("local", [False, True])
 def test_item_delete_missing(local):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             if local:
                 with pytest.raises(DoesNotExist):
                     await MediaItemService.delete(1, local=True)
             else:
                 assert await MediaItemService.delete(1) is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1069,11 +1010,7 @@ def test_item_delete_recovery(tmp_path, monkeypatch, local, stage):
     monkeypatch.setattr("app.services.media.delete_path", remove)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -1141,8 +1078,6 @@ def test_item_delete_recovery(tmp_path, monkeypatch, local, stage):
                 assert item.visible is False
                 assert destination.read_bytes() == b"video"
                 assert removed == []
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1150,11 +1085,7 @@ def test_item_delete_recovery(tmp_path, monkeypatch, local, stage):
 @pytest.mark.parametrize("lib_type", [LibType.NOVEL, LibType.COMIC])
 def test_reading_library(tmp_path, monkeypatch, lib_type):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             graph = await FlowGraph.create(
                 name="Reading",
                 category=GraphCategory.INGEST,
@@ -1218,8 +1149,6 @@ def test_reading_library(tmp_path, monkeypatch, lib_type):
                 GraphCategory.INGEST, library.id
             )
             observer.assert_awaited_once()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -1228,11 +1157,7 @@ def test_reading_library(tmp_path, monkeypatch, lib_type):
 @pytest.mark.parametrize("editing", [False, True])
 def test_reading_library_options(tmp_path, library_services, lib_type, editing):
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             library = (
                 await MediaLib.create(
                     name="Original", dir=str(tmp_path), lib_type=lib_type, priority=1
@@ -1258,7 +1183,5 @@ def test_reading_library_options(tmp_path, library_services, lib_type, editing):
             observer, bind = library_services
             observer.assert_not_awaited()
             bind.assert_not_awaited()
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())

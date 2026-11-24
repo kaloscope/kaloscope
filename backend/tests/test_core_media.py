@@ -16,6 +16,7 @@ from app.core.media.handlers.tvshow import TVShowMediaHandler
 from app.core.media.shelver import update_metadata
 from app.models.media import Language, LibType, MediaItem, MediaLib
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 
 
 @pytest.mark.parametrize(
@@ -129,11 +130,7 @@ def test_metadata_targets(tmp_path, registered):
     )
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -188,8 +185,6 @@ def test_metadata_targets(tmp_path, registered):
             await other.refresh_from_db()
             assert other.title == "Other library"
             assert other.nfo_mtime is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 
@@ -205,11 +200,7 @@ def test_metadata_empty(tmp_path, content):
         path.write_text(content)
 
     async def run():
-        await Tortoise.init(
-            db_url="sqlite://:memory:", modules={"models": ["app.models"]}
-        )
-        await Tortoise.generate_schemas()
-        try:
+        async with memory_db():
             lib = await MediaLib.create(
                 name="Movies", dir=str(tmp_path), lib_type=LibType.MOVIE, priority=1
             )
@@ -228,8 +219,6 @@ def test_metadata_empty(tmp_path, content):
             assert item.title == "Original"
             assert item.nfo_path is None
             assert item.nfo_mtime is None
-        finally:
-            await Tortoise.close_connections()
 
     asyncio.run(run())
 

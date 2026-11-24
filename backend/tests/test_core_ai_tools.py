@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from jsonschema import Draft202012Validator
-from tortoise import Tortoise
 
 from app.core.ai import catalog, history, tools
 from app.core.ai.documents import graph_outline
@@ -34,6 +33,7 @@ from app.models.flow import (
 )
 from app.models.user import Permissions, User, UserInfo, UserRole
 from app.services.assistant import SYSTEM_PROMPT
+from tests.helpers import memory_db
 
 ADMIN = cast(UserInfo, SimpleNamespace(id=1, role=UserRole.ADMIN))
 CREATE = {"name": "Nightly scan", "category": "schedule", "description": "Scan daily"}
@@ -46,16 +46,12 @@ async def database():
     Yields:
         Control while the account and conversation fixtures are available.
     """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    try:
-        await Tortoise.generate_schemas()
+    async with memory_db():
         await User.create(
             id=ADMIN.id, username="owner", password="unused", role="admin"
         )
         await AssistantConversation.create(id=1, user_id=ADMIN.id, title="Tool fixture")
         yield
-    finally:
-        await Tortoise.close_connections()
 
 
 async def record_call(call_id: str, retry_of: AssistantTurn | None = None):

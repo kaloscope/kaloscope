@@ -21,7 +21,6 @@ from filelock import FileLock, Timeout
 from pydantic import ValidationError
 from sanic import Sanic
 from sanic.response import BaseHTTPResponse
-from tortoise import Tortoise
 from tortoise.exceptions import DoesNotExist
 
 from app.core.config import KaloscopeConfig
@@ -62,6 +61,7 @@ from app.routes.media import media as media_blueprint
 from app.services import media as media_service
 from app.services.media import MediaItemService
 from app.utils.json import dumps
+from tests.helpers import memory_db
 
 _PNG = b"\x89PNG\r\n\x1a\nimage"
 
@@ -77,21 +77,6 @@ def workspace(tmp_path, monkeypatch):
     directory = tmp_path / "cache"
     directory.mkdir()
     monkeypatch.setattr(KaloscopeConfig, "get_workspace", lambda _name: str(directory))
-
-
-@asynccontextmanager
-async def _database() -> AsyncGenerator[None]:
-    """Provide an isolated schema without starting application resources.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 def _user(lib_ids: list[int] | None = None) -> UserInfo:
@@ -205,7 +190,7 @@ async def _item(tmp_path: Path, format: MediaFormat | None) -> MediaItem:
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_sync_metadata(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             await MediaItem.filter(id=item.id).update(
                 visible=False,
@@ -270,7 +255,7 @@ def test_sync_metadata(tmp_path, format):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_sync_updates(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
             xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
@@ -357,7 +342,7 @@ def test_sync_failure(tmp_path, monkeypatch, problem, code):
         raise ContentError("ambiguous_metadata")
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(
                 tmp_path, MediaFormat.EPUB if problem == "embedded" else MediaFormat.TXT
             )
@@ -404,7 +389,7 @@ def test_sync_failure(tmp_path, monkeypatch, problem, code):
 @pytest.mark.parametrize("broken", [False, True])
 def test_sync_parent(tmp_path, external, broken):
     async def run():
-        async with _database():
+        async with memory_db():
             parent = await _item(tmp_path, None)
             (Path(parent.path) / "ComicInfo.xml").write_bytes(
                 b"broken"
@@ -450,7 +435,7 @@ def test_sync_parent(tmp_path, external, broken):
 @pytest.mark.parametrize("change", ["move", "delete", "library", "state"])
 def test_sync_ownership(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             worker = media_service.to_thread
 
@@ -509,7 +494,7 @@ def test_sync_ownership(tmp_path, monkeypatch, change):
 @pytest.mark.parametrize("problem", ["video", "missing", "outside", "symlink"])
 def test_sync_source(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             if problem == "video":
                 await MediaLib.filter(id=item.lib_id).update(lib_type=LibType.MOVIE)
@@ -535,7 +520,7 @@ def test_sync_source(tmp_path, problem):
 @pytest.mark.parametrize("cancel", [False, True])
 def test_sync_worker(tmp_path, monkeypatch, cancel):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             before = await MediaItem.get(id=item.id).values()
             started, finish, stopped = (
@@ -591,7 +576,7 @@ def test_sync_worker(tmp_path, monkeypatch, cancel):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_current_details(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
             xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
@@ -628,7 +613,7 @@ def test_current_details(tmp_path, format):
 
 def test_detail_updates(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             path = Path(item.dir) / "metadata.opf"
             path.write_bytes(_opf("First"))
@@ -652,7 +637,7 @@ def test_detail_updates(tmp_path):
 @pytest.mark.parametrize("broken", [False, True])
 def test_metadata_issues(tmp_path, broken):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.EPUB)
             (Path(item.dir) / "metadata.opf").write_bytes(
                 b"broken"
@@ -691,7 +676,7 @@ def test_access_before_files(tmp_path, monkeypatch, access, method):
     monkeypatch.setattr(media_service, "_read_metadata", unexpected)
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             user = _user([] if access in ("denied", "unloaded") else None)
             if access == "unloaded":
@@ -727,7 +712,7 @@ def test_access_before_files(tmp_path, monkeypatch, access, method):
 )
 def test_source_boundary(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             path = Path(item.path)
             (path.parent / "metadata.opf").write_bytes(_opf("Private"))
@@ -772,7 +757,7 @@ def test_source_boundary(tmp_path, problem):
 @pytest.mark.parametrize("parent_state", ["valid", "hidden", "foreign", "wrong_path"])
 def test_parent_scope(tmp_path, parent_state):
     async def run():
-        async with _database():
+        async with memory_db():
             parent = await _item(tmp_path, None)
             directory = Path(parent.path) / "Chapter"
             directory.mkdir()
@@ -827,7 +812,7 @@ def test_parent_scope(tmp_path, parent_state):
 @pytest.mark.parametrize("external", [False, True])
 def test_moved_file_metadata(tmp_path, format, external):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             novel = item.lib.lib_type == LibType.NOVEL
             previous = Path(item.path)
@@ -895,7 +880,7 @@ def test_moved_file_metadata(tmp_path, format, external):
 )
 def test_moved_chapter_metadata(tmp_path, format, move_type):
     async def run():
-        async with _database():
+        async with memory_db():
             parent = await _item(tmp_path, None)
             work = Path(parent.path)
             directory = work / "Chapter"
@@ -984,7 +969,7 @@ def test_moved_chapter_metadata(tmp_path, format, move_type):
 
 def test_related_items(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             parent = await _item(tmp_path, None)
             other = await MediaLib.create(
                 name="Other",
@@ -1016,7 +1001,7 @@ def test_related_items(tmp_path):
 
 def test_cover_freshness(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             assert await MediaItemService.get_cover(item.id, _user()) is None
             path = Path(item.dir) / "cover.png"
@@ -1039,7 +1024,7 @@ def test_read_revalidation(tmp_path, monkeypatch, change):
     calls = 0
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             main_thread = threading.get_ident()
             read_metadata = reader.read_metadata
@@ -1136,7 +1121,7 @@ async def _client(user: UserInfo) -> AsyncGenerator[httpx.AsyncClient]:
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_delete_reading_http(tmp_path, monkeypatch, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             directory = Path(item.dir)
             novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
@@ -1169,7 +1154,7 @@ def test_delete_reading_http(tmp_path, monkeypatch, format):
 )
 def test_delete_reading_http_error(tmp_path, monkeypatch, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.DIR)
             directory = Path(item.dir)
             metadata = directory / "ComicInfo.xml"
@@ -1234,7 +1219,7 @@ def test_delete_reading_http_error(tmp_path, monkeypatch, problem):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_reading_http(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             directory = Path(item.dir)
             novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
@@ -1290,7 +1275,7 @@ def test_reading_http(tmp_path, format):
 )
 def test_video_details_http(tmp_path, lib_type, root):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             await MediaLib.filter(id=item.lib_id).update(lib_type=lib_type)
             path = Path(item.dir) / "video.nfo"
@@ -1381,7 +1366,7 @@ def test_video_details_http(tmp_path, lib_type, root):
 
 def test_cover_errors_http(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             async with _client(_user()) as client:
                 url = f"/_api/media/{item.id}/assets/cover"
@@ -1441,7 +1426,7 @@ def test_text_content_http(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             body = "Chapter 1\n\n<script>alert(1)</script>\n\nChapter 2\n\n中文正文"
             item = await _indexed_text(tmp_path, body)
             metadata = Path(item.dir) / "metadata.opf"
@@ -1538,7 +1523,7 @@ def test_text_query_http(tmp_path, params, status, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_text(tmp_path)
             async with _client(_user()) as client:
                 response = await client.get(
@@ -1574,7 +1559,7 @@ def test_text_content_sources(tmp_path, change, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_text(tmp_path)
             source = Path(item.path)
             cache = (
@@ -1638,7 +1623,7 @@ def test_text_content_access(tmp_path, monkeypatch, change, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_text(tmp_path)
             user = _user()
             if change in {"pending", "empty", "error"}:
@@ -1672,7 +1657,7 @@ def test_text_content_access(tmp_path, monkeypatch, change, code):
 
 def test_content_lock_wait(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_text(tmp_path)
             asyncio.get_running_loop().set_default_executor(
                 ThreadPoolExecutor(max_workers=2)
@@ -1704,7 +1689,7 @@ def test_content_lock_wait(tmp_path):
 
 def test_content_cancel(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_text(tmp_path)
             started, released = threading.Event(), threading.Event()
             read = media_service._read_text_content
@@ -1762,7 +1747,7 @@ def test_content_race(tmp_path, monkeypatch, change, mode):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await (
                 _indexed_text(tmp_path)
                 if mode == "txt"
@@ -1838,7 +1823,7 @@ def test_text_content_limit(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             body = "\n\n".join(
                 f"Chapter {index} " + "长" * 100 + "\n\nBody" for index in range(3500)
             )
@@ -1866,7 +1851,7 @@ def test_text_content_files_change(tmp_path, monkeypatch, change, format):
     from app.core.media import text as text_media
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await (
                 _indexed_text(tmp_path)
                 if format == MediaFormat.TXT
@@ -2001,7 +1986,7 @@ def test_epub_content_http(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_epub(tmp_path)
             user = _user([item.lib_id])
             await User.create(
@@ -2157,7 +2142,7 @@ def test_epub_asset_errors(tmp_path, version_key, case, status, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await (
                 _indexed_text(tmp_path) if case == "txt" else _indexed_epub(tmp_path)
             )
@@ -2235,7 +2220,7 @@ def test_epub_content_corrupt(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_epub(tmp_path)
             async with _client(_user()) as client:
                 url = f"/_api/media/{item.id}/content"
@@ -2318,7 +2303,7 @@ def test_comic_content_http(tmp_path, format, chapter):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_comic(tmp_path, format, chapter=chapter)
             before = await MediaItem.get(id=item.id).values()
             user = _user([item.lib_id])
@@ -2499,7 +2484,7 @@ def test_comic_query_http(tmp_path, params, status):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_comic(tmp_path, MediaFormat.DIR)
             async with _client(_user()) as client:
                 response = await client.get(
@@ -2521,7 +2506,7 @@ def test_comic_page_limits(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_comic(tmp_path, MediaFormat.DIR)
             for number in range(3, 103):
                 (Path(item.path) / f"{number}.png").write_bytes(_PNG)
@@ -2575,7 +2560,7 @@ def test_comic_content_changes(tmp_path, monkeypatch, change, status, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_comic(tmp_path, MediaFormat.DIR)
             directory = Path(item.path)
             page = directory / "1.png"
@@ -2652,7 +2637,7 @@ def test_comic_asset_crc(tmp_path, format):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_comic(tmp_path, format)
             async with _client(_user()) as client:
                 content = await client.get(f"/_api/media/{item.id}/content")
@@ -2694,7 +2679,7 @@ def test_comic_read_race(tmp_path, monkeypatch, asset, change):
     from app.core.media import reader
 
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _indexed_comic(tmp_path, MediaFormat.DIR)
             cache = (
                 tmp_path / "cache/media_index" / str(item.id) / str(item.index_version)
@@ -2809,7 +2794,7 @@ def test_collection_content_http(tmp_path, monkeypatch):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             before = await MediaItem.all().order_by("id").values()
             assert (
@@ -2928,7 +2913,7 @@ def test_collection_selection(tmp_path, states, selected, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             for number, state in zip((1, 2, 10), states, strict=True):
                 await MediaItem.filter(id=chapters[number].id).update(index_state=state)
@@ -2972,7 +2957,7 @@ def test_collection_scope(tmp_path, scope):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             if scope == "foreign_library":
                 foreign = await MediaLib.create(
@@ -3041,7 +3026,7 @@ def test_collection_errors(tmp_path, case, status, code):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             if case == "empty":
                 parent = await _item(tmp_path, None)
             else:
@@ -3107,7 +3092,7 @@ def test_collection_read_race(tmp_path, monkeypatch, change, status):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             user = _user([parent.lib_id])
             await User.create(
@@ -3189,7 +3174,7 @@ def test_collection_reparented(tmp_path, monkeypatch):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             other = await MediaItem.create(
                 lib_id=parent.lib_id,
@@ -3233,7 +3218,7 @@ def test_collection_versions(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             await MediaItem.filter(id=chapters[1].id).update(index_version="invalid")
             async with _client(_user()) as client:
@@ -3258,7 +3243,7 @@ def test_collection_content_limit(tmp_path):
     """
 
     async def run():
-        async with _database():
+        async with memory_db():
             parent, chapters = await _indexed_collection(tmp_path)
             await MediaItem.bulk_create(
                 [
@@ -3290,7 +3275,7 @@ def test_collection_content_limit(tmp_path):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_save_metadata(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             directory = Path(item.dir)
             novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
@@ -3360,7 +3345,7 @@ def test_save_metadata(tmp_path, format):
 )
 def test_save_opf_priority(tmp_path, name):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             directory = Path(item.dir)
             target = directory / name
@@ -3400,7 +3385,7 @@ def test_save_opf_priority(tmp_path, name):
 )
 def test_auto_metadata_existing(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             directory = Path(item.dir)
             if format == MediaFormat.TXT:
@@ -3436,7 +3421,7 @@ def test_auto_metadata_existing(tmp_path, format):
 )
 def test_auto_metadata_create(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             if format in (MediaFormat.CBZ, MediaFormat.ZIP):
                 with zipfile.ZipFile(item.path, "w") as archive:
@@ -3450,7 +3435,7 @@ def test_auto_metadata_create(tmp_path, format):
 
 def test_save_chapter_metadata(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             parent = await _item(tmp_path, None)
             parent_xml = Path(parent.dir) / "ComicInfo.xml"
             parent_xml.write_text(
@@ -3486,7 +3471,7 @@ def test_save_chapter_metadata(tmp_path):
 @pytest.mark.parametrize("stage", ["validation", "publish"])
 def test_auto_metadata_arrives(tmp_path, monkeypatch, stage):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             xml = Path(item.dir) / "metadata.opf"
             read = writer._read_local
@@ -3530,7 +3515,7 @@ def test_auto_metadata_arrives(tmp_path, monkeypatch, stage):
 )
 def test_save_metadata_invalid(tmp_path, candidate):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             xml = Path(item.dir) / "metadata.opf"
             xml.write_bytes(_opf("Original"))
@@ -3548,7 +3533,7 @@ def test_save_metadata_invalid(tmp_path, candidate):
 )
 def test_save_metadata_source(tmp_path, problem):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             directory = Path(item.dir)
             xml = directory / "metadata.opf"
@@ -3592,7 +3577,7 @@ def test_save_metadata_source(tmp_path, problem):
 )
 def test_save_metadata_cover(tmp_path, href):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             directory = Path(item.dir)
             (directory / "cover.png").write_bytes(_PNG)
@@ -3620,7 +3605,7 @@ def test_save_metadata_cover(tmp_path, href):
 @pytest.mark.parametrize("stage", ["replace", "retire"])
 def test_save_metadata_retry(tmp_path, monkeypatch, stage):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             directory = Path(item.dir)
             xml = directory / "metadata.opf"
@@ -3671,7 +3656,7 @@ def test_save_metadata_retry(tmp_path, monkeypatch, stage):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_save_metadata_recovery(tmp_path, monkeypatch, published, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             novel = format in (MediaFormat.TXT, MediaFormat.EPUB)
             xml = Path(item.dir) / ("metadata.opf" if novel else "ComicInfo.xml")
@@ -3731,7 +3716,7 @@ def test_save_metadata_recovery(tmp_path, monkeypatch, published, format):
 
 def test_auto_metadata_recovery(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
 
             async def interrupted(*args, **kwargs):
@@ -3759,7 +3744,7 @@ def test_auto_metadata_recovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize("origin", ["previous", "current", "external"])
 def test_metadata_publication_recovery(tmp_path, format, origin):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             await MediaLib.filter(id=item.lib_id).update(rename_template="{title}")
             novel = format == MediaFormat.TXT
@@ -3821,7 +3806,7 @@ def test_metadata_publication_recovery(tmp_path, format, origin):
 @pytest.mark.parametrize("state", [None, *IndexState])
 def test_metadata_without_index(tmp_path, state):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             version = None if state is None else "0" * 64
             await MediaItem.filter(id=item.id).update(
@@ -3843,7 +3828,7 @@ def test_metadata_without_index(tmp_path, state):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_save_metadata_http(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             user = _user()
             await User.create(
@@ -3894,7 +3879,7 @@ def test_save_metadata_http(tmp_path, format):
 )
 def test_save_metadata_http_error(tmp_path, monkeypatch, problem, status):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             user = _user([item.lib_id] if problem == "permission" else None)
             await User.create(
@@ -3933,7 +3918,7 @@ def test_save_metadata_http_error(tmp_path, monkeypatch, problem, status):
 @pytest.mark.parametrize("format", [None, *MediaFormat])
 def test_reading_rejects_nfo(tmp_path, format):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, format)
             nfo = Path(item.dir) / "movie.nfo"
             assert not await shelver.gen_nfo(
@@ -3951,7 +3936,7 @@ def test_reading_rejects_nfo(tmp_path, format):
 
 def test_save_metadata_cancel(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             directory = Path(item.dir)
             xml = directory / "metadata.opf"
@@ -3996,7 +3981,7 @@ def test_save_metadata_cancel(tmp_path, monkeypatch):
 
 def test_save_metadata_body_change(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             xml = Path(item.dir) / "metadata.opf"
             xml.write_bytes(_opf("Original"))
@@ -4024,7 +4009,7 @@ def test_save_metadata_body_change(tmp_path, monkeypatch):
 )
 def test_metadata_pending(tmp_path, monkeypatch, change):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
 
             async def interrupted(*args, **kwargs):
@@ -4085,7 +4070,7 @@ def test_metadata_pending(tmp_path, monkeypatch, change):
 
 def test_auto_metadata_invalid_local(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             xml = Path(item.dir) / "metadata.opf"
             xml.write_text("<invalid")
@@ -4107,7 +4092,7 @@ def test_auto_metadata_invalid_local(tmp_path):
 )
 def test_metadata_task_invalid(tmp_path, payload):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             event = await MediaEvent.create(
                 lib_id=item.lib_id,
@@ -4130,7 +4115,7 @@ def test_metadata_task_invalid(tmp_path, payload):
 
 def test_sync_after_manual_save(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             item = await _item(tmp_path, MediaFormat.TXT)
             xml = Path(item.dir) / "metadata.opf"
             xml.write_bytes(_opf("Before save"))
@@ -4166,7 +4151,7 @@ def test_sync_after_manual_save(tmp_path, monkeypatch):
 @pytest.mark.parametrize("role", ["admin", "user", "guest"])
 def test_reading_library_http(tmp_path, monkeypatch, lib_type, role):
     async def run():
-        async with _database():
+        async with memory_db():
             root = tmp_path / "Library"
             work = root / "Work"
             work.mkdir(parents=True)

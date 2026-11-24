@@ -3,13 +3,10 @@
 import asyncio
 import shutil
 import threading
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tortoise import Tortoise
 from tortoise.queryset import QuerySet
 
 from app.core.config import KaloscopeConfig
@@ -19,6 +16,7 @@ from app.models.media import LibType, MediaEvent, MediaItem, MediaLib
 from app.models.user import HistoryType, User, UserHistory, UserRole
 from app.services import media as media_service
 from app.services.media import MediaItemService
+from tests.helpers import memory_db
 
 
 @pytest.fixture(autouse=True)
@@ -35,21 +33,6 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(
         KaloscopeConfig, "get", lambda: SimpleNamespace(filesystem_trash_mode=False)
     )
-
-
-@asynccontextmanager
-async def _database() -> AsyncGenerator[None]:
-    """Provide an isolated media schema.
-
-    Yields:
-        Control while the in-memory database is available.
-    """
-    await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["app.models"]})
-    await Tortoise.generate_schemas()
-    try:
-        yield
-    finally:
-        await Tortoise.close_connections()
 
 
 async def _source(tmp_path: Path, layout: str) -> tuple[MediaLib, MediaItem]:
@@ -122,7 +105,7 @@ async def _source(tmp_path: Path, layout: str) -> tuple[MediaLib, MediaItem]:
 @pytest.mark.parametrize("local", [False, True])
 def test_video_delete(tmp_path, monkeypatch, layout, group, local):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _source(tmp_path, layout)
             target = item.parent_id if group else item.id
             assert target is not None
@@ -215,7 +198,7 @@ def test_video_delete(tmp_path, monkeypatch, layout, group, local):
 @pytest.mark.parametrize("external", [False, True])
 def test_video_shared_files(tmp_path, shared, external):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _source(tmp_path, "flat")
             video = Path(item.path)
             cover = Path(item.dir) / "art/Episode.jpg"
@@ -273,7 +256,7 @@ def test_video_shared_files(tmp_path, shared, external):
 @pytest.mark.parametrize("layout", ["flat", "movie", "show", "season"])
 def test_video_external_delete(tmp_path, layout):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _source(tmp_path, layout)
             user = await User.create(
                 username="user", password="unused", role=UserRole.USER
@@ -300,7 +283,7 @@ def test_video_external_delete(tmp_path, layout):
 
 def test_video_delete_restored(tmp_path, monkeypatch):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _source(tmp_path, "flat")
             video = Path(item.path)
             video.unlink()
@@ -334,7 +317,7 @@ def test_video_delete_restored(tmp_path, monkeypatch):
 @pytest.mark.parametrize("layout", ["movie", "show", "season"])
 def test_video_directory_deleted(tmp_path, layout):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, _ = await _source(tmp_path, layout)
             directory = Path(lib.dir) / "Work"
             shutil.rmtree(directory)
@@ -355,7 +338,7 @@ def test_video_directory_deleted(tmp_path, layout):
 @pytest.mark.parametrize("layout", ["flat", "movie", "season"])
 def test_video_empty_directory(tmp_path, layout):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _source(tmp_path, layout)
             directory = Path(item.dir)
             (directory / "notes.md").unlink()
@@ -377,7 +360,7 @@ def test_video_empty_directory(tmp_path, layout):
 )
 def test_video_delete_retry(tmp_path, monkeypatch, failure):
     async def run():
-        async with _database():
+        async with memory_db():
             _, item = await _source(tmp_path, "flat")
             video = Path(item.path)
             subtitle = video.with_suffix(".zh-Hans.forced.SRT")
@@ -469,7 +452,7 @@ def test_video_delete_retry(tmp_path, monkeypatch, failure):
 )
 def test_video_delete_boundary(tmp_path, guard):
     async def run():
-        async with _database():
+        async with memory_db():
             lib, item = await _source(tmp_path, "flat")
             video = Path(item.path)
             outside = tmp_path / "outside.mkv"

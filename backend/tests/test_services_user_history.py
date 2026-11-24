@@ -33,8 +33,8 @@ from app.services import media as media_service
 from app.services.media import MediaItemService
 from app.services.user import UserHistoryService
 from app.utils.crypto import encrypt
+from tests.helpers import memory_db
 from tests.test_services_media_reading import (
-    _database,
     _indexed_collection,
     _indexed_comic,
     _indexed_epub,
@@ -198,7 +198,7 @@ def test_entry_invalid(changes):
 @pytest.mark.parametrize("format", list(MediaFormat))
 def test_reading_history_http(tmp_path, monkeypatch, format):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = (
                 await _indexed_text(tmp_path)
                 if format == MediaFormat.TXT
@@ -273,7 +273,7 @@ def test_reading_history_http(tmp_path, monkeypatch, format):
 
 def test_comic_chapter_history(tmp_path, monkeypatch):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             work, chapters = await _indexed_collection(tmp_path)
             owner = await _login(client, work.lib_id)
             history_id = None
@@ -307,7 +307,7 @@ def test_comic_chapter_history(tmp_path, monkeypatch):
 @pytest.mark.parametrize("format", [MediaFormat.TXT, MediaFormat.EPUB, MediaFormat.DIR])
 def test_history_bad_anchor(tmp_path, monkeypatch, case, format):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = (
                 await _indexed_text(tmp_path)
                 if format == MediaFormat.TXT
@@ -359,7 +359,7 @@ def test_history_bad_anchor(tmp_path, monkeypatch, case, format):
 )
 def test_history_chapter_scope(tmp_path, monkeypatch, case):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             work, chapters = await _indexed_collection(tmp_path / "one")
             await MediaLib.filter(id=work.lib_id).update(priority=2, name="First")
             other, theirs = await _indexed_collection(tmp_path / "two")
@@ -388,7 +388,7 @@ def test_history_chapter_scope(tmp_path, monkeypatch, case):
 @pytest.mark.parametrize("case", ["hidden", "denied", "missing", "pending", "changed"])
 def test_history_access(tmp_path, monkeypatch, case):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
             owner = await _login(client, item.lib_id)
             entry = await _entry(item)
@@ -433,7 +433,7 @@ def test_history_access(tmp_path, monkeypatch, case):
 
 def test_history_pagination(tmp_path, monkeypatch):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             lib = await MediaLib.create(
                 name="Books",
                 dir=str(tmp_path / "Books"),
@@ -482,7 +482,7 @@ def test_history_pagination(tmp_path, monkeypatch):
 @pytest.mark.parametrize("case", ["hidden", "moved", "foreign_library", "corrupt"])
 def test_history_stale_chapter(tmp_path, monkeypatch, case):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             work, chapters = await _indexed_collection(tmp_path)
             owner = await _login(client, work.lib_id)
             entry = await _entry(chapters[1])
@@ -520,7 +520,7 @@ def test_history_stale_chapter(tmp_path, monkeypatch, case):
 
 def test_history_concurrent(tmp_path):
     async def run():
-        async with _database():
+        async with memory_db():
             work, chapters = await _indexed_collection(tmp_path)
             session = _user([work.lib_id])
             await User.create(
@@ -551,7 +551,7 @@ def test_history_concurrent(tmp_path):
 @pytest.mark.parametrize("change", ["permission", "version", "hidden"])
 def test_history_save_race(tmp_path, monkeypatch, change):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
             owner = await _login(client, item.lib_id)
             entry = await _entry(item)
@@ -583,7 +583,7 @@ def test_history_save_race(tmp_path, monkeypatch, change):
 
 def test_history_retention_http(tmp_path, monkeypatch):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
             owner = await _login(client, item.lib_id)
             entry = await _entry(item)
@@ -608,7 +608,7 @@ def test_history_retention_http(tmp_path, monkeypatch):
 @pytest.mark.parametrize("change", ["permission", "hidden"])
 def test_history_list_race(tmp_path, monkeypatch, change):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
             owner = await _login(client, item.lib_id)
             response = await client.post(
@@ -641,7 +641,7 @@ def test_history_list_race(tmp_path, monkeypatch, change):
 @pytest.mark.parametrize("rel_type", ["video", "search"])
 def test_history_legacy_http(tmp_path, monkeypatch, rel_type):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
             if rel_type == "video":
                 await MediaLib.filter(id=item.lib_id).update(lib_type=LibType.MOVIE)
@@ -682,7 +682,7 @@ def test_history_legacy_http(tmp_path, monkeypatch, rel_type):
 @pytest.mark.parametrize("lib_type", [LibType.MOVIE, LibType.TV_SHOW])
 def test_video_history_parent(tmp_path, monkeypatch, lib_type):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             lib = await MediaLib.create(
                 lib_type=lib_type, dir=str(tmp_path), name="Video", priority=1
             )
@@ -779,7 +779,7 @@ def test_video_history_parent(tmp_path, monkeypatch, lib_type):
 
 def test_video_history_visibility(tmp_path, monkeypatch):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             lib = await MediaLib.create(
                 lib_type=LibType.MOVIE, dir=str(tmp_path), name="Video", priority=1
             )
@@ -833,7 +833,7 @@ def test_video_history_visibility(tmp_path, monkeypatch):
 )
 def test_history_parent_invalid(monkeypatch, query):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             await _login(client, 1)
             response = await client.get("/_api/user/history/list", params=query)
             assert response.status_code == 400
@@ -845,7 +845,7 @@ def test_history_parent_invalid(monkeypatch, query):
 @pytest.mark.parametrize("change", ["version", "anchor"])
 def test_history_recover(tmp_path, monkeypatch, format, change):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = (
                 await _indexed_text(tmp_path)
                 if format == MediaFormat.TXT
@@ -891,7 +891,7 @@ def test_history_recover(tmp_path, monkeypatch, format, change):
 
 def test_history_recover_chapter(tmp_path, monkeypatch):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             item = await _indexed_text(tmp_path)
             owner = await _login(client, item.lib_id)
             content = await MediaItemService.get_content(
@@ -931,7 +931,7 @@ def test_history_recover_chapter(tmp_path, monkeypatch):
 
 def test_indexer_grant(monkeypatch):
     async def run():
-        async with _database(), _client(monkeypatch) as (client, _):
+        async with memory_db(), _client(monkeypatch) as (client, _):
             owner = await _login(client, 1)
             graph = await FlowGraph.create(
                 name="Search",
