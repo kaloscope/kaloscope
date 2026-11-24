@@ -91,6 +91,7 @@ def test_draft_connection():
         {"model_ids": [str(i) for i in range(101)]},
         {"model_ids": ["model", " model "]},
         {"model_ids": ["model\nname"]},
+        {"model_ids": []},
         {"api_key": "key\r\nAuthorization: injected"},
         {"api_key": "密钥"},
         {"api_key": "x" * 4097},
@@ -100,7 +101,12 @@ def test_draft_connection():
 def test_invalid_config(fields):
     with pytest.raises(ValidationError):
         AIProviderUpsert.model_validate(
-            {"name": "Test", "base_url": "http://localhost:11434/v1", **fields}
+            {
+                "name": "Test",
+                "base_url": "http://localhost:11434/v1",
+                "model_ids": ["model"],
+                **fields,
+            }
         )
 
 
@@ -124,6 +130,7 @@ def test_presets():
             preset=preset["id"],
             protocol=preset["protocol"],
             base_url=preset["base_url"],
+            enabled=False,
         )
         assert provider.model_ids == []
         assert provider.api_key is None

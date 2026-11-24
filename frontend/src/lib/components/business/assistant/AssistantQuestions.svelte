@@ -35,9 +35,15 @@
   const key = $derived(`assistant-questions:${user.current?.id}:${conversationId}:${callId}:${card.version}`);
 
   onMount(() => {
+    // a subscription question with one option only confirms it, so start with it chosen
     answers =
       card.answers?.map((v) => ({ ...v, selected: [...v.selected] })) ??
-      card.questions.map(({ id }) => ({ id, selected: [], custom: '', skipped: false }));
+      card.questions.map(({ id, options }) => ({
+        id,
+        selected: card.subscription && options.length === 1 ? [options[0].id] : [],
+        custom: '',
+        skipped: false
+      }));
     try {
       const stored = JSON.parse(sessionStorage.getItem(key) ?? 'null');
       if (

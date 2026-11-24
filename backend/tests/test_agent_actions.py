@@ -139,15 +139,9 @@ def test_workflow():
                 WorkspaceQuery(topic="workflow_templates"), user
             )
             assert options["items"][0]["id"] == template.id
-            copy = await review_action(
-                AdminChange(action="copy_template", target_id=template.id, name="Copy"),
-                user,
-            )
-            clicks = await asyncio.gather(*(decide(copy, user) for _ in range(4)))
-            assert {result["status"] for result in clicks} == {"applied"}
-            draft = await FlowGraph.get(name="Copy")
-            assert draft.state == "draft"
-            assert {r["result"]["workflow_id"] for r in clicks} == {draft.id}
+            # copies are ordinary unpublished drafts created without browser approval
+            with pytest.raises(ValidationError):
+                AdminChange(action="copy_template", target_id=template.id, name="Copy")
 
     asyncio.run(run())
 

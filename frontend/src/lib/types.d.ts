@@ -70,7 +70,7 @@ export interface AIProvider {
 }
 
 /** A provider update; omit the key to retain it or use an empty string to clear it. */
-export type AIProviderUpsert = Omit<AIProvider, 'id' | 'created_at' | 'updated_at' | 'has_api_key'> & {
+export type AIProviderUpsert = Omit<AIProvider, 'id' | 'created_at' | 'updated_at' | 'has_api_key' | 'protocol'> & {
   id?: number;
   api_key?: string;
 };

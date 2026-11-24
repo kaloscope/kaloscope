@@ -31,7 +31,6 @@ class AdminChange(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     action: Literal[
-        "copy_template",
         "publish_workflow",
         "create_library",
         "delete_library",

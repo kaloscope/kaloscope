@@ -99,7 +99,8 @@ async def destination_questions(
 
     questions = []
     combined = not directory_known and not library_known and len(paths) == 1
-    if not directory_known and not combined:
+    # a sole candidate needs no question; the confirmation still shows it
+    if not directory_known and len(paths) > 1:
         questions.append(
             {
                 "field": "directory",

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '$lib/api';
+  import { assistant, loadAssistantModels } from '$lib/assistant/session';
   import {
     Badge,
     Button,
@@ -49,6 +50,11 @@
     }
   }
 
+  /** Refresh the assistant's model choices after it has loaded them once. */
+  function refreshAssistantModels() {
+    if ($assistant.modelsLoaded) void loadAssistantModels();
+  }
+
   /**
    * Replace a saved provider in the list or append a new one.
    *
@@ -58,6 +64,7 @@
     const index = providers.findIndex((item) => item.id === provider.id);
     if (index < 0) providers.push(provider);
     else providers[index] = provider;
+    refreshAssistantModels();
   }
 
   /**
@@ -72,7 +79,6 @@
       id: provider.id,
       name: provider.name,
       preset: provider.preset,
-      protocol: 'chat_completions',
       base_url: provider.base_url,
       model_ids: provider.model_ids,
       enabled: input.checked
@@ -102,6 +108,7 @@
     try {
       await api.post(`ai/provider/${id}/delete`);
       providers = providers.filter((provider) => provider.id !== id);
+      refreshAssistantModels();
     } catch (cause) {
       if (!isHTTPError(cause)) alert({ level: 'error', message: $_('ai.delete_failed') });
     } finally {
@@ -182,7 +189,8 @@
                   class="toggle shrink-0 toggle-sm"
                   aria-label={$_('ai.toggle', provider.name)}
                   checked={provider.enabled}
-                  disabled={pendingId !== null}
+                  disabled={pendingId !== null || (!provider.enabled && !provider.model_ids.length)}
+                  title={!provider.enabled && !provider.model_ids.length ? $_('ai.models_required') : undefined}
                   onchange={(event) => toggle(provider, event.currentTarget)}
                 />
                 <Button

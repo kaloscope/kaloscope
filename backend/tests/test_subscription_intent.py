@@ -473,10 +473,14 @@ def test_runtime_confirmation(monkeypatch, choice):
             ]
             assert not await DownloadPlan.all().exists()
             card = results[-1]["data"]
-            question, destination = card["questions"]
-            assert destination["field"] == (
-                "destination" if choice in {"edition", "custom"} else "directory"
-            )
+            question, *destinations = card["questions"]
+            if choice in {"edition", "custom"}:
+                (destination,) = destinations
+                assert destination["field"] == "destination"
+            else:
+                # the sole downloader directory is shown instead of asked
+                assert not destinations
+                assert f"{body.plan.dir} · 不入库" in question["title"]
             assert question["required"] and not question["multiple"]
             assert {option["label"] for option in question["options"]} == {
                 "喵萌奶茶屋",
@@ -488,7 +492,9 @@ def test_runtime_confirmation(monkeypatch, choice):
             download.notify_download_changes.assert_not_called()
             card_id = results[-1]["id"]
 
-            location = {"selected": [destination["options"][-1]["id"]]}
+            location = {}
+            if choice == "edition":
+                location = {"selected": [destination["options"][-1]["id"]]}
             if choice == "custom":
                 location = {"custom": "/downloads/自填 | 番剧"}
 
@@ -500,10 +506,11 @@ def test_runtime_confirmation(monkeypatch, choice):
                         {
                             "version": card["version"],
                             "items": [
-                                {
-                                    "id": destination["id"],
-                                    **location,
-                                },
+                                *(
+                                    [{"id": destination["id"], **location}]
+                                    if location
+                                    else []
+                                ),
                                 {"id": question["id"], **value},
                             ],
                         }
@@ -878,6 +885,40 @@ def test_destination_access():
                 )
                 is None
             )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("recent", [[], ["/downloads"], ["/other"]])
+def test_sole_directory(recent):
+    from tortoise import timezone
+
+    from app.models.download import DownloadDir
+    from app.services.subscription_destinations import destination_questions
+
+    async def run():
+        async with database() as (owner, _):
+            lib = await MediaLib.create(
+                name="TV", dir="/tv", lib_type="tv_show", priority=1
+            )
+            for path in recent:
+                await DownloadDir.create(path=path, last_used=timezone.now())
+            plan = {
+                "dir": "/downloads",
+                "transfer_lib_id": lib.id,
+                "transfer_method": "hardlink",
+            }
+
+            questions = await destination_questions(
+                plan, "subscribe to Lantern", owner, chinese=False
+            )
+
+            if recent == ["/other"]:
+                (q,) = questions
+                assert q["field"] == "directory"
+                assert [o["value"] for o in q["options"]] == ["/downloads", "/other"]
+            else:
+                assert questions == []
 
     asyncio.run(run())
 

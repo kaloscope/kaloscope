@@ -140,6 +140,7 @@ def test_upsert(monkeypatch):
                     "name": "Custom",
                     "base_url": "https://example.com/v1",
                     "api_key": "key",
+                    "model_ids": ["model"],
                 }
             ),
         )

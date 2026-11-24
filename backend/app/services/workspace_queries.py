@@ -110,7 +110,6 @@ async def inspect_workspace(query: WorkspaceQuery, user: UserInfo) -> dict:
         }
     return {
         "actions": [
-            "copy_template",
             "publish_workflow",
             "create_library",
             "delete_library",

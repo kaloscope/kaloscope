@@ -147,7 +147,12 @@ from app.services.agent_actions import review_action
 from app.services.assistant_questions import build_card
 from app.services.download import DownloadPlanService, DownloadTaskService, open_source
 from app.services.download_diagnostics import IngestionQuery, diagnose_ingestion
-from app.services.flow import FlowGraphService, FlowJobService, FlowRunService
+from app.services.flow import (
+    FlowGraphService,
+    FlowJobService,
+    FlowRunService,
+    FlowTemplateService,
+)
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
 from app.services.media_changes import MediaChangeService
@@ -372,15 +377,39 @@ class HistoryQuery(ToolArguments):
 
 
 class WorkflowCreate(ToolArguments):
-    """Describe a new workflow without accepting any graph content."""
+    """Describe a new empty workflow or a template copy without graph content."""
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=64)
-    category: GraphCategory
-    description: str = Field(
-        min_length=1, max_length=512, description="Purpose; saved as the description."
+    # omissions are shown as optional fields without spending schema bytes on null
+    category: GraphCategory | SkipJsonSchema[None] = None
+    description: str | SkipJsonSchema[None] = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description="Purpose; saved as the description.",
     )
+    template_id: ResourceID | SkipJsonSchema[None] = None
+
+    @model_validator(mode="after")
+    def require_source(self) -> Self:
+        """Take the category and purpose from either the caller or the template.
+
+        Returns:
+            The validated creation request.
+
+        Raises:
+            ValueError: If a blank draft lacks them or a copy also supplies them.
+        """
+        described = self.category is not None or self.description is not None
+        if self.template_id is not None and described:
+            raise ValueError("Omit category and description when copying a template.")
+        if self.template_id is None and (
+            self.category is None or self.description is None
+        ):
+            raise ValueError("Supply category and description for a blank workflow.")
+        return self
 
 
 class MediaLibraryList(ToolArguments):
@@ -823,8 +852,8 @@ TOOLS = (
     ),
     AssistantTool(
         CREATE_TOOL,
-        "Explicit workflow authoring only. Create an empty unpublished draft; "
-        "retries replay, duplicate names fail.",
+        "Explicit authoring/template copy only: unpublished draft; a copy omits "
+        "category/description. Retries replay, duplicate names fail.",
         WorkflowCreate,
     ),
     AssistantTool(
@@ -902,8 +931,7 @@ TOOLS = (
     ),
     AssistantTool(
         "review_workspace_change",
-        "Show a review in chat. copy_template: target_id=template ID, "
-        "name=new draft name.",
+        "Show a review in chat.",
         AdminChange,
     ),
     AssistantTool(
@@ -2627,7 +2655,7 @@ async def apply_media_change(
 async def create_workflow(
     args: WorkflowCreate, conversation_id: int, call_id: str, user: UserInfo
 ) -> dict:
-    """Create at most one empty draft per request and record it with its tool call.
+    """Create at most one draft per request and record it with its tool call.
 
     The workflow and the call's successful result commit in one transaction. A
     repeated call or a retry of the same request finds that record and returns the
@@ -2635,17 +2663,19 @@ async def create_workflow(
     response was lost.
 
     Args:
-        args: Validated name, category, and purpose.
+        args: Validated name with either a category and purpose for an empty draft
+            or a template whose graph, category, and description are copied.
         conversation_id: Server-owned conversation of the current turn.
         call_id: Server-generated identifier of this tool call.
         user: Account whose editor rights the creation service checks.
 
     Returns:
-        Workflow identity, its empty unpublished draft state, and designer path;
+        Workflow identity, its unpublished draft state, and designer path;
         `replayed` marks a workflow created earlier for this request.
 
     Raises:
-        NotFoundException: If the call record or the recorded workflow is missing.
+        NotFoundException: If the call record, recorded workflow, or template is
+            missing.
         ForbiddenException: If the account cannot edit workflows.
         KaloscopeException: If the name already exists.
     """
@@ -2680,15 +2710,18 @@ async def create_workflow(
         return {**data, "replayed": True}
 
     async with in_transaction():
-        graph = await FlowGraphService.create_draft(
-            GraphDraftCreate(
-                name=args.name,
-                description=args.description,
-                category=args.category,
-                document=GraphDocument(nodes=[], edges=[]),
-            ),
-            user,
-        )
+        if args.template_id is not None:
+            graph = await FlowTemplateService.copy_template(args.template_id, args.name)
+        else:
+            graph = await FlowGraphService.create_draft(
+                GraphDraftCreate(
+                    name=args.name,
+                    description=args.description,
+                    category=args.category,
+                    document=GraphDocument(nodes=[], edges=[]),
+                ),
+                user,
+            )
         data = {
             "workflow_id": graph.id,
             "name": graph.name,
@@ -2696,7 +2729,7 @@ async def create_workflow(
             "description": graph.description,
             "state": str(graph.state),
             "draft_version": graph.draft_version,
-            "node_count": 0,
+            "node_count": len((graph.draft or {}).get("nodes", [])),
             "editor_path": f"{WORKFLOW_PATH}/{graph.id}",
             "published": False,
             "executed": False,

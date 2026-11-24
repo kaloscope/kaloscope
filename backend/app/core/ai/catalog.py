@@ -88,6 +88,8 @@ DOMAIN_TOOLS: dict[ActionDomain, frozenset[str]] = {
         {
             "inspect_workspace",
             "review_workspace_change",
+            # template copies are created directly from the listed template IDs
+            "create_workflow_draft",
             "get_media_batch",
             "cancel_media_batch",
         }
@@ -139,6 +141,7 @@ WORKSPACE_FOCUS = frozenset(
         "discover_actions",
         "inspect_workspace",
         "review_workspace_change",
+        "create_workflow_draft",
         "get_media_batch",
         "cancel_media_batch",
         "ask_user",

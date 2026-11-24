@@ -222,7 +222,7 @@ class FlowTemplateService(BaseService[FlowTemplate], model=FlowTemplate):
 
     @classmethod
     async def copy_template(cls, id: int, name: str) -> FlowGraph:
-        """Copy a template to create a new flow graph.
+        """Copy a template into a new editable, unpublished draft.
 
         Args:
             id: Flow template ID.
@@ -230,8 +230,12 @@ class FlowTemplateService(BaseService[FlowTemplate], model=FlowTemplate):
 
         Returns:
             Created flow graph instance.
+
+        Raises:
+            NotFoundException: If the template does not exist.
+            KaloscopeException: If the name is already in use.
         """
-        tmpl = await FlowTemplate.get(id=id)
+        tmpl = await FlowTemplate.get_or_none(id=id)
         if not tmpl:
             raise NotFoundException
 

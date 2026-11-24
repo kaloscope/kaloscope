@@ -20,7 +20,7 @@ from mcp.types import (
     PaginatedRequestParams,
     ToolAnnotations,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from sanic import HTTPResponse, Request, Sanic, raw
 from starlette.requests import Request as ASGIRequest
 
@@ -138,6 +138,7 @@ from app.services.flow import (
     FlowJobService,
     FlowLogService,
     FlowRunService,
+    FlowTemplateService,
 )
 from app.services.media import MediaItemService, MediaLibService
 from app.services.media_batches import MediaBatchService
@@ -1120,6 +1121,46 @@ def create_server() -> MCPServer:
             New workflow ID, draft version, and designer path.
         """
         return await saved(FlowGraphService.create_draft(workflow, _user(ctx)))
+
+    @server.tool(
+        access="write",
+        annotations=WRITE_CREATE,
+        description=(
+            "Copy a workflow template from `inspect_workspace` into a new "
+            "unpublished editable draft; does not publish or schedule."
+        ),
+    )
+    async def copy_workflow_template(
+        ctx: Context,
+        template_id: Annotated[_ResourceID, Field(description="Template ID.")],
+        name: Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
+            Field(description="Unique new draft name."),
+        ],
+    ) -> WorkflowDraftResult:
+        """Create an unpublished editable copy of a template using a read-write token.
+
+        Args:
+            ctx: Authenticated request context supplied by the server.
+            template_id: Template whose graph, category, and description are copied.
+            name: Name of the new workflow; duplicate names are rejected.
+
+        Returns:
+            New workflow ID, draft version, and designer path.
+        """
+        user = _user(ctx)
+
+        async def copy() -> Any:
+            """Check editor rights, then copy the template.
+
+            Returns:
+                New workflow created from the template.
+            """
+            FlowGraphService.require_editor(user)
+            return await FlowTemplateService.copy_template(template_id, name)
+
+        return await saved(copy())
 
     @server.tool(
         access="write",

@@ -27,6 +27,8 @@ from app.models.flow import (
     FlowGraph,
     FlowJob,
     FlowLog,
+    FlowRepository,
+    FlowTemplate,
     GraphCategory,
     GraphState,
 )
@@ -132,7 +134,12 @@ def test_grants():
     assert all("save" not in name and "publish" not in name for name in admin_names)
 
     # creation accepts metadata only; generated content goes through canvas edits
-    assert set(tools.WorkflowCreate.model_fields) == {"name", "category", "description"}
+    assert set(tools.WorkflowCreate.model_fields) == {
+        "name",
+        "category",
+        "description",
+        "template_id",
+    }
 
 
 @pytest.mark.parametrize("domain", list(tools.DOMAIN_TOOLS))
@@ -201,7 +208,8 @@ def test_catalog_failure_recovery():
         subscription_answer=False,
         allow_answer_tool=lambda _name, _sub: True,
     )
-    assert len(schemas) == 7
+    # the workspace domain includes direct template copies
+    assert "create_workflow_draft" in names(schemas) and len(schemas) == 8
     schemas = ws_catalog.on_tool_result(
         "inspect_workspace",
         {"ok": False, "error": {"code": "bad_request"}},
@@ -1072,6 +1080,8 @@ def test_create_existing_name():
         {**CREATE, "name": "x" * 65},
         {**CREATE, "category": "download"},
         {**CREATE, "document": {"nodes": [], "edges": []}},
+        {**CREATE, "template_id": 1},
+        {"name": "Copy", "category": "schedule", "template_id": 1},
     ],
 )
 def test_create_invalid(arguments):
@@ -1083,6 +1093,52 @@ def test_create_invalid(arguments):
 
             assert result["error"]["code"] == ErrorCode.BAD_REQUEST
             assert await FlowGraph.all().count() == 0
+
+    asyncio.run(run())
+
+
+def test_create_template():
+    async def run():
+        async with database():
+            repo = await FlowRepository.create(
+                repo_name="fixture", repo_url="https://example.invalid"
+            )
+            definition = {"nodes": [{"id": "start", "data": {}}], "edges": []}
+            template = await FlowTemplate.create(
+                repo=repo,
+                path="fixture.json",
+                name="Example",
+                description="From the template",
+                category="indexer",
+                revision=1,
+                definition=definition,
+            )
+            await record_call("create")
+            await record_call("again")
+            await record_call("missing")
+
+            result = await create({"name": "Copy", "template_id": template.id})
+            duplicate = await create(
+                {"name": "Copy", "template_id": template.id}, call_id="again"
+            )
+            missing = await create(
+                {"name": "Other", "template_id": template.id + 1}, call_id="missing"
+            )
+
+            assert result["ok"] is True
+            data = result["data"]
+            graph = await FlowGraph.get(id=data["workflow_id"])
+            assert (graph.name, graph.category, graph.description) == (
+                "Copy",
+                GraphCategory.INDEXER,
+                "From the template",
+            )
+            assert (graph.state, graph.editable) == (GraphState.DRAFT, True)
+            assert graph.draft == definition and graph.definition is None
+            assert data["node_count"] == 1 and data["published"] is False
+            assert duplicate["error"]["code"] == ErrorCode.NAME_ALREADY_EXISTS
+            assert missing["error"]["code"] == ErrorCode.NOT_FOUND
+            assert await FlowGraph.all().count() == 1
 
     asyncio.run(run())
 
