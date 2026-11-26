@@ -27,8 +27,6 @@
 
 /* https://tailwindcss.com/docs/upgrade-guide#hover-styles-on-mobile */
 @custom-variant hover (&:hover);
-/* touch screens, where controls revealed on hover would stay hidden */
-@custom-variant hover-none (@media (hover: none));
 
 /* https://developer.chrome.com/docs/web-platform/view-transitions */
 @media (prefers-reduced-motion) {

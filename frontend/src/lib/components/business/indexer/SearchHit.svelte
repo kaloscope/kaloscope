@@ -226,7 +226,7 @@
         />
       {/if}
       <div
-        class="absolute top-0 right-0 z-1 flex gap-1.5 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover-none:opacity-80 {transClass}"
+        class="absolute top-0 right-0 z-1 flex gap-1.5 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 {transClass}"
       >
         {#if detailsConfig && rsrc.favorite !== undefined}
           <Button

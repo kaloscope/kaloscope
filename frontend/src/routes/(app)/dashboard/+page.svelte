@@ -1429,12 +1429,6 @@
     }
   }
 
-  @media (hover: none) {
-    .history-delete-button {
-      opacity: 0.58;
-    }
-  }
-
   @container (inline-size < 16.5rem) {
     .media-card {
       gap: 0.6875rem;
