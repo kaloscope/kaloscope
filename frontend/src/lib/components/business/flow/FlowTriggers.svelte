@@ -15,6 +15,7 @@
   import { Button, Image } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { moveItem } from '$lib/utils/object';
   import { onMount, tick } from 'svelte';
   import { flip } from 'svelte/animate';
 
@@ -122,10 +123,7 @@
             return;
           }
           const index = triggers.findIndex((t) => t.graph_id === triggerGraphId);
-          if (index > 0) {
-            const temp = triggers[index];
-            triggers[index] = triggers[index - 1];
-            triggers[index - 1] = temp;
+          if (moveItem(triggers, index, -1)) {
             onchange?.(triggers);
           }
           scrollIntoView(triggerElement, 200);
@@ -141,10 +139,7 @@
             return;
           }
           const index = triggers.findIndex((t) => t.graph_id === triggerGraphId);
-          if (index < triggers.length - 1) {
-            const temp = triggers[index];
-            triggers[index] = triggers[index + 1];
-            triggers[index + 1] = temp;
+          if (moveItem(triggers, index, 1)) {
             onchange?.(triggers);
           }
           scrollIntoView(triggerElement, 200);

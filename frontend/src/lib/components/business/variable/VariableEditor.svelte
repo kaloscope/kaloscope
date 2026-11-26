@@ -88,7 +88,8 @@
         />
         <button
           type="button"
-          aria-label="Toggle encryption"
+          aria-label={$_('action.encrypt')}
+          aria-pressed={encrypted}
           class="flex-center {id ? 'cursor-not-allowed' : 'cursor-pointer'}"
           onclick={() => (encrypted = !encrypted)}
           disabled={!!id}

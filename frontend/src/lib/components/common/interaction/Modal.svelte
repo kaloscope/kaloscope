@@ -36,6 +36,7 @@
 </script>
 
 <script lang="ts">
+  import { _ } from '$lib/i18n';
   import { pushState } from '$app/navigation';
   import { portal } from '$lib/actions';
   import { Alerts } from '$lib/components';
@@ -140,11 +141,11 @@
     }}
   >
     <form method="dialog" class="modal-backdrop">
-      <button onclick={close} aria-label="Close"></button>
+      <button onclick={close} aria-label={$_('action.close')}></button>
     </form>
     <div class="modal-box {boxClass}" style:max-width={maxWidth}>
       <form method="dialog" class="modal-corner {cornerClass}">
-        <button onclick={close} aria-label="Close">
+        <button onclick={close} aria-label={$_('action.close')}>
           <iconify-icon icon={icons.dismiss} width="1.125rem" aria-hidden="true"></iconify-icon>
         </button>
       </form>

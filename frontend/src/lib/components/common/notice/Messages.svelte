@@ -142,11 +142,11 @@
     }}
   >
     <form method="dialog" class="modal-backdrop">
-      <button onclick={(event) => close(id, msg.shallow, msg.oncancel, event)} aria-label="Close"></button>
+      <button onclick={(event) => close(id, msg.shallow, msg.oncancel, event)} aria-label={$_('action.close')}></button>
     </form>
     <div class="modal-box max-w-xl">
       <form method="dialog" class="modal-corner">
-        <button onclick={(event) => close(id, msg.shallow, msg.oncancel, event)} aria-label="Close">
+        <button onclick={(event) => close(id, msg.shallow, msg.oncancel, event)} aria-label={$_('action.close')}>
           <iconify-icon icon={icons.dismiss} width="1.125rem" aria-hidden="true"></iconify-icon>
         </button>
       </form>

@@ -963,7 +963,7 @@
     <!-- back button -->
     <button
       class="btn absolute top-2 left-2 z-2 btn-circle size-10 btn-enlarge btn-subtle shadow-sm"
-      aria-label="Back"
+      aria-label={$_('action.back')}
       onclick={historyBack}
     >
       <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
@@ -1321,7 +1321,11 @@
     </div>
     {#if readingLoading || readingError}
       <div class="absolute inset-0 layer-3 flex-center flex-col gap-5 bg-base-100 p-6 text-center">
-        <button class="btn absolute top-2 left-2 btn-circle btn-ghost" aria-label="Back" onclick={closeReader}>
+        <button
+          class="btn absolute top-2 left-2 btn-circle btn-ghost"
+          aria-label={$_('action.back')}
+          onclick={closeReader}
+        >
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if readingLoading}

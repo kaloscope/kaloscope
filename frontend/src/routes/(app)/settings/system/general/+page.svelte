@@ -15,6 +15,9 @@
     { value: 'videotoolbox', label: 'Apple VideoToolBox' }
   ];
 
+  // the accelerators that open a DRM render device, the only ones the VAAPI device setting applies to
+  const DRM_HWACCELS = new Set(['qsv', 'vaapi']);
+
   // quality options
   const qualityOptions = [
     { value: 'low', label: 'transcode.quality.low' },
@@ -119,17 +122,19 @@
         class="w-full"
       />
     </fieldset>
-    <fieldset class="fieldset">
-      <Label tip={$_('transcode.vaapi_device.tip')}>
-        {$_('transcode.vaapi_device.title')}
-      </Label>
-      <input
-        type="text"
-        class="input w-full"
-        placeholder="/dev/dri/renderD128"
-        bind:value={configs['vaapi.device']}
-        onchange={() => setValue('vaapi.device')}
-      />
-    </fieldset>
+    {#if DRM_HWACCELS.has(configs['transcode.hwaccel'])}
+      <fieldset class="fieldset">
+        <Label tip={$_('transcode.vaapi_device.tip')}>
+          {$_('transcode.vaapi_device.title')}
+        </Label>
+        <input
+          type="text"
+          class="input w-full"
+          placeholder="/dev/dri/renderD128"
+          bind:value={configs['vaapi.device']}
+          onchange={() => setValue('vaapi.device')}
+        />
+      </fieldset>
+    {/if}
   </Setting>
 </Container>

@@ -99,7 +99,7 @@
     tabindex="0"
     role="button"
     class={btnClass}
-    aria-label="Search"
+    aria-label={$_('action.search')}
     onclick={(event) => {
       event.preventDefault();
       required && searchInput.reportValidity();
@@ -131,7 +131,12 @@
 
   {#if showFilters}
     {@const filtered = filters && filters !== '{}'}
-    <button type="button" class={btnClass} aria-label="Show filters" onclick={() => filtersModal?.showModal()}>
+    <button
+      type="button"
+      class={btnClass}
+      aria-label={$_('action.view', $_('entity.filters'))}
+      onclick={() => filtersModal?.showModal()}
+    >
       <iconify-icon
         icon={icons.adjustmentsHorizontal}
         width="1.5rem"

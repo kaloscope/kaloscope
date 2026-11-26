@@ -59,7 +59,7 @@
       {@const btnClass = 'btn h-10 min-h-10 btn-subtle'}
       {#if back}
         <!-- back button -->
-        <button class="btn-square w-10 opacity-90 {btnClass}" aria-label="Back" onclick={historyBack}>
+        <button class="btn-square w-10 opacity-90 {btnClass}" aria-label={$_('action.back')} onclick={historyBack}>
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
       {:else}

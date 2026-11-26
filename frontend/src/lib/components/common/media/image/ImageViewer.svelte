@@ -1,7 +1,8 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores.svelte';
   import type { Chapter } from '$lib/types';
-  import { groupChapters, matchChapterId } from '$lib/utils/chapter';
+  import { matchChapterId } from '$lib/utils/chapter';
+  import type { ReaderColors } from '../ReaderFrame.svelte';
 
   /** Delay in ms before auto-hiding the overlay controls. */
   const CONTROLS_HIDE_DELAY = 3000;
@@ -13,6 +14,15 @@
   const MAX_IMAGE_RETRY = 3;
   /** Number of images requested in each batch. */
   const IMAGE_BATCH_SIZE = 20;
+
+  /** Frame colors of the always-dark image reader. */
+  const COLORS: ReaderColors = {
+    bg: '#000000',
+    text: '#cccccc',
+    muted: 'rgb(255 255 255 / 80%)',
+    panel: '#1a1a1a',
+    bar: 'rgb(0 0 0 / 50%)'
+  };
 
   /** A batch of images, with an optional explicit continuation offset. */
   export type ImagePage = {
@@ -81,10 +91,10 @@
 <script lang="ts">
   import { proxyImage } from '$lib/api';
   import { _ } from '$lib/i18n';
-  import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores.svelte';
   import { onMount, tick } from 'svelte';
-  import { fade, fly } from 'svelte/transition';
+  import { fly } from 'svelte/transition';
+  import ReaderFrame from '../ReaderFrame.svelte';
 
   // resource title
   let title = $state('');
@@ -92,18 +102,10 @@
   let images = $state<string[]>([]);
   // available chapters
   let chapters = $state<Chapter[]>([]);
-  // chapters grouped by volume in source order
-  let chapterGroups = $derived(groupChapters(chapters));
   // currently active chapter id from url or selection
   let chapterId = $state<string | null>(null);
   // index of the current chapter within the chapters array
   let chapterIndex = $derived(chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
-  // previous chapter in sequence, or null if at the first
-  let previousChapter = $derived(chapterIndex > 0 ? chapters[chapterIndex - 1] : null);
-  // next chapter in sequence, or null if at the last
-  let nextChapter = $derived(
-    chapterIndex >= 0 && chapterIndex < chapters.length - 1 ? chapters[chapterIndex + 1] : null
-  );
   // callback to notify parent of chapter change
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
   // callback to return from a local reading overlay
@@ -285,7 +287,6 @@
    * @param chapter - Chapter to select.
    */
   function selectChapter(chapter: Chapter) {
-    chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
     readController?.abort();
@@ -556,96 +557,27 @@
 
 <svelte:window onkeydown={handleKeyDown} onmousemove={showControls} />
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  role="application"
-  aria-label="Image viewer"
-  data-theme="dark"
-  class="fixed inset-0 flex flex-col bg-black"
+<ReaderFrame
+  label={$_('media.image_viewer')}
+  theme="dark"
+  colors={COLORS}
+  title={currentTitle}
+  titleExtra={imageCount > 0 ? counter : undefined}
+  {chapters}
+  {chapterId}
+  {sortDesc}
+  {controlsVisible}
+  bind:chaptersOpen
+  bind:settingsOpen
+  onback={() => {
+    (back ?? historyBack)();
+    readController?.abort();
+  }}
+  onselect={selectChapter}
+  onsort={toggleSort}
+  onchaptersopen={() => clearTimeout(hideTimer)}
   onclick={handleClick}
 >
-  <!-- top bar -->
-  {#if controlsVisible}
-    <div
-      class="absolute inset-x-0 top-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-black/50 px-2 py-1.5 text-white/80 backdrop-blur-sm"
-      transition:fade={{ duration: 200 }}
-    >
-      <div class="flex items-center gap-1">
-        <button
-          class="btn border-0 btn-ghost shadow-none btn-xs"
-          onclick={() => {
-            (back ?? historyBack)();
-            readController?.abort();
-          }}
-          aria-label="Back"
-        >
-          <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
-        </button>
-        {#if chapters.length > 1}
-          <button
-            class="btn border-0 btn-ghost shadow-none btn-xs"
-            aria-label="Chapters"
-            onclick={() => {
-              chaptersOpen = true;
-              clearTimeout(hideTimer);
-            }}
-          >
-            <iconify-icon icon={icons.menuFoldSolid} width="1.5rem"></iconify-icon>
-          </button>
-        {/if}
-      </div>
-
-      <span class="flex-center min-w-0 text-sm">
-        <span class="truncate" class:mr-2={imageCount > 0}>{currentTitle}</span>
-        {#if imageCount > 0}
-          <span class="shrink-0 tabular-nums opacity-60">{imageIndex + 1} / {imageCount}</span>
-        {/if}
-      </span>
-
-      <button
-        class="btn border-0 btn-ghost shadow-none btn-xs"
-        aria-label="Reading settings"
-        onclick={() => (settingsOpen = !settingsOpen)}
-      >
-        <iconify-icon icon={icons.settingsFilled} width="1.25rem"></iconify-icon>
-      </button>
-    </div>
-  {/if}
-
-  <!-- chapter panel -->
-  {#if chaptersOpen}
-    <button
-      class="fixed inset-0 z-2 bg-black/20"
-      aria-label="Close chapter list"
-      onclick={() => (chaptersOpen = false)}
-      transition:fade={{ duration: 150 }}
-    ></button>
-    <div
-      class="fixed top-0 left-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
-      transition:fly={{ x: -300, duration: 200 }}
-    >
-      <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <div class="flex items-center gap-1">
-          <h3 class="text-base font-bold">{$_('media.chapters')}</h3>
-          <!-- svelte-ignore a11y_consider_explicit_label -->
-          <button class="btn border-0 bg-transparent text-white/80 shadow-none btn-xs" onclick={toggleSort}>
-            <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
-            </iconify-icon>
-          </button>
-        </div>
-        <button
-          class="btn border-0 bg-transparent text-white/80 shadow-none btn-xs"
-          aria-label="Close"
-          onclick={() => (chaptersOpen = false)}
-        >
-          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
-        </button>
-      </div>
-      {@render chapterMenu()}
-    </div>
-  {/if}
-
   <!-- reading area -->
   {#if settings.current?.readMode === 'scroll'}
     <div
@@ -718,116 +650,37 @@
       </button>
     </div>
   {/if}
-
-  <!-- settings panel -->
-  {#if settingsOpen}
-    <button
-      class="fixed inset-0 z-2 bg-black/20"
-      aria-label="Close settings"
-      onclick={() => (settingsOpen = false)}
-      transition:fade={{ duration: 150 }}
-    ></button>
-    <div
-      class="fixed top-0 right-0 z-3 flex h-full w-72 flex-col overflow-y-auto bg-[#1a1a1a] text-[#ccc] shadow-xl sm:w-80"
-      transition:fly={{ x: 300, duration: 200 }}
-    >
-      <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">{$_('media.reader_settings')}</h3>
-        <button
-          class="btn border-0 bg-transparent text-white/80 shadow-none btn-xs"
-          aria-label="Close"
-          onclick={() => (settingsOpen = false)}
-        >
-          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
-        </button>
+  {#snippet settingsPanel()}
+    {#if settings.current !== null}
+      <div>
+        <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.read_mode')}</span>
+        <div class="grid grid-cols-2 gap-2">
+          {@render readModeBtn('scroll')}
+          {@render readModeBtn('paged')}
+        </div>
       </div>
-      <div class="flex-1 space-y-5 p-4">
-        {#if settings.current !== null}
-          <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.read_mode')}</span>
-            <div class="grid grid-cols-2 gap-2">
-              {@render readModeBtn('scroll')}
-              {@render readModeBtn('paged')}
-            </div>
-          </div>
-          <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.zoom_mode')}</span>
-            <div class="grid grid-cols-3 gap-2">
-              {@render zoomModeBtn('auto')}
-              {@render zoomModeBtn('width')}
-              {@render zoomModeBtn('height')}
-            </div>
-          </div>
-          <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.page_direction')}</span>
-            <div class="grid grid-cols-3 gap-2">
-              {@render directionBtn('right')}
-              {@render directionBtn('left')}
-              {@render directionBtn('bottom')}
-            </div>
-          </div>
-        {/if}
+      <div>
+        <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.zoom_mode')}</span>
+        <div class="grid grid-cols-3 gap-2">
+          {@render zoomModeBtn('auto')}
+          {@render zoomModeBtn('width')}
+          {@render zoomModeBtn('height')}
+        </div>
       </div>
-    </div>
-  {/if}
+      <div>
+        <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.image.page_direction')}</span>
+        <div class="grid grid-cols-3 gap-2">
+          {@render directionBtn('right')}
+          {@render directionBtn('left')}
+          {@render directionBtn('bottom')}
+        </div>
+      </div>
+    {/if}
+  {/snippet}
+</ReaderFrame>
 
-  <!-- bottom bar -->
-  {#if controlsVisible && chapters.length > 1}
-    <div
-      class="absolute inset-x-0 bottom-0 z-1 flex justify-center gap-6 bg-black/50 p-2 text-white/80 backdrop-blur-sm"
-      transition:fade={{ duration: 200 }}
-    >
-      <button
-        class="btn border-0 btn-ghost shadow-none btn-xs disabled:text-white/20"
-        aria-label="Previous chapter"
-        disabled={!previousChapter}
-        onclick={() => previousChapter && selectChapter(previousChapter)}
-      >
-        <iconify-icon icon={icons.arrowPreviousFilled} width="1.25rem"></iconify-icon>
-      </button>
-      <button
-        class="btn border-0 btn-ghost shadow-none btn-xs disabled:text-white/20"
-        aria-label="Next chapter"
-        disabled={!nextChapter}
-        onclick={() => nextChapter && selectChapter(nextChapter)}
-      >
-        <iconify-icon icon={icons.arrowNextFilled} width="1.25rem"></iconify-icon>
-      </button>
-    </div>
-  {/if}
-</div>
-
-{#snippet chapterMenu()}
-  <ul class="menu w-full px-2 pb-6 text-sm">
-    {#each sortDesc ? [...chapterGroups].reverse() : chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
-      {#if group.volume}
-        <li>
-          <h2 class="menu-title text-neutral-content/40">{group.volume}</h2>
-          <ul>
-            {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
-              {@render chapterItem(chapter)}
-            {/each}
-          </ul>
-        </li>
-      {:else}
-        {#each sortDesc ? [...group.chapters].reverse() : group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
-          {@render chapterItem(chapter)}
-        {/each}
-      {/if}
-    {/each}
-  </ul>
-{/snippet}
-
-{#snippet chapterItem(chapter: Chapter)}
-  <li class="mb-0.75">
-    <button
-      class="h-auto min-h-0 py-2 whitespace-normal {matchChapterId(chapter.id, chapterId) ? 'menu-active' : ''}"
-      title={chapter.title}
-      onclick={() => selectChapter(chapter)}
-    >
-      <span class="min-w-0 text-left wrap-break-word">{chapter.title}</span>
-    </button>
-  </li>
+{#snippet counter()}
+  <span class="shrink-0 tabular-nums opacity-60">{imageIndex + 1} / {imageCount}</span>
 {/snippet}
 
 {#snippet readModeBtn(mode: ReadMode)}

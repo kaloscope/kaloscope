@@ -7,6 +7,8 @@
     Cell,
     confirm,
     DataView,
+    DownloaderEmpty,
+    Empty,
     HCell,
     Paginator,
     PlanEditor,
@@ -19,7 +21,7 @@
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { user } from '$lib/stores.svelte';
-  import type { AssistantPageContext, DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
+  import type { AssistantPageContext, Downloader, DownloadPlan, FlowGraph, Page, Resp } from '$lib/types';
   import { describePlanExecution } from '$lib/utils/plan-execution';
   import { toDatetimeLocal } from '$lib/utils/datetime';
   import { onMount, tick, untrack } from 'svelte';
@@ -31,6 +33,8 @@
   let creator: PlanEditor | null = $state(null);
   let updater: PlanEditor | null = $state(null);
   let selected: DownloadPlan | null = $state(null);
+  // whether the downloader list has loaded without any entry; every plan needs a downloader
+  let noDownloader: boolean = $state(false);
 
   const pagination: PaginatorProps = $state({ current: 1, size: 15, onchange: search });
   const ordering = createSortField();
@@ -153,6 +157,12 @@
       };
     });
     api
+      .get('download/manager/list')
+      .json<Resp<Downloader[]>>()
+      .then(({ data }) => {
+        noDownloader = data.length === 0;
+      });
+    api
       .get('flow/graph/list', {
         searchParams: [
           ['page_num', 0],
@@ -178,6 +188,13 @@
 </script>
 
 <DataView dvh loading={$loading} data={plans}>
+  {#snippet empty()}
+    {#if noDownloader}
+      <DownloaderEmpty />
+    {:else}
+      <Empty />
+    {/if}
+  {/snippet}
   {#snippet filters()}
     <Select
       filter

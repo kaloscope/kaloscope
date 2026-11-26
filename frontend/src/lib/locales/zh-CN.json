@@ -178,7 +178,9 @@
       "current": "第 {0} 页",
       "previous": "上一页",
       "next": "下一页"
-    }
+    },
+    "previous_month": "上个月",
+    "next_month": "下个月"
   },
   "field": {
     "dir": "目录",
@@ -300,7 +302,9 @@
     "toggle_on": "打开",
     "toggle_off": "关闭",
     "assign_permissions": "分配权限",
-    "batch_delete": "批量删除{0}"
+    "batch_delete": "批量删除{0}",
+    "back": "返回",
+    "encrypt": "加密"
   },
   "status": {
     "up": "正常",
@@ -794,7 +798,12 @@
       "reverts": "撤销批量操作 #{0}"
     },
     "chapters": "章节",
-    "reader_settings": "阅读设置"
+    "reader_settings": "阅读设置",
+    "text_viewer": "文本阅读器",
+    "image_viewer": "图片阅读器",
+    "sort_chapters": "倒序排列",
+    "previous_chapter": "上一章",
+    "next_chapter": "下一章"
   },
   "metadata": {
     "fields": {

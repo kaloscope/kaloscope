@@ -16,6 +16,7 @@
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { DNSResolver, HTTPProxy, Resp, URLRule } from '$lib/types';
+  import { moveItem } from '$lib/utils/object';
   import { debounce } from '$lib/utils/timing';
   import { onMount, tick } from 'svelte';
 
@@ -73,36 +74,6 @@
     const ids = rules.map((rule) => rule.id);
     api.post('network/rule/sort', { json: { ids } });
   });
-
-  /**
-   * Move a rule up in the list.
-   *
-   * @param index - Index of the rule to move up.
-   */
-  function moveUp(index: number) {
-    if (index <= 0) {
-      return;
-    }
-    const temp = rules[index];
-    rules[index] = rules[index - 1];
-    rules[index - 1] = temp;
-    sort();
-  }
-
-  /**
-   * Move a rule down in the list.
-   *
-   * @param index - Index of the rule to move down.
-   */
-  function moveDown(index: number) {
-    if (index >= rules.length - 1) {
-      return;
-    }
-    const temp = rules[index];
-    rules[index] = rules[index + 1];
-    rules[index + 1] = temp;
-    sort();
-  }
 
   // DNS resolver states
   let resolvers: DNSResolver[] = $state([]);
@@ -229,13 +200,13 @@
           icon: icons.arrowUp,
           text: $_('action.move_up'),
           disabled: !!pattern || index === 0,
-          onclick: () => moveUp(index)
+          onclick: () => moveItem(rules, index, -1) && sort()
         },
         {
           icon: icons.arrowDown,
           text: $_('action.move_down'),
           disabled: !!pattern || index === rules.length - 1,
-          onclick: () => moveDown(index)
+          onclick: () => moveItem(rules, index, 1) && sort()
         },
         {
           icon: icons.delete,

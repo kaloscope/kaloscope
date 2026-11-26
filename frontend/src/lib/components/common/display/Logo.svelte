@@ -54,6 +54,7 @@
 </script>
 
 <script lang="ts">
+  import { _ } from '$lib/i18n';
   let { size = '2.5rem', random = false }: LogoProps = $props();
   // the unique clip path id of this instance
   const clipId = $props.id();
@@ -73,7 +74,7 @@
 
 {#if random}
   {#key pattern}
-    <svg class="kaleidoscope" viewBox="0 0 256 256" width={size} height={size} role="img" aria-label="logo">
+    <svg class="kaleidoscope" viewBox="0 0 256 256" width={size} height={size} role="img" aria-label={$_('app.name')}>
       <defs>
         <clipPath id={clipId}><path d={pattern.clip} /></clipPath>
       </defs>
@@ -94,7 +95,7 @@
     </svg>
   {/key}
 {:else}
-  <img {src} alt="logo" style:width={size} style:height={size} />
+  <img {src} alt={$_('app.name')} style:width={size} style:height={size} />
 {/if}
 
 <style>

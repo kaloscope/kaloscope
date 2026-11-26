@@ -178,7 +178,9 @@
       "current": "Page {0}",
       "previous": "Previous",
       "next": "Next"
-    }
+    },
+    "previous_month": "Previous Month",
+    "next_month": "Next Month"
   },
   "field": {
     "dir": "Directory",
@@ -300,7 +302,9 @@
     "toggle_on": "On",
     "toggle_off": "Off",
     "assign_permissions": "Assign Permissions",
-    "batch_delete": "Batch Delete {0}"
+    "batch_delete": "Batch Delete {0}",
+    "back": "Back",
+    "encrypt": "Encrypt"
   },
   "status": {
     "up": "Online",
@@ -794,7 +798,12 @@
       "reverts": "Reverts batch #{0}"
     },
     "chapters": "Chapters",
-    "reader_settings": "Reading Settings"
+    "reader_settings": "Reading Settings",
+    "text_viewer": "Text Reader",
+    "image_viewer": "Image Reader",
+    "sort_chapters": "Reverse Order",
+    "previous_chapter": "Previous Chapter",
+    "next_chapter": "Next Chapter"
   },
   "metadata": {
     "fields": {

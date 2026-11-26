@@ -100,7 +100,7 @@
     {#if schema.group !== 'start'}
       <button
         class="btn btn-square btn-subtle btn-sm"
-        aria-label="Copy"
+        aria-label={$_('action.copy')}
         disabled={canvasLocked}
         onclick={(event) => copyNode(event)}
       >
@@ -110,7 +110,7 @@
     <!-- delete button -->
     <button
       class="btn btn-square btn-subtle btn-sm"
-      aria-label="Delete"
+      aria-label={$_('action.delete')}
       disabled={canvasLocked}
       onclick={(event) => deleteNode(event)}
     >

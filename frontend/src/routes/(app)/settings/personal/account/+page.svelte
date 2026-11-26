@@ -145,7 +145,7 @@
           {@const opacityClass = 'opacity-0 group-hover:opacity-100 transition-opacity'}
           <button
             class="btn absolute top-7.5 right-7.5 btn-square btn-sm {opacityClass}"
-            aria-label="Delete"
+            aria-label={$_('action.delete')}
             onclick={(event) => {
               event.preventDefault();
               cropSrc = '';
