@@ -605,7 +605,7 @@
                           width="100%"
                           ratio="2/3"
                           sharpen
-                          class="cover-image size-full! rounded-none!"
+                          class="size-full! rounded-none!"
                         />
                       {:else}
                         <div class="cover-fallback">
@@ -679,7 +679,7 @@
                           width="100%"
                           ratio="2/3"
                           sharpen
-                          class="cover-image size-full! rounded-none!"
+                          class="size-full! rounded-none!"
                         />
                       {:else}
                         <div class="cover-fallback">
@@ -1122,15 +1122,6 @@
   @media (hover: hover) and (prefers-reduced-motion: no-preference) {
     .history-card:hover {
       translate: 0 -1px;
-
-      :global(.cover-image) {
-        transform: scale(1.05);
-      }
-
-      /* the box-sized thumbnail would blur when scaled, so the zoom shows the full-size original beneath it */
-      :global(.image-thumbnail) {
-        opacity: 0;
-      }
     }
   }
 
@@ -1180,14 +1171,6 @@
     box-shadow:
       0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
       0 4px 10px -4px color-mix(in oklab, var(--color-shade) 20%, transparent);
-
-    :global(.cover-image) {
-      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
-    }
-
-    :global(.image-thumbnail) {
-      transition: opacity 200ms ease;
-    }
   }
 
   .read-cover {
