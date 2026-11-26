@@ -312,9 +312,10 @@
       {#snippet item(item)}
         {@const pointerClass = 'cursor-pointer transition-colors hover:text-primary'}
         {@const transClass = 'transition-all duration-300'}
-        <!-- only administrators get the actions menu, whose white trigger needs the poster dimmed behind it -->
+        <!-- only administrators get the actions menu; its white trigger needs the poster dimmed behind it on hover,
+        and keeps a dark backing of its own on touch screens, where it always shows -->
         {@const actionable = user.current?.role === 'admin' && !selecting}
-        {@const btnClass = 'text-white hover:bg-base-300 hover:text-base-content'}
+        {@const btnClass = 'text-white hover:bg-base-300 hover:text-base-content hover-none:bg-black/45'}
         <!-- items open as links, or toggle their selection while items are being selected -->
         {@const href = selecting ? undefined : `${page.url.pathname}/${item.id}`}
         {@const picked = selected.includes(item.id)}
@@ -334,7 +335,7 @@
           {/if}
           <div
             class:hidden={!actionable}
-            class="absolute right-0 bottom-0 z-1 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 {transClass}"
+            class="absolute right-0 bottom-0 z-1 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover-none:opacity-80 {transClass}"
           >
             <MediaActions
               {item}
