@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import { sniffer } from '$lib/utils/browser';
+  import { flip } from '$lib/utils/motion';
 
   const isSafari = sniffer.isSafari();
   const INTERACTIVE_SELECTOR = [
@@ -34,7 +35,6 @@
   import { Empty, Overlay, Skeleton, type SkeletonProps } from '$lib/components';
   import { _ } from '$lib/i18n';
   import type { Snippet } from 'svelte';
-  import { flip } from 'svelte/animate';
   import { fade } from 'svelte/transition';
 
   type TableProps = {

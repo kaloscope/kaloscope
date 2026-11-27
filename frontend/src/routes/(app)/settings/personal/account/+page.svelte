@@ -142,7 +142,7 @@
       <div class="group relative size-80">
         <Image circle border src={avatarSrc} icon={icons.user} width="320px" />
         {#if avatarSrc}
-          {@const opacityClass = 'opacity-0 group-hover:opacity-100 transition-opacity'}
+          {@const opacityClass = 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity'}
           <button
             class="btn absolute top-7.5 right-7.5 btn-square btn-sm {opacityClass}"
             aria-label={$_('action.delete')}

@@ -33,8 +33,8 @@
   } from '$lib/types';
   import { buildStreamUrl, mediaTitle } from '$lib/utils/media';
   import { aspectRatio } from '$lib/utils/number';
+  import { flip } from '$lib/utils/motion';
   import { onMount, tick, untrack } from 'svelte';
-  import { flip } from 'svelte/animate';
   import { SvelteSet } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import type { PageData } from './$types';

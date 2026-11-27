@@ -8,6 +8,7 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { FlowGraph, NodeSchema, Resp } from '$lib/types';
+  import { fly } from '$lib/utils/motion';
   import {
     Background,
     BackgroundVariant,
@@ -21,7 +22,6 @@
   } from '@xyflow/svelte';
   import { onMount, setContext } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import { fly } from 'svelte/transition';
   import { hideAll } from 'tippy.js';
   import { v7 as uuidv7 } from 'uuid';
   import { waitForGraphWrites } from '../graphWrites';

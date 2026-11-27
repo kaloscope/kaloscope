@@ -544,7 +544,8 @@
         "right": "Tap Right",
         "left": "Tap Left",
         "bottom": "Tap Bottom"
-      }
+      },
+      "page": "Page {0} of {1}"
     },
     "video": {
       "settings": "Video",

@@ -7,8 +7,9 @@
   import { icons } from '$lib/icons';
   import { restorePosition, user } from '$lib/stores.svelte';
   import type { IndexerAuth, IndexerConfig, Page, Resource, Resp } from '$lib/types';
+  import { fly } from '$lib/utils/motion';
   import { onMount } from 'svelte';
-  import { fade, fly } from 'svelte/transition';
+  import { fade } from 'svelte/transition';
   import { queryParameters, ssp } from 'sveltekit-search-params';
   import type { PageData } from './$types';
 

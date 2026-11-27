@@ -61,7 +61,8 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { groupChapters, matchChapterId } from '$lib/utils/chapter';
-  import { fade, fly } from 'svelte/transition';
+  import { fly } from '$lib/utils/motion';
+  import { fade } from 'svelte/transition';
 
   let {
     label,

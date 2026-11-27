@@ -28,8 +28,8 @@
   import { activate } from '$lib/actions';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { scale } from '$lib/utils/motion';
   import { MediaQuery } from 'svelte/reactivity';
-  import { scale } from 'svelte/transition';
 
   let {
     condition = true,

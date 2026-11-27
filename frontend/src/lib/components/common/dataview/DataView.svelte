@@ -2,9 +2,9 @@
   import type { SkeletonProps } from '$lib/components';
   import type { ScrollPosition, ViewMode, ViewModes } from '$lib/types';
   import { throttle } from '$lib/utils/timing';
+  import { slide } from '$lib/utils/motion';
   import type { Snippet } from 'svelte';
   import { tick } from 'svelte';
-  import { slide } from 'svelte/transition';
   import Grid from './grid/Grid.svelte';
   import Table from './table/Table.svelte';
   import ViewSwitcher from './ViewSwitcher.svelte';

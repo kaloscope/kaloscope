@@ -92,8 +92,8 @@
   import { proxyImage } from '$lib/api';
   import { _ } from '$lib/i18n';
   import { freeze, historyBack } from '$lib/stores.svelte';
+  import { fly } from '$lib/utils/motion';
   import { onMount, tick } from 'svelte';
-  import { fly } from 'svelte/transition';
   import ReaderFrame from '../ReaderFrame.svelte';
 
   // resource title
@@ -590,7 +590,7 @@
           <img
             bind:this={imageEls[i]}
             {src}
-            alt=""
+            alt={$_('media.image.page', [startOffset + i + 1, imageCount])}
             class="scroll-image {zoomClass}"
             loading={Math.abs(startOffset + i - imageIndex) < 2 ? 'eager' : 'lazy'}
             draggable="false"
@@ -621,7 +621,7 @@
             <img
               bind:this={pagedImage}
               src={images[imageIndex - startOffset]}
-              alt=""
+              alt={$_('media.image.page', [imageIndex + 1, imageCount])}
               class="my-auto {zoomClass}"
               draggable="false"
               in:fly={flyParams}

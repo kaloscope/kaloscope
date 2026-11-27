@@ -2,8 +2,8 @@
   import { Empty, Overlay, Skeleton, type SkeletonProps } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { throttle } from '$lib/utils/timing';
+  import { flip } from '$lib/utils/motion';
   import type { Snippet } from 'svelte';
-  import { flip } from 'svelte/animate';
   import { fade } from 'svelte/transition';
 
   type GridProps = {

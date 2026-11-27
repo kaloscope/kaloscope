@@ -16,8 +16,8 @@
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { moveItem } from '$lib/utils/object';
+  import { flip } from '$lib/utils/motion';
   import { onMount, tick } from 'svelte';
-  import { flip } from 'svelte/animate';
 
   let { category, triggers: _triggers, onchange, class: _class }: FlowTriggersProps = $props();
 
