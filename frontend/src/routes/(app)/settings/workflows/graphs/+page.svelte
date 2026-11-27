@@ -582,9 +582,8 @@
             });
           }
         },
-        // kept on every row, so each row shows edit beside the same menu instead of shifting its second action
         {
-          disabled: !graph.last_exec,
+          condition: !!graph.last_exec,
           icon: icons.documentSearch,
           text: $_('action.view', $_('entity.logs')),
           onclick: () => flowLogs.showModal(graph.id)
