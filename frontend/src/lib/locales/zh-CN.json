@@ -180,7 +180,8 @@
       "next": "下一页"
     },
     "previous_month": "上个月",
-    "next_month": "下个月"
+    "next_month": "下个月",
+    "rank": "第 {0} 名"
   },
   "field": {
     "dir": "目录",
@@ -304,7 +305,8 @@
     "assign_permissions": "分配权限",
     "batch_delete": "批量删除{0}",
     "back": "返回",
-    "encrypt": "加密"
+    "encrypt": "加密",
+    "more": "更多操作"
   },
   "status": {
     "up": "正常",
@@ -1180,7 +1182,9 @@
     "assistant_canvas_already_reverted": "修改此前已撤回，未保存",
     "download_plan_already_exists": "已存在配置完全相同的下载计划",
     "download_plan_request_conflict": "该计划已按其他配置创建，请打开原预览查看结果",
-    "assistant_review_unavailable": "无法保存此预览，请在助手中查看最新状态"
+    "assistant_review_unavailable": "无法保存此预览，请在助手中查看最新状态",
+    "copied": "已复制",
+    "copy_failed": "复制失败"
   },
   "ai": {
     "custom": "自定义提供商",

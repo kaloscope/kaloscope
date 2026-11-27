@@ -25,6 +25,7 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { MediaQuery } from 'svelte/reactivity';
@@ -77,6 +78,7 @@
         <div
           tabindex={sort ? 0 : undefined}
           role={sort ? 'button' : 'generic'}
+          use:activate
           class="group flex min-h-8 min-w-0 items-center p-1 transition-all duration-300 {sortClass} {sortedClass}"
           onclick={() => sort && sort.toggle()}
         >

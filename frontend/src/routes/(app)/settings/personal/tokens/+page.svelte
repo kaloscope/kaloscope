@@ -2,7 +2,7 @@
   import { enhance } from '$app/forms';
   import { api } from '$lib/api';
   import { Badge, Button, Container, Empty, Label, Modal, Select, Setting, alert, confirm } from '$lib/components';
-  import { createFormSchema, createLoading } from '$lib/helpers';
+  import { copyText, createFormSchema, createLoading } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { MCPAccessToken, MCPAccessTokenCreate, MCPAccessTokenCreated, Resp } from '$lib/types';
@@ -171,13 +171,9 @@
   async function copy(input: HTMLInputElement | HTMLTextAreaElement | undefined): Promise<void> {
     if (!input) return;
 
-    try {
-      await navigator.clipboard.writeText(input.value);
-      alert({ level: 'success', message: $_('access_token.copied') });
-    } catch {
+    if (!(await copyText(input.value, $_('access_token.copied'), $_('access_token.copy_failed')))) {
       input.focus();
       input.select();
-      alert({ level: 'warning', message: $_('access_token.copy_failed') });
     }
   }
 

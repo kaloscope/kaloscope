@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { Label, Modal } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -152,6 +153,7 @@
       <div
         tabindex="0"
         role="button"
+        use:activate
         class="absolute right-2 flex-center cursor-pointer"
         onclick={(event) => {
           event.preventDefault();

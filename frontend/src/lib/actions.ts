@@ -23,6 +23,32 @@ export function portal(target: HTMLElement, parent?: HTMLElement): ActionReturn 
 }
 
 /**
+ * A Svelte action that lets Enter and Space click an element with the `button` role, as they do a native button.
+ *
+ * The role is read on each key press, so an element whose role changes at runtime is handled only while it is a
+ * button, and an element marked `aria-disabled="true"` is left alone.
+ *
+ * @param target - Target element.
+ * @returns The Svelte action return.
+ */
+export function activate(target: HTMLElement): ActionReturn {
+  const onkeydown = (event: KeyboardEvent) => {
+    // only the focused element itself, not keys typed in an input nested inside it
+    if (event.target !== target || target.getAttribute('role') !== 'button') return;
+    if (target.getAttribute('aria-disabled') === 'true') return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      // keep Space from scrolling the page
+      event.preventDefault();
+      if (!event.repeat) target.click();
+    }
+  };
+  target.addEventListener('keydown', onkeydown);
+  return {
+    destroy: () => target.removeEventListener('keydown', onkeydown)
+  };
+}
+
+/**
  * A Svelte action to create a tooltip using Tippy.js.
  *
  * @param target - Target element.

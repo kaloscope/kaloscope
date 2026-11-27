@@ -180,7 +180,8 @@
       "next": "Next"
     },
     "previous_month": "Previous Month",
-    "next_month": "Next Month"
+    "next_month": "Next Month",
+    "rank": "Rank {0}"
   },
   "field": {
     "dir": "Directory",
@@ -304,7 +305,8 @@
     "assign_permissions": "Assign Permissions",
     "batch_delete": "Batch Delete {0}",
     "back": "Back",
-    "encrypt": "Encrypt"
+    "encrypt": "Encrypt",
+    "more": "More Actions"
   },
   "status": {
     "up": "Online",
@@ -1180,7 +1182,9 @@
     "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved.",
     "download_plan_already_exists": "An identical download plan already exists",
     "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it.",
-    "assistant_review_unavailable": "This review can no longer be saved. Check its latest status in the assistant."
+    "assistant_review_unavailable": "This review can no longer be saved. Check its latest status in the assistant.",
+    "copied": "Copied",
+    "copy_failed": "Copy failed"
   },
   "ai": {
     "custom": "Custom Provider",

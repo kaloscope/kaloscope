@@ -64,6 +64,7 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { proxyImage } from '$lib/api';
   import { icons } from '$lib/icons';
   import { sharpThumbnail } from '$lib/utils/image';
@@ -203,6 +204,7 @@
 <div
   tabindex={onclick ? 0 : undefined}
   role={onclick ? 'button' : 'generic'}
+  use:activate
   class="flex-center shrink-0 rotate-0 overflow-hidden {roundedClass} {btnClass} {bgClass} {_class}"
   class:shadow-sm={shadow && src}
   class:relative={sharpen}

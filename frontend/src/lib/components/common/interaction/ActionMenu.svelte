@@ -17,6 +17,7 @@
 
 <script lang="ts">
   import { Dropdown } from '$lib/components';
+  import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
 
   let { actions, class: _class }: ActionMenuProps = $props();
@@ -29,7 +30,8 @@
 <Dropdown contentWidth="10rem" class="dropdown-end {_class}">
   {#snippet trigger()}
     <div class="btn btn-square btn-subtle btn-sm">
-      <iconify-icon icon={icons.moreVertical} width="1rem"></iconify-icon>
+      <iconify-icon icon={icons.moreVertical} width="1rem" aria-hidden="true"></iconify-icon>
+      <span class="sr-only">{$_('action.more')}</span>
     </div>
   {/snippet}
   <ul class="menu gap-1">

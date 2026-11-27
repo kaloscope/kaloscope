@@ -10,6 +10,8 @@
 </script>
 
 <script lang="ts">
+  import { _ } from '$lib/i18n';
+
   let { rank: _rank, compact = false, class: _class }: RankingProps = $props();
 
   // the formatted ranking to display
@@ -37,7 +39,12 @@
 </script>
 
 {#if rank}
-  <span class="ranking-badge flex-center {rankClass} {_class}" class:ranking-compact={compact} aria-label="Rank {rank}">
+  <span
+    class="ranking-badge flex-center {rankClass} {_class}"
+    class:ranking-compact={compact}
+    role="img"
+    aria-label={$_('data.rank', rank)}
+  >
     {rank}
   </span>
 {/if}

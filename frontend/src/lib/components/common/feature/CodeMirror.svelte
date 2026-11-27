@@ -199,6 +199,7 @@
 
 <script lang="ts">
   import { Button, Modal } from '$lib/components';
+  import { copyText } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import { debounce } from '$lib/utils/timing';
@@ -539,7 +540,7 @@
           size="xs"
           icon={icons.documentCopy}
           class="border-0 bg-transparent shadow-none"
-          onclick={() => document && navigator.clipboard && navigator.clipboard.writeText(document)}
+          onclick={() => document && copyText(document)}
         />
       {/if}
     </span>

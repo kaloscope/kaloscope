@@ -31,6 +31,7 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { Filters } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -98,6 +99,7 @@
   <span
     tabindex="0"
     role="button"
+    use:activate
     class={btnClass}
     aria-label={$_('action.search')}
     onclick={(event) => {

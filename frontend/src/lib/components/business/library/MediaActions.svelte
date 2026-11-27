@@ -84,7 +84,8 @@
 >
   {#snippet trigger()}
     <div class="btn btn-circle border-0 btn-subtle btn-sm {triggerClass}">
-      <iconify-icon icon={icons.moreVertical} width="1.25rem"></iconify-icon>
+      <iconify-icon icon={icons.moreVertical} width="1.25rem" aria-hidden="true"></iconify-icon>
+      <span class="sr-only">{$_('action.more')}</span>
     </div>
   {/snippet}
   <ul class="menu gap-1">
