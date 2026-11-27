@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { Label, Modal } from '$lib/components';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
@@ -152,6 +153,7 @@
       <div
         tabindex="0"
         role="button"
+        use:activate
         class="absolute right-2 flex-center cursor-pointer"
         onclick={(event) => {
           event.preventDefault();
@@ -215,7 +217,7 @@
 {#snippet calendarMonth()}
   {/* @ts-expect-error property does not exist */ null}
   <svg
-    aria-label="Previous"
+    aria-label={$_('data.previous_month')}
     class="size-4 fill-current"
     slot="previous"
     xmlns="http://www.w3.org/2000/svg"
@@ -224,7 +226,13 @@
     <path d="M15.75 19.5 8.25 12l7.5-7.5"></path>
   </svg>
   {/* @ts-expect-error property does not exist */ null}
-  <svg aria-label="Next" class="size-4 fill-current" slot="next" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <svg
+    aria-label={$_('data.next_month')}
+    class="size-4 fill-current"
+    slot="next"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+  >
     <path d="m8.25 4.5 7.5 7.5-7.5 7.5"></path>
   </svg>
   <calendar-month></calendar-month>

@@ -11,7 +11,7 @@
     confirm,
     type PaginatorProps
   } from '$lib/components';
-  import { createLoading, createSortField } from '$lib/helpers';
+  import { copyText, createLoading, createSortField } from '$lib/helpers';
   import { _, dateTime } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { GlobalVariable, Page, Resp } from '$lib/types';
@@ -96,12 +96,7 @@
   {/snippet}
   {#snippet row(variable)}
     <Cell>
-      <button
-        class="group relative flex-center hover-dashed px-2 py-0.5"
-        onclick={() => {
-          navigator.clipboard && navigator.clipboard.writeText(variable.key);
-        }}
-      >
+      <button class="group relative flex-center hover-dashed px-2 py-0.5" onclick={() => copyText(variable.key)}>
         <span class="truncate text-base">{variable.key}</span>
         <div class="invisible absolute flex-center size-full bg-blur-70 group-hover:visible">
           <iconify-icon icon={icons.documentCopy} width="1.5rem" class="opacity-30 group-active:scale-95">

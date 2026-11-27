@@ -1,7 +1,7 @@
 <script lang="ts" module>
   import { persisted } from '$lib/stores.svelte';
   import type { Chapter, ContentBlock, ContentRun } from '$lib/types';
-  import { groupChapters, matchChapterId } from '$lib/utils/chapter';
+  import { matchChapterId } from '$lib/utils/chapter';
 
   /** Delay in ms before auto-hiding the overlay controls. */
   const CONTROLS_HIDE_DELAY = 3000;
@@ -135,10 +135,9 @@
 
 <script lang="ts">
   import { _ } from '$lib/i18n';
-  import { icons } from '$lib/icons';
   import { freeze, historyBack } from '$lib/stores.svelte';
   import { onMount, tick } from 'svelte';
-  import { fade, fly } from 'svelte/transition';
+  import ReaderFrame from '../ReaderFrame.svelte';
 
   // resource title
   let title = $state('');
@@ -164,18 +163,10 @@
   let restoreFrame = 0;
   // available chapters
   let chapters = $state<Chapter[]>([]);
-  // chapters grouped by volume in source order
-  let chapterGroups = $derived(groupChapters(chapters));
   // currently active chapter id from url or selection
   let chapterId = $state<string | null>(null);
   // index of the current chapter within the chapters array
   let chapterIndex = $derived(chapters.findIndex((c) => matchChapterId(c.id, chapterId)));
-  // previous chapter in sequence, or null if at the first
-  let previousChapter = $derived(chapterIndex > 0 ? chapters[chapterIndex - 1] : null);
-  // next chapter in sequence, or null if at the last
-  let nextChapter = $derived(
-    chapterIndex >= 0 && chapterIndex < chapters.length - 1 ? chapters[chapterIndex + 1] : null
-  );
   // callback to notify parent of chapter change
   let chapterChange = $state<((c: Chapter) => void) | undefined>(undefined);
   // display title, resource title or current chapter title
@@ -289,7 +280,6 @@
    * @param chapter - Chapter to select.
    */
   function selectChapter(chapter: Chapter) {
-    chaptersOpen = false;
     chapterId = chapter.id ?? null;
     chapterChange?.(chapter);
   }
@@ -345,94 +335,22 @@
 
 <svelte:window onmousemove={showControls} />
 
-<div
-  role="application"
-  aria-label="Text viewer"
-  data-theme="light"
-  class="fixed inset-0 flex flex-col transition-colors duration-300"
-  style:background-color={colors.bg}
+<ReaderFrame
+  label={$_('media.text_viewer')}
+  theme="light"
+  {colors}
+  title={currentTitle}
+  {chapters}
+  {chapterId}
+  {sortDesc}
+  {controlsVisible}
+  bind:chaptersOpen
+  bind:settingsOpen
+  onback={() => (back ?? historyBack)()}
+  onselect={selectChapter}
+  onsort={toggleSort}
+  onchaptersopen={() => clearTimeout(hideTimer)}
 >
-  <!-- top bar -->
-  {#if controlsVisible}
-    <div
-      class="absolute inset-x-0 top-0 z-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1.5 backdrop-blur-sm transition-colors duration-300"
-      style:color={colors.muted}
-      style:background-color={colors.bar}
-      transition:fade={{ duration: 200 }}
-    >
-      <div class="flex items-center gap-1">
-        <button
-          class="btn border-0 btn-ghost shadow-none btn-xs"
-          style:color={colors.muted}
-          onclick={() => (back ?? historyBack)()}
-          aria-label="Back"
-        >
-          <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
-        </button>
-        {#if chapters.length > 1}
-          <button
-            class="btn border-0 btn-ghost shadow-none btn-xs"
-            style:color={colors.muted}
-            aria-label="Chapters"
-            onclick={() => {
-              chaptersOpen = true;
-              clearTimeout(hideTimer);
-            }}
-          >
-            <iconify-icon icon={icons.menuFoldSolid} width="1.5rem"></iconify-icon>
-          </button>
-        {/if}
-      </div>
-
-      <span class="min-w-0 truncate text-center text-sm">{currentTitle}</span>
-
-      <button
-        class="btn border-0 btn-ghost shadow-none btn-xs"
-        style:color={colors.muted}
-        aria-label="Reading settings"
-        onclick={() => (settingsOpen = !settingsOpen)}
-      >
-        <iconify-icon icon={icons.settingsFilled} width="1.25rem"></iconify-icon>
-      </button>
-    </div>
-  {/if}
-
-  <!-- chapter panel -->
-  {#if chaptersOpen}
-    <button
-      class="fixed inset-0 z-2 bg-black/20"
-      aria-label="Close chapter list"
-      onclick={() => (chaptersOpen = false)}
-      transition:fade={{ duration: 150 }}
-    ></button>
-    <div
-      class="fixed top-0 left-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
-      style:color={colors.text}
-      style:background-color={colors.panel}
-      transition:fly={{ x: -300, duration: 200 }}
-    >
-      <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <div class="flex items-center gap-1">
-          <h3 class="text-base font-bold">{$_('media.chapters')}</h3>
-          <!-- svelte-ignore a11y_consider_explicit_label -->
-          <button class="btn border-0 bg-transparent shadow-none btn-xs" style:color={colors.text} onclick={toggleSort}>
-            <iconify-icon icon={sortDesc ? icons.arrowSortDownLines : icons.arrowSortUpLines} width="1rem">
-            </iconify-icon>
-          </button>
-        </div>
-        <button
-          class="btn border-0 bg-transparent shadow-none btn-xs"
-          style:color={colors.text}
-          aria-label="Close"
-          onclick={() => (chaptersOpen = false)}
-        >
-          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
-        </button>
-      </div>
-      {@render chapterMenu()}
-    </div>
-  {/if}
-
   <!-- reading area -->
   {#if settings.current !== null}
     <article
@@ -549,105 +467,48 @@
       {/key}
     </article>
   {/if}
-
-  <!-- settings panel -->
-  {#if settingsOpen}
-    <button
-      class="fixed inset-0 z-2 bg-black/20"
-      aria-label="Close settings"
-      onclick={() => (settingsOpen = false)}
-      transition:fade={{ duration: 150 }}
-    ></button>
-    <div
-      class="fixed top-0 right-0 z-3 flex h-full w-72 flex-col overflow-y-auto shadow-xl sm:w-80"
-      style:color={colors.text}
-      style:background-color={colors.panel}
-      transition:fly={{ x: 300, duration: 200 }}
-    >
-      <div class="flex items-center justify-between px-4 pt-4 pb-2">
-        <h3 class="text-base font-bold">{$_('media.reader_settings')}</h3>
-        <button
-          class="btn border-0 bg-transparent shadow-none btn-xs"
-          style:color={colors.text}
-          aria-label="Close"
-          onclick={() => (settingsOpen = false)}
-        >
-          <iconify-icon icon={icons.dismiss} width="1.125rem"></iconify-icon>
-        </button>
+  {#snippet settingsPanel()}
+    {#if settings.current !== null}
+      <div>
+        <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.theme')}</span>
+        <div class="grid grid-cols-4 gap-2">
+          {#each Object.entries(THEMES) as [key, t] (key)}
+            <label
+              class="flex cursor-pointer flex-col items-center gap-1.5 rounded-field py-2 text-xs transition-all
+              {settings.current.theme === key ? 'ring-2 ring-primary' : 'opacity-60 hover:opacity-100'}"
+            >
+              <input type="radio" class="hidden" value={key} bind:group={settings.current.theme} />
+              <span
+                class="size-5 rounded-full border shadow-sm"
+                style:background-color={t.bg}
+                style:border-color="{t.muted}50 !important"
+              ></span>
+              <span>{$_(`media.text.theme_options.${key}`)}</span>
+            </label>
+          {/each}
+        </div>
       </div>
-      <div class="flex-1 space-y-5 p-4">
-        {#if settings.current !== null}
-          <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.theme')}</span>
-            <div class="grid grid-cols-4 gap-2">
-              {#each Object.entries(THEMES) as [key, t] (key)}
-                <label
-                  class="flex cursor-pointer flex-col items-center gap-1.5 rounded-field py-2 text-xs transition-all
-                  {settings.current.theme === key ? 'ring-2 ring-primary' : 'opacity-60 hover:opacity-100'}"
-                >
-                  <input type="radio" class="hidden" value={key} bind:group={settings.current.theme} />
-                  <span
-                    class="size-5 rounded-full border shadow-sm"
-                    style:background-color={t.bg}
-                    style:border-color="{t.muted}50 !important"
-                  ></span>
-                  <span>{$_(`media.text.theme_options.${key}`)}</span>
-                </label>
-              {/each}
-            </div>
-          </div>
-          <div>
-            <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.font')}</span>
-            <div class="grid grid-cols-3 gap-2">
-              {#each Object.entries(FONTS) as [key] (key)}
-                <label
-                  class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
-                  {settings.current.font === key ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
-                >
-                  <input type="radio" class="hidden" value={key} bind:group={settings.current.font} />
-                  {$_(`media.text.font_options.${key}`)}
-                </label>
-              {/each}
-            </div>
-          </div>
-          {@render slider('fontSize')}
-          {@render slider('lineHeight')}
-          {@render slider('paraSpacing')}
-          {@render slider('paddingX')}
-        {/if}
+      <div>
+        <span class="mb-1.5 block text-sm font-semibold opacity-60">{$_('media.text.font')}</span>
+        <div class="grid grid-cols-3 gap-2">
+          {#each Object.entries(FONTS) as [key] (key)}
+            <label
+              class="cursor-pointer rounded-field py-2 text-center text-xs font-medium transition-opacity
+              {settings.current.font === key ? 'bg-primary/15 outline' : 'opacity-50 hover:opacity-80'}"
+            >
+              <input type="radio" class="hidden" value={key} bind:group={settings.current.font} />
+              {$_(`media.text.font_options.${key}`)}
+            </label>
+          {/each}
+        </div>
       </div>
-    </div>
-  {/if}
-
-  <!-- bottom bar -->
-  {#if controlsVisible && chapters.length > 1}
-    <div
-      class="absolute inset-x-0 bottom-0 z-1 flex justify-center gap-6 p-2 backdrop-blur-sm transition-colors duration-300"
-      style:color={colors.muted}
-      style:background-color={colors.bar}
-      transition:fade={{ duration: 200 }}
-    >
-      <button
-        class="btn border-0 btn-ghost shadow-none btn-xs disabled:opacity-20"
-        style:color={colors.muted}
-        aria-label="Previous chapter"
-        disabled={!previousChapter}
-        onclick={() => previousChapter && selectChapter(previousChapter)}
-      >
-        <iconify-icon icon={icons.arrowPreviousFilled} width="1.25rem"></iconify-icon>
-      </button>
-      <button
-        class="btn border-0 btn-ghost shadow-none btn-xs disabled:opacity-20"
-        style:color={colors.muted}
-        aria-label="Next chapter"
-        disabled={!nextChapter}
-        onclick={() => nextChapter && selectChapter(nextChapter)}
-      >
-        <iconify-icon icon={icons.arrowNextFilled} width="1.25rem"></iconify-icon>
-      </button>
-    </div>
-  {/if}
-</div>
+      {@render slider('fontSize')}
+      {@render slider('lineHeight')}
+      {@render slider('paraSpacing')}
+      {@render slider('paddingX')}
+    {/if}
+  {/snippet}
+</ReaderFrame>
 
 {#snippet textRuns(runs: ContentRun[])}
   {#each runs as run, i (i)}
@@ -661,39 +522,6 @@
       {run.text}
     {/if}
   {/each}
-{/snippet}
-
-{#snippet chapterMenu()}
-  <ul class="menu w-full px-2 pb-6 text-sm">
-    {#each sortDesc ? [...chapterGroups].reverse() : chapterGroups as group, groupIndex (group.volume ?? groupIndex)}
-      {#if group.volume}
-        <li>
-          <h2 class="menu-title opacity-40" style:color={colors.text}>{group.volume}</h2>
-          <ul>
-            {#each group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
-              {@render chapterItem(chapter)}
-            {/each}
-          </ul>
-        </li>
-      {:else}
-        {#each sortDesc ? [...group.chapters].reverse() : group.chapters as chapter, chapterIndex (chapter.id ?? chapterIndex)}
-          {@render chapterItem(chapter)}
-        {/each}
-      {/if}
-    {/each}
-  </ul>
-{/snippet}
-
-{#snippet chapterItem(chapter: Chapter)}
-  <li class="mb-0.75">
-    <button
-      class="h-auto min-h-0 py-2 whitespace-normal {matchChapterId(chapter.id, chapterId) ? 'menu-active' : ''}"
-      title={chapter.title}
-      onclick={() => selectChapter(chapter)}
-    >
-      <span class="min-w-0 text-left wrap-break-word">{chapter.title}</span>
-    </button>
-  </li>
 {/snippet}
 
 {#snippet slider(key: keyof typeof SLIDER_CONFIGS)}

@@ -59,6 +59,7 @@
 <script lang="ts">
   import { beforeNavigate, goto, replaceState } from '$app/navigation';
   import { navigating, page } from '$app/state';
+  import { activate } from '$lib/actions';
   import { api } from '$lib/api';
   import { registerAssistantContext } from '$lib/assistant/context';
   import { workflowPath } from '$lib/assistant/navigation';
@@ -506,6 +507,7 @@
           <div
             tabindex="0"
             role="button"
+            use:activate
             class="{graph.newest_tmpl ? 'hover-link' : 'pb-px'} {nameClass}"
             title={graph.name}
             onclick={() => {

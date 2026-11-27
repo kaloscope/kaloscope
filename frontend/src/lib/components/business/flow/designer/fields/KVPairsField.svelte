@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Label } from '$lib/components';
-  import { nodeFormatter } from '$lib/i18n';
+  import { _, nodeFormatter } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { Field } from '$lib/types';
   import { useSvelteFlow } from '@xyflow/svelte';
@@ -30,7 +30,7 @@
       <span>:</span>
       <input type="text" class="input w-1/2 input-sm" placeholder={valuePlaceholder} disabled />
       <button
-        aria-label="Add"
+        aria-label={$_('action.add')}
         class="btn ml-auto btn-square btn-subtle btn-sm"
         onclick={() => {
           data = [...data, { key: '', value: '' }];
@@ -61,7 +61,7 @@
           oninput={() => updateNodeData(field.nodeId, { [field.id]: data })}
         />
         <button
-          aria-label="Delete"
+          aria-label={$_('action.delete')}
           class="btn ml-auto btn-square btn-subtle btn-sm"
           onclick={() => {
             data = data.filter((_, i) => i !== index);

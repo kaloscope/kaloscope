@@ -1,10 +1,11 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, DownloaderEditor, Dropdown, Empty, EntityCard, Grid, Image, confirm } from '$lib/components';
+  import { ActionMenu, Button, DownloaderEditor, Empty, EntityCard, Grid, Image, confirm } from '$lib/components';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { Downloader, DownloadSource, Resp } from '$lib/types';
+  import { moveItem } from '$lib/utils/object';
   import { debounce } from '$lib/utils/timing';
   import type { IconifyIcon } from 'iconify-icon';
   import { onMount, tick } from 'svelte';
@@ -113,58 +114,32 @@
         />
       {/snippet}
       {#snippet actions()}
-        <Dropdown contentWidth="10rem" class="dropdown-end">
-          {#snippet trigger()}
-            <div class="btn btn-square btn-subtle btn-sm">
-              <iconify-icon icon={icons.moreVertical} width="1rem"></iconify-icon>
-            </div>
-          {/snippet}
-          <ul class="menu gap-1">
-            <li class={index === 0 ? 'menu-disabled' : ''}>
-              <button
-                class="px-2"
-                onclick={() => {
-                  const temp = downloaders[index];
-                  downloaders[index] = downloaders[index - 1];
-                  downloaders[index - 1] = temp;
-                  sort();
-                }}
-              >
-                <iconify-icon icon={icons.arrowUp} width="1rem"></iconify-icon>
-                {$_('action.move_up')}
-              </button>
-            </li>
-            <li class={index === downloaders.length - 1 ? 'menu-disabled' : ''}>
-              <button
-                class="px-2"
-                onclick={() => {
-                  const temp = downloaders[index];
-                  downloaders[index] = downloaders[index + 1];
-                  downloaders[index + 1] = temp;
-                  sort();
-                }}
-              >
-                <iconify-icon icon={icons.arrowDown} width="1rem"></iconify-icon>
-                {$_('action.move_down')}
-              </button>
-            </li>
-            <li>
-              <button
-                class="px-2"
-                onclick={() => {
-                  confirm({
-                    icon: icons.delete,
-                    title: `${$_('action.delete', $_('download.downloader.config'))} [${downloader.name}]`,
-                    onconfirm: () => del(downloader.id)
-                  });
-                }}
-              >
-                <iconify-icon icon={icons.delete} width="1rem"></iconify-icon>
-                {$_('action.delete')}
-              </button>
-            </li>
-          </ul>
-        </Dropdown>
+        <ActionMenu
+          actions={[
+            {
+              icon: icons.arrowUp,
+              text: $_('action.move_up'),
+              disabled: index === 0,
+              onclick: () => moveItem(downloaders, index, -1) && sort()
+            },
+            {
+              icon: icons.arrowDown,
+              text: $_('action.move_down'),
+              disabled: index === downloaders.length - 1,
+              onclick: () => moveItem(downloaders, index, 1) && sort()
+            },
+            {
+              icon: icons.delete,
+              text: $_('action.delete'),
+              onclick: () =>
+                confirm({
+                  icon: icons.delete,
+                  title: `${$_('action.delete', $_('download.downloader.config'))} [${downloader.name}]`,
+                  onconfirm: () => del(downloader.id)
+                })
+            }
+          ]}
+        />
       {/snippet}
       <ul class="flex flex-wrap gap-2">
         <li class="card-tag">

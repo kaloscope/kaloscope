@@ -237,6 +237,28 @@
     );
   }
 
+  /**
+   * Turn a vertical mouse wheel into sideways scrolling while the row can still move that way.
+   *
+   * At either end, or when the row does not overflow, the wheel keeps scrolling the page.
+   *
+   * @param event - Wheel event on the horizontally scrolling row.
+   */
+  function scrollSideways(event: WheelEvent & { currentTarget: HTMLElement }) {
+    const row = event.currentTarget;
+    // trackpads already scroll sideways on their own
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+      return;
+    }
+    const delta = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * 16 : event.deltaY;
+    const end = row.scrollWidth - row.clientWidth;
+    if ((delta < 0 && row.scrollLeft <= 0) || (delta > 0 && row.scrollLeft >= end - 1)) {
+      return;
+    }
+    event.preventDefault();
+    row.scrollLeft += delta;
+  }
+
   /** Load novel directory without mounting a reader or retaining its body. */
   async function loadTextChapters() {
     if (!media || mediaType !== 'text') return;
@@ -879,6 +901,19 @@
 
 <svelte:window onpagehide={saveProgress} />
 
+<!-- people and companies side by side, one column per entry with a value and stacked on phones -->
+{#snippet credits(entries: [string, string | null | undefined][])}
+  {@const shown = entries.filter(([, value]) => !!value)}
+  <dl class="grid gap-3 max-sm:grid-cols-1!" style:grid-template-columns="repeat({shown.length}, minmax(0, 1fr))">
+    {#each shown as [label, value] (label)}
+      <div class="min-w-0">
+        <dt class="font-semibold text-primary/80">{label}</dt>
+        <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{value}</dd>
+      </div>
+    {/each}
+  </dl>
+{/snippet}
+
 <Container class="pull-to-refresh history-back navbar-hidden" loading={$loading}>
   <!-- placeholder that mirrors the header and list layout while the details load -->
   {#snippet skeleton()}
@@ -928,7 +963,7 @@
     <!-- back button -->
     <button
       class="btn absolute top-2 left-2 z-2 btn-circle size-10 btn-enlarge btn-subtle shadow-sm"
-      aria-label="Back"
+      aria-label={$_('action.back')}
       onclick={historyBack}
     >
       <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
@@ -1061,9 +1096,11 @@
 
       <!-- reading metadata -->
       {#if readingMeta}
-        {@const authors = readingMeta.authors?.join(', ')}
-        {@const illustrators = readingMeta.illustrators?.join(', ')}
-        {@const cols = [authors, illustrators, readingMeta.publisher].filter(Boolean).length}
+        {@const hasPeople = !!(
+          readingMeta.authors?.length ||
+          readingMeta.illustrators?.length ||
+          readingMeta.publisher
+        )}
         {@const published = publicationDate(readingMeta)}
         {@const facts = [
           published ? $_('metadata.published', published) : null,
@@ -1075,29 +1112,14 @@
         ]
           .filter(Boolean)
           .join(' · ')}
-        {#if cols || facts || readingMeta.isbn}
+        {#if hasPeople || facts || readingMeta.isbn}
           <div class="mt-8 space-y-3">
-            {#if cols}
-              <dl class="grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
-                {#if authors}
-                  <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.authors')}</dt>
-                    <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{authors}</dd>
-                  </div>
-                {/if}
-                {#if illustrators}
-                  <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.illustrators')}</dt>
-                    <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{illustrators}</dd>
-                  </div>
-                {/if}
-                {#if readingMeta.publisher}
-                  <div class="min-w-0">
-                    <dt class="font-semibold text-primary/80">{$_('metadata.fields.publisher')}</dt>
-                    <dd class="text-sm wrap-break-word whitespace-pre-wrap opacity-70">{readingMeta.publisher}</dd>
-                  </div>
-                {/if}
-              </dl>
+            {#if hasPeople}
+              {@render credits([
+                [$_('metadata.fields.authors'), readingMeta.authors?.join(', ')],
+                [$_('metadata.fields.illustrators'), readingMeta.illustrators?.join(', ')],
+                [$_('metadata.fields.publisher'), readingMeta.publisher]
+              ])}
             {/if}
             {#if facts}
               <p class="text-sm leading-relaxed wrap-break-word opacity-60">{facts}</p>
@@ -1111,26 +1133,12 @@
 
       <!-- staff -->
       {#if meta?.directors?.length || meta?.writers?.length || meta?.studios?.length}
-        {@const cols = [meta?.directors, meta?.writers, meta?.studios].filter((arr) => arr?.length).length}
-        <div class="mt-8 grid gap-3 max-sm:grid-cols-1!" style="grid-template-columns: repeat({cols}, minmax(0, 1fr))">
-          {#if meta?.directors?.length}
-            <div>
-              <span class="font-semibold text-primary/80">{$_('metadata.fields.directors')}</span>
-              <p class="text-sm opacity-70">{meta.directors.join(', ')}</p>
-            </div>
-          {/if}
-          {#if meta?.writers?.length}
-            <div>
-              <span class="font-semibold text-primary/80">{$_('metadata.fields.writers')}</span>
-              <p class="text-sm opacity-70">{meta.writers.join(', ')}</p>
-            </div>
-          {/if}
-          {#if meta?.studios?.length}
-            <div>
-              <span class="font-semibold text-primary/80">{$_('metadata.fields.studios')}</span>
-              <p class="text-sm opacity-70">{meta.studios.join(', ')}</p>
-            </div>
-          {/if}
+        <div class="mt-8">
+          {@render credits([
+            [$_('metadata.fields.directors'), meta?.directors?.join(', ')],
+            [$_('metadata.fields.writers'), meta?.writers?.join(', ')],
+            [$_('metadata.fields.studios'), meta?.studios?.join(', ')]
+          ])}
         </div>
       {/if}
 
@@ -1138,13 +1146,7 @@
       {#if meta?.actors?.length}
         <div class="mt-8">
           <h2 class="mb-3 text-lg font-semibold">{$_('metadata.fields.actors')}</h2>
-          <div
-            class="flex gap-3 overflow-x-auto pb-3"
-            onwheel={(event) => {
-              event.preventDefault();
-              event.currentTarget.scrollLeft += event.deltaY;
-            }}
-          >
+          <div class="flex gap-3 overflow-x-auto pb-3" onwheel={scrollSideways}>
             {#each meta.actors as actor, i (i)}
               <div class="flex w-24 shrink-0 flex-col items-center gap-1 text-center">
                 <Image proxy="store" src={actor.thumb} text={actor.name} width="4.5rem" circle />
@@ -1172,47 +1174,40 @@
           <div class="flex flex-col gap-2">
             {#each parts as part (part.id)}
               {@const active = _media?.id === part.id}
-              {@const activeClass = active ? 'bg-primary/15' : 'bg-gradient hover:bg-base-content/15'}
               {@const transClass = 'transition-colors duration-300'}
-              <button
-                class="media-part flex items-center rounded-lg px-3 py-2 text-left {transClass} {activeClass}"
-                onclick={() => selectMedia(part)}
-              >
-                <Image
-                  proxy="store"
-                  src={part.poster}
-                  icon={posterIcon}
-                  width="5.5rem"
-                  ratio="16/9"
-                  class="shrink-0 rounded-md!"
-                />
-                <div class="flex min-w-0 flex-1 flex-col gap-0.5 px-3">
-                  <span class="truncate text-sm font-medium {transClass}" class:text-primary={active}>
-                    {mediaType === 'video' ? mediaTitle(part) : (part.title ?? part.name)}
+              <!-- selecting, playing, and the menu are sibling controls; the row only carries the surface -->
+              <div class="media-part part-row flex items-center card-surface pe-3" class:active>
+                <button
+                  class="flex min-w-0 flex-1 items-center self-stretch rounded-[inherit] py-2 ps-3 text-start"
+                  onclick={() => selectMedia(part)}
+                >
+                  <Image
+                    proxy="store"
+                    src={part.poster}
+                    icon={posterIcon}
+                    width="5.5rem"
+                    ratio="16/9"
+                    class="shrink-0 rounded-md!"
+                  />
+                  <span class="flex min-w-0 flex-1 flex-col gap-0.5 px-3">
+                    <span class="truncate text-sm font-medium {transClass}" class:text-primary={active}>
+                      {mediaType === 'video' ? mediaTitle(part) : (part.title ?? part.name)}
+                    </span>
+                    <span class="text-xs opacity-50">{part.aired}</span>
                   </span>
-                  <span class="text-xs opacity-50">{part.aired}</span>
-                </div>
-                <div
-                  tabindex="0"
-                  role="button"
-                  aria-label={$_(mediaType === 'video' ? 'media.play' : 'media.read')}
+                </button>
+                <button
                   class="btn btn-circle btn-enlarge shadow-sm btn-sm {transClass}"
                   class:btn-active={active}
                   class:btn-subtle={!active}
-                  onclick={(event) => {
-                    event.stopPropagation();
+                  aria-label={$_(mediaType === 'video' ? 'media.play' : 'media.read')}
+                  onclick={() => {
                     if (mediaType === 'video') selectMedia(part).then(() => play());
                     else read(`item:${part.id}`);
                   }}
-                  onkeydown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      event.currentTarget.click();
-                    }
-                  }}
                 >
-                  <iconify-icon icon={icons.play} width="1.25rem"></iconify-icon>
-                </div>
+                  <iconify-icon icon={icons.play} width="1.25rem" aria-hidden="true"></iconify-icon>
+                </button>
                 {#if user.current?.role === 'admin'}
                   <MediaActions
                     item={part}
@@ -1236,7 +1231,7 @@
                     }}
                   />
                 {/if}
-              </button>
+              </div>
             {/each}
           </div>
         </div>
@@ -1262,7 +1257,7 @@
             <div class="flex max-h-144 flex-col gap-2 overflow-y-auto px-2 py-3">
               {#each textChapters as chapter, index (chapter.id)}
                 <button
-                  class="flex items-center gap-3 rounded-lg bg-gradient px-3 py-3 text-left transition-colors hover:bg-base-content/15"
+                  class="part-row flex items-center gap-3 card-surface px-3 py-3 text-start"
                   title={chapterTitle(chapter, index)}
                   onclick={() => read(chapter.id, textVersion)}
                 >
@@ -1326,7 +1321,11 @@
     </div>
     {#if readingLoading || readingError}
       <div class="absolute inset-0 layer-3 flex-center flex-col gap-5 bg-base-100 p-6 text-center">
-        <button class="btn absolute top-2 left-2 btn-circle btn-ghost" aria-label="Back" onclick={closeReader}>
+        <button
+          class="btn absolute top-2 left-2 btn-circle btn-ghost"
+          aria-label={$_('action.back')}
+          onclick={closeReader}
+        >
           <iconify-icon icon={icons.backSolid} width="1.25rem"></iconify-icon>
         </button>
         {#if readingLoading}
@@ -1347,6 +1346,19 @@
 {/if}
 
 <style>
+  /* episode, part, and chapter rows: a card surface tinted on hover and for the selected part */
+  .part-row {
+    transition: background-color 200ms ease;
+
+    &:hover {
+      background-color: color-mix(in oklab, var(--color-base-content) 5%, var(--color-base-100));
+    }
+
+    &.active {
+      background-color: color-mix(in oklab, var(--color-primary) 15%, var(--color-base-100));
+    }
+  }
+
   :global(.detail-poster) {
     box-shadow:
       0 0 0 1px color-mix(in oklab, var(--color-base-content) 8%, transparent),

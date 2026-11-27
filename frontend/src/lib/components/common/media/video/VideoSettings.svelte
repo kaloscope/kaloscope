@@ -884,7 +884,12 @@
         {/if}
       </div>
 
-      <button type="button" class="video-settings-close" aria-label="Close" onclick={(event) => modal.close(event)}>
+      <button
+        type="button"
+        class="video-settings-close"
+        aria-label={$_('action.close')}
+        onclick={(event) => modal.close(event)}
+      >
         <iconify-icon icon={icons.dismiss} width="1rem"></iconify-icon>
       </button>
     </div>

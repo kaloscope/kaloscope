@@ -26,6 +26,7 @@ export { default as PageHeader, type PageHeaderProps } from './feature/PageHeade
 export { default as Signposts, type SignpostsProps } from './feature/Signposts.svelte';
 export { default as Themes, type ThemesProps } from './feature/Themes.svelte';
 
+export { default as ActionMenu, type Action, type ActionMenuProps } from './interaction/ActionMenu.svelte';
 export { default as Button, type ButtonProps } from './interaction/Button.svelte';
 export { default as Checkbox, type CheckboxProps } from './interaction/Checkbox.svelte';
 export { default as Dropdown, type DropdownProps } from './interaction/Dropdown.svelte';

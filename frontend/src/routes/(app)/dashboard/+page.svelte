@@ -33,8 +33,8 @@
   } from '$lib/types';
   import { buildStreamUrl, mediaTitle } from '$lib/utils/media';
   import { aspectRatio } from '$lib/utils/number';
+  import { flip } from '$lib/utils/motion';
   import { onMount, tick, untrack } from 'svelte';
-  import { flip } from 'svelte/animate';
   import { SvelteSet } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import type { PageData } from './$types';
@@ -107,12 +107,19 @@
   let loadReads = $derived(
     (user.current?.preferences?.recent_reads ?? false) && user.current?.preferences?.read_records !== 0
   );
-  let showWatches = $derived(loadWatches && latestWatches.length > 0);
-  let showSearches = $derived(loadSearches && searches.length > 0);
-  let showReads = $derived(loadReads && reads.length > 0);
+  // the history lists still loading; their sections keep placeholder cards meanwhile
+  let loadingWatches: boolean = $state(false);
+  let loadingSearches: boolean = $state(false);
+  let loadingReads: boolean = $state(false);
+  let showWatches = $derived(loadWatches && (loadingWatches || latestWatches.length > 0));
+  let showSearches = $derived(loadSearches && (loadingSearches || searches.length > 0));
+  let showReads = $derived(loadReads && (loadingReads || reads.length > 0));
   let historyCount = $derived([showSearches, showWatches, showReads].filter(Boolean).length);
-  // the history requests still in flight, so the empty dashboard message waits for them
-  let historyPending: number = $state(0);
+  // the empty dashboard message waits for the history requests
+  let historyPending = $derived(loadingWatches || loadingSearches || loadingReads);
+
+  // the placeholder cards shown while a history list loads
+  const HISTORY_SKELETONS: Record<HistoryType, number> = { search: 4, video: 3, reading: 3 };
 
   // the placeholder cards shown while a board loads
   const BOARD_SKELETONS = 7;
@@ -225,28 +232,36 @@
   }
 
   /**
-   * Load user histories if enabled in preferences.
+   * Load the watch history.
    */
-  async function loadHistories() {
-    if (loadWatches) {
-      try {
-        const resp = await api
-          .get('user/history/list', { searchParams: { rel_type: 'video', page_num: 0, ordering: '-updated_at' } })
-          .json<Resp<{ items: WatchHistory[] }>>();
-        watches = resp.data.items.filter((w) => w.media);
-      } catch {
-        watches = [];
-      }
+  async function loadWatchHistory() {
+    loadingWatches = true;
+    try {
+      const resp = await api
+        .get('user/history/list', { searchParams: { rel_type: 'video', page_num: 0, ordering: '-updated_at' } })
+        .json<Resp<{ items: WatchHistory[] }>>();
+      watches = resp.data.items.filter((w) => w.media);
+    } catch {
+      watches = [];
+    } finally {
+      loadingWatches = false;
     }
-    if (loadSearches) {
-      try {
-        const resp = await api
-          .get('user/history/list', { searchParams: { rel_type: 'search', page_num: 0, ordering: '-repetitions' } })
-          .json<Resp<{ items: SearchHistory[] }>>();
-        searches = resp.data.items;
-      } catch {
-        searches = [];
-      }
+  }
+
+  /**
+   * Load the search history.
+   */
+  async function loadSearchHistory() {
+    loadingSearches = true;
+    try {
+      const resp = await api
+        .get('user/history/list', { searchParams: { rel_type: 'search', page_num: 0, ordering: '-repetitions' } })
+        .json<Resp<{ items: SearchHistory[] }>>();
+      searches = resp.data.items;
+    } catch {
+      searches = [];
+    } finally {
+      loadingSearches = false;
     }
   }
 
@@ -430,26 +445,33 @@
     };
   }
 
-  // load the user histories
+  // load the watch and search histories side by side, so their sections appear together
   $effect(() => {
-    if (loadWatches || loadSearches) {
-      untrack(() => {
-        historyPending++;
-        void loadHistories().finally(() => historyPending--);
-      });
+    if (loadWatches) {
+      untrack(() => void loadWatchHistory());
+    }
+  });
+  $effect(() => {
+    if (loadSearches) {
+      untrack(() => void loadSearchHistory());
     }
   });
 
   // discard reading results from an old account or a disabled dashboard section
   $effect(() => {
     const owner = user.current?.id;
-    const enabled = loadReads;
+    const enabled = !!owner && loadReads;
     const controller = new AbortController();
     reads = [];
-    if (owner && enabled) {
+    loadingReads = enabled;
+    if (enabled) {
       untrack(() => {
-        historyPending++;
-        void loadReadingHistory(controller.signal).finally(() => historyPending--);
+        void loadReadingHistory(controller.signal).finally(() => {
+          // a newer request owns the loading state once this one is aborted
+          if (!controller.signal.aborted) {
+            loadingReads = false;
+          }
+        });
       });
     }
     return () => controller.abort();
@@ -506,196 +528,196 @@
     >
       <!-- recent searches -->
       {#if showSearches}
-        <section class="min-w-0">
-          {@render historyHead($_('preference.dashboard.search'), searches.length, 'search')}
-          <ul class="history-list max-sm:scrollbar-none" use:scrollFade={searches.length}>
-            {#each searches as item (item.id)}
-              <li class="history-slot" animate:flip={{ duration: 200 }}>
-                <article class="history-card search-card card-surface">
-                  <span
-                    class="search-tile flex-center icon-tile"
-                    style:--tone={item.graph?.icon ? undefined : 'var(--color-primary)'}
-                    aria-hidden="true"
-                  >
-                    {#if item.graph?.icon}
-                      <Image transparent src={item.graph.icon} width="1.375rem" />
-                    {:else}
-                      <iconify-icon icon={icons.search} width="1.125rem" height="1.125rem" class="history-inline-icon"
-                      ></iconify-icon>
-                    {/if}
-                  </span>
-                  <div class="history-body">
-                    <h3 class="history-title">
-                      <a href={searchHref(item)} class="card-link" title={item.keyword}>
-                        <span class="block truncate">{item.keyword}</span>
-                      </a>
-                    </h3>
-                    <div class="history-meta">
-                      <span class="history-meta-label">{item.graph?.name ?? $_('nav.websearch.global.search')}</span>
-                      <span class="history-dot" aria-hidden="true">·</span>
-                      <span class="history-time">{$dateTime(item.updated_at)}</span>
+        <section class="min-w-0" aria-busy={loadingSearches}>
+          {@render historyHead($_('preference.dashboard.search'), searches.length, 'search', loadingSearches)}
+          {#if loadingSearches}
+            {@render historySkeleton('search')}
+          {:else}
+            <ul class="history-list max-sm:scrollbar-none" use:scrollFade={searches.length} in:fade={{ duration: 200 }}>
+              {#each searches as item (item.id)}
+                <li class="history-slot" animate:flip={{ duration: 200 }}>
+                  <article class="history-card search-card card-surface">
+                    <span
+                      class="search-tile flex-center icon-tile"
+                      style:--tone={item.graph?.icon ? undefined : 'var(--color-primary)'}
+                      aria-hidden="true"
+                    >
+                      {#if item.graph?.icon}
+                        <Image transparent src={item.graph.icon} width="1.375rem" />
+                      {:else}
+                        <iconify-icon icon={icons.search} width="1.125rem" height="1.125rem" class="history-inline-icon"
+                        ></iconify-icon>
+                      {/if}
+                    </span>
+                    <div class="history-body">
+                      <div class="history-top">
+                        <span class="history-badge">
+                          <span class="history-badge-text trim-cap"
+                            >{item.graph?.name ?? $_('nav.websearch.global.search')}</span
+                          >
+                        </span>
+                        {@render historyTime(item.updated_at)}
+                      </div>
+                      <h3 class="history-title trim-cap">
+                        <a href={searchHref(item)} class="card-link" title={item.keyword}>
+                          <span class="search-keyword">{item.keyword}</span>
+                        </a>
+                      </h3>
                     </div>
-                  </div>
-                  {@render historyDelete(item.id, 'search')}
-                </article>
-              </li>
-            {/each}
-          </ul>
+                    {@render historyDelete(item.id, 'search')}
+                  </article>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </section>
       {/if}
 
       <!-- recent watches -->
       {#if showWatches}
-        <section class="min-w-0">
-          {@render historyHead($_('preference.dashboard.watch'), latestWatches.length, 'video')}
-          <ul class="history-list max-sm:scrollbar-none" use:scrollFade={latestWatches.length}>
-            {#each latestWatches as item (item.id)}
-              {@const media = item.media}
-              {@const parent = media?.parent}
-              {@const libType = media?.lib ? LibType[media.lib.lib_type] : null}
-              {@const badgeLabel = media?.lib?.name || (libType ? $_(libType.label) : '')}
-              {@const poster = parent?.poster ?? media?.poster}
-              {@const watchTitle = parent?.title ?? parent?.name ?? mediaTitle(media)}
-              {@const pct = clampPercentage(item.percentage)}
-              <li class="history-slot" animate:flip={{ duration: 200 }}>
-                <article class="history-card media-card card-surface">
-                  <div class="media-cover" aria-hidden="true">
-                    {#if poster}
-                      <Image
-                        proxy="store"
-                        src={poster}
-                        icon={libType?.icon}
-                        width="100%"
-                        ratio="2/3"
-                        class="cover-image size-full! rounded-none!"
-                      />
-                    {:else}
-                      <div class="cover-fallback">
-                        {#if libType?.icon}
-                          <iconify-icon icon={libType.icon} width="1.5rem" height="1.5rem" class="history-inline-icon"
-                          ></iconify-icon>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="media-body">
-                    <div class="history-top">
-                      {#if libType || badgeLabel}
-                        <span class="history-badge">
+        <section class="min-w-0" aria-busy={loadingWatches}>
+          {@render historyHead($_('preference.dashboard.watch'), latestWatches.length, 'video', loadingWatches)}
+          {#if loadingWatches}
+            {@render historySkeleton('video')}
+          {:else}
+            <ul
+              class="history-list max-sm:scrollbar-none"
+              use:scrollFade={latestWatches.length}
+              in:fade={{ duration: 200 }}
+            >
+              {#each latestWatches as item (item.id)}
+                {@const media = item.media}
+                {@const parent = media?.parent}
+                {@const libType = media?.lib ? LibType[media.lib.lib_type] : null}
+                {@const badgeLabel = media?.lib?.name || (libType ? $_(libType.label) : '')}
+                {@const poster = parent?.poster ?? media?.poster}
+                {@const watchTitle = parent?.title ?? parent?.name ?? mediaTitle(media)}
+                {@const subtitle = parent && mediaTitle(media) !== watchTitle ? mediaTitle(media) : ''}
+                {@const pct = clampPercentage(item.percentage)}
+                <li class="history-slot" animate:flip={{ duration: 200 }}>
+                  <article class="history-card media-card card-surface">
+                    <div class="media-cover" aria-hidden="true">
+                      {#if poster}
+                        <Image
+                          proxy="store"
+                          src={poster}
+                          icon={libType?.icon}
+                          width="100%"
+                          ratio="2/3"
+                          sharpen
+                          class="size-full! rounded-none!"
+                        />
+                      {:else}
+                        <div class="cover-fallback">
                           {#if libType?.icon}
-                            <iconify-icon
-                              icon={libType.icon}
-                              width="0.75rem"
-                              height="0.75rem"
-                              class="history-inline-icon"
-                              aria-hidden="true"
+                            <iconify-icon icon={libType.icon} width="1.5rem" height="1.5rem" class="history-inline-icon"
                             ></iconify-icon>
                           {/if}
-                          {#if badgeLabel}
+                        </div>
+                      {/if}
+                    </div>
+                    <div class="media-body">
+                      <div class="history-top">
+                        {#if badgeLabel}
+                          <span class="history-badge">
                             <span class="history-badge-text trim-cap">{badgeLabel}</span>
-                          {/if}
-                        </span>
-                      {/if}
+                          </span>
+                        {/if}
+                        {@render historyTime(item.updated_at)}
+                      </div>
+                      <div class="history-main">
+                        <h3 class="history-title">
+                          <button
+                            type="button"
+                            class="card-link"
+                            onclick={() => playMedia(item)}
+                            aria-label="{$_('media.continue_play')} {watchTitle}"
+                            title={watchTitle}
+                          >
+                            <span class="block truncate">{watchTitle}</span>
+                          </button>
+                        </h3>
+                        <!-- a movie file repeats its folder's title, so only a distinct episode title gets a line -->
+                        {#if subtitle}
+                          <div class="history-meta">
+                            <span class="history-meta-label" title={subtitle}>{subtitle}</span>
+                          </div>
+                        {/if}
+                      </div>
+                      {@render historyProgress(pct, $_('media.continue_play'))}
                     </div>
-                    <h3 class="history-title media-title">
-                      <button
-                        type="button"
-                        class="card-link"
-                        onclick={() => playMedia(item)}
-                        aria-label="{$_('media.continue_play')} {watchTitle}"
-                        title={watchTitle}
-                      >
-                        <span class="block truncate">{watchTitle}</span>
-                      </button>
-                    </h3>
-                    <div class="history-meta">
-                      {#if parent}
-                        <span class="history-meta-label" title={mediaTitle(media)}>{mediaTitle(media)}</span>
-                        <span class="history-dot" aria-hidden="true">·</span>
-                      {/if}
-                      <span class="history-time">{$dateTime(item.updated_at)}</span>
-                    </div>
-                    {@render historyProgress(pct, $_('media.continue_play'))}
-                  </div>
-                  {@render historyDelete(item.id, 'video')}
-                </article>
-              </li>
-            {/each}
-          </ul>
+                    {@render historyDelete(item.id, 'video')}
+                  </article>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </section>
       {/if}
 
       <!-- recent reads -->
       {#if showReads}
-        <section class="min-w-0 {historyCount === 3 ? 'lg:col-span-2 xl:col-span-1' : ''}">
-          {@render historyHead($_('preference.dashboard.read'), reads.length, 'reading')}
-          <ul class="history-list max-sm:scrollbar-none" use:scrollFade={reads.length}>
-            {#each reads as item (item.id)}
-              {@const media = item.media!}
-              {@const libType = media.lib ? LibType[media.lib.lib_type] : null}
-              {@const badgeLabel = media.lib?.name || (libType ? $_(libType.label) : '')}
-              {@const pct = clampPercentage(item.percentage)}
-              <li class="history-slot" animate:flip={{ duration: 200 }}>
-                <article class="history-card media-card card-surface">
-                  <div class="media-cover read-cover" aria-hidden="true">
-                    {#if media.poster}
-                      <Image
-                        proxy="store"
-                        src={media.poster}
-                        icon={libType?.icon}
-                        width="100%"
-                        ratio="2/3"
-                        class="cover-image size-full! rounded-none!"
-                      />
-                    {:else}
-                      <div class="cover-fallback">
-                        {#if libType?.icon}
-                          <iconify-icon icon={libType.icon} width="1.5rem" height="1.5rem" class="history-inline-icon"
-                          ></iconify-icon>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="media-body">
-                    <div class="history-top">
-                      {#if libType || badgeLabel}
-                        <span class="history-badge">
+        <section class="min-w-0 {historyCount === 3 ? 'lg:col-span-2 xl:col-span-1' : ''}" aria-busy={loadingReads}>
+          {@render historyHead($_('preference.dashboard.read'), reads.length, 'reading', loadingReads)}
+          {#if loadingReads}
+            {@render historySkeleton('reading')}
+          {:else}
+            <ul class="history-list max-sm:scrollbar-none" use:scrollFade={reads.length} in:fade={{ duration: 200 }}>
+              {#each reads as item (item.id)}
+                {@const media = item.media!}
+                {@const libType = media.lib ? LibType[media.lib.lib_type] : null}
+                {@const badgeLabel = media.lib?.name || (libType ? $_(libType.label) : '')}
+                {@const pct = clampPercentage(item.percentage)}
+                <li class="history-slot" animate:flip={{ duration: 200 }}>
+                  <article class="history-card media-card card-surface">
+                    <div class="media-cover read-cover" aria-hidden="true">
+                      {#if media.poster}
+                        <Image
+                          proxy="store"
+                          src={media.poster}
+                          icon={libType?.icon}
+                          width="100%"
+                          ratio="2/3"
+                          sharpen
+                          class="size-full! rounded-none!"
+                        />
+                      {:else}
+                        <div class="cover-fallback">
                           {#if libType?.icon}
-                            <iconify-icon
-                              icon={libType.icon}
-                              width="0.75rem"
-                              height="0.75rem"
-                              class="history-inline-icon"
-                              aria-hidden="true"
+                            <iconify-icon icon={libType.icon} width="1.5rem" height="1.5rem" class="history-inline-icon"
                             ></iconify-icon>
                           {/if}
-                          {#if badgeLabel}
-                            <span class="history-badge-text trim-cap">{badgeLabel}</span>
-                          {/if}
-                        </span>
+                        </div>
                       {/if}
                     </div>
-                    <h3 class="history-title media-title">
-                      <a
-                        href="/medialibs/{media.lib!.id}/{media.id}"
-                        class="card-link"
-                        onclick={(event) => openRead(event, media)}
-                        aria-label="{$_('media.continue_read')} {mediaTitle(media)}"
-                        title={mediaTitle(media)}
-                      >
-                        <span class="block truncate">{mediaTitle(media)}</span>
-                      </a>
-                    </h3>
-                    <div class="history-meta">
-                      <span class="history-time">{$dateTime(item.updated_at)}</span>
+                    <div class="media-body">
+                      <div class="history-top">
+                        {#if badgeLabel}
+                          <span class="history-badge">
+                            <span class="history-badge-text trim-cap">{badgeLabel}</span>
+                          </span>
+                        {/if}
+                        {@render historyTime(item.updated_at)}
+                      </div>
+                      <h3 class="history-title">
+                        <a
+                          href="/medialibs/{media.lib!.id}/{media.id}"
+                          class="card-link"
+                          onclick={(event) => openRead(event, media)}
+                          aria-label="{$_('media.continue_read')} {mediaTitle(media)}"
+                          title={mediaTitle(media)}
+                        >
+                          <span class="block truncate">{mediaTitle(media)}</span>
+                        </a>
+                      </h3>
+                      {@render historyProgress(pct, $_('media.continue_read'))}
                     </div>
-                    {@render historyProgress(pct, $_('media.continue_read'))}
-                  </div>
-                  {@render historyDelete(item.id, 'reading')}
-                </article>
-              </li>
-            {/each}
-          </ul>
+                    {@render historyDelete(item.id, 'reading')}
+                  </article>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </section>
       {/if}
     </div>
@@ -813,7 +835,7 @@
   {/if}
 
   <!-- nothing to show -->
-  {#if settled && historyPending === 0 && historyCount === 0 && Object.keys(boards).length === 0}
+  {#if settled && !historyPending && historyCount === 0 && Object.keys(boards).length === 0}
     <div class="flex-center min-h-[60vh]">
       <Empty title={$_('empty.boards.title')} description={$_('empty.boards.tip')}>
         {#if user.current?.role === 'admin'}
@@ -827,19 +849,56 @@
   {/if}
 </Container>
 
-{#snippet historyHead(title: string, count: number, type: HistoryType)}
-  <div class="mb-1.5 flex h-8 items-center justify-between gap-2 px-2">
+{#snippet historyHead(title: string, count: number, type: HistoryType, loading: boolean)}
+  <!-- a quick response skips the placeholders, so a section that turns out empty never flashes -->
+  <div class="mb-1.5 flex h-8 items-center justify-between gap-2 px-2" class:fade-in-late={loading}>
     <h2 class="section-title">
       <span class="truncate">{title}</span>
-      <span class="history-count" aria-hidden="true"><span class="trim-cap">{count}</span></span>
+      {#if !loading}
+        <span class="history-count" aria-hidden="true"><span class="trim-cap">{count}</span></span>
+      {/if}
     </h2>
-    <Button
-      icon={icons.clear}
-      text={$_('action.clear', title)}
-      iconClass="opacity-70"
-      onclick={() => deleteAllHistories(type)}
-    />
+    {#if !loading}
+      <Button
+        icon={icons.clear}
+        text={$_('action.clear', title)}
+        iconClass="opacity-70"
+        onclick={() => deleteAllHistories(type)}
+      />
+    {/if}
   </div>
+{/snippet}
+
+{#snippet historySkeleton(type: HistoryType)}
+  <span class="sr-only" role="status">{$_('data.loading')}</span>
+  <ul class="history-list history-skeleton fade-in-late max-sm:scrollbar-none" aria-hidden="true">
+    {#each { length: HISTORY_SKELETONS[type] }, index (index)}
+      <li class="history-slot">
+        <div class="history-card card-surface {type === 'search' ? 'search-card' : 'media-card'}">
+          <div class="skeleton skeleton-soft {type === 'search' ? 'search-tile' : 'media-cover'}"></div>
+          <div class={type === 'search' ? 'history-body' : 'media-body'}>
+            <div class="history-top">
+              <span class="h-5 w-14 skeleton skeleton-soft rounded-full"></span>
+              <span class="ms-auto h-2.5 w-24 skeleton skeleton-soft"></span>
+            </div>
+            {#if type === 'search'}
+              <div class="h-2.5 skeleton skeleton-soft" style:width={index % 2 ? '55%' : '80%'}></div>
+            {:else}
+              <div class="history-main">
+                <div class="h-3.5 skeleton skeleton-soft" style:width={index % 2 ? '50%' : '68%'}></div>
+                {#if type === 'video'}
+                  <div class="mt-1 h-2.5 w-2/5 skeleton skeleton-soft"></div>
+                {/if}
+              </div>
+              <div class="history-progress">
+                <div class="h-1 flex-1 skeleton skeleton-soft"></div>
+              </div>
+            {/if}
+          </div>
+        </div>
+      </li>
+    {/each}
+  </ul>
 {/snippet}
 
 {#snippet historyDelete(id: number, type: HistoryType)}
@@ -852,6 +911,10 @@
     <iconify-icon icon={icons.dismiss} width="1rem" height="1rem" class="history-inline-icon" aria-hidden="true"
     ></iconify-icon>
   </button>
+{/snippet}
+
+{#snippet historyTime(value: string | null)}
+  <time class="history-time" datetime={value ?? undefined}>{$dateTime(value)}</time>
 {/snippet}
 
 {#snippet historyProgress(percentage: number | null, resumeLabel: string)}
@@ -1003,6 +1066,11 @@
     container-type: inline-size;
   }
 
+  /* placeholder cards keep the card geometry but ignore hover and clicks */
+  .history-skeleton {
+    pointer-events: none;
+  }
+
   .history-card {
     position: relative;
     display: flex;
@@ -1054,10 +1122,6 @@
   @media (hover: hover) and (prefers-reduced-motion: no-preference) {
     .history-card:hover {
       translate: 0 -1px;
-
-      :global(.cover-image) {
-        transform: scale(1.05);
-      }
     }
   }
 
@@ -1068,8 +1132,20 @@
   }
 
   .search-card {
-    min-block-size: 4.375rem;
     padding-block: 0.75rem;
+
+    /* with the keyword trimmed to its cap height, the badge and keyword span the icon tile exactly */
+    .history-body {
+      gap: 0.625rem;
+    }
+  }
+
+  .search-keyword {
+    display: block;
+    overflow-x: clip;
+    overflow-y: visible;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .media-card {
@@ -1095,10 +1171,6 @@
     box-shadow:
       0 0 0 1px color-mix(in oklab, var(--color-base-content) 10%, transparent),
       0 4px 10px -4px color-mix(in oklab, var(--color-shade) 20%, transparent);
-
-    :global(.cover-image) {
-      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
-    }
   }
 
   .read-cover {
@@ -1147,6 +1219,27 @@
   .media-body {
     justify-content: space-between;
     gap: 0.3125rem;
+
+    /* a lone title (movies, novels, comics) fills the middle row a little more */
+    &:not(:has(.history-meta)) .history-title {
+      font-size: 0.9375rem;
+    }
+  }
+
+  .history-main {
+    display: flex;
+    min-inline-size: 0;
+    flex-direction: column;
+    gap: 0.125rem;
+
+    .history-title {
+      line-height: 1.25;
+    }
+
+    .history-meta {
+      font-size: 0.6875rem;
+      line-height: 1.25;
+    }
   }
 
   .history-top {
@@ -1183,15 +1276,10 @@
 
   .history-title {
     min-inline-size: 0;
-    padding-inline-end: 1.75rem;
     font-size: 0.875rem;
     font-weight: 600;
     line-height: 1.35;
     transition: color 200ms ease;
-  }
-
-  .media-title {
-    padding-inline-end: 0;
   }
 
   .card-link {
@@ -1235,16 +1323,14 @@
     white-space: nowrap;
   }
 
-  .history-dot {
-    flex-shrink: 0;
-    color: color-mix(in oklab, var(--color-base-content) 30%, transparent);
-  }
-
   .history-time {
     flex-shrink: 0;
+    margin-inline-start: auto;
     color: color-mix(in oklab, var(--color-base-content) 43%, transparent);
     font-size: 0.6875rem;
     font-variant-numeric: tabular-nums;
+    line-height: 1;
+    white-space: nowrap;
   }
 
   .history-progress {
@@ -1340,12 +1426,6 @@
     &:focus-visible {
       outline: 2px solid var(--color-error);
       outline-offset: -2px;
-    }
-  }
-
-  @media (hover: none) {
-    .history-delete-button {
-      opacity: 0.58;
     }
   }
 

@@ -312,6 +312,8 @@
       {#snippet item(item)}
         {@const pointerClass = 'cursor-pointer transition-colors hover:text-primary'}
         {@const transClass = 'transition-all duration-300'}
+        <!-- only administrators get the actions menu, whose white trigger needs the poster dimmed behind it -->
+        {@const actionable = user.current?.role === 'admin' && !selecting}
         {@const btnClass = 'text-white hover:bg-base-300 hover:text-base-content'}
         <!-- items open as links, or toggle their selection while items are being selected -->
         {@const href = selecting ? undefined : `${page.url.pathname}/${item.id}`}
@@ -331,7 +333,7 @@
             />
           {/if}
           <div
-            class:hidden={user.current?.role !== 'admin' || selecting}
+            class:hidden={!actionable}
             class="absolute right-0 bottom-0 z-1 p-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 {transClass}"
           >
             <MediaActions
@@ -364,7 +366,7 @@
               icon={lib ? LibType[lib.lib_type].icon : undefined}
               width="100%"
               ratio="2/3"
-              class="lib-poster rounded-card! group-hover:brightness-75 {transClass}"
+              class="lib-poster rounded-card! {actionable ? 'group-hover:brightness-75' : ''} {transClass}"
             />
           </a>
         </div>

@@ -1,11 +1,12 @@
 <script lang="ts">
   import { api } from '$lib/api';
-  import { Button, Dropdown, Empty, EntityCard, Grid, MediaLibEditor, confirm } from '$lib/components';
+  import { ActionMenu, Button, Empty, EntityCard, Grid, MediaLibEditor, confirm } from '$lib/components';
   import { LibType } from '$lib/enums';
   import { createLoading } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { MediaLib, Resp } from '$lib/types';
+  import { moveItem } from '$lib/utils/object';
   import { debounce } from '$lib/utils/timing';
   import { onMount, tick } from 'svelte';
 
@@ -116,58 +117,32 @@
     {@const libType = LibType[lib.lib_type]}
     <EntityCard title={lib.name} subtitle={lib.dir} mono truncateStart icon={libType.icon} tone={libType.iconColor}>
       {#snippet actions()}
-        <Dropdown contentWidth="10rem" class="dropdown-end">
-          {#snippet trigger()}
-            <div class="btn btn-square btn-subtle btn-sm">
-              <iconify-icon icon={icons.moreVertical} width="1rem"></iconify-icon>
-            </div>
-          {/snippet}
-          <ul class="menu gap-1">
-            <li class={index === 0 ? 'menu-disabled' : ''}>
-              <button
-                class="px-2"
-                onclick={() => {
-                  const temp = libs[index];
-                  libs[index] = libs[index - 1];
-                  libs[index - 1] = temp;
-                  sort();
-                }}
-              >
-                <iconify-icon icon={icons.arrowUp} width="1rem"></iconify-icon>
-                {$_('action.move_up')}
-              </button>
-            </li>
-            <li class={index === libs.length - 1 ? 'menu-disabled' : ''}>
-              <button
-                class="px-2"
-                onclick={() => {
-                  const temp = libs[index];
-                  libs[index] = libs[index + 1];
-                  libs[index + 1] = temp;
-                  sort();
-                }}
-              >
-                <iconify-icon icon={icons.arrowDown} width="1rem"></iconify-icon>
-                {$_('action.move_down')}
-              </button>
-            </li>
-            <li>
-              <button
-                class="px-2"
-                onclick={() => {
-                  confirm({
-                    icon: icons.delete,
-                    title: `${$_('action.delete', $_('entity.media_lib'))} [${lib.name}]`,
-                    onconfirm: () => del(lib.id)
-                  });
-                }}
-              >
-                <iconify-icon icon={icons.delete} width="1rem"></iconify-icon>
-                {$_('action.delete')}
-              </button>
-            </li>
-          </ul>
-        </Dropdown>
+        <ActionMenu
+          actions={[
+            {
+              icon: icons.arrowUp,
+              text: $_('action.move_up'),
+              disabled: index === 0,
+              onclick: () => moveItem(libs, index, -1) && sort()
+            },
+            {
+              icon: icons.arrowDown,
+              text: $_('action.move_down'),
+              disabled: index === libs.length - 1,
+              onclick: () => moveItem(libs, index, 1) && sort()
+            },
+            {
+              icon: icons.delete,
+              text: $_('action.delete'),
+              onclick: () =>
+                confirm({
+                  icon: icons.delete,
+                  title: `${$_('action.delete', $_('entity.media_lib'))} [${lib.name}]`,
+                  onconfirm: () => del(lib.id)
+                })
+            }
+          ]}
+        />
       {/snippet}
       <ul class="flex flex-wrap gap-2">
         {#if lib.scanning}

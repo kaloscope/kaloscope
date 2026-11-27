@@ -15,6 +15,8 @@
     icon: string | IconifyIcon;
     /** Whether to change the image slowly. */
     sluggish: boolean;
+    /** Whether to resample and sharpen an image shown much smaller than its natural size. */
+    sharpen: boolean;
     /** The aspect ratio of the image. */
     ratio: string;
     /** The width of the image. */
@@ -62,8 +64,10 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { proxyImage } from '$lib/api';
   import { icons } from '$lib/icons';
+  import { sharpThumbnail } from '$lib/utils/image';
   import { extractInitial } from '$lib/utils/text';
   import { debounce } from '$lib/utils/timing';
 
@@ -74,6 +78,7 @@
     text: _text = null,
     icon = icons.image,
     sluggish = false,
+    sharpen = false,
     ratio,
     width,
     height,
@@ -119,6 +124,57 @@
     }
   }
 
+  // sharpened thumbnail layered over the original, which stays underneath for scaled (zoomed) rendering
+  let thumbnail: string | null = $state(null);
+
+  /**
+   * Build a sharpened thumbnail of a large loaded image at its displayed size.
+   *
+   * @param node - Image element.
+   * @returns The action lifecycle that releases the thumbnail.
+   */
+  function crisp(node: HTMLImageElement) {
+    let url: string | null = null;
+    let started = false;
+    let destroyed = false;
+
+    const apply = async () => {
+      // a cached image can report `complete` and still fire `load`, so build only once
+      if (!sharpen || started || !node.naturalWidth) {
+        return;
+      }
+      started = true;
+      const { width, height } = node.getBoundingClientRect();
+      const created = await sharpThumbnail(node, width, height);
+      if (!created) {
+        return;
+      }
+      if (destroyed) {
+        URL.revokeObjectURL(created);
+        return;
+      }
+      url = created;
+      thumbnail = created;
+    };
+
+    if (node.complete) {
+      apply();
+    }
+    node.addEventListener('load', apply);
+    return {
+      destroy() {
+        destroyed = true;
+        node.removeEventListener('load', apply);
+        if (url) {
+          URL.revokeObjectURL(url);
+          if (thumbnail === url) {
+            thumbnail = null;
+          }
+        }
+      }
+    };
+  }
+
   // the default aspect ratio
   let aspectRatio = $derived(ratio || '1/1');
 
@@ -148,8 +204,10 @@
 <div
   tabindex={onclick ? 0 : undefined}
   role={onclick ? 'button' : 'generic'}
+  use:activate
   class="flex-center shrink-0 rotate-0 overflow-hidden {roundedClass} {btnClass} {bgClass} {_class}"
   class:shadow-sm={shadow && src}
+  class:relative={sharpen}
   class:border
   style:width={width || size}
   style:height={height || size}
@@ -167,7 +225,11 @@
         onload={() => (loadedSrc = src)}
         onerror={() => (src = null)}
         use:reveal
+        use:crisp
       />
+      {#if thumbnail}
+        <img src={thumbnail} alt="" class="image-thumbnail absolute inset-0 size-full object-cover" draggable={false} />
+      {/if}
     {/key}
   {:else if text}
     <span class="text-xl font-bold opacity-60">{extractInitial(text)}</span>

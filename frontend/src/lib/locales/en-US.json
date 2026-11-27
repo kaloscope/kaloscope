@@ -178,7 +178,10 @@
       "current": "Page {0}",
       "previous": "Previous",
       "next": "Next"
-    }
+    },
+    "previous_month": "Previous Month",
+    "next_month": "Next Month",
+    "rank": "Rank {0}"
   },
   "field": {
     "dir": "Directory",
@@ -300,7 +303,10 @@
     "toggle_on": "On",
     "toggle_off": "Off",
     "assign_permissions": "Assign Permissions",
-    "batch_delete": "Batch Delete {0}"
+    "batch_delete": "Batch Delete {0}",
+    "back": "Back",
+    "encrypt": "Encrypt",
+    "more": "More Actions"
   },
   "status": {
     "up": "Online",
@@ -538,7 +544,8 @@
         "right": "Tap Right",
         "left": "Tap Left",
         "bottom": "Tap Bottom"
-      }
+      },
+      "page": "Page {0} of {1}"
     },
     "video": {
       "settings": "Video",
@@ -794,7 +801,12 @@
       "reverts": "Reverts batch #{0}"
     },
     "chapters": "Chapters",
-    "reader_settings": "Reading Settings"
+    "reader_settings": "Reading Settings",
+    "text_viewer": "Text Reader",
+    "image_viewer": "Image Reader",
+    "sort_chapters": "Reverse Order",
+    "previous_chapter": "Previous Chapter",
+    "next_chapter": "Next Chapter"
   },
   "metadata": {
     "fields": {
@@ -1171,7 +1183,9 @@
     "assistant_canvas_already_reverted": "These changes had already been reverted and were not saved.",
     "download_plan_already_exists": "An identical download plan already exists",
     "download_plan_request_conflict": "Plan already created with different settings. Reopen the original preview to recover it.",
-    "assistant_review_unavailable": "This review can no longer be saved. Check its latest status in the assistant."
+    "assistant_review_unavailable": "This review can no longer be saved. Check its latest status in the assistant.",
+    "copied": "Copied",
+    "copy_failed": "Copy failed"
   },
   "ai": {
     "custom": "Custom Provider",

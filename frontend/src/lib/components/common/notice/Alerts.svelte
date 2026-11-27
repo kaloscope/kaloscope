@@ -52,9 +52,10 @@
   import { afterNavigate } from '$app/navigation';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
+  import { fly, slide } from '$lib/utils/motion';
   import { onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { fade, fly, slide } from 'svelte/transition';
+  import { fade } from 'svelte/transition';
   import { v4 as uuidv4 } from 'uuid';
 
   const { dialog = false, maxSize = 5, timeout = 3000 }: AlertsProps = $props();

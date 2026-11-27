@@ -1,3 +1,4 @@
+import { alert } from '$lib/components/common/notice/Alerts.svelte';
 import { writable } from 'svelte/store';
 
 /**
@@ -315,4 +316,27 @@ export function createSortField() {
   }
 
   return { subscribe, bind };
+}
+
+/**
+ * Copy text to the clipboard and tell the user whether it worked.
+ *
+ * The clipboard is unavailable outside secure contexts, such as a plain-HTTP LAN address, so a failure is reported
+ * instead of passing silently.
+ *
+ * @param text - Text to copy.
+ * @param copied - Alert message key, or translated text, shown after copying.
+ * @param failed - Alert message key, or translated text, shown when copying fails.
+ * @returns Whether the text was copied.
+ */
+export async function copyText(text: string, copied = 'copied', failed = 'copy_failed'): Promise<boolean> {
+  try {
+    // `navigator.clipboard` is undefined outside secure contexts, which also lands here
+    await navigator.clipboard.writeText(text);
+  } catch {
+    alert({ level: 'warning', message: failed });
+    return false;
+  }
+  alert({ level: 'success', message: copied });
+  return true;
 }

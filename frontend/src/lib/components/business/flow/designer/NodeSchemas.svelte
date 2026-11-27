@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { activate } from '$lib/actions';
   import { api } from '$lib/api';
   import { Button, Overlay } from '$lib/components';
   import { GraphCategory } from '$lib/enums';
@@ -167,8 +168,11 @@
                 <span class="truncate">{$_(`flow.node.name.${schema.node_type}`, { default: schema.name })}</span>
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <div
-                  tabindex="0"
+                  tabindex={disabled ? -1 : 0}
                   role="button"
+                  aria-disabled={disabled}
+                  aria-label={$_('action.add')}
+                  use:activate
                   class="btn btn-square btn-subtle btn-sm {disabled ? 'btn-disabled' : ''}"
                   onclick={() => addNode(schema)}
                 >

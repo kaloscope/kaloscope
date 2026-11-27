@@ -144,9 +144,9 @@
         </div>
       </div>
       <Label required>{$_('field.dir')}</Label>
-      <!-- svelte-ignore a11y_consider_explicit_label -->
       <button
         type="button"
+        aria-label={$_('action.select', $_('field.dir'))}
         class="input w-full {id ? 'cursor-not-allowed' : 'cursor-pointer'}"
         onclick={() => fileTree.showModal()}
         disabled={!!id}

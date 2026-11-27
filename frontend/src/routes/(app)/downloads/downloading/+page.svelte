@@ -21,7 +21,7 @@
     type PaginatorProps
   } from '$lib/components';
   import { DownloadState } from '$lib/enums';
-  import { createLoading, createSortField } from '$lib/helpers';
+  import { copyText, createLoading, createSortField } from '$lib/helpers';
   import { _ } from '$lib/i18n';
   import { icons } from '$lib/icons';
   import type { DownloadAction, Downloader, DownloadTask, Page, Resp } from '$lib/types';
@@ -174,14 +174,8 @@
    * @param task - Download task.
    */
   async function copyMagnetLink(task: DownloadTask) {
-    if (!task.magnet_link || !navigator.clipboard) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(task.magnet_link);
-      alert({ level: 'success', message: 'magnet_link_copied' });
-    } catch {
-      return;
+    if (task.magnet_link) {
+      await copyText(task.magnet_link, 'magnet_link_copied');
     }
   }
 

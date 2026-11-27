@@ -35,6 +35,7 @@
 </script>
 
 <script lang="ts">
+  import { activate } from '$lib/actions';
   let {
     children,
     icon,
@@ -52,6 +53,7 @@
 <div
   tabindex={onclick ? 0 : undefined}
   role={onclick ? 'button' : 'generic'}
+  use:activate
   {onclick}
   class="tag {dashed ? 'tag-dashed' : ''} {uppercase ? 'uppercase' : ''} {onclick ? 'btn-scale' : ''} {_class}"
 >

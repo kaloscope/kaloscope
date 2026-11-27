@@ -1,12 +1,7 @@
 <script lang="ts" module>
-  import type { ButtonProps } from '$lib/components';
+  import type { Action } from '$lib/components';
   import type { Snippet } from 'svelte';
   import type { MouseEventHandler } from 'svelte/elements';
-
-  type Action = {
-    /** Hidden the action button if the condition is false. */
-    condition?: boolean;
-  } & ButtonProps;
 
   export type CellProps = Partial<{
     /** Whether to render the cell. */
@@ -29,9 +24,8 @@
 </script>
 
 <script lang="ts">
-  import { Button, Dropdown } from '$lib/components';
+  import { ActionMenu, Button } from '$lib/components';
   import { EMPTY_SIGN } from '$lib/constants';
-  import { icons } from '$lib/icons';
 
   let {
     condition = true,
@@ -77,37 +71,12 @@
     {#if rest.length === 1}
       {@render button(rest[0], 'max-lg:hidden')}
     {:else if rest.length > 1}
-      {@render dropdown(rest, 'max-lg:hidden')}
+      <ActionMenu actions={rest} class="max-lg:hidden" />
     {/if}
-    {@render dropdown(actions, 'lg:hidden')}
+    <ActionMenu {actions} class="lg:hidden" />
   {/if}
 {/snippet}
 
 {#snippet button(action: Action, _class?: string)}
   <Button {...action} class="{action.class} {_class}" />
-{/snippet}
-
-{#snippet dropdown(actions: Action[], _class?: string)}
-  <Dropdown contentWidth="10rem" class="dropdown-end {_class}">
-    {#snippet trigger()}
-      <div class="btn btn-square btn-subtle btn-sm">
-        <iconify-icon icon={icons.moreVertical} width="1rem"></iconify-icon>
-      </div>
-    {/snippet}
-    <ul class="menu gap-1">
-      {#each actions as action, i (i)}
-        <li class={action.disabled ? 'menu-disabled' : ''}>
-          <button
-            class="px-2 {action.class}"
-            onclick={(event) => {
-              !action.disabled && action.onclick?.(event);
-            }}
-          >
-            <iconify-icon icon={action.icon} width="1rem" class="size-4"></iconify-icon>
-            {action.text}
-          </button>
-        </li>
-      {/each}
-    </ul>
-  </Dropdown>
 {/snippet}

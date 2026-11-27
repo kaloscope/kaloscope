@@ -115,10 +115,10 @@
             onclick={() => iconInput.click()}
           />
           {#if icon}
-            {@const opacityClass = 'opacity-0 group-hover:opacity-100 transition-opacity'}
+            {@const opacityClass = 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity'}
             <button
               class="btn absolute top-0.5 right-0.5 btn-square btn-xs {opacityClass}"
-              aria-label="Delete"
+              aria-label={$_('action.delete')}
               onclick={(event) => {
                 event.preventDefault();
                 cropSrc = '';
